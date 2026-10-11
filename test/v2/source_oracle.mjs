@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Boundary contributors. MIT license.
 // Independent higher-order reference semantics. This module reads source terms,
-// never BPI2, target blocks, Kronos frames, or the production evaluator.
+// never BPI2, target blocks, Kosmos frames, or the production evaluator.
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";

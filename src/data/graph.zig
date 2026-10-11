@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Boundary contributors. MIT license.
-//! Logical process nodes. Runtime allocation and transitions are Kronos-owned.
+//! Logical process nodes. Runtime allocation and transitions are Kosmos-owned.
 const p = @import("program.zig");
 pub const NodeRef = struct { id: p.Id };
 pub const BlobRef = struct { id: p.Id };

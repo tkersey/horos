@@ -3,7 +3,7 @@
 Formerly Boundary; see the [rename notes](docs/rename.md).
 
 Horos checks staged Zig computations and handlers and compiles them into
-portable BPI3 program data. Kronos 6 executes that data with one generic native/WASM
+portable BPI3 program data. Kosmos 6 executes that data with one generic native/WASM
 interpreter. Horos contains no production evaluator.
 
 Horos `3.0.0` requires Zig `0.17.0`. The public modules are `horos` for
@@ -44,7 +44,7 @@ The [public example](examples/one_effect.zig) compiles without a runtime:
 zig build emit-one-effect -Doptimize=safe > example.bpi3
 ```
 
-Its initial argument and result are canonical little-endian `u32` values. Kronos
+Its initial argument and result are canonical little-endian `u32` values. Kosmos
 returns a typed `example.lookup.v2` request, and the environment supplies its
 result. Application handlers, search, scheduling and cleanup remain Program code.
 

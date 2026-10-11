@@ -159,7 +159,7 @@ pub fn build(b: *std.Build) void {
         }
     }
     oracle.has_side_effects = true;
-    const semantics = b.step("check-semantics", "Check higher-order source semantics without Kronos");
+    const semantics = b.step("check-semantics", "Check higher-order source semantics without Kosmos");
     semantics.dependOn(&oracle.step);
     semantics.dependOn(&oracleScopeChecks(b, horos, optimize, authoring_cases).step);
     semantics.dependOn(&borrowReturnChecks(b, horos, optimize).step);

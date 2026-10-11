@@ -5,8 +5,8 @@ and the shared ordered graph traversal. The codec establishes framing, bounded
 record decoding, references, canonical graph order and activation record shape.
 `state_admission.validateStable` separately checks the graph against the admitted
 Program, including identity, code position, slot availability, ownership, effects,
-borrow lifetimes and cleanup custody. Kronos now restores these checked records
-into its native stable controller. Current envelopes and Kronos ABI 3 carry this
+borrow lifetimes and cleanup custody. Kosmos now restores these checked records
+into its native stable controller. Current envelopes and Kosmos ABI 3 carry this
 same State through fresh and resident execution and the cross-host checks.
 
 ## Framing and primitive grammar
@@ -135,7 +135,7 @@ Record recursion has fixed type depth; runtime cycles use checked references.
 
 Tests include an independently specified terminal-unit golden, native and wasm32
 golden re-encoding, graph permutation and cycles, immutable blob ownership,
-truncation, malformed shape, allocation failures, and output atomicity. Kronos's
+truncation, malformed shape, allocation failures, and output atomicity. Kosmos's
 stable source suite checkpoints after drive boundaries and verifies identical
 repeated export and decode/re-encode. Its export allocation-failure sweep checks
 that the original resident boundary remains byte-for-byte unchanged.

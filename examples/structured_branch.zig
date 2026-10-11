@@ -1,4 +1,4 @@
-//! The host constructs both arms; Kronos executes only the runtime-selected arm.
+//! The host constructs both arms; Kosmos executes only the runtime-selected arm.
 const std = @import("std");
 const horos = @import("horos");
 pub const Application = struct {

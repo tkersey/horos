@@ -312,7 +312,7 @@ fn cost(allocator: std.mem.Allocator, owned: *const p01.Owned) Error!Cost {
     @memset(active, false);
     // Fixed logical weights avoid making selection depend on host pointers,
     // allocator resize success, or native versus wasm node representation.
-    // This models the retained analysis containers, not Kronos runtime memory.
+    // This models the retained analysis containers, not Kosmos runtime memory.
     const admission_sets = try admissionSetCost(owned.flow.pool.nodeCount(), owned.flow.pool.interned.capacity());
     const repeated_work = try motion.repeatedWorkEstimate(allocator, program);
     var result: Cost = .{ .bytes = try image.encodedLength(program), .work = 0, .path_work = if (try rectangles.executionWork(allocator, program)) |work| work else try pathWork(allocator, program), .repeated_scalar_work = if (repeated_work) |work| work.scalars else null, .repeated_branch_tests = if (repeated_work) |work| work.branch_tests else null, .retention = 0, .admission_sets = admission_sets };
