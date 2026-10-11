@@ -2,6 +2,45 @@ const std = @import("std");
 const a = @import("../authoring.zig");
 const source = @import("../source.zig");
 
+test "checked source imports validate signatures closure and environmental sites" {
+    var raw = source.Builder.init(std.testing.allocator);
+    defer raw.deinit();
+    const c = try a.Context.init(&raw);
+    const number = try c.schema(u64);
+    const unit = try c.schema(void);
+    const number_id = try a.interop.schemaId(c, number);
+    const raw_function = try raw.declare(&.{number_id}, number_id, &.{}, &.{});
+    try raw.define(raw_function, try raw.pure(try raw.reference(raw.parameter(raw_function, 0))));
+    const signature = try c.callable(.{ .input = number }, number, .{}, .{ .use = .reusable });
+    const function = try a.interop.sourceFunction(c, raw_function, signature);
+    const entry = try c.function("entry", .{}, number, .{});
+    const body = try c.body(entry);
+    const result = try body.call(function, .{ .input = try body.constant(u64, 42) });
+    try std.testing.expect(@TypeOf(result) == *const a.Value(a.Shape(u64)));
+    try c.define(entry, try body.ret(result));
+    try std.testing.expectError(error.SchemaMismatch, a.interop.sourceFunction(c, raw_function, try c.callable(.{ .input = unit }, number, .{}, .{ .use = .reusable })));
+    const captured = try raw.variable(number_id);
+    const open = try raw.declare(&.{}, number_id, &.{}, &.{});
+    try raw.define(open, try raw.pure(try raw.reference(captured)));
+    try std.testing.expectError(error.UnboundVariable, a.interop.sourceFunction(c, open, try c.callable(.{}, number, .{}, .{ .use = .reusable })));
+    const future = try raw.declare(&.{}, number_id, &.{}, &.{});
+    const premature = try raw.declare(&.{}, number_id, &.{}, &.{});
+    try raw.define(premature, try raw.term(.{ .call = .{ .function = future, .arguments = &.{} } }));
+    try std.testing.expectError(error.UndefinedFunction, a.interop.sourceFunction(c, premature, try c.callable(.{}, number, .{}, .{ .use = .reusable })));
+
+    const effect = try raw.effect(.{ .identity = "checked external", .payload = number_id, .result = number_id });
+    const operation = try a.interop.externalOperation(c, effect, number, number);
+    try std.testing.expectError(error.SchemaMismatch, a.interop.externalOperation(c, effect, unit, number));
+    const local = try raw.effect(.{ .identity = "local", .payload = number_id, .result = number_id, .external = false });
+    try std.testing.expectError(error.InvalidCategory, a.interop.externalOperation(c, local, number, number));
+    const owner = try c.function("environment owner", .{}, number, .{operation});
+    const owner_body = try c.body(owner);
+    const site = try a.interop.performSite(owner_body, operation, try owner_body.constant(u64, 7));
+    try std.testing.expect(@TypeOf(site.value) == *const a.Value(a.Shape(u64)));
+    try std.testing.expectEqual(effect, raw.terms.items[@intCast(site.term)].perform.effect);
+    try c.define(owner, try owner_body.ret(site.value));
+}
+
 test "replacement retains schema through parameter nested field call ret and define" {
     var raw = source.Builder.init(std.testing.allocator);
     defer raw.deinit();
@@ -336,6 +375,8 @@ test "replacement encoded literals are global checked values with reachable vali
     try std.testing.expectError(error.InvalidValue, a.interop.encodedLiteral(c, schema, &.{9}));
     const f = try c.function("one", .{}, schema, .{});
     const b = try c.body(f);
+    try std.testing.expectEqual(try a.interop.valueId(c, literal), try a.interop.valueId(b, literal));
+    try std.testing.expectError(error.OutOfScope, a.interop.valueId(c, try b.constant(u64, 3)));
     try c.define(f, try b.ret(literal));
     const g = try c.function("two", .{}, schema, .{});
     const gb = try c.body(g);
@@ -346,6 +387,7 @@ test "replacement encoded literals are global checked values with reachable vali
     defer other_raw.deinit();
     const other = try a.Context.init(&other_raw);
     try std.testing.expectError(error.ForeignHandle, a.interop.literalFailure(other, literal));
+    try std.testing.expectError(error.ForeignHandle, a.interop.valueId(other, literal));
     try c.defineAlternatives(unrelated, .{ .done = try c.schema(void) });
     var compiled = try c.compile(std.testing.allocator, g, try c.schema(void));
     defer compiled.deinit();

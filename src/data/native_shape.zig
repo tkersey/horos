@@ -58,6 +58,7 @@ pub fn Shape(comptime T: type) type {
 }
 
 pub fn info(comptime T: type) Info {
+    @setEvalBranchQuota(100000);
     return describe(T, "value", &.{});
 }
 
@@ -140,20 +141,29 @@ fn describe(comptime T: type, comptime path: []const u8, comptime ancestors: []c
         .@"enum" => |enumeration| blk: {
             if (enumeration.mode != .exhaustive) invalid(path, "enum must be exhaustive");
             if (enumeration.field_values.len == 0) break :blk .{ .enumeration = @Enum(noreturn, .exhaustive, &.{}, &.{}) };
-            var tags: [enumeration.field_values.len]u32 = undefined;
-            for (enumeration.field_values, 0..) |value, index| {
+            for (enumeration.field_values) |value| {
                 if (value < 0 or value > std.math.maxInt(u32)) invalid(path, "enum tag must fit u32");
-                tags[index] = @intCast(value);
             }
-            std.mem.sort(u32, &tags, {}, std.sort.asc(u32));
-            var names: [tags.len][:0]const u8 = undefined;
-            for (tags, 0..) |tag, index| {
-                names[index] = std.fmt.comptimePrint("{d}", .{tag});
-            }
-            break :blk .{ .enumeration = @Enum(u32, .exhaustive, &names, &tags) };
+            break :blk .{ .enumeration = canonicalEnum(T) };
         },
         else => invalid(path, "unsupported native type " ++ @typeName(T)),
     };
+}
+
+// Independent of diagnostic paths, so repeated uses of one enum share its
+// normalized type. Decimal tags need no general-purpose formatting machinery.
+fn enumName(comptime tag: u32) [:0]const u8 {
+    const digit = [_]u8{@intCast('0' + tag % 10)};
+    return if (tag < 10) digit ++ "" else enumName(tag / 10) ++ digit ++ "";
+}
+fn canonicalEnum(comptime T: type) type {
+    const values = @typeInfo(T).@"enum".field_values;
+    var tags: [values.len]u32 = undefined;
+    for (values, 0..) |value, i| tags[i] = @intCast(value);
+    std.mem.sort(u32, &tags, {}, std.sort.asc(u32));
+    var names: [tags.len][:0]const u8 = undefined;
+    for (tags, 0..) |tag, i| names[i] = enumName(tag);
+    return @Enum(u32, .exhaustive, &names, &tags);
 }
 
 /// Struct construction interns the ordered names and canonical child types.

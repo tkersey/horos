@@ -28,6 +28,10 @@ test "native enum tags and union case ordinals have distinct normalization laws"
     const B = enum(u8) { first = 2, second = 9 };
     try std.testing.expect(native.Shape(A) == native.Shape(B));
     try std.testing.expectEqualSlices(u32, &.{ 2, 9 }, &native.enumTags(A));
+    const Wide = enum(u32) { maximum = 4294967295, zero = 0, decimal = 1234567890 };
+    try std.testing.expectEqualSlices(u32, &.{ 0, 1234567890, 4294967295 }, &native.enumTags(Wide));
+    inline for (.{ "0", "1234567890", "4294967295" }, @typeInfo(native.info(Wide).enumeration).@"enum".field_names) |expected, actual|
+        try std.testing.expectEqualStrings(expected, actual);
     const U = union(A) { red: u64, blue: void };
     const V = union(enum) { red: u64, blue: void };
     try std.testing.expect(native.Shape(U) == native.Shape(V));

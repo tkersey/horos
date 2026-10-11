@@ -1332,6 +1332,11 @@ pub const interop = struct {
         const raw_body: *runtime.Body = @ptrCast(body);
         return @ptrCast(try raw_body.caseOf(erased(.value, sum), name));
     }
+    pub fn variantPayload(body: anytype, sum: anytype, name: []const u8, failure: anytype) Error!*const Value(Dynamic) {
+        _ = comptime index(.body, @TypeOf(body));
+        const raw_body: *runtime.Body = @ptrCast(body);
+        return @ptrCast(try raw_body.variantPayload(erased(.value, sum), name, erased(.failure_literal, failure)));
+    }
     pub fn schema(c: *Context, id: p.Id) Error!*const Schema(Dynamic) {
         return @ptrCast(try runtime.interop.schema(rawContext(c), id));
     }
@@ -1360,6 +1365,21 @@ pub const interop = struct {
     pub fn declaredFunction(c: *Context, id: p.Id) Error!*const Function(Dynamic) {
         return @ptrCast(try runtime.interop.declaredFunction(rawContext(c), id));
     }
+    /// Checked closed source integration. The supplied callable retains all
+    /// names and shapes; its contract and the source function are validated.
+    pub fn sourceFunction(c: *Context, id: p.Id, expected: anytype) Error!*const Function(callableSignature(index(.schema, @TypeOf(expected)), "sourceFunction")) {
+        return @ptrCast(try runtime.interop.sourceFunction(rawContext(c), id, erased(.schema, expected)));
+    }
+    pub fn externalOperation(c: *Context, id: p.Id, payload: anytype, result: anytype) Error!*const Operation(OperationSignature(index(.schema, @TypeOf(payload)), index(.schema, @TypeOf(result)), native.Fields(&.{}, &.{}))) {
+        return @ptrCast(try runtime.interop.externalOperation(rawContext(c), id, erased(.schema, payload), erased(.schema, result)));
+    }
+    pub fn performSite(body: anytype, operation_handle: anytype, payload: anytype) Error!struct { value: *const Value(resultShape(index(.operation, @TypeOf(operation_handle)))), term: p.Id } {
+        _ = comptime index(.body, @TypeOf(body));
+        const Op = index(.operation, @TypeOf(operation_handle));
+        if (comptime Op != Dynamic) comptime compatible(Op.payload, index(.value, @TypeOf(payload)), "performSite");
+        const site = try runtime.interop.performSite(@ptrCast(body), erased(.operation, operation_handle), erased(.value, payload));
+        return .{ .value = @ptrCast(site.value), .term = site.term };
+    }
     pub fn operation(c: *Context, id: p.Id) Error!*const Operation(Dynamic) {
         return @ptrCast(try runtime.interop.operation(rawContext(c), id));
     }
@@ -1384,9 +1404,11 @@ pub const interop = struct {
     pub fn failureLiteralId(c: *Context, literal: anytype) Error!p.Id {
         return runtime.interop.failureLiteralId(rawContext(c), erased(.failure_literal, literal));
     }
-    pub fn valueId(body: anytype, value: anytype) Error!p.Id {
-        _ = comptime index(.body, @TypeOf(body));
-        return runtime.interop.valueId(@ptrCast(body), erased(.value, value));
+    /// Context access requires a global value; Body access also checks lexical use.
+    pub fn valueId(owner: anytype, value: anytype) Error!p.Id {
+        if (comptime @TypeOf(owner) == *Context) return runtime.interop.globalValueId(rawContext(owner), erased(.value, value));
+        _ = comptime index(.body, @TypeOf(owner));
+        return runtime.interop.valueId(@ptrCast(owner), erased(.value, value));
     }
     pub fn computationId(c: *Context, computation: anytype) Error!p.Id {
         return runtime.interop.computationId(rawContext(c), erased(.computation, computation));
