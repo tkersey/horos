@@ -206,6 +206,7 @@ fn HandleList(comptime family: Family, comptime T: type) type {
             return if (self.present) self.slice() else null;
         }
         fn slice(self: *const @This()) []const *const rawType(family) {
+            if (!self.present) return &.{};
             return if (count == null) self.borrowed else &self.owned;
         }
     };
@@ -218,8 +219,11 @@ fn handles(comptime family: Family, values: anytype) HandleList(family, @TypeOf(
     } else if (comptime @typeInfo(T) == .optional) {
         if (values) |present| {
             const nested = handles(family, present);
-            list.owned = nested.owned;
-            list.borrowed = nested.borrowed;
+            list.present = nested.present;
+            if (nested.present) {
+                list.owned = nested.owned;
+                list.borrowed = nested.borrowed;
+            }
         } else list.present = false;
     } else if (comptime listCount(T) == null) {
         _ = comptime index(family, @typeInfo(T).pointer.child);

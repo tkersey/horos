@@ -1758,6 +1758,49 @@ test "resumption slot validation accepts the canonical handle collection forms" 
     inline for (comptime std.meta.tags(SlotCollection)) |form| try checkSlotCollection(form);
 }
 
+test "absent handle collections project to empty lists without reading storage" {
+    var raw = source.Builder.init(testing.allocator);
+    defer raw.deinit();
+    const c = try a.Context.init(&raw);
+    const unit = try c.schema(void);
+    const operation = try c.local("optional/local", unit, unit, .linear);
+    const effect = try c.external("optional/external", unit, unit);
+    const tuple = .{effect};
+    const array = [_]@TypeOf(effect){effect};
+    inline for (.{ @TypeOf(tuple), @TypeOf(&tuple), @TypeOf(array), @TypeOf(&array), []const @TypeOf(effect) }) |Collection| {
+        const absent: ?Collection = null;
+        const handler = try c.handler(operation, unit, unit, .{ .mode = .deep, .use = .linear, .residual = absent, .escaping = absent });
+        const returns_fn = try c.returnFunction(handler);
+        const returns = try c.body(returns_fn);
+        try c.define(returns_fn, try returns.ret(try returns.parameter("result")));
+        const clause_fn = try c.clauseFunction(handler);
+        const clause = try c.body(clause_fn);
+        try c.define(clause_fn, try clause.ret(try clause.resumeValue(try clause.parameter("resumption"), try clause.parameter("payload"))));
+        const entry = try c.function("absent", .{}, unit, absent);
+        const body = try c.body(entry);
+        try c.define(entry, try body.ret(try body.constant(void, {})));
+        var compiled = try c.compile(testing.allocator, entry, unit);
+        defer compiled.deinit();
+    }
+    const nested_absent: ??@TypeOf(array) = @as(?@TypeOf(array), null);
+    const entry = try c.function("nested absent", .{}, unit, nested_absent);
+    const body = try c.body(entry);
+    try c.define(entry, try body.ret(try body.constant(void, {})));
+    var compiled = try c.compile(testing.allocator, entry, unit);
+    defer compiled.deinit();
+
+    const nested_present: ??@TypeOf(array) = array;
+    const supplied = try c.function("nested present", .{}, unit, nested_present);
+    const supplied_body = try c.body(supplied);
+    try c.define(supplied, try supplied_body.ret(try supplied_body.perform(effect, try supplied_body.constant(void, {}))));
+    var supplied_compiled = try c.compile(testing.allocator, supplied, unit);
+    defer supplied_compiled.deinit();
+
+    const slot = try c.declareSchema(.resumption, a.Dynamic);
+    const absent_slots: ??[1]@TypeOf(slot) = @as(?[1]@TypeOf(slot), null);
+    _ = try c.handler(operation, unit, unit, .{ .mode = .deep, .use = .linear, .resumption_slots = absent_slots });
+}
+
 test "tuple pointers retain heterogeneous resumption declaration shapes and order" {
     var raw = source.Builder.init(testing.allocator);
     defer raw.deinit();
