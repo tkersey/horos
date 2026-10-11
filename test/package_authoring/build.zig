@@ -22,7 +22,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{.{ .name = "horos", .module = horos }},
     }) });
     b.step("reject", "Check rejected public-package neighbor").dependOn(&b.addRunArtifact(rejection).step);
-    const static = b.step("static", "Reject incompatible shapes through the public package");
+    const static = b.step("comptime-reject", "Reject incompatible shapes through the public package");
     inline for (@import("static_cases.zig").cases) |case| {
         const options = b.addOptions();
         options.addOption([]const u8, "value", case[0]);

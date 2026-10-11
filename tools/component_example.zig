@@ -106,7 +106,7 @@ fn package(r: Runner, zig: []const u8, repository: []const u8, output: []const u
     try r.write(try r.path(&.{ consumer, "build.zig.zon" }), ".{ .name=.consumer, .version=\"0.0.0\", .fingerprint=0x705b3727bb03dcc2, .dependencies=.{ .horos=.{.path=\"../package\"}}, .paths=.{\"\"} }");
     inline for (.{ "build.zig", "rejection.zig", "category.zig", "failure_literal_category.zig", "lifecycle.zig", "data.zig", "static.zig", "static_cases.zig" }) |file| try r.write(try r.path(&.{ consumer, file }), try r.read(try r.path(&.{ source, "test/package_authoring", file })));
     try r.write(try r.path(&.{ consumer, "client.zig" }), try r.read(try r.path(&.{ source, "examples/authoring_client.zig" })));
-    const image = try selected.run(&.{ zig, "build", "emit", "reject", "data", "static" }, consumer, true);
+    const image = try selected.run(&.{ zig, "build", "emit", "reject", "data", "comptime-reject" }, consumer, true);
     var admitted = try horos.data.program_image.Admitted.decode(r.a, image.stdout);
     defer admitted.deinit();
     inline for (.{ .{ "category", "wrong handle family", "expected schema" }, .{ "failure_literal_category", "wrong handle family", "expected failure_literal" }, .{ "lifecycle", "Body", "does not support field access" } }) |item| {
