@@ -578,3 +578,64 @@ test "replacement recursive library results preserve known schemas" {
     const awaiting = try Scheduler.awaiting(c, tasks, join, .{region});
     try std.testing.expect(a.ShapeOf(@TypeOf(awaiting)).result == a.Shape(u64));
 }
+
+test "recursive partial shapes refine through the same Search interpretation" {
+    const Search = @import("../library/search.zig");
+    var raw = source.Builder.init(std.testing.allocator);
+    defer raw.deinit();
+    const c = try a.Context.init(&raw);
+    const family = try Search.family(c, "recursive refinement");
+    const integer = try c.schema(u64);
+    const options = .{ .captures = .{ .continuation = .{} }, .order = .breadth_first };
+    const known = try Search.interpret(c, family, integer, options);
+    const partial = try Search.interpret(c, family, a.interop.erase(integer), options);
+    const refined = try a.interop.refineSchema(c, partial.step, known.step);
+    try std.testing.expect(@TypeOf(refined) == @TypeOf(known.step));
+    try std.testing.expectEqual(try a.interop.schemaId(c, known.step), try a.interop.schemaId(c, refined));
+    const refined_token = try a.interop.refineSchema(c, partial.resumption, known.resumption);
+    try std.testing.expect(@TypeOf(refined_token) == @TypeOf(known.resumption));
+    try std.testing.expectEqual(try a.interop.schemaId(c, known.resumption), try a.interop.schemaId(c, refined_token));
+}
+
+test "declaration completion retains promises while Dynamic authority remains usable" {
+    var raw = source.Builder.init(std.testing.allocator);
+    defer raw.deinit();
+    const c = try a.Context.init(&raw);
+    const unit = try c.schema(void);
+    const integer = try c.schema(u64);
+    const known = try c.declareSchema(.alternatives, a.Shape(?u64));
+    try c.defineAlternatives(known, .{ .none = unit, .some = integer });
+    const erased_schema = a.interop.erase(known.schema());
+    try std.testing.expectEqual(try a.interop.schemaId(c, known.schema()), try a.interop.schemaId(c, erased_schema));
+    const fields = try known.schema().fields();
+    try std.testing.expect(@TypeOf(fields.some) == @TypeOf(integer));
+    try std.testing.expectEqual(try a.interop.schemaId(c, integer), try a.interop.schemaId(c, fields.some));
+    const dynamic = try c.declareSchema(.alternatives, a.Dynamic);
+    try c.defineAlternatives(a.interop.erase(dynamic), .{ .none = unit, .some = integer });
+    const dynamic_fields = try a.interop.fields(c, dynamic.schema());
+    try std.testing.expectEqual(@as(usize, 2), dynamic_fields.len());
+    try std.testing.expectEqual(try a.interop.schemaId(c, integer), try a.interop.schemaId(c, dynamic_fields.at(1).?.handle));
+    const recovered = try a.interop.refineSchema(c, erased_schema, known.schema());
+    try std.testing.expect(@TypeOf(recovered) == @TypeOf(known.schema()));
+}
+
+test "compatible recursive descriptions retain actual schema identity checks" {
+    const native = @import("horos_data").schema.native;
+    const Left = struct {
+        pub const contract: native.Info = .{ .sum = native.Fields(&.{ "next", "value" }, &.{ @This(), a.Shape(u64) }) };
+    };
+    const Right = struct {
+        pub const contract: native.Info = .{ .sum = native.Fields(&.{ "next", "value" }, &.{ @This(), a.Shape(u64) }) };
+    };
+    var raw = source.Builder.init(std.testing.allocator);
+    defer raw.deinit();
+    const c = try a.Context.init(&raw);
+    const integer = try c.schema(u64);
+    const left = try c.declareSchema(.alternatives, Left);
+    const right = try c.declareSchema(.alternatives, Right);
+    try c.defineAlternatives(left, .{ .next = left.schema(), .value = integer });
+    try c.defineAlternatives(right, .{ .next = right.schema(), .value = integer });
+    // The structural comparison must terminate, but distinct reserved runtime
+    // schema identities remain incompatible under the existing owner.
+    try std.testing.expectError(error.SchemaMismatch, a.interop.refineSchema(c, right.schema(), left.schema()));
+}

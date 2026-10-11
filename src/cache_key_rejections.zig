@@ -1,5 +1,5 @@
-const key = @import("cache_key.zig");
-const a = @import("../authoring.zig");
+const key = @import("authoring/cache_key.zig");
+const a = @import("authoring.zig");
 const mode = @import("rejection_mode").value;
 comptime {
     const Fake = opaque {

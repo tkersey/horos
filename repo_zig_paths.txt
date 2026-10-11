@@ -5,11 +5,11 @@ examples/structured_branch.zig
 src/allocation_testing.zig
 src/authoring.zig
 src/authoring/cache_key.zig
-src/authoring/cache_key_rejections.zig
 src/authoring/checked_tests.zig
 src/authoring/runtime.zig
 src/authoring_cases.zig
 src/authoring_tests.zig
+src/cache_key_rejections.zig
 src/coalescing_allocation_meter.zig
 src/coalescing_baselines.zig
 src/coalescing_borrow_cases.zig

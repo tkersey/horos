@@ -30,7 +30,10 @@ Helpers should retain their available input and result shapes. Do not replace
 ordinary annotations with `Dynamic`. Use `interop.erase` when an actual runtime
 heterogeneous collection or integration boundary requires it; checked refinement
 recovers known structure from actual compatible metadata. A struct can retain
-known children alongside a Dynamic child.
+known children alongside a Dynamic child. A declaration carrying a known completion
+shape cannot be erased: existing aliases rely on that promise. Complete it through
+its original typed handle, then erase `declaration.schema()` if needed. Choose
+`declareSchema(kind, Dynamic)` when completion names or shapes arrive at runtime.
 
 `externalOperation` checks the environmental operation's actual contracts before
 retaining their names. `interop.performSite`

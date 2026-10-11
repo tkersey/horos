@@ -59,6 +59,25 @@ pub fn main(init: std.process.Init) !void {
     } else if (comptime selected("pending_unknown")) {
         const declaration = try c.declareSchema(.alternatives, a.Shape(?u64));
         try c.defineAlternatives(declaration, .{ .none = try c.schema(void), .some = a.interop.erase(integer) });
+    } else if (comptime selected("declaration_erasure")) {
+        const slot = try c.declareSchema(.alternatives, a.Shape(?u64));
+        try c.defineAlternatives(a.interop.erase(slot), .{ .none = try c.schema(void), .some = try c.schema(bool) });
+    } else if (comptime selected("callable_declaration_erasure")) {
+        const signature = try c.callable(.{ .input = integer }, integer, .{}, .{ .use = .reusable });
+        const slot = try c.declareSchema(.callable, a.ShapeOf(@TypeOf(signature)));
+        try c.defineCallable(a.interop.erase(slot), .{ .input = integer }, try c.schema(bool), .{}, .{ .use = .reusable });
+    } else if (comptime selected("recursive_mismatch")) {
+        const Left = struct {
+            pub const contract: native.Info = .{ .sum = native.Fields(&.{ "next", "value" }, &.{ @This(), a.Shape(u64) }) };
+        };
+        const Right = struct {
+            pub const contract: native.Info = .{ .sum = native.Fields(&.{ "next", "value" }, &.{ @This(), a.Shape(bool) }) };
+        };
+        const left = try c.declareSchema(.alternatives, Left);
+        const right = try c.declareSchema(.alternatives, Right);
+        try c.defineAlternatives(left, .{ .next = left.schema(), .value = integer });
+        try c.defineAlternatives(right, .{ .next = right.schema(), .value = try c.schema(bool) });
+        _ = try a.interop.refineSchema(c, right.schema(), left.schema());
     } else if (comptime selected("native_pointer")) {
         _ = try c.schema(*u64);
     } else if (comptime selected("native_recursive")) {

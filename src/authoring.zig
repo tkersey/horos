@@ -250,114 +250,104 @@ fn mismatch(comptime path: []const u8) noreturn {
     @compileError("Horos " ++ path ++ ": incompatible schema shape");
 }
 
+const ShapePair = struct { expected: type, actual: type };
+const ShapeRelation = enum { compatible, declaration };
+
 fn compatible(comptime Expected: type, comptime Actual: type, comptime path: []const u8) void {
-    if (Expected == Actual or Expected == Dynamic or Actual == Dynamic) return;
+    compareShapes(Expected, Actual, path, .compatible, &.{});
+}
+
+// A declaration promises facts that must survive completion. Ordinary uses may
+// instead defer unknown portions to the runtime compatibility owner.
+fn declarationCompatible(comptime Expected: type, comptime Actual: type, comptime path: []const u8) void {
+    compareShapes(Expected, Actual, path, .declaration, &.{});
+}
+
+fn compareShapes(comptime Expected: type, comptime Actual: type, comptime path: []const u8, comptime relation: ShapeRelation, comptime ancestors: []const ShapePair) void {
+    if (Expected == Actual or Expected == Dynamic) return;
+    if (Actual == Dynamic) {
+        if (relation == .declaration) @compileError("Horos " ++ path ++ ": refine the unknown input before fulfilling a known declaration shape");
+        return;
+    }
+    // Shape descriptions can be finite recursive graphs (Search and Reader).
+    // Re-entering the same pair adds no obligation; sibling fields still run.
+    for (ancestors) |pair| if (pair.expected == Expected and pair.actual == Actual) return;
+    const next = ancestors ++ [_]ShapePair{.{ .expected = Expected, .actual = Actual }};
     if (@hasDecl(Expected, "internal") or @hasDecl(Actual, "internal")) {
         if (!@hasDecl(Expected, "internal") or !@hasDecl(Actual, "internal")) mismatch(path);
-        const a = Expected.internal;
-        const b = Actual.internal;
-        if (std.meta.activeTag(a) != std.meta.activeTag(b)) mismatch(path);
-        switch (a) {
+        const left = Expected.internal;
+        const right = Actual.internal;
+        if (std.meta.activeTag(left) != std.meta.activeTag(right)) mismatch(path);
+        switch (left) {
             .region => {},
-            .callable => |signature| compatibleSignature(signature, b.callable, path),
+            .callable => |signature| compareSignatures(signature, right.callable, path, relation, next),
             .capability => |signature| {
-                if (signature == Dynamic or b.capability == Dynamic) return;
-                compatible(signature.payload, b.capability.payload, path ++ ".payload");
-                compatible(signature.result, b.capability.result, path ++ ".reply");
-                compatibleFields(signature.bodies, b.capability.bodies, path ++ ".bodies");
+                if (signature == Dynamic) return;
+                if (right.capability == Dynamic) {
+                    if (relation == .declaration) @compileError("Horos " ++ path ++ ": unknown capability cannot fulfill a known declaration shape");
+                    return;
+                }
+                compareShapes(signature.payload, right.capability.payload, path ++ ".payload", relation, next);
+                compareShapes(signature.result, right.capability.result, path ++ ".reply", relation, next);
+                compareFields(signature.bodies, right.capability.bodies, path ++ ".bodies", relation, next);
             },
             .resumption => |signature| {
-                if (signature == Dynamic or b.resumption == Dynamic) return;
-                if (signature.mode != b.resumption.mode) mismatch(path ++ ".mode");
-                compatible(signature.reply, b.resumption.reply, path ++ ".reply");
-                compatible(signature.result, b.resumption.result, path ++ ".result");
+                if (signature == Dynamic) return;
+                if (right.resumption == Dynamic) {
+                    if (relation == .declaration) @compileError("Horos " ++ path ++ ": unknown resumption cannot fulfill a known declaration shape");
+                    return;
+                }
+                if (signature.mode != right.resumption.mode) mismatch(path ++ ".mode");
+                compareShapes(signature.reply, right.resumption.reply, path ++ ".reply", relation, next);
+                compareShapes(signature.result, right.resumption.result, path ++ ".result", relation, next);
             },
-            .cell, .resource, .borrowed, .package => |element, tag| compatible(element, @field(b, @tagName(tag)), path ++ ".element"),
+            .cell, .resource, .borrowed, .package => |element, tag| compareShapes(element, @field(right, @tagName(tag)), path ++ ".element", relation, next),
         }
         return;
     }
-    const a = Expected.contract;
-    const b = Actual.contract;
-    if (std.meta.activeTag(a) != std.meta.activeTag(b)) mismatch(path);
-    switch (a) {
-        .product, .sum => |Fields| {
-            const other = if (b == .product) b.product else b.sum;
-            const left = @typeInfo(Fields).@"struct";
-            const right = @typeInfo(other).@"struct";
-            if (left.field_types.len != right.field_types.len) mismatch(path);
-            for (left.field_names, left.field_types, right.field_names, right.field_types) |ln, L, rn, R| {
+    const left = Expected.contract;
+    const right = Actual.contract;
+    if (std.meta.activeTag(left) != std.meta.activeTag(right)) mismatch(path);
+    switch (left) {
+        .product, .sum => |Fields, tag| {
+            const lhs = @typeInfo(Fields).@"struct";
+            const rhs = @typeInfo(@field(right, @tagName(tag))).@"struct";
+            if (lhs.field_types.len != rhs.field_types.len) mismatch(path);
+            for (lhs.field_names, lhs.field_types, rhs.field_names, rhs.field_types) |ln, L, rn, R| {
                 if (!std.mem.eql(u8, ln, rn)) mismatch(path ++ "." ++ ln);
-                compatible(L, R, path ++ "." ++ ln);
+                compareShapes(L, R, path ++ "." ++ ln, relation, next);
             }
         },
         .array => |array| {
-            if (array.length != b.array.length) mismatch(path);
-            compatible(array.element, b.array.element, path ++ ".element");
+            if (array.length != right.array.length) mismatch(path);
+            compareShapes(array.element, right.array.element, path ++ ".element", relation, next);
         },
         .sequence => |sequence| {
-            if (sequence.maximum != b.sequence.maximum) mismatch(path);
-            compatible(sequence.element, b.sequence.element, path ++ ".element");
+            if (sequence.maximum != right.sequence.maximum) mismatch(path);
+            compareShapes(sequence.element, right.sequence.element, path ++ ".element", relation, next);
         },
         else => mismatch(path),
     }
 }
-fn compatibleFields(comptime Expected: type, comptime Actual: type, comptime path: []const u8) void {
-    if (Expected == Dynamic or Actual == Dynamic) return;
-    compatible(native.Contract(.{ .product = Expected }), native.Contract(.{ .product = Actual }), path);
+fn compareFields(comptime Expected: type, comptime Actual: type, comptime path: []const u8, comptime relation: ShapeRelation, comptime ancestors: []const ShapePair) void {
+    if (Expected == Actual or Expected == Dynamic) return;
+    if (Actual == Dynamic) {
+        if (relation == .declaration) @compileError("Horos " ++ path ++ ": runtime names cannot fulfill a known declaration without refinement");
+        return;
+    }
+    compareShapes(native.Contract(.{ .product = Expected }), native.Contract(.{ .product = Actual }), path, relation, ancestors);
 }
 fn compatibleSignature(comptime Expected: type, comptime Actual: type, comptime path: []const u8) void {
-    if (Expected == Dynamic or Actual == Dynamic) return;
-    compatibleFields(Expected.parameters, Actual.parameters, path ++ ".parameters");
-    compatible(Expected.result, Actual.result, path ++ ".result");
+    compareSignatures(Expected, Actual, path, .compatible, &.{});
 }
-
-// A pending declaration has no runtime expected schema to compare against yet.
-// Unlike ordinary calls, its static promise therefore needs established input
-// shapes. Explicit unknown edges remain available and preserve their metadata.
-fn declarationCompatible(comptime Expected: type, comptime Actual: type, comptime path: []const u8) void {
-    compatible(Expected, Actual, path);
-    if (Expected == Dynamic or Expected == Actual) return;
-    if (Actual == Dynamic) @compileError("Horos " ++ path ++ ": refine the unknown input before fulfilling a known declaration shape");
-    if (@hasDecl(Expected, "internal")) {
-        const a = Expected.internal;
-        const b = Actual.internal;
-        switch (a) {
-            .region => {},
-            .callable => |Sig| declarationSignatureCompatible(Sig, b.callable, path),
-            .resumption => |Sig| {
-                if (Sig == Dynamic) return;
-                if (b.resumption == Dynamic) @compileError("Horos " ++ path ++ ": unknown resumption cannot fulfill a known declaration shape");
-                declarationCompatible(Sig.reply, b.resumption.reply, path ++ ".reply");
-                declarationCompatible(Sig.result, b.resumption.result, path ++ ".result");
-            },
-            .capability => |Sig| {
-                if (Sig == Dynamic) return;
-                if (b.capability == Dynamic) @compileError("Horos " ++ path ++ ": unknown capability cannot fulfill a known declaration shape");
-                declarationCompatible(Sig.payload, b.capability.payload, path ++ ".payload");
-                declarationCompatible(Sig.result, b.capability.result, path ++ ".reply");
-                declarationFieldsCompatible(Sig.bodies, b.capability.bodies, path ++ ".bodies");
-            },
-            .cell, .resource, .borrowed, .package => |Child, tag| declarationCompatible(Child, @field(b, @tagName(tag)), path ++ ".element"),
-        }
-    } else switch (Expected.contract) {
-        .product, .sum => |Fields, tag| declarationFieldsCompatible(Fields, @field(Actual.contract, @tagName(tag)), path),
-        .array => |v| declarationCompatible(v.element, Actual.contract.array.element, path ++ ".element"),
-        .sequence => |v| declarationCompatible(v.element, Actual.contract.sequence.element, path ++ ".element"),
-        else => {},
+fn compareSignatures(comptime Expected: type, comptime Actual: type, comptime path: []const u8, comptime relation: ShapeRelation, comptime ancestors: []const ShapePair) void {
+    if (Expected == Actual or Expected == Dynamic) return;
+    if (Actual == Dynamic) {
+        if (relation == .declaration) @compileError("Horos " ++ path ++ ": unknown callable cannot fulfill a known declaration shape");
+        return;
     }
-}
-fn declarationFieldsCompatible(comptime Expected: type, comptime Actual: type, comptime path: []const u8) void {
-    if (Expected == Dynamic) return;
-    if (Actual == Dynamic) @compileError("Horos " ++ path ++ ": runtime names cannot fulfill a known declaration without refinement");
-    const a = @typeInfo(Expected).@"struct";
-    const b = @typeInfo(Actual).@"struct";
-    for (a.field_names, a.field_types, b.field_types) |name, E, A| declarationCompatible(E, A, path ++ "." ++ name);
-}
-fn declarationSignatureCompatible(comptime Expected: type, comptime Actual: type, comptime path: []const u8) void {
-    if (Expected == Dynamic) return;
-    if (Actual == Dynamic) @compileError("Horos " ++ path ++ ": unknown callable cannot fulfill a known declaration shape");
-    declarationFieldsCompatible(Expected.parameters, Actual.parameters, path ++ ".parameters");
-    declarationCompatible(Expected.result, Actual.result, path ++ ".result");
+    compareFields(Expected.parameters, Actual.parameters, path ++ ".parameters", relation, ancestors);
+    compareShapes(Expected.result, Actual.result, path ++ ".result", relation, ancestors);
 }
 
 pub const InternalInfo = union(enum) {
@@ -1437,7 +1427,9 @@ pub const interop = struct {
         return runtime.interop.schemaId(rawContext(c), erased(.schema, schema_handle));
     }
     pub fn erase(value: anytype) (if (metadata(@TypeOf(value)).family == .body) *Body(Dynamic) else *const canonical(metadata(@TypeOf(value)).family, Dynamic)) {
-        _ = comptime metadata(@TypeOf(value));
+        const info = comptime metadata(@TypeOf(value));
+        if (comptime info.family == .declaration and info.shape != Dynamic and info.shape.shape != Dynamic)
+            @compileError("Horos authoring: cannot erase a declaration with a known completion shape");
         return @ptrCast(value);
     }
 };

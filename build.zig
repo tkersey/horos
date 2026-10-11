@@ -84,7 +84,7 @@ pub fn build(b: *std.Build) void {
         const options = b.addOptions();
         options.addOption([]const u8, "value", mode);
         const rejected_key = b.addObject(.{ .name = "cache-key-" ++ mode, .root_module = b.createModule(.{
-            .root_source_file = b.path("src/authoring/cache_key_rejections.zig"),
+            .root_source_file = b.path("src/cache_key_rejections.zig"),
             .target = b.graph.host,
             .imports = &.{.{ .name = "horos_data", .module = data }},
         }) });
@@ -146,7 +146,7 @@ pub fn build(b: *std.Build) void {
     authoring_step.dependOn(static_authoring);
     const native = b.step("check-native", "Check native authoring, data and linker contracts without an interpreter");
     native.dependOn(data_step);
-    native.dependOn(&run_authoring_tests.step);
+    native.dependOn(authoring_step);
     native.dependOn(component_step);
     const compact_emit = b.addExecutable(.{ .name = "emit-compact-fixture", .root_module = b.createModule(.{
         .root_source_file = b.path("test/v2/emit_compact.zig"),
