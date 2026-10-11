@@ -1,7 +1,7 @@
 # Boundary → Horos
 
 Horos 3.0.0 is the renamed Boundary package. Use `horos`, `horos_data`
-and `horos-link`; downstream World and Agent are now Kronos and Protean.
+and `horos-link`; downstream World and Agent are now Kosmos and Protean.
 There are no legacy import aliases or duplicate executables.
 
 The `boundary.*` semantic IDs and hash domains, and

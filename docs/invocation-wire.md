@@ -1,6 +1,6 @@
 # Current invocation and external-interaction envelopes
 
-`data/invocation.zig` defines PKI3, PKO3, ERQ3 and ERS3. Kronos executes them
+`data/invocation.zig` defines PKI3, PKO3, ERQ3 and ERS3. Kosmos executes them
 through the public stable Session evaluator and generic ABI 3 kernel.
 
 ## Framing and records
@@ -100,14 +100,14 @@ silently rebind old bytes, or claim global exactly-once execution.
 `decode` owns input before trusting contents, with a configurable 64 MiB default
 input budget. Returned slices belong to that owner. `encode` validates, sizes,
 and checks capacity/overlap before writing. Failure releases partial owners.
-Fresh Kronos invocation owns input, executes privately and publishes no successor
+Fresh Kosmos invocation owns input, executes privately and publishes no successor
 on operational failure. Failed output allocation/capacity leaves the command reusable.
 
 Horos tests cover independent PKI3 bytes, ownership, stale binding, typed
 replies, flags/families, atomic output and allocation failures.
 `zig build check-invocation-wasm -Doptimize=safe` checks independent bytes
 for all four families and a JavaScript-computed request hash on import-free wasm32.
-Kronos compares fresh, resident and restored execution at matching quanta, retaining
+Kosmos compares fresh, resident and restored execution at matching quanta, retaining
 the source corpus's independent expectations. Tests distinguish identical visible
 requests with different captures, stale replies, explicit yields, zero quanta and
 cancellation during pending cleanup. Fresh allocation-failure sweeps preserve

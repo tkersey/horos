@@ -1,7 +1,7 @@
 # Typed, structured authoring
 
 Import `horos.authoring`. It stages ordinary Horos source; the existing
-source checker, lowering, target admission and unchanged Kronos interpreter remain
+source checker, lowering, target admission and unchanged Kosmos interpreter remain
 authoritative. `horos.source` is the single low-level IR interface for source
 inspection, negative fixtures, component construction and internal generation.
 The duplicate `horos.computation` export is removed. Ordinary construction
@@ -62,7 +62,7 @@ The canonical route is:
    while retaining source-oriented diagnostics. Alternatively return `module`
    from `Application.emit` and call `horos.program.lower`.
 5. Encode the returned owning `Compiled` with `encode`; deinitialize it afterward.
-6. Use the separately verified Kronos package to prepare/start or invoke the image.
+6. Use the separately verified Kosmos package to prepare/start or invoke the image.
    Supply only environmental replies and transfer actual State; host code does
    not reconstruct authored branches, handlers or continuations.
 
@@ -80,7 +80,7 @@ request, including after restoration.
 | Zig `if` selects code to construct | `conditional` selects runtime work |
 | Zig `try` propagates construction/allocation failure | `checkedAdd` emits an authored failure edge |
 | Zig `defer` releases native resources | `protect` installs portable cleanup |
-| Calling a staging function constructs source | `apply` executes an authored callable in Kronos |
+| Calling a staging function constructs source | `apply` executes an authored callable in Kosmos |
 | `lambda` constructs and binds a callable value | `apply` forces a zero-argument delay when demanded |
 
 No native callback enters the Program. Inspecting schemas or diagnostics does not
@@ -263,7 +263,7 @@ foreign-owner and lifecycle rejection. Its native driver is shared with componen
 CLI checks; it requires a clean committed candidate.
 
 `zig build check -Doptimize=safe` additionally runs the independent source oracle
-and small wasm32 byte/identity checks. Kronos owns the comparison between
+and small wasm32 byte/identity checks. Kosmos owns the comparison between
 source meaning and actual native/WASM evaluation.
 
 Historical paired timing, platform, search and experimental application campaigns

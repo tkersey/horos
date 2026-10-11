@@ -9,7 +9,7 @@ https://github.com/tkersey/agent/pull/33.
 
 The pure core uses explicit call-by-name delays, including endpoint values.
 The rest of Horos remains strict. Native Zig builders construct source; no
-native closure is serialized or called by Kronos. Runtime recursion may remain
+native closure is serialized or called by Kosmos. Runtime recursion may remain
 nonproductive, and work-quantum exhaustion is never an authored result.
 
 In lazy semantic notation:
@@ -90,7 +90,7 @@ and then forces its answer; push constructs an argument thunk without demanding
 it; lift ties its tail through code references; composition's three functions
 implement the same reciprocal rotation; ana's query thunk defers both counterpart
 lookup and successor construction. Normal selective lowering turns these closures
-into code IDs and checked environments. Kronos retains actual non-tail callers and
+into code IDs and checked environments. Kosmos retains actual non-tail callers and
 serializes their reachable finite state without executing delayed code.
 
 The intended pure identity, associativity and lifting laws are scoped to the
@@ -104,7 +104,7 @@ commutativity is claimed.
 ## Verification
 
 The native authoring/data roots retain the construction and ownership contracts.
-The independent higher-order source oracle and Kronos source agreement retain
+The independent higher-order source oracle and Kosmos source agreement retain
 execution semantics. Historical hyperfunction experiment emitters, duplicate
 reference implementations, timing/measurement collectors and optional campaigns
 are retired; their prior results remain in Git history.

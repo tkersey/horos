@@ -19,7 +19,7 @@ diagnostics do not bypass those checks.
 
 Structural compilation preserves its declared cross-build logical-step relation.
 Additional semantic passes require the semantic contract and preserve specified
-external behavior. Kronos always preserves the exact same-image stepping and
+external behavior. Kosmos always preserves the exact same-image stepping and
 interruption contract. A changed image has a changed identity: old checkpoints and
 reply envelopes cannot be transplanted. Ordinary codecs retain valid duplicate
 records and do not silently optimize images.
