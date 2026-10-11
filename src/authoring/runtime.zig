@@ -2179,13 +2179,14 @@ pub const Body = opaque {
         var returned_error: anyerror = undefined;
         errdefer c.poison(returned_error);
         const fields = try captureError(&returned_error, contextData(c).raw.allocator().alloc(Argument, info.fields.len));
+        const parts = try captureError(&returned_error, self.destructure(value));
         for (info.fields, fields) |named, *out| {
             var replacement: ?*const Value = null;
             for (replacements) |entry| if (std.mem.eql(u8, named.name, entry.name)) {
                 replacement = entry.value;
                 break;
             };
-            out.* = .{ .name = named.name, .value = replacement orelse try captureError(&returned_error, self.field(value, named.name)) };
+            out.* = .{ .name = named.name, .value = replacement orelse try captureError(&returned_error, parts.get(named.name)) };
         }
         return captureError(&returned_error, self.product(original.schema, fields));
     }

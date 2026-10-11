@@ -887,6 +887,68 @@ test "typed sequence pop and consuming destructure preserve names and scope" {
     try sequenceConstruction(testing.allocator);
 }
 
+fn recordUpdateBytes(allocator: std.mem.Allocator, use: @import("horos_data").program.Use, comptime runtime_names: bool, empty: bool, reference: bool, duplicate: bool) ![]u8 {
+    var raw = source.Builder.init(allocator);
+    defer raw.deinit();
+    const c = try a.Context.init(&raw);
+    const integer = try c.schema(u64);
+    const unit = try c.schema(void);
+    const callable = try c.callable(.{}, integer, &.{}, .{ .use = use, .captures = &.{} });
+    const work = try c.functionFor("task", callable);
+    const task_body = try c.body(work);
+    try c.define(work, try task_body.ret(try task_body.constant(u64, 7)));
+    const record = try c.record(.{ .count = integer, .extra = integer, .task = callable });
+    const entry = try c.function("entry", .{}, integer, &.{});
+    const body = try c.body(entry);
+    const original = try body.product(record, .{
+        .count = try body.constant(u64, 10),
+        .extra = try body.constant(u64, 5),
+        .task = try body.lambda(work, callable),
+    });
+    const count = try body.constant(u64, 30);
+    const updated = if (reference) blk: {
+        const parts = try body.destructure(original);
+        break :blk try body.product(record, .{
+            .count = if (empty) try parts.get("count") else count,
+            .extra = try parts.get("extra"),
+            .task = try parts.get("task"),
+        });
+    } else if (runtime_names) blk: {
+        const replacements = try a.interop.RuntimeNamed(.value).init(c, if (empty) &.{} else &.{.{ .name = "count", .handle = a.interop.erase(count) }});
+        break :blk try body.update(original, replacements);
+    } else if (empty) try body.update(original, .{}) else try body.update(original, .{ .count = count });
+    const parts = try body.destructure(updated);
+    const result = try body.apply(try parts.get("task"), .{});
+    if (duplicate) {
+        const again = try body.destructure(original);
+        _ = try body.apply(try again.get("task"), .{});
+    }
+    const failure = try c.literalFailure(void, {});
+    const total = try body.checkedAdd(try parts.get("count"), try parts.get("extra"), failure);
+    try c.define(entry, try body.ret(try body.checkedAdd(total, result, failure)));
+    var compiled = try c.compile(allocator, entry, unit);
+    defer compiled.deinit();
+    const bytes = try allocator.alloc(u8, try @import("horos_data").program_image.encodedLength(compiled.program));
+    errdefer allocator.free(bytes);
+    _ = try compiled.encode(allocator, bytes);
+    return bytes;
+}
+
+test "record updates consume owned products once through typed and runtime names" {
+    for ([_]@import("horos_data").program.Use{ .affine, .linear, .reusable }) |use| {
+        for ([_]bool{ false, true }) |empty| {
+            const expected = try recordUpdateBytes(testing.allocator, use, false, empty, true, false);
+            defer testing.allocator.free(expected);
+            inline for ([_]bool{ false, true }) |runtime_names| {
+                const actual = try recordUpdateBytes(testing.allocator, use, runtime_names, empty, false, false);
+                defer testing.allocator.free(actual);
+                try testing.expectEqualSlices(u8, expected, actual);
+                if (use != .reusable) try testing.expectError(error.UnavailableSlot, recordUpdateBytes(testing.allocator, use, runtime_names, empty, false, true));
+            }
+        }
+    }
+}
+
 fn explicitFailure(allocator: std.mem.Allocator, mode: FailureCase) !void {
     var raw = source.Builder.init(allocator);
     defer raw.deinit();
