@@ -123,6 +123,72 @@ test "authoring derived responder preserves explicit residual allowance" {
     defer compiled.deinit();
 }
 
+test "responder rejection preserves the context before generated functions are allocated" {
+    var raw = source.Builder.init(testing.allocator);
+    defer raw.deinit();
+    const c = try a.Context.init(&raw);
+    const unit = try c.schema(void);
+    const integer = try c.schema(u64);
+    const question = try c.local("question", integer, integer, .linear);
+    const good = try c.function("good", .{ .payload = integer }, integer, .{});
+    const good_body = try c.body(good);
+    try c.define(good, try good_body.ret(try good_body.parameter("payload")));
+    const bad = try c.function("bad", .{ .payload = unit }, unit, .{});
+    const bad_body = try c.body(bad);
+    try c.define(bad, try bad_body.ret(try bad_body.parameter("payload")));
+    const foreign = try a.Context.init(&raw);
+    const foreign_unit = try foreign.schema(void);
+    const foreign_function = try foreign.function("foreign", .{ .payload = foreign_unit }, foreign_unit, .{});
+    const foreign_body = try foreign.body(foreign_function);
+    try foreign.define(foreign_function, try foreign_body.ret(try foreign_body.parameter("payload")));
+    const count = raw.functions.items.len;
+    try testing.expectError(error.SchemaMismatch, c.responder(question, integer, a.interop.erase(bad), .{ .mode = .deep, .use = .linear }));
+    try testing.expectEqual(count, raw.functions.items.len);
+    try testing.expectError(error.SchemaMismatch, c.responder(question, integer, good, .{ .mode = .deep, .use = .linear, .state = .{ .seed = integer } }));
+    try testing.expectEqual(count, raw.functions.items.len);
+    try testing.expectError(error.ForeignHandle, c.responder(question, integer, a.interop.erase(foreign_function), .{ .mode = .deep, .use = .linear }));
+    try testing.expectEqual(count, raw.functions.items.len);
+    _ = try c.responder(question, integer, good, .{ .mode = .deep, .use = .linear });
+    const entry = try c.function("entry", .{}, unit, .{});
+    const body = try c.body(entry);
+    try c.define(entry, try body.ret(try body.constant(void, {})));
+    var compiled = try c.compile(testing.allocator, entry, unit);
+    defer compiled.deinit();
+}
+
+fn runtimeNamedConstruction(allocator: std.mem.Allocator, name: []const u8) !void {
+    var raw = source.Builder.init(allocator);
+    defer raw.deinit();
+    const c = try a.Context.init(&raw);
+    const integer = try c.schema(u64);
+    const record = try c.record(.{ .count = integer });
+    const sum = try c.alternatives(.{ .selected = record });
+    const entry = try c.function("entry", .{ .input = record }, sum, .{});
+    const body = try c.body(entry);
+    const input = try body.parameter("input");
+    const parts = try body.destructure(input);
+    try testing.expectError(error.UnknownName, a.interop.get(parts, "absent"));
+    const count = try a.interop.get(parts, "count");
+    try testing.expect(@TypeOf(count) == *const a.Value(a.Dynamic));
+    const reconstructed = try body.product(record, .{ .count = count });
+    try testing.expectError(error.UnknownName, a.interop.variant(body, sum, "absent", reconstructed));
+    try testing.expectError(error.SchemaMismatch, a.interop.variant(body, sum, name, count));
+    const branch = try body.branch();
+    const local = try branch.product(record, .{ .count = count });
+    try testing.expectError(error.OutOfScope, a.interop.variant(body, sum, name, local));
+    branch.abandon();
+    const result = try a.interop.variant(body, sum, name, reconstructed);
+    try testing.expect(@TypeOf(result) == *const a.Value(a.Shape(union(enum) { selected: struct { count: u64 } })));
+    try c.define(entry, try body.ret(result));
+    try testing.expectError(error.ClosedBody, a.interop.get(parts, "count"));
+    var compiled = try c.compile(allocator, entry, try c.schema(void));
+    defer compiled.deinit();
+}
+
+test "runtime names preserve sum shapes and checked consuming product fields" {
+    try runtimeNamedConstruction(testing.allocator, "selected");
+}
+
 test "authoring nested callable captures parent named value" {
     var raw = source.Builder.init(testing.allocator);
     defer raw.deinit();
@@ -711,7 +777,7 @@ test "handler return effects can be pure while the clause retains residual I/O" 
     try testing.expectError(error.InvalidEffect, handlerReturnEffects(testing.allocator, false, false, true));
 }
 
-fn suspensionRoundtrip(allocator: std.mem.Allocator, duplicate: bool, duplicate_product: bool, direct: bool) !void {
+fn suspensionRoundtrip(allocator: std.mem.Allocator, duplicate: bool, duplicate_product: bool, direct: bool, comptime runtime_name: bool) !void {
     var raw = source.Builder.init(allocator);
     defer raw.deinit();
     const c = try a.Context.init(&raw);
@@ -740,11 +806,14 @@ fn suspensionRoundtrip(allocator: std.mem.Allocator, duplicate: bool, duplicate_
     const box_schema = try c.record(.{ .future = try c.suspensionPackage(try a.interop.resumptionSchema(c, handler)) });
     const box = try body.product(box_schema, .{ .future = packaged });
     const parts = try body.destructure(box);
-    const future = try parts.get("future");
+    const future = if (runtime_name) try a.interop.get(parts, "future") else try parts.get("future");
     if (direct) {
         var selected = future;
         if (duplicate or duplicate_product) _ = try body.disposePackage(future);
-        if (duplicate_product) selected = try (try body.destructure(box)).get("future");
+        if (duplicate_product) {
+            const again = try body.destructure(box);
+            selected = if (runtime_name) try a.interop.get(again, "future") else try again.get("future");
+        }
         try c.define(clause, try body.ret(try body.resumePackage(selected, try body.parameter("payload"))));
     } else {
         var token = try body.unpack(future);
@@ -779,16 +848,16 @@ fn suspensionRoundtrip(allocator: std.mem.Allocator, duplicate: bool, duplicate_
 }
 
 test "typed suspension packaging preserves resumption custody" {
-    for ([_]bool{ false, true }) |direct| {
-        try suspensionRoundtrip(testing.allocator, false, false, direct);
+    inline for ([_]bool{ false, true }) |runtime_name| for ([_]bool{ false, true }) |direct| {
+        try suspensionRoundtrip(testing.allocator, false, false, direct, runtime_name);
         for ([_]bool{ false, true }) |product| {
-            if (suspensionRoundtrip(testing.allocator, !product, product, direct)) {
+            if (suspensionRoundtrip(testing.allocator, !product, product, direct, runtime_name)) {
                 return error.DuplicatePackageAdmitted;
             } else |err| {
                 try testing.expect(err == error.UnavailableSlot or err == error.InvalidOwnership);
             }
         }
-    }
+    };
 }
 
 fn sequenceConstruction(allocator: std.mem.Allocator) !void {
@@ -1637,8 +1706,10 @@ test "handler resumption declarations enforce kind, cardinality and single assig
     var options: struct {
         comptime mode: @import("horos_data").program.Mode = .deep,
         use: @import("horos_data").program.Use = .linear,
-        resumption_slots: []const *const a.SchemaDeclaration(a.Dynamic) = &.{},
+        resumption_slots: ?[]const *const a.SchemaDeclaration(a.Dynamic) = null,
     } = .{};
+    _ = try c.handler(first, unit, unit, options);
+    _ = try c.handler(first, unit, unit, .{ .mode = .deep, .use = .linear, .resumption_slots = null });
     options.resumption_slots = &.{};
     try testing.expectError(error.SchemaMismatch, c.handler(first, unit, unit, options));
     options.resumption_slots = &.{a.interop.erase(wrong)};

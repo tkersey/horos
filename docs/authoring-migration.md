@@ -10,6 +10,8 @@ ABI 3 and nominal runtime authority retain their existing contracts.
 | `body.call(f, &.{.{ .name = "x", .value = value }})` | `body.call(f, .{ .x = value })` |
 | Erased `*const Schema` / `*const Value` annotations | Infer handles, or use `Schema(Shape)` / `Value(Shape)` with the actual retained contract |
 | Runtime field/parameter selection | `interop.field` / `interop.parameter` |
+| Runtime variant construction | `interop.variant(body, schema, name, payload)` retains the whole sum shape |
+| Runtime destructured field selection | `interop.get(parts, name)` returns a checked Dynamic child |
 | Runtime name/arity slices | Context-owned `interop.RuntimeNamed` collections |
 | `schema.fields()[i].schema` | `try schema.fields()` with named typed children, or `interop.fields` for runtime inspection |
 | A slice of finished cases | A named struct of finished cases |
@@ -50,6 +52,9 @@ Actual runtime handler mode selection returns a tagged typed choice. Switch on
 `.deep` or `.shallow` before authoring its mode-dependent interfaces. Deep answers,
 shallow successor behavior and multi-shot continuation reuse retain their existing
 meaning. State's runtime answer policy also returns a tagged choice.
+Optional `resumption_slots` retain their runtime policy: null requests automatic
+declarations, while a supplied list (including an empty list) is checked against
+the handled operations.
 
 The public `hyper_authoring` adapter is retired. Its unchecked raw-value and term
 assertions are not part of the new interface. Deliberate `library.hyper` source

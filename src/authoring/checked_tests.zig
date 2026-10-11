@@ -414,6 +414,8 @@ test "replacement explicit positional mapping validates schema without relabelin
     const other = try c.schema(struct { total: u64 });
     const imported = try a.interop.schema(c, try a.interop.schemaId(c, expected));
     try std.testing.expectError(error.SchemaMismatch, a.interop.refineSchema(c, imported, expected));
+    const incompatible = try c.schema(struct { count: bool });
+    try std.testing.expectError(error.SchemaMismatch, a.interop.mapSchema(c, imported, incompatible));
     const mapped = try a.interop.mapSchema(c, imported, expected);
     try std.testing.expect(@TypeOf(mapped) == @TypeOf(expected));
     try std.testing.expectError(error.SchemaMismatch, a.interop.mapSchema(c, a.interop.erase(other), expected));
@@ -433,6 +435,18 @@ test "replacement explicit positional mapping validates schema without relabelin
     try c.define(entry, try b.ret(refined));
     var compiled = try c.compile(std.testing.allocator, entry, try c.schema(void));
     defer compiled.deinit();
+}
+
+test "schema refinement allocation failure poisons the context" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var raw = source.Builder.init(failing.allocator());
+    defer raw.deinit();
+    const c = try a.Context.init(&raw);
+    const expected = try c.schema(u64);
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, a.interop.refineSchema(c, a.interop.erase(expected), expected));
+    try std.testing.expectEqual(error.OutOfMemory, c.lastDiagnostic().code.?);
+    try std.testing.expectError(error.PoisonedAuthoring, a.interop.schemaId(c, expected));
 }
 
 test "replacement checked scalar blob and record operations retain their result contracts" {

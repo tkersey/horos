@@ -1098,17 +1098,20 @@ pub const Context = opaque {
         responder_function: *const Function,
         options: HandlerOptions,
     ) Error!*const Handler {
+        try self.validateResponder(operation_handle, responder_function, options.state.len);
+        const h = try self.handler(operation_handle, answer, answer, options);
+        try self.finishResponder(h, operation_handle, responder_function);
+        return h;
+    }
+    pub fn validateResponder(self: *Context, operation_handle: *const Operation, responder_function: *const Function, state_count: usize) Error!void {
         const op = data(OperationData, operation_handle);
         const f = data(FunctionData, responder_function);
         try self.origin(op.owner);
         try self.origin(f.owner);
-        if (f.parameters.len != 1 or options.state.len != 0)
+        if (f.parameters.len != 1 or state_count != 0)
             return self.reject(error.SchemaMismatch, f.name, "responder requires one payload parameter and no handler state");
         try self.same(op.payload, f.parameters[0].schema);
         try self.same(op.result, f.result);
-        const h = try self.handler(operation_handle, answer, answer, options);
-        try self.finishResponder(h, operation_handle, responder_function);
-        return h;
     }
     pub fn finishResponder(self: *Context, h: *const Handler, operation_handle: *const Operation, responder_function: *const Function) Error!void {
         const op = data(OperationData, operation_handle);
@@ -2702,10 +2705,12 @@ pub const interop = struct {
         }
     }
     pub fn refineSchema(c: *Context, current: *const Schema, expected: *const Schema, positional: bool) Error!*const Schema {
-        var returned_error: anyerror = undefined;
-        errdefer if (returned_error == error.OutOfMemory) c.poison(returned_error);
-        try captureError(&returned_error, completeMetadata(c, current));
-        try captureError(&returned_error, completeMetadata(c, expected));
+        for ([_]*const Schema{ current, expected }) |schema_handle| {
+            completeMetadata(c, schema_handle) catch |err| {
+                if (err == error.OutOfMemory) c.poison(err);
+                return err;
+            };
+        }
         if (positional and data(SchemaData, current).positional_import) {
             // Exact canonical IDs include child IDs, numeric tags, bounds and
             // nominal identities. Expected supplies names in this explicit map.

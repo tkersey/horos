@@ -642,7 +642,14 @@ fn validateSlot(comptime Slot: type, comptime Op: type, comptime Ops: type, comp
 }
 fn validateResumptionSlots(comptime Options: type, comptime Ops: type, comptime Input: type, comptime Answer: type) void {
     if (!@hasField(Options, "resumption_slots")) return;
-    const Slots = @FieldType(Options, "resumption_slots");
+    validateSlotCollection(@FieldType(Options, "resumption_slots"), Options, Ops, Input, Answer);
+}
+fn validateSlotCollection(comptime Slots: type, comptime Options: type, comptime Ops: type, comptime Input: type, comptime Answer: type) void {
+    switch (@typeInfo(Slots)) {
+        .null => return,
+        .optional => |optional| return validateSlotCollection(optional.child, Options, Ops, Input, Answer),
+        else => {},
+    }
     if (@typeInfo(Slots) == .@"struct") {
         const declarations = @typeInfo(Slots).@"struct";
         if (Ops == Dynamic) {
@@ -822,7 +829,7 @@ pub const Context = opaque {
         const raw = try rawContext(self).handlerSet(ops.slice(), erased(.schema, input), erased(.schema, answer), .{
             .mode = options.mode,
             .use = options.use,
-            .resumption_slots = if (@hasField(@TypeOf(options), "resumption_slots")) slots.slice() else null,
+            .resumption_slots = if (@hasField(@TypeOf(options), "resumption_slots")) slots.optionalSlice() else null,
             .residual = residual.slice(),
             .escaping = escaping.slice(),
             .captures = captures.slice(),
@@ -849,6 +856,8 @@ pub const Context = opaque {
             }
             if (F != Dynamic and Op != Dynamic) compatible(Op.result, F.result, "responder reply");
         }
+        const state = packSchemas(option(options, "state", .{}));
+        try rawContext(self).validateResponder(erased(.operation, operation), erased(.function, responder_function), state.slice().len);
         const selected = try self.handler(operation, answer, answer, options);
         if (comptime knownMode(@TypeOf(options)) != null) {
             try rawContext(self).finishResponder(erased(.handler, selected), erased(.operation, operation), erased(.function, responder_function));
@@ -1316,6 +1325,17 @@ pub const interop = struct {
         _ = comptime index(.body, @TypeOf(body));
         const raw_body: *runtime.Body = @ptrCast(body);
         return @ptrCast(try raw_body.field(erased(.value, value), name));
+    }
+    /// Select a destructured field at runtime, retaining the consuming unpack.
+    pub fn get(parts: anytype, name: []const u8) Error!*const Value(Dynamic) {
+        return @ptrCast(try erased(.product_parts, parts).get(name));
+    }
+    /// The arm is runtime-selected; the checked result retains the whole sum.
+    pub fn variant(body: anytype, schema_handle: anytype, name: []const u8, payload: anytype) Error!*const Value(index(.schema, @TypeOf(schema_handle))) {
+        _ = comptime index(.body, @TypeOf(body));
+        _ = comptime sumFields(index(.schema, @TypeOf(schema_handle)), "interop.variant");
+        const raw_body: *runtime.Body = @ptrCast(body);
+        return @ptrCast(try raw_body.variant(erased(.schema, schema_handle), name, erased(.value, payload)));
     }
     pub fn parameter(body: anytype, name: []const u8) Error!*const Value(Dynamic) {
         _ = comptime index(.body, @TypeOf(body));
