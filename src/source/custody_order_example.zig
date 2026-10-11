@@ -13,13 +13,13 @@ pub fn define(b: *source.Builder, release: p.Id) source.Error!Fixtures {
 }
 fn defineTyped(b: *source.Builder, release_id: p.Id) a.Error!Fixtures {
     const c = try a.Context.init(b);
-    const unit = try c.scalar(void);
-    const integer = try c.scalar(u64);
+    const unit = try c.schema(void);
+    const integer = try c.schema(u64);
     const release = try a.interop.operation(c, release_id);
     const generator = try gen.create(c, "custody/suspend", unit, integer, unit, .{
         .captures = .{ .continuation = &.{ unit, integer } },
         .residual = &.{release},
-        .parameters = &.{.{ .name = "label", .schema = integer }},
+        .parameters = .{ .label = integer },
         .body_use = .reusable,
     });
     const start_type = try c.handledSchema(generator.handler());
@@ -27,23 +27,23 @@ fn defineTyped(b: *source.Builder, release_id: p.Id) a.Error!Fixtures {
     const start = try c.body(start_fn);
     const label = try start.parameter("label");
     const capability = try start.parameter("capability");
-    const body_type = try c.callable(&.{}, unit, &.{generator.effect()}, .{ .use = .reusable, .captures = &.{ generator.capability(), integer } });
+    const body_type = try c.callable(.{}, unit, &.{generator.effect()}, .{ .use = .reusable, .captures = &.{ generator.capability(), integer } });
     const body_fn = try c.functionFor("custody suspension", body_type);
     const body = try start.closureBody(body_fn);
     _ = try body.performLocal(generator.effect(), capability, label);
     try c.define(body_fn, try body.ret(try body.constant(void, {})));
-    const cleanup_type = try c.callable(&.{.{ .name = "exit", .schema = try c.cleanupInfo(integer) }}, unit, &.{release}, .{ .use = .reusable, .captures = &.{integer} });
+    const cleanup_type = try c.callable(.{ .exit = try c.cleanupInfo(integer) }, unit, &.{release}, .{ .use = .reusable, .captures = &.{integer} });
     const cleanup_fn = try c.functionFor("custody release", cleanup_type);
     const cleanup = try start.closureBody(cleanup_fn);
     try c.define(cleanup_fn, try cleanup.ret(try cleanup.perform(release, label)));
-    try c.define(start_fn, try start.ret(try start.protect(try start.lambda(body_fn, body_type), try start.lambda(cleanup_fn, cleanup_type), &.{})));
-    const factory_fn = try c.function("custody factory", &.{.{ .name = "label", .schema = integer }}, generator.package(), &.{release});
+    try c.define(start_fn, try start.ret(try start.protect(try start.lambda(body_fn, body_type), try start.lambda(cleanup_fn, cleanup_type), .{})));
+    const factory_fn = try c.function("custody factory", .{ .label = integer }, generator.package(), &.{release});
     const factory = try c.body(factory_fn);
-    const answer = try factory.handleWithArguments(generator.handler(), try factory.lambda(start_fn, start_type), &.{.{ .name = "label", .value = try factory.parameter("label") }}, &.{});
+    const answer = try factory.handleWithArguments(generator.handler(), try factory.lambda(start_fn, start_type), .{ .label = try factory.parameter("label") }, .{});
     const done = try factory.caseOf(answer, "done");
     const yielded = try factory.caseOf(answer, "yielded");
     const parts = try yielded.body().destructure(yielded.payload());
-    try c.define(factory_fn, try factory.ret(try factory.match(answer, &.{ try done.fail(generator.package(), try done.body().constant(u64, 99)), try yielded.ret(try parts.get("future")) })));
+    try c.define(factory_fn, try factory.ret(try factory.match(answer, .{ .done = try done.fail(generator.package(), try done.body().constant(u64, 99)), .yielded = try yielded.ret(try parts.get("future")) })));
     return .{ .package = try a.interop.schemaId(c, generator.package()), .queue = try a.interop.schemaId(c, try c.sequence(generator.package())), .factory = try a.interop.functionId(c, factory_fn), .release = release_id };
 }
 

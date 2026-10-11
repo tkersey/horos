@@ -4,6 +4,7 @@ const std = @import("std");
 const data = @import("horos_data");
 const p = data.program;
 const ast = @import("ast.zig");
+const reference_roles = @import("reference_roles.zig");
 const Error = @import("../source.zig").Error;
 pub const Set = std.ArrayList(p.Id);
 const compact = data.analysis_sets;
@@ -323,61 +324,26 @@ pub const References = struct {
     values: Set = .empty,
     terms: Set = .empty,
     bound: Set = .empty,
-    pub fn collect(self: *References, term: ast.Term) Error!void {
-        switch (term) {
-            .value, .dispose, .fail => |value| try self.values.append(self.allocator, value),
-            .bind => |bind| {
-                try self.terms.appendSlice(self.allocator, &.{ bind.value, bind.next });
-                try self.bound.append(self.allocator, bind.variable);
-            },
-            .conditional => |conditional| {
-                try self.values.append(self.allocator, conditional.condition);
-                try self.terms.appendSlice(self.allocator, &.{ conditional.when_true, conditional.when_false });
-            },
-            .call => |call| try self.values.appendSlice(self.allocator, call.arguments),
-            .apply => |apply| {
-                try self.values.append(self.allocator, apply.computation);
-                try self.values.appendSlice(self.allocator, apply.arguments);
-            },
-            .perform => |perform| {
-                try self.values.append(self.allocator, perform.payload);
-                if (perform.capability) |cap| try self.values.append(self.allocator, cap);
-                try self.values.appendSlice(self.allocator, perform.bodies);
-                try self.values.appendSlice(self.allocator, perform.use_site_capabilities);
-            },
-            .handle => |handle| {
-                try self.values.append(self.allocator, handle.body);
-                try self.values.appendSlice(self.allocator, handle.arguments);
-                try self.values.appendSlice(self.allocator, handle.state);
-            },
-            .resume_value => |resuming| try self.values.appendSlice(self.allocator, &.{ resuming.resumption, resuming.argument }),
-            .resume_with => |resuming| {
-                try self.values.appendSlice(self.allocator, &.{ resuming.resumption, resuming.argument });
-                try self.values.appendSlice(self.allocator, resuming.state);
-            },
-            .resume_computation => |resuming| try self.values.appendSlice(self.allocator, &.{ resuming.resumption, resuming.computation }),
-            .protect => |protection| {
-                try self.values.appendSlice(self.allocator, &.{ protection.body, protection.cleanup });
-                try self.values.appendSlice(self.allocator, protection.arguments);
-                if (protection.resource) |resource| try self.values.append(self.allocator, resource);
-            },
-            .with_region => |region| {
-                try self.values.append(self.allocator, region.body);
-                try self.values.appendSlice(self.allocator, region.arguments);
-            },
-            .yield_then => |next| try self.terms.append(self.allocator, next),
-            .match_sum => |match| {
-                try self.values.append(self.allocator, match.value);
-                for (match.cases) |case| {
-                    try self.bound.append(self.allocator, case.variable);
-                    try self.terms.append(self.allocator, case.body);
-                }
-            },
-            .unpack_product => |unpack| {
-                try self.values.append(self.allocator, unpack.value);
-                try self.terms.append(self.allocator, unpack.body);
-                try self.bound.appendSlice(self.allocator, unpack.variables);
-            },
+    pub const VisitError = Error;
+    pub fn reference(self: *References, comptime role: reference_roles.Role, comptime cardinality: reference_roles.Cardinality, value: anytype) Error!void {
+        if (comptime role == .match_case) {
+            for (value) |case| try reference_roles.visitMatchCase(case, self);
+            return;
         }
+        const set = switch (role) {
+            .value => &self.values,
+            .term => &self.terms,
+            .bound => &self.bound,
+            .function, .effect, .handler, .region, .nonreference => return,
+            .match_case => unreachable,
+        };
+        switch (cardinality) {
+            .one => try set.append(self.allocator, value),
+            .list => try set.appendSlice(self.allocator, value),
+            .optional => if (value) |present| try set.append(self.allocator, present),
+        }
+    }
+    pub fn collect(self: *References, term: ast.Term) Error!void {
+        return reference_roles.visitTerm(term, self);
     }
 };

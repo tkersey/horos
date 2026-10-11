@@ -7,11 +7,11 @@ test "foreign effect rejects in public package while local binding succeeds" {
     defer second.deinit();
     const left = try b.authoring.Context.init(&first);
     const right = try b.authoring.Context.init(&second);
-    const lu = try left.scalar(void);
-    const ru = try right.scalar(void);
+    const lu = try left.schema(void);
+    const ru = try right.schema(void);
     const foreign = try left.external("same", lu, lu);
     const local = try right.external("same", ru, ru);
-    const entry = try right.function("entry", &.{}, ru, &.{local});
+    const entry = try right.function("entry", .{}, ru, &.{local});
     const body = try right.body(entry);
     const payload = try body.constant(void, {});
     try std.testing.expectError(error.ForeignHandle, body.perform(foreign, payload));
@@ -27,8 +27,8 @@ test "foreign failure literal rejects through public package" {
     defer second.deinit();
     const left = try b.authoring.Context.init(&first);
     const right = try b.authoring.Context.init(&second);
-    const integer = try left.scalar(u64);
-    const entry = try left.function("entry", &.{}, integer, &.{});
+    const integer = try left.schema(u64);
+    const entry = try left.function("entry", .{}, integer, &.{});
     const body = try left.body(entry);
     const value = try body.constant(u64, 1);
     try std.testing.expectError(error.ForeignHandle, body.checkedAdd(
@@ -42,11 +42,11 @@ test "same-name local capabilities and sibling values remain distinct" {
     var raw = b.source.Builder.init(std.testing.allocator);
     defer raw.deinit();
     const c = try b.authoring.Context.init(&raw);
-    const unit = try c.scalar(void);
+    const unit = try c.schema(void);
     const first = try c.local("same", unit, unit, .linear);
     const second = try c.local("same", unit, unit, .linear);
     const cap = try c.capability(first);
-    const entry = try c.function("entry", &.{.{ .name = "cap", .schema = cap }}, unit, &.{second});
+    const entry = try c.function("entry", .{ .cap = cap }, unit, &.{second});
     const body = try c.body(entry);
     try std.testing.expectError(error.SchemaMismatch, body.performLocal(
         second,

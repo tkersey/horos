@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Boundary contributors. MIT license.
 //! Self-contained structural schemas for residual contracts.
 const std = @import("std");
+pub const native = @import("native_shape.zig");
 const p = @import("program.zig");
 const wire = @import("wire.zig");
 const record = @import("record.zig");
@@ -153,6 +154,50 @@ pub fn decodeLimited(allocator: std.mem.Allocator, input: []const u8, max_decode
     try record.write(Descriptor, canonical.descriptor, &comparison);
     if (comparison.position != input.len) return error.NonCanonical;
     return canonical;
+}
+
+/// Validate an encoded value while the surrounding builder may contain unrelated
+/// unfinished declarations. Only the reachable, exportable schema graph is read.
+pub fn validateReachableValue(allocator: std.mem.Allocator, types: []const p.Schema, root: p.Id, value: []const u8) Error!void {
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    const storage = scratch.allocator();
+    const missing = std.math.maxInt(p.Id);
+    const map = try storage.alloc(p.Id, types.len);
+    @memset(map, missing);
+    var order: std.ArrayList(p.Id) = .empty;
+    _ = try admission.schemaAt(types, root);
+    map[@intCast(root)] = 0;
+    try order.append(storage, root);
+    var cursor: usize = 0;
+    while (cursor < order.items.len) : (cursor += 1) {
+        const schema = types[@intCast(order.items[cursor])];
+        if (schema == .internal) return error.InvalidSchema;
+        var single: [1]p.Id = undefined;
+        for (children(schema, &single)) |id| {
+            _ = try admission.schemaAt(types, id);
+            if (map[@intCast(id)] != missing) continue;
+            map[@intCast(id)] = order.items.len;
+            try order.append(storage, id);
+        }
+    }
+    const reachable = try storage.alloc(p.Schema, order.items.len);
+    for (reachable, order.items) |*target, id| {
+        target.* = types[@intCast(id)];
+        switch (target.*) {
+            .product, .sum => |refs| {
+                const remapped = try storage.alloc(p.Id, refs.len);
+                for (remapped, refs) |*out, old| out.* = map[@intCast(old)];
+                target.* = if (target.* == .product) .{ .product = remapped } else .{ .sum = remapped };
+            },
+            .seq => |old| target.* = .{ .seq = map[@intCast(old)] },
+            .vector => |v| target.* = .{ .vector = .{ .element = map[@intCast(v.element)], .maximum = v.maximum } },
+            .array => |v| target.* = .{ .array = .{ .element = map[@intCast(v.element)], .length = v.length } },
+            else => {},
+        }
+    }
+    const facts = try admission.schemas(storage, reachable);
+    try admission.value(storage, reachable, facts, .{ .schema = 0, .bytes = value });
 }
 
 pub fn validateValue(allocator: std.mem.Allocator, descriptor: Descriptor, value: []const u8) Error!void {

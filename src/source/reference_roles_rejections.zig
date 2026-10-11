@@ -1,0 +1,21 @@
+const std = @import("std");
+const roles = @import("reference_roles.zig");
+const mode = @import("rejection_mode").value;
+fn extend(comptime T: type) type {
+    const fields = @typeInfo(T).@"struct";
+    const names = fields.field_names ++ &[_][]const u8{"unclassified"};
+    const types = fields.field_types ++ &[_]type{u64};
+    return @Struct(.auto, null, names, types, &(@as([names.len]std.lang.Type.Struct.FieldAttributes, @splat(.{}))));
+}
+fn changedType(comptime T: type, comptime index: usize) type {
+    const fields = @typeInfo(T).@"struct";
+    var types: [fields.field_types.len]type = fields.field_types[0..fields.field_types.len].*;
+    types[index] = u32;
+    return @Struct(.auto, null, fields.field_names, &types, &(@as([types.len]std.lang.Type.Struct.FieldAttributes, @splat(.{}))));
+}
+const ast = @import("ast.zig");
+comptime {
+    if (std.mem.eql(u8, mode, "field")) roles.validateTermPayload(.call, extend(@FieldType(ast.Term, "call")));
+    if (std.mem.eql(u8, mode, "type")) roles.validateTermPayload(.perform, changedType(ast.Operation, 1));
+    if (std.mem.eql(u8, mode, "case")) roles.validateMatchCase(extend(@typeInfo(@FieldType(@FieldType(ast.Term, "match_sum"), "cases")).pointer.child));
+}

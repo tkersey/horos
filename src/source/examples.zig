@@ -219,10 +219,10 @@ fn typedChoices(builder: *source.Builder, comptime every: bool) @import("../auth
     const typed = @import("../authoring.zig");
     const library = @import("../library/choice.zig");
     const c = try typed.Context.init(builder);
-    const boolean = try c.scalar(bool);
-    const pair = try c.record(&.{ .{ .name = "first", .schema = boolean }, .{ .name = "second", .schema = boolean } });
+    const boolean = try c.schema(bool);
+    const pair = try c.record(.{ .first = boolean, .second = boolean });
     const family = try library.family(c, "example/boolean-choice");
-    const options: library.Options = .{ .captures = .{ .continuation = &.{ boolean, family.capability() } }, .residual = &.{} };
+    const options = .{ .captures = .{ .continuation = &.{ boolean, family.capability() } }, .residual = &.{} };
     const answer = if (every) try library.all(c, family, pair, options) else try library.first(c, family, pair, options);
     const schema = try c.handledSchema(answer.handler);
     const body_fn = try c.functionFor("two choices", schema);
@@ -230,11 +230,11 @@ fn typedChoices(builder: *source.Builder, comptime every: bool) @import("../auth
     const capability = try body.parameter("capability");
     const first = try body.performLocal(family.effect(), capability, try body.constant(void, {}));
     const second = try body.performLocal(family.effect(), capability, try body.constant(void, {}));
-    try c.define(body_fn, try body.ret(try body.product(pair, &.{ .{ .name = "first", .value = first }, .{ .name = "second", .value = second } })));
-    const main = try c.function("entry", &.{}, answer.answer, &.{});
+    try c.define(body_fn, try body.ret(try body.product(pair, .{ .first = first, .second = second })));
+    const main = try c.function("entry", .{}, answer.answer, &.{});
     const entry = try c.body(main);
-    try c.define(main, try entry.ret(try entry.handleWith(answer.handler, try entry.lambda(body_fn, schema), &.{})));
-    return c.module(main, try c.scalar(void));
+    try c.define(main, try entry.ret(try entry.handleWith(answer.handler, try entry.lambda(body_fn, schema), .{})));
+    return c.module(main, try c.schema(void));
 }
 pub const queensDfs = @import("queens_example.zig").dfs;
 pub const queensBfs = @import("queens_example.zig").bfs;

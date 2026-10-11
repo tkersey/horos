@@ -1,81 +1,43 @@
-// Copyright (c) 2026 Boundary contributors. MIT license.
-//! Dynamic log accumulation through explicit handler-owned state.
-const std = @import("std");
-const a = @import("../authoring.zig");
-pub const Writer = struct { answer: *const a.Schema, cell: *const a.Schema, sequence: *const a.Schema, handler: *const a.Handler, resumption: *const a.Schema };
-pub const Family = opaque {
-    pub fn effect(self: *const Family) *const a.Operation {
-        return familyData(self).effect;
-    }
-    pub fn capability(self: *const Family) *const a.Schema {
-        return familyData(self).capability;
-    }
-};
-fn familyData(self: *const Family) *const FamilyData {
-    return @ptrCast(@alignCast(self));
+//! Shape-preserving interface over the shared checked library implementation.
+const bridge = @import("bridge.zig");
+const a = bridge.a;
+const native = bridge.native;
+const runtime = @import("runtime/writer.zig");
+fn Op(comptime S: type) type {
+    return a.OperationSignature(S, bridge.Unit, bridge.Empty);
 }
-const FamilyData = struct {
-    effect: *const a.Operation,
-    capability: *const a.Schema,
-    message: *const a.Schema,
-    owner: *a.Context,
-    interpretations: *std.ArrayList(Cached),
-};
-const Cached = struct {
-    result: *const a.Schema,
-    region: *const a.Region,
-    captures: []const *const a.Schema,
-    body_captures: []const *const a.Schema,
-    residual: []const *const a.Operation,
-    value: Writer,
-};
-pub fn family(c: *a.Context, identity: []const u8, message: *const a.Schema) a.Error!*const Family {
-    const effect = try c.local(identity, message, try c.scalar(void), .linear);
-    const entries = try a.interop.builder(c).allocator().create(std.ArrayList(Cached));
-    entries.* = .empty;
-    const saved = try a.interop.builder(c).allocator().create(FamilyData);
-    saved.* = .{ .effect = effect, .capability = try c.capability(effect), .message = message, .owner = c, .interpretations = entries };
-    return @ptrCast(saved);
+pub fn Family(comptime S: type) type {
+    return opaque {
+        pub const family_shape = S;
+        pub fn effect(self: *const @This()) *const a.Operation(Op(S)) {
+            return @ptrCast(@as(*const runtime.Family, @ptrCast(self)).effect());
+        }
+        pub fn capability(self: *const @This()) *const a.Schema(a.Internal(.{ .capability = Op(S) })) {
+            return @ptrCast(@as(*const runtime.Family, @ptrCast(self)).capability());
+        }
+    };
 }
-pub fn interpret(c: *a.Context, writer: *const Family, result: *const a.Schema, region: *const a.Region, captures: a.CaptureBounds, residual: []const *const a.Operation) a.Error!Writer {
-    const f = familyData(writer);
-    _ = try c.capability(f.effect);
-    if (c != f.owner) return error.ForeignHandle;
-    for (f.interpretations.items) |entry| {
-        if (entry.result == result and entry.region == region and std.mem.eql(*const a.Schema, entry.captures, captures.continuation) and std.mem.eql(*const a.Schema, entry.body_captures, captures.body) and
-            std.mem.eql(*const a.Operation, entry.residual, residual)) return entry.value;
-    }
-    const allocator = a.interop.builder(c).allocator();
-    const sequence = try c.sequence(f.message);
-    const cell = try c.cell(region, sequence);
-    const answer = try c.record(&.{ .{ .name = "value", .schema = result }, .{ .name = "log", .schema = sequence } });
-    const bound = try allocator.alloc(*const a.Schema, captures.continuation.len + 3);
-    @memcpy(bound[0..captures.continuation.len], captures.continuation);
-    @memcpy(bound[captures.continuation.len..], &[_]*const a.Schema{ f.capability, cell, sequence });
-    const handler = try c.handler(f.effect, result, answer, .{
-        .mode = .deep,
-        .use = .linear,
-        .residual = residual,
-        .return_effects = &.{},
-        .captures = bound,
-        .body_captures = captures.body,
-        .borrowed_regions = &.{region},
-        .state = &.{.{ .name = "log", .schema = cell }},
-        .obligations = true,
-    });
-    const returns_fn = try c.returnFunction(handler);
-    const returns = try c.body(returns_fn);
-    const logs = try returns.readCell(try returns.parameter("log"));
-    try c.define(returns_fn, try returns.ret(try returns.product(answer, &.{
-        .{ .name = "value", .value = try returns.parameter("result") }, .{ .name = "log", .value = logs },
-    })));
-    const clause_fn = try c.clauseFunction(handler);
-    const clause = try c.body(clause_fn);
-    const target = try clause.parameter("log");
-    const after = try clause.append(try clause.readCell(target), try clause.parameter("payload"));
-    _ = try clause.writeCell(target, after);
-    try c.define(clause_fn, try clause.ret(try clause.resumeValue(try clause.parameter("resumption"), try clause.constant(void, {}))));
-    const value: Writer = .{ .answer = answer, .cell = cell, .sequence = sequence, .handler = handler, .resumption = try a.interop.resumptionSchema(c, handler) };
-    try f.interpretations.append(allocator, .{ .result = result, .region = region, .captures = try allocator.dupe(*const a.Schema, captures.continuation), .body_captures = try allocator.dupe(*const a.Schema, captures.body), .residual = try allocator.dupe(*const a.Operation, residual), .value = value });
-    return value;
+fn familyShape(comptime T: type) type {
+    if (@typeInfo(T) != .pointer or @typeInfo(T).pointer.size != .one) @compileError("Horos Writer: expected canonical family");
+    const Child = @typeInfo(T).pointer.child;
+    if (!@hasDecl(Child, "family_shape")) @compileError("Horos Writer: expected canonical family");
+    const S = Child.family_shape;
+    if (T != *const Family(S)) @compileError("Horos Writer: expected canonical family");
+    return S;
+}
+pub fn family(c: *a.Context, identity: []const u8, message: anytype) a.Error!*const Family(bridge.schemaShape(@TypeOf(message))) {
+    return @ptrCast(try runtime.family(bridge.context(c), identity, bridge.schema(message)));
+}
+pub fn Writer(comptime S: type, comptime R: type) type {
+    const Sequence = bridge.sequence(S);
+    const Cell = a.Internal(.{ .cell = Sequence });
+    const Answer = native.Contract(.{ .product = native.Fields(&.{ "value", "log" }, &.{ R, Sequence }) });
+    const H = a.HandlerShape(native.Fields(&.{"capability"}, &.{Op(S)}), R, Answer, native.Fields(&.{"log"}, &.{Cell}), bridge.Empty, .deep);
+    return struct { answer: *const a.Schema(Answer), cell: *const a.Schema(Cell), sequence: *const a.Schema(Sequence), handler: *const a.Handler(H), resumption: *const a.Schema(bridge.resumption(bridge.Unit, Answer)) };
+}
+pub fn interpret(c: *a.Context, writer: anytype, result: anytype, region: *const a.Region, capture_bounds: anytype, residual: anytype) a.Error!Writer(familyShape(@TypeOf(writer)), bridge.schemaShape(@TypeOf(result))) {
+    const bounds = bridge.captures(capture_bounds);
+    const effects = bridge.list(.operation, residual);
+    const value = try runtime.interpret(bridge.context(c), @ptrCast(writer), bridge.schema(result), region, bounds.value(), effects.slice());
+    return .{ .answer = @ptrCast(value.answer), .cell = @ptrCast(value.cell), .sequence = @ptrCast(value.sequence), .handler = @ptrCast(value.handler), .resumption = @ptrCast(value.resumption) };
 }

@@ -39,9 +39,8 @@ pub fn overlaps(comptime T: type, value: T, output: []const u8) bool {
         .@"struct" => |info| inline for (info.field_names, info.field_types) |field_name, FieldType| {
             if (overlaps(FieldType, @field(value, field_name), output)) return true;
         },
-        .@"union" => |info| inline for (info.field_names, info.field_types) |field_name, FieldType| {
-            if (std.mem.eql(u8, field_name, @tagName(value)))
-                return overlaps(FieldType, @field(value, field_name), output);
+        .@"union" => switch (value) {
+            inline else => |payload| return overlaps(@TypeOf(payload), payload, output),
         },
         .optional => |info| {
             if (value) |present| return overlaps(info.child, present, output);
@@ -83,13 +82,10 @@ pub fn write(comptime T: type, value: T, writer: *wire.Writer) wire.Error!void {
         .@"struct" => |info| {
             inline for (info.field_names, info.field_types) |field_name, FieldType| try write(FieldType, @field(value, field_name), writer);
         },
-        .@"union" => |info| {
+        .@"union" => {
             try writer.natural(@backingInt(std.meta.activeTag(value)));
-            inline for (info.field_names, info.field_types) |field_name, FieldType| {
-                if (std.mem.eql(u8, field_name, @tagName(value))) {
-                    try write(FieldType, @field(value, field_name), writer);
-                    return;
-                }
+            switch (value) {
+                inline else => |payload| try write(@TypeOf(payload), payload, writer),
             }
         },
         else => @compileError("not a logical portable record: " ++ @typeName(T)),
@@ -153,12 +149,11 @@ pub fn readBounded(comptime T: type, reader: *wire.Reader, allocator: std.mem.Al
             break :blk result;
         },
         .@"union" => |info| blk: {
-            const tag = try reader.natural();
-            inline for (info.field_names, info.field_types) |field_name, FieldType| {
-                const declared_tag = @backingInt(@field(info.tag_type.?, field_name));
-                if (tag == declared_tag) break :blk @unionInit(T, field_name, try readBounded(FieldType, reader, allocator, remaining));
-            }
-            break :blk error.InvalidTag;
+            const raw_tag = try reader.natural();
+            const tag = std.enums.fromInt(info.tag_type.?, raw_tag) orelse return error.InvalidTag;
+            break :blk switch (tag) {
+                inline else => |known| @unionInit(T, @tagName(known), try readBounded(@FieldType(T, @tagName(known)), reader, allocator, remaining)),
+            };
         },
         else => @compileError("not a logical portable record: " ++ @typeName(T)),
     };
@@ -232,10 +227,15 @@ pub fn equal(comptime T: type, a: T, b: T) bool {
             inline for (info.field_names, info.field_types) |field_name, FieldType| if (!equal(FieldType, @field(a, field_name), @field(b, field_name))) break :blk false;
             break :blk true;
         },
-        .@"union" => |info| blk: {
+        .@"union" => blk: {
             if (std.meta.activeTag(a) != std.meta.activeTag(b)) break :blk false;
-            inline for (info.field_names, info.field_types) |field_name, FieldType| if (std.mem.eql(u8, field_name, @tagName(a))) break :blk equal(FieldType, @field(a, field_name), @field(b, field_name));
-            unreachable;
+            break :blk switch (a) {
+                inline else => |payload, tag| equal(@TypeOf(payload), payload, @field(b, @tagName(tag))),
+            };
+        },
+        .array => |info| blk: {
+            for (a, b) |left, right| if (!equal(info.child, left, right)) break :blk false;
+            break :blk true;
         },
         .optional => |info| if (a) |left| (if (b) |right| equal(info.child, left, right) else false) else b == null,
         .void => true,

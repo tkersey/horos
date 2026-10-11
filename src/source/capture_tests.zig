@@ -103,9 +103,9 @@ fn program(b: *source.Builder, mode: Mode) !source.Module {
     const family = try choice.family(author, "test/outer-choice");
     const c: ChoiceOperation = .{ .effect = try typed.interop.operationId(author, family.effect()), .capability = try typed.interop.schemaId(author, family.capability()) };
     const capture_ids = [_]Id{ unit, boolean, sequence, c.capability };
-    var captures: [capture_ids.len]*const typed.Schema = undefined;
+    var captures: [capture_ids.len]*const typed.Schema(typed.Dynamic) = undefined;
     for (capture_ids, &captures) |id, *schema| schema.* = try typed.interop.schema(author, id);
-    const interpreted = try choice.all(author, family, try author.scalar(void), .{ .captures = .{ .continuation = &captures }, .residual = &.{}, .borrowed_regions = &.{try typed.interop.region(author, r.loan)} });
+    const interpreted = try choice.all(author, family, try author.schema(void), .{ .captures = .{ .continuation = &captures }, .residual = &.{}, .borrowed_regions = &.{try typed.interop.region(author, r.loan)} });
     const all = .{ .handler = try typed.interop.handlerId(author, interpreted.handler) };
     const protected_body = try b.declare(&.{r.borrowed}, sequence, &.{}, &.{r.loan});
     try b.define(protected_body, try b.term(.{ .handle = .{

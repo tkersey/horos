@@ -1,73 +1,42 @@
-// Copyright (c) 2026 Boundary contributors. MIT license.
-//! Catch explicitly discharges the abandoned continuation before returning failure.
-const std = @import("std");
-const a = @import("../authoring.zig");
-pub const Raise = struct { answer: *const a.Schema, resumption: *const a.Schema, handler: *const a.Handler };
-pub const Family = opaque {
-    pub fn effect(self: *const Family) *const a.Operation {
-        return familyData(self).effect;
-    }
-    pub fn capability(self: *const Family) *const a.Schema {
-        return familyData(self).capability;
-    }
-};
-fn familyData(self: *const Family) *const FamilyData {
-    return @ptrCast(@alignCast(self));
+//! Shape-preserving interface over the shared checked library implementation.
+const bridge = @import("bridge.zig");
+const a = bridge.a;
+const native = bridge.native;
+const runtime = @import("runtime/raise.zig");
+fn Op(comptime S: type) type {
+    return a.OperationSignature(S, bridge.Unit, bridge.Empty);
 }
-const FamilyData = struct {
-    effect: *const a.Operation,
-    capability: *const a.Schema,
-    failure: *const a.Schema,
-    owner: *a.Context,
-    interpretations: *std.ArrayList(Cached),
-};
-const Cached = struct {
-    result: *const a.Schema,
-    captures: []const *const a.Schema,
-    body_captures: []const *const a.Schema,
-    residual: []const *const a.Operation,
-    regions: []const *const a.Region,
-    value: Raise,
-};
-pub fn family(c: *a.Context, identity: []const u8, failure: *const a.Schema) a.Error!*const Family {
-    const effect = try c.local(identity, failure, try c.scalar(void), .linear);
-    const entries = try a.interop.builder(c).allocator().create(std.ArrayList(Cached));
-    entries.* = .empty;
-    const saved = try a.interop.builder(c).allocator().create(FamilyData);
-    saved.* = .{ .effect = effect, .capability = try c.capability(effect), .failure = failure, .owner = c, .interpretations = entries };
-    return @ptrCast(saved);
+pub fn Family(comptime S: type) type {
+    return opaque {
+        pub const family_shape = S;
+        pub fn effect(self: *const @This()) *const a.Operation(Op(S)) {
+            return @ptrCast(@as(*const runtime.Family, @ptrCast(self)).effect());
+        }
+        pub fn capability(self: *const @This()) *const a.Schema(a.Internal(.{ .capability = Op(S) })) {
+            return @ptrCast(@as(*const runtime.Family, @ptrCast(self)).capability());
+        }
+    };
 }
-pub fn catching(c: *a.Context, raised: *const Family, result: *const a.Schema, captures: a.CaptureBounds, residual: []const *const a.Operation, regions: []const *const a.Region) a.Error!Raise {
-    const f = familyData(raised);
-    _ = try c.capability(f.effect);
-    if (c != f.owner) return error.ForeignHandle;
-    for (f.interpretations.items) |entry| {
-        if (entry.result == result and std.mem.eql(*const a.Schema, entry.captures, captures.continuation) and std.mem.eql(*const a.Schema, entry.body_captures, captures.body) and
-            std.mem.eql(*const a.Operation, entry.residual, residual) and std.mem.eql(*const a.Region, entry.regions, regions)) return entry.value;
-    }
-    const allocator = a.interop.builder(c).allocator();
-    const answer = try c.alternatives(&.{ .{ .name = "failure", .schema = f.failure }, .{ .name = "value", .schema = result } });
-    const bound = try allocator.alloc(*const a.Schema, captures.continuation.len + 1);
-    @memcpy(bound[0..captures.continuation.len], captures.continuation);
-    bound[captures.continuation.len] = f.capability;
-    const handler = try c.handler(f.effect, result, answer, .{
-        .mode = .deep,
-        .use = .linear,
-        .residual = residual,
-        .return_effects = &.{},
-        .captures = bound,
-        .body_captures = captures.body,
-        .borrowed_regions = regions,
-        .obligations = true,
-    });
-    const returns_fn = try c.returnFunction(handler);
-    const returns = try c.body(returns_fn);
-    try c.define(returns_fn, try returns.ret(try returns.variant(answer, "value", try returns.parameter("result"))));
-    const clause_fn = try c.clauseFunction(handler);
-    const clause = try c.body(clause_fn);
-    _ = try clause.dispose(try clause.parameter("resumption"));
-    try c.define(clause_fn, try clause.ret(try clause.variant(answer, "failure", try clause.parameter("payload"))));
-    const value: Raise = .{ .answer = answer, .resumption = try a.interop.resumptionSchema(c, handler), .handler = handler };
-    try f.interpretations.append(allocator, .{ .result = result, .captures = try allocator.dupe(*const a.Schema, captures.continuation), .body_captures = try allocator.dupe(*const a.Schema, captures.body), .residual = try allocator.dupe(*const a.Operation, residual), .regions = try allocator.dupe(*const a.Region, regions), .value = value });
-    return value;
+fn familyShape(comptime T: type) type {
+    if (@typeInfo(T) != .pointer or @typeInfo(T).pointer.size != .one) @compileError("Horos Raise: expected canonical family");
+    const Child = @typeInfo(T).pointer.child;
+    if (!@hasDecl(Child, "family_shape")) @compileError("Horos Raise: expected canonical family");
+    const S = Child.family_shape;
+    if (T != *const Family(S)) @compileError("Horos Raise: expected canonical family");
+    return S;
+}
+pub fn family(c: *a.Context, identity: []const u8, failure: anytype) a.Error!*const Family(bridge.schemaShape(@TypeOf(failure))) {
+    return @ptrCast(try runtime.family(bridge.context(c), identity, bridge.schema(failure)));
+}
+pub fn Raise(comptime S: type, comptime R: type) type {
+    const Answer = native.Contract(.{ .sum = native.Fields(&.{ "failure", "value" }, &.{ S, R }) });
+    const H = a.HandlerShape(native.Fields(&.{"capability"}, &.{Op(S)}), R, Answer, bridge.Empty, bridge.Empty, .deep);
+    return struct { answer: *const a.Schema(Answer), resumption: *const a.Schema(bridge.resumption(bridge.Unit, Answer)), handler: *const a.Handler(H) };
+}
+pub fn catching(c: *a.Context, raised: anytype, result: anytype, capture_bounds: anytype, residual: anytype, regions: anytype) a.Error!Raise(familyShape(@TypeOf(raised)), bridge.schemaShape(@TypeOf(result))) {
+    const bounds = bridge.captures(capture_bounds);
+    const effects = bridge.list(.operation, residual);
+    const borrowed = bridge.list(.region, regions);
+    const value = try runtime.catching(bridge.context(c), @ptrCast(raised), bridge.schema(result), bounds.value(), effects.slice(), borrowed.slice());
+    return .{ .answer = @ptrCast(value.answer), .handler = @ptrCast(value.handler), .resumption = @ptrCast(value.resumption) };
 }

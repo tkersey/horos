@@ -1,271 +1,235 @@
-# Typed, structured authoring
+# Authoring with retained schema shapes
 
-Import `horos.authoring`. It stages ordinary Horos source; the existing
-source checker, lowering, target admission and unchanged Kosmos interpreter remain
-authoritative. `horos.source` is the single low-level IR interface for source
-inspection, negative fixtures, component construction and internal generation.
-The duplicate `horos.computation` export is removed. Ordinary construction
-uses the typed frontend; IR access does not select another compiler or checker.
+Import `horos.authoring`. `Context.schema(T)`, named declarations, and body
+operations retain known structure in opaque Zig handle types. The shared runtime
+core still checks actual schemas, context ownership, scopes, nominal capabilities,
+regions and lifecycle. Source compilation and portable admission remain separate
+from Kosmos execution.
 
-Handlers may declare `return_effects` separately from their residual row. Omit it
-to retain the full residual allowance, or use `&.{}` for a pure return arm while
-the operation clause still performs residual effects. Authoritative source
-admission rejects a return body that exceeds its declared row.
-`clause_effects` similarly narrows the operation clause's row, without changing
-the effects of its captured resumption. A clause that only packages a suspension
-can therefore be pure while later resumption performs residual effects.
+`horos.source` serves explicit IR inspection, malformed fixtures, components and
+compiler integrations. It is not an alternate ordinary authoring tutorial.
 
-Use `Context.suspensionPackage` for its typed schema and `Body.package` /
-`Body.unpack` to move a resumption into or out of an owned suspension package.
-These emit the existing source operations. Their named schema metadata is retained;
-ordinary source admission still rejects repeated consumption and invalid custody.
+## Construct and call a function
 
-`Body.destructure(product)` consumes a product and returns named parts accessed
-with `parts.get(name)`. It is distinct from borrowing field projections: owned
-suspensions can move through the parts, and source admission rejects consuming
-the original product or an owned part twice. Parts retain their lexical scope.
-`Body.pop(sequence)` returns `empty` or `item`, whose product has `head` and `tail`;
-`append` and `equal` complete ordinary forward sequence-search construction.
+```zig
+const a = horos.authoring;
+const c = try a.Context.init(&builder);
+const integer = try c.schema(u64);
+const request = try c.schema(struct { input: u64, offset: u64 });
+const run = try c.function("run", .{ .request = request }, integer, .{});
+const body = try c.body(run);
+const argument = try body.parameter("request");
+const input = try body.field(argument, "input");
+const offset = try body.field(argument, "offset");
+const sum = try body.checkedAdd(input, offset, try c.literalFailure(void, {}));
+try c.define(run, try body.ret(sum));
+```
 
-Construct handlers and regions through `authoring.Context.handler` and
-`authoring.Context.region`. The former top-level `horos.handler` and
-`horos.region` aliases are removed. Expert record inspection uses
-`horos.data.program` types; it does not require those construction facades.
+A call uses `.{ .request = value }`.
+Argument order may differ from declaration order. Already-created handles are
+packed into declared order; authoring computations are not reordered. Parameters
+are materialized when requested.
 
-Declare operations with `Context.external`, `local`, or `scoped`. The raw-ID
-`horos.effect` facade and its indexed-declaration wrapper are removed. A finite
-native collection of typed operation handles retains each operation's result
-schema. The independent indexed source-IR fixture keeps its explicit source terms
-to test row-polymorphic composition, using checked operation declarations.
+An explicitly composed record uses the same interface:
 
-## Start here
+```zig
+const request = try c.record(.{ .input = integer, .offset = integer });
+const supplied = try caller.product(request, .{
+    .offset = offset_value,
+    .input = input_value,
+});
+const answer = try caller.call(run, .{ .request = supplied });
+```
 
-[`examples/structured_branch.zig`](../examples/structured_branch.zig) is a complete
-public example. [`examples/authoring_client.zig`](../examples/authoring_client.zig)
-adds a reusable callable, two ordered calls, named records, a derived responder,
-residual lookup and checked overflow. Both emit ordinary BPI3:
+`input`, `offset`, `sum` and `answer` retain the u64 contract. A Boolean supplied
+for a known integer field, a missing or extra argument, an unknown static name,
+or the wrong handle category fails Zig compilation. Diagnostics identify the
+operation and nested field where the relationship fails.
+
+[`structured_branch.zig`](../examples/structured_branch.zig) and
+[`authoring_client.zig`](../examples/authoring_client.zig) are complete clients:
 
 ```sh
 zig build emit-structured-branch -Doptimize=safe > branch.bpi3
 zig build emit-authoring-client -Doptimize=safe > client.bpi3
 ```
 
-The canonical route is:
+The latter emits two interpreted questions, residual environmental lookups, named
+records, branches and checked arithmetic. All that work executes in Kosmos.
 
-1. Initialize a source `Builder`, then `authoring.Context.init(&builder)`.
-2. Declare schemas, external/local operations, and named function interfaces with
-   explicit allowed effects. Retain declarations to reuse their code.
-3. Open a function body with `body`, or a capturing nested body with `closureBody`.
-   Calls, applications, effects, projections and checked arithmetic bind their
-   results in forward order. `parameter` and `field` use declared names.
-4. Finish with `ret`, then `Context.define`. `Context.compile` checks and lowers
-   while retaining source-oriented diagnostics. Alternatively return `module`
-   from `Application.emit` and call `horos.program.lower`.
-5. Encode the returned owning `Compiled` with `encode`; deinitialize it afterward.
-6. Use the separately verified Kosmos package to prepare/start or invoke the image.
-   Supply only environmental replies and transfer actual State; host code does
-   not reconstruct authored branches, handlers or continuations.
+## Native contracts and opaque handles
 
-The client takes one Boolean byte followed by a record containing little-endian
-u64 `input` and `offset`. False returns their checked sum without a request. True
-interprets two local questions as two external `client/lookup` requests carrying
-`input`, then returns `first_reply + offset + second_reply` with checked addition.
-Its overflow is an authored unit failure. Replies must bind to the current actual
-request, including after restoration.
+`schema(T)` supports void, bool, 8/16/32/64-bit integers, exhaustive enums with
+u32 tags, records, tagged unions, optionals, arrays and unsentinelled slices.
+`horos.data.schema.native` owns the shared wrappers:
 
-## Staging and lifetimes
-
-| Zig emitter operation | Generated computation |
+| Native type | Portable contract |
 |---|---|
-| Zig `if` selects code to construct | `conditional` selects runtime work |
-| Zig `try` propagates construction/allocation failure | `checkedAdd` emits an authored failure edge |
-| Zig `defer` releases native resources | `protect` installs portable cleanup |
-| Calling a staging function constructs source | `apply` executes an authored callable in Kosmos |
-| `lambda` constructs and binds a callable value | `apply` forces a zero-argument delay when demanded |
+| `native.Text(null)` / `native.Utf8` | Unbounded UTF-8 text |
+| `native.Text(n)` | Text bounded by n bytes |
+| `native.Bytes(null)` / `[]const u8` | Unbounded bytes |
+| `native.Bytes(n)` | Bytes bounded by n bytes |
+| `native.Vector(T, null)` / `[]const T` (T other than u8) | Sequence of T |
+| `native.Vector(T, n)` | Vector of T bounded by n elements |
+| `[n]T` | Exactly n elements |
+| `?T` | Named alternatives `none` and `some` |
 
-No native callback enters the Program. Inspecting schemas or diagnostics does not
-force delayed work. Recursive function declarations can be used before definition;
-all declarations must be defined before `module` or `compile` publishes a snapshot.
-Calls and lambda constructions made before a body is opened are rechecked against
-that function's eventual lexical parent at publication. Valid uses in that parent
-and forward uses of global functions remain supported; discarded branches do not
-contribute pending scope obligations.
-Publication also compares the declared named failure layout with executable
-arithmetic faults and protected cleanup contracts, including late helper
-definitions. Abandoned staging branches do not contribute executable uses.
-The recursive adapter retains the existing finite `hyper.ana` construction.
+Absent bounds and zero bounds differ. Native layout, alignment, defaults and type
+identity do not create distinct portable record shapes. Ordered field names do.
+Enums normalize numeric tags, independently of native enum labels. Unsupported
+pointers and recursive native types fail with a field path; recursive authored
+schemas use explicit declarations.
 
-Keep the source builder at a stable address. Contexts, handles, copied names and
-source snapshots borrow its arena until `Builder.deinit`. `Context` and `Body` are opaque arena-owned handles; pointer aliases share lifecycle
-state. Clients cannot copy, reopen, or retarget staging storage. `Compiled` owns its output independently.
-`module` copies the source arrays, so later builder growth cannot stale its slices.
+`Schema(Shape)`, `Value(Shape)`, `Function(Signature)`, `Body(Parameters)`,
+`Computation(Result)` and `Operation(Signature)` are canonical opaque families.
+Callers normally infer those indices. Case payloads, destructured parts, schema
+reflection, handler-derived functions, resumptions and library results retain
+corresponding known children. Copying a metadata declaration onto an unrelated
+Zig type cannot manufacture a canonical handle.
 
-`ret` and `abandon` close a body and its descendants to further authoring. Abandoning
-an unused branch is harmless; abandoning a declared function leaves it undefined
-and prevents publication. A closure legitimately captures ancestor values while
-being authored. The runtime lifetime of those captures is checked independently.
-Sibling values and branch-local values cannot escape directly: use `conditional`,
-`block` or `match` to produce a parent-scope result.
-
-`Body.fail(result_schema, failure_value)` closes a body with an explicit authored
-failure. The result schema lets a failing branch join a returning branch.
-The failure value keeps its lexical scope and named schema; module publication
-checks it against the declared failure contract. Discarded staging branches do
-not introduce executable failures. Protected cleanup follows the same runtime
-failure semantics, including when a failing clause still owns a continuation.
-
-Construction errors, including allocation and named-argument validation failures,
-may poison the context. After an error, retain its diagnostic, discard the context
-and tear down its source builder; general transactional recovery is not promised. No successful checked
-module is returned from a failed operation. Diagnostic handles remain valid until
-that builder is destroyed; `renderAlloc` returns caller-owned text.
-
-## Declarations and guarantees
-
-`Schema`, `Operation`, `Function`, `Value`, `FailureLiteral`, `Computation`, `Handler` and `Region`
-are distinct opaque handle categories. Zig rejects category substitution. Runtime
-checks reject foreign contexts, out-of-scope values, incompatible named layouts,
-arguments, branch results and capability instances. Final source/target admission
-still owns effect allowances, affine/linear use, capture safety and borrowed-region
-escape. In particular, one-shot use in mutually exclusive arms is allowed; two
-sequential uses are rejected. Lambda and aggregate construction bind once rather than silently
-creating a fresh one-shot value at each use.
-
-`checked` supports add, subtract, multiply, divide and remainder with opaque
-`FailureLiteral` handles constructed once with `c.literalFailure(T, item)`. Ordinary
-`Value` handles cannot substitute for this category. The constructor establishes
-literal status; arithmetic checks origin and publication checks the failure schema. Overflow is explicit; division and remainder additionally require
-an explicit zero-divisor failure. `checkedAdd` is the short addition spelling.
-The operand schemas determine the result; no expression is evaluated in the host.
-
-`scalar(T)` supports the existing portable scalar subset (void, bool and supported
-fixed-width integers). `record` and `alternatives` accept dynamically selected
-named fields. `sequence` describes homogeneous sequences. `product`, `field`,
-`variant`, `caseOf` and `match` preserve these names and schemas. `Schema.fields`
-and `describe` inspect the metadata. This is not a serializer for arbitrary Zig
-pointers or recursive native structures; unsupported `scalar` types fail clearly.
-
-Compatibility compares builder origin, raw schema identity and the complete named
-metadata graph, including callable and resumption capture bounds. Memoized schema
-pairs handle sharing and recursion without
-repeated unfolding; allocation identity is only a fast path. Names are compared
-within declarations; equal raw product shapes do not make
-incompatible named layouts interchangeable. Operation identity is nominal: two
-`local` calls with identical display names create distinct capabilities.
-`external` explicitly permits environmental performance; `local` requires the
-matching capability. `scoped` additionally declares named authored body operands.
-
-`callable` fixes named parameters, result, allowed effects, use, capture allowance
-and regions. `functionFor` derives a declaration from that interface. `lambda`
-checks the function's complete declared interface. Actual lexical captures and
-values retained across effects are compared with named capture bounds using the
-existing compiler's capture and liveness observations. Ownership, borrowing and
-multiplicity remain checked by the unchanged admission rules. A value used only
-before suspension does not become a continuation capture. Reusing a returned function emits calls without rebuilding its
-body. Staging configurations are values, not a cache keyed only by Zig type.
-
-## Interpretation, ownership and diagnostics
-
-`handler` derives the operation payload, capability, clause signature and
-resumption input. Intentional choices remain explicit: deep/shallow mode, body
-input and interpretation answer, resumption use, body use (`body_use`), residual effects, continuation
-captures, body captures, handler state and owned/borrowed regions.
-`obligations` defaults to `false`; set it to `true` when a local resumption may
-capture a pending protected cleanup. This carries the existing source/data bound,
-including through `responder`; it does not change effects, regions or resumption
-use. Independent admission still rejects invalid combinations and captures.
-
-Use `returnFunction`, `clauseFunction` and `handledSchema` to author its pieces.
-Return functions expose `result`; clauses expose `payload`, named state and scoped
-bodies, and `resumption`. `resumeValue` continues and returns for postprocessing.
-`resumeWith` installs a successor for a shallow resumption. Deep resumptions return
-the interpretation answer; shallow resumptions return the handled body's input
-schema. For shallow work, explicitly allow effects that its resumed body can use;
-`escaping` names effects that can select outside attachments (such as residual
-external lookups). The authoritative checker validates this allowance.
-
-`responder` derives the ordinary resume clause from an authored function. Its
-residual effects remain explicit. Body capture and continuation capture bounds are
-separate: allowing a capability in a continuation does not silently grant a body
-permission to capture an outside instance. Nothing widens an effect/capture/use
-allowance to make admission pass. Capture applicability follows the existing
-admission rule: every declared handler sharing an effect instance contributes its
-continuation capture bound, including unused handler declarations. A successful
-raw check after names have been erased does not make incompatible named bounds
-interchangeable.
-
-`protect` keeps local cleanup inside the Program across suspension. `dispose`
-expresses local owned-resumption disposal; it does not cancel the enclosing
-session. `regionBodySchema` derives the implicit region-token parameter and
-contract; `withRegion` supplies that token and takes only the remaining named
-arguments. `region` and these contracts retain nominal region boundaries. Existing low-level resource/loan constructions remain supported.
-
-`Context.lastDiagnostic()` contains a stable error category, entity, failed relationship,
-and expected/actual schema handles when available. `render` and `renderAlloc`
-render that same information. `Context.compile` also retains the authoritative
-source/target diagnostic for failed effects, captures, borrows, uses and answers.
-Diagnostic function labels are not emitted and do not change executable bytes.
-Errors explain the relationship rather than recommend widening permissions.
-
-`authoring.interop` is the deliberate advanced boundary for existing source
-libraries. Its caller promises that raw IDs come from the supplied source builder;
-it checks available bounds, categories and schema relationships. Erased numeric
-provenance cannot be reconstructed. Imported positional schemas use positional
-names unless the adapter supplies checked names. Scoped operation imports retain
-their body schemas and expose those operands under positional names. `cleanupInfo`
-retains the supplied typed failure layout in both the primary-failure alternative
-and the cleanup-failures sequence; it does not erase known names through import. Ordinary covered clients need
-neither these adapters nor mutable source catalogs. Finish low-level recursive
-schema definitions before adoption, and keep adopted declarations stable afterward;
-appending independent declarations is supported. Raw catalog mutation is outside
-the checked handle contract.
-
-## Migrated constructions
-
-The migrated source consumers retain their existing behavior:
-`one_effect`, `Context.twice`, choice family/first/all/allScoped, and
-`hyper_demand`. The hyper bridge handles recursive interface setup and existing
-library calls; the example retains its own demands, runtime branch, checked
-additions, delayed descriptors and reciprocal startup. Two Need instances remain
-nominally distinct despite identical display strings.
-
-`Context.twice` shares its complete definition for repeated use of the same
-checked callable in one context. Its key preserves named result layouts and
-effect identities; it does not identify schemas solely by their raw record ID.
-The former raw-ID combinator wrapper has been removed.
-
-Before, `twice` allocated destination variables, built references, and nested two
-binds backward. Its implementation now expresses:
+`try schema.fields()` returns named typed child handles. `try
+schema.resultSchema()` retains its result relationship. `parameter`, `field`,
+`ProductParts.get`, `variant` and `caseOf` take compile-time names when used through
+the ordinary interface. `match` takes named finished cases:
 
 ```zig
-const first = try forward.apply(callable_value, &.{});
-const second = try forward.apply(callable_value, &.{});
-const result = try forward.product(pair, &.{
-    .{ .name = "first", .value = first },
-    .{ .name = "second", .value = second },
+const absent = try body.caseOf(optional, "none");
+const present = try body.caseOf(optional, "some");
+const result = try body.match(optional, .{
+    .some = try present.ret(present.payload()),
+    .none = try absent.ret(try absent.body().constant(u64, 0)),
 });
-try self.define(function_handle, try forward.ret(result));
 ```
 
-Choice formerly repeated payload, result, answer, capability and clause ordinal
-relationships in schema/function/handler records. It now declares the operation
-and explicit handler policy once, obtains named clause inputs, resumes each branch
-and concatenates the results. Multi-shot use, answer transformation, captures and
-region allowances remain intentional decisions.
+A body describes available parameters, independently of the result of a branch.
+`branch` has no function parameters but retains its runtime parent scope. `ret`
+and `fail` return result-indexed computations; `conditional`, `block` and `match`
+check their results without requiring every intermediate branch to return the
+surrounding function's eventual result.
+
+## Staging, ownership and lifetime
+
+| Emitter action | Generated computation |
+|---|---|
+| Zig `if` chooses source to construct | `conditional` chooses runtime work |
+| Zig `try` propagates construction failure | Checked arithmetic emits an authored failure |
+| Zig `defer` releases host resources | `protect` installs portable cleanup |
+| Calling an emitter helper constructs source | `apply` executes an authored callable |
+| `lambda` constructs a callable value | `apply` forces it when demanded |
+
+Keep the source Builder at a stable address. Contexts and handles borrow its
+arena until `deinit`. Aliases share lifecycle. `ret` and `abandon` close a body
+and its descendants. A closure can capture ancestor values; sibling values and
+branch-local values cannot escape directly. Join them through a checked branch
+operation. `Compiled` owns its output independently; `module` snapshots source
+arrays so later Builder growth does not stale them.
+
+Matching shape parameters do not establish runtime identity. Two same-named
+local operations still have distinct capabilities. Runtime compatibility checks
+actual schema identity and the complete named metadata graph, including recursive
+and shared graphs and capture bounds. Source and target admission continue to
+check effect rows, linear/affine use, borrowing, regions and ownership. Mutually
+exclusive one-shot uses can be valid while sequential duplicate uses are rejected.
+
+Construction failures after mutation may poison a Context. Retain its diagnostic
+and discard it; general transactional recovery is not promised. `lastDiagnostic`,
+`render` and `renderAlloc` retain the failed relationship and expected/actual
+schemas. Diagnostic labels do not affect portable program identities.
+
+## Operations and interpretations
+
+`external`, `local` and `scoped` retain payload, reply and named body contracts.
+Calls, effect performance, callable application, cells, resources and containers
+retain known results. `sequenceValue`, `sequenceGet`, `pop`, `sequencePopLast` and
+updates preserve element and container relationships.
+
+`append` and `concat` take an options struct: `.{} ` for an unbounded sequence,
+`.{ .capacity = failure }` for a finite vector. Arithmetic uses checked
+`FailureLiteral` handles from `literalFailure`; divide and remainder also require
+`division_by_zero`. Narrowing integer conversion requires an overflow literal;
+widening conversion does not. Blob slicing requires the applicable capacity and
+UTF-8 failure clauses. The shared admission owner validates dynamic categories.
+
+Handlers retain operation payloads, state, body parameters, input and answer
+relationships. Declare deep/shallow mode, use, residual effects, captures and
+regions explicitly. `return_effects` and `clause_effects` may narrow their arms;
+omission retains the residual allowance. `obligations = true` permits a local
+resumption to retain protected cleanup, subject to independent admission.
+
+`returnFunction`, `clauseFunctionFor` and `handledSchema` derive typed interfaces.
+Deep resumptions return the handler answer; shallow resumptions return the handled
+body's input. `resumeWith` supplies the successor for shallow work. A statically
+known mode yields the corresponding handler type. An actual runtime mode yields
+`.deep` or `.shallow` typed alternatives; switch on that result before using its
+derived interfaces. `state.interpret` similarly returns a tagged answer policy.
+Runtime choices remain runtime choices.
+
+Multi-shot resumptions retain their original continuation; resuming them does
+not re-run their producer. `cloneableResumption` and `cloneResumption` construct
+explicit copies only when source use, capture safety and admission permit them.
+`package` and `unpack` transfer suspension ownership. `resumePackage` and
+`disposePackage` consume a package directly. `destructure` transfers named product
+parts; ordinary field projection has its separate borrowing meaning.
+
+`protect`, `bracket`, `withRegion`, `resourceAuthority` and nominal region schemas
+retain their existing ownership obligations. `Body.fail(result_schema, value)`
+closes its branch with an explicit failure. Publication validates executable
+failure literals and cleanup contracts, including later helper definitions;
+abandoned staging branches do not contribute executable failures.
+
+Choice, State, Reader, Writer, Raise, Search, Generator and Scheduler expose
+shape-preserving results over shared runtime graph construction. Their cache keys
+retain complete actual schema/operation identity and ordered capture and region
+rows. Reusing an interface reuses declarations; it does not erase nominal identity
+or turn an emitter configuration into a cache keyed only by Zig type.
+
+## Explicit runtime integration
+
+`authoring.interop` owns runtime-selected names, raw IDs and checked refinement.
+A `Dynamic` index marks unavailable structural knowledge; known surrounding
+fields and function results remain known.
+
+```zig
+const parameters = try a.interop.RuntimeNamed(.schema).init(c, &.{
+    .{ .name = runtime_name, .handle = a.interop.erase(integer) },
+});
+const function = try c.function("runtime interface", parameters, integer, .{});
+```
+
+The canonical `RuntimeNamed` collection snapshots entries and names in the
+Context. Schema declarations, value arguments, operation sets and finished cases
+use that representation. Its `len` and `at` support runtime inspection. Consumers
+still validate actual names, cardinality, schemas, ownership and scope.
+`interop.parameter`, `field`, `caseOf` and `fields` expose runtime selection.
+
+`refineSchema`, `refineValue` and `refineFunction` check actual metadata before
+returning the expected known shape. Positional imported schemas use `mapSchema`
+or `mapValue` to validate and assign an expected named interface; these operations
+cannot relabel an already-authored incompatible named schema. Raw ID import checks
+available bounds and categories but cannot reconstruct historical provenance.
+Keep adopted catalogs stable; raw mutation is outside the checked guarantee.
+
+`interop.encodedLiteral(c, schema, bytes)` validates canonical bytes against the
+reachable schema and creates a Context-owned typed value reusable across bodies.
+`interop.literalFailure(c, value)` verifies global literal status before producing
+a typed failure literal. Unrelated pending declarations do not invalidate a
+complete literal schema. Body-local values cannot be promoted to global literals.
+
+`declareSchema(kind, shape)` reserves a recursive schema; its definition must
+prove any promised static structure. Use explicit `Dynamic` for unknown structure
+and refine after completion. Undefined, wrong-kind and repeated definitions remain
+checked. Raw terms and values do not acquire typed trust through an unchecked
+adoption assertion.
 
 ## Verification
 
-`zig build check-native -Doptimize=safe` checks the shared authoring/data roots,
-actual data-only linker and public authoring client without Node or Python.
-`zig build check-package -Doptimize=safe` checks committed HEAD as a clean Zig
-package in an unrelated consumer, including data-only import and nominal-category,
-foreign-owner and lifecycle rejection. Its native driver is shared with component
-CLI checks; it requires a clean committed candidate.
+`zig build check-authoring -Doptimize=safe` runs authoring and compile-rejection
+witnesses. `check-authoring-bytes` compares all 42 examples with the captured
+pre-migration BPI3 images. `check-native` includes data, authoring and actual
+linker/client checks. `check` adds the independent source oracle and wasm32
+byte/identity checks; Kosmos owns execution comparisons.
 
-`zig build check -Doptimize=safe` additionally runs the independent source oracle
-and small wasm32 byte/identity checks. Kosmos owns the comparison between
-source meaning and actual native/WASM evaluation.
-
-Historical paired timing, platform, search and experimental application campaigns
-and their wrappers are retired. Core language, optimizer, ownership, borrow and
-wire behavior remains implemented and checked by the retained native roots.
+`check-package` exports clean committed HEAD and consumes the actual extracted
+Zig package. It runs the public client, dynamic rejection cases and static shape,
+category, counterfeit-handle and lifecycle rejections. A local module build does
+not replace that package check.

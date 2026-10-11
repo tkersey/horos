@@ -25,29 +25,30 @@ fn buildClosures(
     defer raw.deinit();
     const a = raw.arena.allocator();
     const context = try authoring.Context.init(&raw);
-    const integer = try context.scalar(u64);
-    const unit = try context.scalar(void);
-    const fields = try a.alloc(authoring.Field, count);
+    const integer = try context.schema(u64);
+    const unit = try context.schema(void);
+    const fields = try a.alloc(authoring.interop.NamedEntry(.schema), count);
     for (fields, 0..) |*field, id| field.* = .{
         .name = try a.print("value-{d}", .{id}),
-        .schema = integer,
+        .handle = authoring.interop.erase(integer),
     };
-    const result_schema = try context.record(fields);
+    const named_fields = try authoring.interop.RuntimeNamed(.schema).init(context, fields);
+    const result_schema = try context.record(named_fields);
     const callable = try context.callable(
-        &.{.{ .name = "x", .schema = integer }},
+        .{ .x = integer },
         integer,
         &.{},
         .{ .use = .reusable, .captures = &.{integer} },
     );
-    const entry = try context.function("entry", if (literal) &.{} else fields, result_schema, &.{});
+    const entry = try context.function("entry", try authoring.interop.RuntimeNamed(.schema).init(context, if (literal) &.{} else fields), result_schema, &.{});
     const body = try context.body(entry);
     const failure = try context.literalFailure(void, {});
-    const arguments = try a.alloc(authoring.Argument, count);
+    const arguments = try a.alloc(authoring.interop.NamedEntry(.value), count);
     for (fields, arguments, 0..) |field, *argument, id| {
         const captured = if (literal)
-            try body.constant(u64, 3 + 4 * @as(u64, @intCast(id)))
+            authoring.interop.erase(try body.constant(u64, 3 + 4 * @as(u64, @intCast(id))))
         else
-            try body.parameter(field.name);
+            try authoring.interop.parameter(body, field.name);
         // Each invocation emits a fresh declaration, constructor and capture site.
         const helper = try context.functionFor(field.name, callable);
         const inner = try body.closureBody(helper);
@@ -59,10 +60,10 @@ fn buildClosures(
         const x = try body.constant(u64, 10);
         argument.* = .{
             .name = field.name,
-            .value = try body.apply(closure, &.{.{ .name = "x", .value = x }}),
+            .handle = authoring.interop.erase(try body.apply(closure, .{ .x = x })),
         };
     }
-    try context.define(entry, try body.ret(try body.product(result_schema, arguments)));
+    try context.define(entry, try body.ret(try body.product(result_schema, try authoring.interop.RuntimeNamed(.value).init(context, arguments))));
     return context.compileWithOptions(allocator, entry, unit, options);
 }
 
