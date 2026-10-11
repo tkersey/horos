@@ -14,6 +14,7 @@ pub const cases = .{
     .{ "pending_unknown", "Horos defineAlternatives.some: refine the unknown input before fulfilling a known declaration shape" },
     .{ "declaration_erasure", "Horos authoring: cannot erase a declaration with a known completion shape" },
     .{ "callable_declaration_erasure", "Horos authoring: cannot erase a declaration with a known completion shape" },
+    .{ "resumption_slot_pointer", "Horos handler resumption declaration.reply: incompatible schema shape" },
     .{ "recursive_mismatch", "Horos refineSchema.value: incompatible schema shape" },
     .{ "native_pointer", "Horos native schema: value: pointer must be an unsentinelled slice" },
     .{ "native_recursive", "Horos native schema: value.children.element: recursive native type requires an explicit runtime declaration" },

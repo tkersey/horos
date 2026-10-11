@@ -1722,6 +1722,71 @@ test "handler resumption declarations enforce kind, cardinality and single assig
     try testing.expectError(error.SchemaAlreadyDefined, c.handler(first, unit, unit, options));
 }
 
+const SlotCollection = enum { tuple, tuple_pointer, array, array_pointer, slice, optional_tuple_pointer };
+fn checkSlotCollection(comptime form: SlotCollection) !void {
+    var raw = source.Builder.init(testing.allocator);
+    defer raw.deinit();
+    const c = try a.Context.init(&raw);
+    const unit = try c.schema(void);
+    const integer = try c.schema(u64);
+    const ask = try c.local("slots/ask", unit, integer, .linear);
+    const reply = try c.function("reply", .{ .payload = unit }, integer, .{});
+    const reply_body = try c.body(reply);
+    try c.define(reply, try reply_body.ret(try reply_body.constant(u64, 1)));
+    const S = a.Internal(.{ .resumption = a.ResumptionSignature(a.Shape(u64), a.Shape(void), .deep) });
+    const slot = try c.declareSchema(.resumption, S);
+    const tuple = .{slot};
+    const array = [_]@TypeOf(slot){slot};
+    const slots = switch (form) {
+        .tuple => tuple,
+        .tuple_pointer => &tuple,
+        .array => array,
+        .array_pointer => &array,
+        .slice => @as([]const @TypeOf(slot), &array),
+        .optional_tuple_pointer => @as(?@TypeOf(&tuple), &tuple),
+    };
+    const h = try c.responder(ask, unit, reply, .{ .mode = .deep, .use = .linear, .resumption_slots = slots });
+    try testing.expectEqual(slot.schema(), try c.resumptionSchemaFor(h, ask));
+    const entry = try c.function("entry", .{}, unit, .{});
+    const body = try c.body(entry);
+    try c.define(entry, try body.ret(try body.constant(void, {})));
+    var compiled = try c.compile(testing.allocator, entry, unit);
+    defer compiled.deinit();
+}
+
+test "resumption slot validation accepts the canonical handle collection forms" {
+    inline for (comptime std.meta.tags(SlotCollection)) |form| try checkSlotCollection(form);
+}
+
+test "tuple pointers retain heterogeneous resumption declaration shapes and order" {
+    var raw = source.Builder.init(testing.allocator);
+    defer raw.deinit();
+    const c = try a.Context.init(&raw);
+    const unit = try c.schema(void);
+    const integer = try c.schema(u64);
+    const boolean = try c.schema(bool);
+    const first = try c.local("slots/integer", integer, integer, .linear);
+    const second = try c.local("slots/boolean", boolean, boolean, .linear);
+    const first_slot = try c.declareSchema(.resumption, a.Internal(.{ .resumption = a.ResumptionSignature(a.Shape(u64), a.Shape(void), .deep) }));
+    const second_slot = try c.declareSchema(.resumption, a.Internal(.{ .resumption = a.ResumptionSignature(a.Shape(bool), a.Shape(void), .deep) }));
+    const h = try c.handlerSet(.{ .first = first, .second = second }, unit, unit, .{ .mode = .deep, .use = .linear, .resumption_slots = &.{ first_slot, second_slot } });
+    try testing.expectEqual(first_slot.schema(), try c.resumptionSchemaFor(h, first));
+    try testing.expectEqual(second_slot.schema(), try c.resumptionSchemaFor(h, second));
+    const returns_fn = try c.returnFunction(h);
+    const returns = try c.body(returns_fn);
+    try c.define(returns_fn, try returns.ret(try returns.parameter("result")));
+    inline for (.{ first, second }) |operation| {
+        const clause_fn = try c.clauseFunctionFor(h, operation);
+        const clause = try c.body(clause_fn);
+        try c.define(clause_fn, try clause.ret(try clause.resumeValue(try clause.parameter("resumption"), try clause.parameter("payload"))));
+    }
+    const entry = try c.function("entry", .{}, unit, .{});
+    const body = try c.body(entry);
+    try c.define(entry, try body.ret(try body.constant(void, {})));
+    var compiled = try c.compile(testing.allocator, entry, unit);
+    defer compiled.deinit();
+}
+
 const HandlerArgumentCase = enum { valid, missing, duplicate, wrong_type };
 fn handlerArguments(allocator: std.mem.Allocator, mode: HandlerArgumentCase) !void {
     var raw = source.Builder.init(allocator);

@@ -648,6 +648,7 @@ fn validateSlotCollection(comptime Slots: type, comptime Options: type, comptime
     switch (@typeInfo(Slots)) {
         .null => return,
         .optional => |optional| return validateSlotCollection(optional.child, Options, Ops, Input, Answer),
+        .pointer => |pointer| if (pointer.size == .one) return validateSlotCollection(pointer.child, Options, Ops, Input, Answer),
         else => {},
     }
     if (@typeInfo(Slots) == .@"struct") {
@@ -660,18 +661,15 @@ fn validateSlotCollection(comptime Slots: type, comptime Options: type, comptime
             for (declarations.field_types, ops.field_types) |D, Op| validateSlot(D, Op, Ops, Input, Answer, Options);
         }
     } else {
-        const Slot = listElement(Slots);
+        const Slot = switch (@typeInfo(Slots)) {
+            .array => |array| array.child,
+            .pointer => |pointer| if (pointer.size == .slice) pointer.child else @compileError("Horos handle collection: expected a tuple, array, or slice"),
+            else => @compileError("Horos handle collection: expected a tuple, array, or slice"),
+        };
         if (Ops == Dynamic) validateSlot(Slot, Dynamic, Ops, Input, Answer, Options) else {
             for (@typeInfo(Ops).@"struct".field_types) |Op| validateSlot(Slot, Op, Ops, Input, Answer, Options);
         }
     }
-}
-fn listElement(comptime T: type) type {
-    return switch (@typeInfo(T)) {
-        .array => |a| a.child,
-        .pointer => |p_info| if (p_info.size == .slice) p_info.child else listElement(p_info.child),
-        else => @compileError("Horos handle collection: expected an array or slice"),
-    };
 }
 
 fn handlerReturnSignature(comptime H: type) type {

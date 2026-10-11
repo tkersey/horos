@@ -66,6 +66,11 @@ pub fn main(init: std.process.Init) !void {
         const signature = try c.callable(.{ .input = integer }, integer, .{}, .{ .use = .reusable });
         const slot = try c.declareSchema(.callable, a.ShapeOf(@TypeOf(signature)));
         try c.defineCallable(a.interop.erase(slot), .{ .input = integer }, try c.schema(bool), .{}, .{ .use = .reusable });
+    } else if (comptime selected("resumption_slot_pointer")) {
+        const unit = try c.schema(void);
+        const operation = try c.local("typed slot", unit, integer, .linear);
+        const slot = try c.declareSchema(.resumption, a.Internal(.{ .resumption = a.ResumptionSignature(a.Shape(bool), a.Shape(void), .deep) }));
+        _ = try c.handler(operation, unit, unit, .{ .mode = .deep, .use = .linear, .resumption_slots = &.{slot} });
     } else if (comptime selected("recursive_mismatch")) {
         const Left = struct {
             pub const contract: native.Info = .{ .sum = native.Fields(&.{ "next", "value" }, &.{ @This(), a.Shape(u64) }) };
