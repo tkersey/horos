@@ -1,12 +1,12 @@
-# Horos 3
+# Horos 4
 
 Formerly Boundary; see the [rename notes](docs/rename.md).
 
 Horos checks staged Zig computations and handlers and compiles them into
-portable BPI3 program data. Kosmos 6 executes that data with one generic native/WASM
+portable BPI3 program data. Kosmos 7 executes that data with one generic native/WASM
 interpreter. Horos contains no production evaluator.
 
-Horos `4.0.0-dev.0` requires Zig `0.17.0`. The public modules are `horos` for
+Horos `4.0.0` requires Zig `0.17.0`. The public modules are `horos` for
 authoring and `horos_data` for data-only admission and linking. This version
 uses BMO1 components, BPI3 programs, PST3 states and ABI 3; the major package
 version does not introduce another wire format. See the

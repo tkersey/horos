@@ -1,6 +1,6 @@
 # Horos 4 authoring migration
 
-Horos 4.0.0-dev.0 replaces the ordinary authoring interface. BMO1, BPI3, PST3,
+Horos 4.0.0 replaces the ordinary authoring interface. BMO1, BPI3, PST3,
 ABI 3 and nominal runtime authority retain their existing contracts.
 
 | Previous construction | Current construction |
@@ -67,8 +67,8 @@ The implementation series migrates Horos, Kosmos and Protean together. Qualify
 Horos first, then Kosmos against that committed Horos package, then Protean against
 the selected Horos and Kosmos. Record exact revisions and authenticated source,
 archive, package and API-file identities in the consuming locks and the final
-qualification report. This development revision alone is not a qualification of
-an untested downstream tuple.
+qualification report. A stable version number alone does not qualify an
+untested downstream tuple.
 
 Rollback restores the entire previously qualified dependency/artifact tuple;
 a package pin, source inventory and kernel binding from different candidates do
