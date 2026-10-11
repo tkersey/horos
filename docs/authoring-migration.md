@@ -16,7 +16,6 @@ ABI 3 and nominal runtime authority retain their existing contracts.
 | Sequence `append(left, item)` | `append(left, item, .{})` |
 | Raw literal adoption | `interop.encodedLiteral(c, schema, bytes)` |
 | Raw-ID failure assertion | `interop.literalFailure(c, checked_literal)` |
-| Closed raw source function integration | `interop.sourceFunction(c, id, expected_callable)` |
 | Known external operation integration | `interop.externalOperation(c, id, payload, result)` |
 | `declareSchema(kind)` | `declareSchema(kind, known_shape)` or explicit `Dynamic` |
 
@@ -33,9 +32,8 @@ heterogeneous collection or integration boundary requires it; checked refinement
 recovers known structure from actual compatible metadata. A struct can retain
 known children alongside a Dynamic child.
 
-`sourceFunction` validates the source signature and lexical closure, including
-completed transitive callees. `externalOperation` checks the environmental
-operation's actual contracts before retaining their names. `interop.performSite`
+`externalOperation` checks the environmental operation's actual contracts before
+retaining their names. `interop.performSite`
 uses the ordinary checked effect producer and also returns its exact source term
 for consumers that certify individual environmental sites. `interop.valueId`
 accepts a Body for lexical use or a Context for a global encoded literal.

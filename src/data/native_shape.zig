@@ -58,8 +58,19 @@ pub fn Shape(comptime T: type) type {
 }
 
 pub fn info(comptime T: type) Info {
-    @setEvalBranchQuota(100000);
-    return describe(T, "value", &.{});
+    return NativeInfo(T).description;
+}
+
+// A declaration is evaluated once per native type. Repeated authoring signatures
+// reuse classification without repeating the full diagnostic-path traversal.
+// Contract still interns only the normalized description, not this native key.
+fn NativeInfo(comptime T: type) type {
+    return struct {
+        const description: Info = blk: {
+            @setEvalBranchQuota(100000);
+            break :blk describe(T, "value", &.{});
+        };
+    };
 }
 
 /// Recognize canonical wrappers by type identity, not by a caller's marker alone.

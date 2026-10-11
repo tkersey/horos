@@ -416,9 +416,14 @@ fn CaseSignature(comptime Sum: type, comptime arm_index: usize) type {
 }
 fn caseSignature(comptime S: type, comptime name: []const u8) type {
     if (S == Dynamic) return Dynamic;
-    const fields = @typeInfo(sumFields(S, "caseOf")).@"struct";
-    for (fields.field_names, 0..) |found, i| if (std.mem.eql(u8, name, found)) return CaseSignature(S, i);
-    @compileError("Horos caseOf." ++ name ++ ": unknown name");
+    const Fields = sumFields(S, "caseOf");
+    if (!@hasField(Fields, name)) @compileError("Horos caseOf." ++ name ++ ": unknown name");
+    return CaseSignature(S, @backingInt(@field(FieldOrdinals(Fields).Index, name)));
+}
+fn FieldOrdinals(comptime Fields: type) type {
+    return struct {
+        const Index = std.meta.FieldEnum(Fields);
+    };
 }
 fn casePayload(comptime S: type) type {
     return if (S == Dynamic) Dynamic else S.payload;
@@ -1364,11 +1369,6 @@ pub const interop = struct {
     }
     pub fn declaredFunction(c: *Context, id: p.Id) Error!*const Function(Dynamic) {
         return @ptrCast(try runtime.interop.declaredFunction(rawContext(c), id));
-    }
-    /// Checked closed source integration. The supplied callable retains all
-    /// names and shapes; its contract and the source function are validated.
-    pub fn sourceFunction(c: *Context, id: p.Id, expected: anytype) Error!*const Function(callableSignature(index(.schema, @TypeOf(expected)), "sourceFunction")) {
-        return @ptrCast(try runtime.interop.sourceFunction(rawContext(c), id, erased(.schema, expected)));
     }
     pub fn externalOperation(c: *Context, id: p.Id, payload: anytype, result: anytype) Error!*const Operation(OperationSignature(index(.schema, @TypeOf(payload)), index(.schema, @TypeOf(result)), native.Fields(&.{}, &.{}))) {
         return @ptrCast(try runtime.interop.externalOperation(rawContext(c), id, erased(.schema, payload), erased(.schema, result)));
