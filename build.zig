@@ -217,6 +217,15 @@ pub fn build(b: *std.Build) void {
             }
         }
     }
+    inline for (.{ "local-one-shot", "local-multi-shot" }, 42..) |name, index| {
+        for ([_][]const u8{ "json", "bpi3" }) |format| {
+            const run = b.addRunArtifact(source_emitter);
+            run.addArgs(&.{ b.fmt("{d}", .{index}), format });
+            const file = run.captureStdOut(.{});
+            source_fixtures.dependOn(&b.addInstallFileWithDir(file, .prefix, b.fmt("source-{s}.{s}", .{ name, format })).step);
+            if (std.mem.eql(u8, format, "json")) oracle.addFileArg2(file, .{});
+        }
+    }
     oracle.has_side_effects = true;
     const semantics = b.step("check-semantics", "Check higher-order source semantics without Kosmos");
     semantics.dependOn(&oracle.step);

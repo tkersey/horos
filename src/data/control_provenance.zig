@@ -146,10 +146,8 @@ pub const Analysis = opaque {
             };
             const node = nodes[@intCast(ref.id)];
             if (node == .attachment) {
-                const effect = self.data().image.schemas[@intCast(item.value.schema)].internal.capability;
-                if (values.rebound[@intCast(effect)]) continue;
                 const definition = nodes[@intCast(node.attachment.handler.id)].handler.definition;
-                if (!contains(allowed, .{ .handler = definition })) return error.InvalidOwnership;
+                if (!values.receives(allowed, definition)) return error.InvalidOwnership;
                 continue;
             }
             if ((try seen.getOrPut(allocator, .{ .node = ref.id, .allowed = item.allowed })).found_existing) continue;
@@ -159,6 +157,14 @@ pub const Analysis = opaque {
                     try pending.append(allocator, .{ .value = field, .allowed = item.allowed });
                 },
                 .resource => |resource| try pending.append(allocator, .{ .value = resource.value, .allowed = item.allowed }),
+                .package => |package| try pending.append(allocator, .{ .value = package.continuation, .allowed = item.allowed }),
+                .one_shot, .multi_template => |token| {
+                    const attachment = nodes[@intCast(token.delimiter.id)].attachment;
+                    const definition = nodes[@intCast(attachment.handler.id)].handler.definition;
+                    // A token names the receiving clause's delimiter at capture.
+                    // Successors belong to fresh resumed views, not the template.
+                    if (!contains(allowed, .{ .resumption = definition })) return error.InvalidOwnership;
+                },
                 // These opaque/mutable values have conservative transfers. Their
                 // concrete capture, lifetime and cleanup checks remain mandatory.
                 else => {},
@@ -197,12 +203,11 @@ pub fn derive(allocator: std.mem.Allocator, image: ir.Program, imports: []const 
                 stored.operations[id] = &.{}; // Environmental, never nearest-handler dispatch.
                 continue;
             }
-            if (flow.rebound[@intCast(op.effect)]) continue;
             const origins = flow.exits[id][@intCast(op.capability.?)].items;
             if (origins.len == 0 or contains(origins, .unknown)) continue;
             var selected: std.ArrayList(Target) = .empty;
             for (stored.conservative[@intCast(op.effect)]) |target| {
-                if (contains(origins, .{ .handler = target.handler })) try selected.append(allocator, target);
+                if (flow.receives(origins, target.handler)) try selected.append(allocator, target);
             }
             stored.operations[id] = try selected.toOwnedSlice(allocator);
         };
@@ -212,13 +217,12 @@ pub fn derive(allocator: std.mem.Allocator, image: ir.Program, imports: []const 
             const call = block.terminator.call;
             var rows: std.ArrayList(CallTargets) = .empty;
             for (image.functions[@intCast(call.function)].effects) |effect| {
-                if (flow.rebound[@intCast(effect)]) continue;
                 var actual: Set = .empty;
                 try substitute(allocator, &actual, relative.suspensions[@intCast(call.function)][@intCast(effect)].items, call.arguments, flow.exits[id]);
                 if (contains(actual.items, .unknown)) continue;
                 var selected: std.ArrayList(Target) = .empty;
                 for (stored.conservative[@intCast(effect)]) |target|
-                    if (contains(actual.items, .{ .handler = target.handler })) try selected.append(allocator, target);
+                    if (flow.receives(actual.items, target.handler)) try selected.append(allocator, target);
                 try rows.append(allocator, .{ .effect = effect, .targets = try selected.toOwnedSlice(allocator), .environmental = contains(actual.items, .environmental) });
             }
             stored.calls[id] = try rows.toOwnedSlice(allocator);
@@ -249,7 +253,6 @@ fn closureTargets(stored: *Storage, flow: *const Values, relative: *const Values
     const schema = image.functions[@intCast(image.blocks[block].function)].layout.slots[@intCast(slot)];
     const signature = try contracts.computation(image, schema);
     for (signature.effects) |effect| {
-        if (flow.rebound[@intCast(effect)]) continue;
         var actual: Set = .empty;
         var found = false;
         for (image.constructors, 0..) |constructor, id| {
@@ -279,7 +282,7 @@ fn closureTargets(stored: *Storage, flow: *const Values, relative: *const Values
         if (!found or contains(actual.items, .unknown)) continue;
         var selected: std.ArrayList(Target) = .empty;
         for (stored.conservative[@intCast(effect)]) |target|
-            if (contains(actual.items, .{ .handler = target.handler })) try selected.append(stored.allocator, target);
+            if (flow.receives(actual.items, target.handler)) try selected.append(stored.allocator, target);
         try rows.append(stored.allocator, .{ .role = role, .effect = effect, .targets = try selected.toOwnedSlice(stored.allocator), .environmental = contains(actual.items, .environmental) });
     }
 }
@@ -290,7 +293,7 @@ fn closureTargets(stored: *Storage, flow: *const Values, relative: *const Values
 // The same transfer computes input-relative return/suspension summaries. Direct
 // calls and known closure boundaries instantiate them. Unrepresented saved
 // contexts retain the conservative upper bound.
-const Origin = union(enum) { unknown, environmental, handler: p.Id, constructor: p.Id, input: usize };
+const Origin = union(enum) { unknown, environmental, handler: p.Id, resumption: p.Id, constructor: p.Id, input: usize };
 const Set = std.ArrayList(Origin);
 fn contains(set: []const Origin, value: Origin) bool {
     for (set) |item| if (std.meta.eql(item, value)) return true;
@@ -313,7 +316,7 @@ const Values = struct {
     exits: [][]Set,
     returns: []Set,
     captures: [][]Set,
-    rebound: []bool,
+    bindings: [][]bool,
     relative: bool,
     suspensions: [][]Set,
     changed: bool = false,
@@ -324,18 +327,16 @@ const Values = struct {
         return result;
     }
     fn init(a: std.mem.Allocator, image: ir.Program, relative: bool) Error!Values {
-        var self: Values = .{ .allocator = a, .image = image, .entries = try a.alloc([]Set, image.blocks.len), .exits = try a.alloc([]Set, image.blocks.len), .returns = try sets(a, image.functions.len), .captures = try a.alloc([]Set, image.constructors.len), .rebound = try a.alloc(bool, image.effects.len), .relative = relative, .suspensions = try a.alloc([]Set, if (relative) image.functions.len else 0) };
-        @memset(self.rebound, false);
+        var self: Values = .{ .allocator = a, .image = image, .entries = try a.alloc([]Set, image.blocks.len), .exits = try a.alloc([]Set, image.blocks.len), .returns = try sets(a, image.functions.len), .captures = try a.alloc([]Set, image.constructors.len), .bindings = try a.alloc([]bool, image.handlers.len), .relative = relative, .suspensions = try a.alloc([]Set, if (relative) image.functions.len else 0) };
+        for (self.bindings, 0..) |*row, id| {
+            row.* = try a.alloc(bool, image.handlers.len);
+            @memset(row.*, false);
+            row.*[id] = true;
+        }
         for (image.blocks, 0..) |block, id| {
             const count = image.functions[@intCast(block.function)].layout.slots.len;
             self.entries[id] = try sets(a, count);
             self.exits[id] = try sets(a, count);
-            // An aliased successor view cannot be strongly updated by allocation
-            // site. Keep both original and successor possibilities conservative.
-            if (block.terminator == .resume_with) {
-                const successor = image.handlers[@intCast(block.terminator.resume_with.handler)];
-                for (successor.clauses) |clause| self.rebound[@intCast(clause.effect)] = true;
-            }
         }
         for (image.constructors, 0..) |constructor, id|
             self.captures[id] = try sets(a, image.scopes.captures[@intCast(constructor.capture)].fields.len);
@@ -347,9 +348,16 @@ const Values = struct {
             return self;
         }
         try self.unknownInputs(image.roots.entry);
-        for (image.handlers) |handler| {
+        for (image.handlers, 0..) |handler, handler_id| {
             try self.unknownInputs(handler.return_function);
-            for (handler.clauses) |clause| try self.unknownInputs(clause.function);
+            for (handler.clauses) |clause| {
+                const function = image.functions[@intCast(clause.function)];
+                for (function.inputs, 0..) |_, index| {
+                    if (contracts.retainsResumption(clause) and index == function.inputs.len - 1) {
+                        try self.input(clause.function, index, &.{.{ .resumption = handler_id }});
+                    } else try self.input(clause.function, index, &unknown);
+                }
+            }
         }
         return self;
     }
@@ -378,6 +386,33 @@ const Values = struct {
                 if (self.entries[@intCast(function.entry)][@intCast(slot)].items.len == 0) try self.input(id, index, &unknown);
         }
         try self.converge();
+        try self.deriveBindings();
+    }
+
+    // Each row retains the original binding and every successor reachable from
+    // it. This is a may-rebind relation, never a strong update of an allocation
+    // site. Distinct branch views can therefore keep independent handlers.
+    fn deriveBindings(self: *Values) Error!void {
+        for (self.image.blocks, 0..) |block, id| {
+            if (block.terminator != .resume_with) continue;
+            const operation = block.terminator.resume_with;
+            const origins = self.exits[id][@intCast(operation.resumption)].items;
+            for (self.bindings, 0..) |row, handler_id| {
+                if (origins.len == 0 or contains(origins, .unknown) or contains(origins, .{ .resumption = handler_id }))
+                    row[@intCast(operation.handler)] = true;
+            }
+        }
+        // Finite transitive closure: a successor can capture a new token that
+        // is itself resumed with another successor. No branch/path IDs grow.
+        for (0..self.bindings.len) |via| for (self.bindings) |row| {
+            if (row[via]) for (self.bindings[via], 0..) |reachable, destination| {
+                row[destination] = row[destination] or reachable;
+            };
+        };
+    }
+    fn receives(self: *const Values, origins: []const Origin, handler: p.Id) bool {
+        for (origins) |origin| if (origin == .handler and self.bindings[@intCast(origin.handler)][@intCast(handler)]) return true;
+        return false;
     }
     fn converge(self: *Values) Error!void {
         while (true) {

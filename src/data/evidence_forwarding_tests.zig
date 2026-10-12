@@ -220,3 +220,62 @@ test "qualified targets preserve explicit outer forwarding and runtime capabilit
     program.handlers = handlers;
     try std.testing.expectError(error.InvalidReference, @import("activation_ownership.zig").analyze(a, program));
 }
+
+test "successor bindings retain original views without poisoning unrelated deep handlers" {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var program = base;
+    const schemas = try allocator.alloc(p.Schema, base.schemas.len + 2);
+    @memcpy(schemas[0..base.schemas.len], base.schemas);
+    schemas[6] = .{ .internal = .{ .resumption = .{ .effect = 0, .input = 0, .answer = 0, .effects = &.{0}, .handled = &.{0}, .capture_bound = &.{ 0, 5 }, .mode = .shallow, .use = .linear } } };
+    schemas[7] = schemas[6];
+    schemas[7].internal.resumption.capture_bound = &.{};
+    program.schemas = schemas;
+    const functions = try allocator.alloc(ir.Function, 6);
+    @memcpy(functions[0..4], base.functions);
+    functions[4] = .{ .entry = 8, .inputs = &.{ 0, 1 }, .layout = .{ .slots = &.{ 0, 6, 0 } }, .result = 0 };
+    functions[5] = .{ .entry = 10, .inputs = &.{ 0, 1 }, .layout = .{ .slots = &.{ 0, 6, 0 } }, .result = 0 };
+    program.functions = functions;
+    const blocks = try allocator.alloc(ir.Block, 12);
+    @memcpy(blocks[0..8], base.blocks);
+    blocks[8] = .{ .function = 4, .instructions = &.{}, .terminator = .{ .resume_with = .{ .resumption = 1, .argument = 0, .handler = 2, .state = &.{}, .next = .{ .block = 9, .assignments = &.{.{ .destination = 2, .source = .returned }} } } } };
+    blocks[9] = .{ .function = 4, .instructions = &.{}, .terminator = .{ .return_value = 2 } };
+    blocks[10] = .{ .function = 5, .instructions = &.{}, .terminator = .{ .resume_with = .{ .resumption = 1, .argument = 0, .handler = 1, .state = &.{}, .next = .{ .block = 11, .assignments = &.{.{ .destination = 2, .source = .returned }} } } } };
+    blocks[11] = .{ .function = 5, .instructions = &.{}, .terminator = .{ .return_value = 2 } };
+    blocks[3] = .{ .function = 1, .instructions = &.{}, .terminator = .{ .return_value = 0 } };
+    program.blocks = blocks;
+    const handlers = try allocator.dupe(ir.Handler, &.{
+        base.handlers[0],
+        .{ .mode = .shallow, .input = 0, .answer = 0, .return_function = 2, .clauses = &.{.{ .effect = 0, .function = 4, .resumption = 6 }} },
+        .{ .mode = .shallow, .input = 0, .answer = 0, .return_function = 2, .clauses = &.{.{ .effect = 0, .function = 5, .resumption = 6 }} },
+    });
+    program.handlers = handlers;
+    var admitted = try @import("activation_ownership.zig").analyze(a, program);
+    admitted.deinit();
+    const provenance = @import("control_provenance.zig");
+    const original = try provenance.derive(allocator, program, &.{}, false);
+    const isolated = try original.select(.{ .block = 2, .role = .operation }, 0);
+    try std.testing.expect(!isolated.knowledge().conservative);
+    try std.testing.expectEqual(@as(usize, 1), isolated.targets().len);
+    try std.testing.expectEqual(@as(p.Id, 0), isolated.targets()[0].handler);
+    // Installing the shallow handler instead joins both possible bindings; the
+    // original view is retained even through a cycle of successor declarations.
+    blocks[0].terminator.handle.handler = 1;
+    admitted = try @import("activation_ownership.zig").analyze(a, program);
+    admitted.deinit();
+    const rebound = try provenance.derive(allocator, program, &.{}, false);
+    const views = try rebound.select(.{ .block = 2, .role = .operation }, 0);
+    try std.testing.expect(!views.knowledge().conservative);
+    try std.testing.expectEqual(@as(usize, 2), views.targets().len);
+    try std.testing.expectEqual(@as(p.Id, 1), views.targets()[0].handler);
+    try std.testing.expectEqual(@as(p.Id, 2), views.targets()[1].handler);
+    // A successor with a narrower capture contract remains a possible recipient.
+    // Neither the original broad handler nor the unused deep one can authorize it.
+    handlers[2].clauses = &.{.{ .effect = 0, .function = 5, .resumption = 7 }};
+    functions[5].layout.slots = &.{ 0, 7, 0 };
+    try std.testing.expectError(error.InvalidOwnership, @import("activation_ownership.zig").analyze(a, program));
+    blocks[0].terminator.handle.handler = 0;
+    admitted = try @import("activation_ownership.zig").analyze(a, program);
+    admitted.deinit();
+}

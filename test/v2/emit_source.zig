@@ -55,6 +55,8 @@ pub fn main(init: std.process.Init) !void {
         39 => CleanupDisposal.build(&builder, .failure),
         40 => CleanupDisposal.ownedResult(&builder),
         41 => horos.source.examples.productProjection(&builder),
+        42 => horos.source.examples.localContinuation(&builder, false),
+        43 => horos.source.examples.localContinuation(&builder, true),
         else => error.UnknownExample,
     };
     var buffer: [4096]u8 = undefined;

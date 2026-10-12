@@ -166,9 +166,13 @@ use the same handler descriptor. Named diagnostics, borrow requirements, region
 and cleanup checks, and optimizer capture checks use this same owner.
 
 Unknown flows and open components retain the conservative clause union. Mutable
-cell reads, unrepresented saved resumption contexts, and effects affected by
-successor rebinding currently fall back to that union. All declarations still
-undergo structural and intrinsic validation, including unused handlers. These
+cell reads and unrepresented saved resumption contexts currently fall back to
+that union. Successor rebinding follows token provenance: it joins the original
+handler with every possible successor, including transitive successors. It never
+rewrites an installation or multi-shot template globally. Unknown token origins
+retain all possible original handlers; unrelated known origins stay separate.
+All declarations still undergo structural and intrinsic validation, including
+unused handlers. These
 facts are transient; transformations and final linking derive them again.
 
 Checkpoint admission also qualifies concrete activation and closure bindings
