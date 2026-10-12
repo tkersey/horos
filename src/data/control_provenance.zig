@@ -67,6 +67,7 @@ const Storage = struct {
     conservative: [][]const Target,
     operations: []?[]const Target,
     calls: [][]const CallTargets,
+    values: ?*const Values = null,
 };
 const CallTargets = struct { role: Role = .callee, effect: p.Id, targets: []const Target, environmental: bool = false };
 
@@ -111,6 +112,59 @@ pub const Analysis = opaque {
                 if (!(try contracts.resumption(self.data().image, target.resumption)).obligations) return error.InvalidOwnership;
         }
     }
+
+    /// After ordinary graph/type/custody admission, qualify concrete values
+    /// against the same abstract bindings that justified reduced target sets.
+    /// Restoring bytes is a second constructor of execution state; schema
+    /// equality alone cannot establish this relation.
+    pub fn validateState(self: *const Analysis, allocator: std.mem.Allocator, nodes: []const @import("graph.zig").Node, activations: []const ?@import("process_state.zig").Activation) Error!void {
+        const values = self.data().values orelse return;
+        const g = @import("graph.zig");
+        const Pending = struct { value: g.Value, allowed: *const Set };
+        var pending: std.ArrayList(Pending) = .empty;
+        var seen: std.AutoHashMapUnmanaged(struct { node: p.Id, allowed: *const Set }, void) = .empty;
+        for (nodes, activations) |node, activation| {
+            if (activation) |frame| {
+                const block = if (node == .control) node.control.block else node.continuation.source_block;
+                const row = try values.at(allocator, @intCast(block), @intCast(frame.position));
+                for (frame.bindings) |binding| try pending.append(allocator, .{ .value = binding.value, .allowed = &row[@intCast(binding.slot)] });
+            }
+            if (node == .computation) {
+                const closure = node.computation;
+                const fields = nodes[@intCast(closure.environment.id)].environment.values;
+                for (fields, values.captures[@intCast(closure.constructor)]) |value, *allowed|
+                    try pending.append(allocator, .{ .value = value, .allowed = allowed });
+            }
+        }
+        while (pending.pop()) |item| {
+            const allowed = item.allowed.items;
+            if (contains(allowed, .unknown)) continue;
+            const ref = switch (item.value.body) {
+                .reference => |ref| ref,
+                .owned => |owned| owned.node,
+                .scalar, .blob => continue,
+            };
+            const node = nodes[@intCast(ref.id)];
+            if (node == .attachment) {
+                const effect = self.data().image.schemas[@intCast(item.value.schema)].internal.capability;
+                if (values.rebound[@intCast(effect)]) continue;
+                const definition = nodes[@intCast(node.attachment.handler.id)].handler.definition;
+                if (!contains(allowed, .{ .handler = definition })) return error.InvalidOwnership;
+                continue;
+            }
+            if ((try seen.getOrPut(allocator, .{ .node = ref.id, .allowed = item.allowed })).found_existing) continue;
+            switch (node) {
+                .computation => |closure| if (!contains(allowed, .{ .constructor = closure.constructor })) return error.InvalidOwnership,
+                .aggregate => |aggregate| for (aggregate.fields) |field| {
+                    try pending.append(allocator, .{ .value = field, .allowed = item.allowed });
+                },
+                .resource => |resource| try pending.append(allocator, .{ .value = resource.value, .allowed = item.allowed }),
+                // These opaque/mutable values have conservative transfers. Their
+                // concrete capture, lifetime and cleanup checks remain mandatory.
+                else => {},
+            }
+        }
+    }
 };
 
 /// The invocation allocator owns all facts; callers keep the input immutable
@@ -134,6 +188,9 @@ pub fn derive(allocator: std.mem.Allocator, image: ir.Program, imports: []const 
     if (!component and imports.len == 0 and image.handlers.len != 0) {
         var flow = try Values.init(allocator, image, false);
         try flow.solve();
+        const concrete = try allocator.create(Values);
+        concrete.* = flow;
+        stored.values = concrete;
         for (image.blocks, 0..) |block, id| if (block.terminator == .perform) {
             const op = block.terminator.perform;
             if (op.capability == null) {
@@ -367,6 +424,41 @@ const Values = struct {
             try self.join(destination, value);
         }
     }
+    fn at(self: *const Values, allocator: std.mem.Allocator, block_id: usize, position: usize) Error![]Set {
+        var reader = self.*;
+        reader.allocator = allocator;
+        const row = try sets(allocator, self.entries[block_id].len);
+        for (row, self.entries[block_id]) |*value, entry| try value.appendSlice(allocator, entry.items);
+        for (self.image.blocks[block_id].instructions[0..position]) |instruction| try reader.transferInstruction(row, instruction, false);
+        return row;
+    }
+    fn transferInstruction(self: *Values, values: []Set, instruction: ir.Instruction, record_captures: bool) Error!void {
+        var result: Set = .empty;
+        defer result.deinit(self.allocator);
+        switch (instruction.opcode) {
+            .computation => {
+                if (self.relative) {
+                    try result.append(self.allocator, .unknown);
+                } else {
+                    if (record_captures) for (instruction.operands, 0..) |operand, index| try self.join(&self.captures[@intCast(instruction.immediate)][index], values[@intCast(operand)].items);
+                    try result.append(self.allocator, .{ .constructor = instruction.immediate });
+                }
+            },
+            .move, .product, .field, .variant, .variant_payload, .sequence, .sequence_get, .sequence_append, .sequence_concat, .sequence_pop, .sequence_set, .sequence_take, .sequence_pop_last, .resource_pack, .resource_unpack, .clone_resumption, .package, .unpack => {
+                for (instruction.operands) |operand| for (values[@intCast(operand)].items) |origin|
+                    if (!contains(result.items, origin)) try result.append(self.allocator, origin);
+            },
+            .select => for (instruction.operands[1..]) |operand| {
+                for (values[@intCast(operand)].items) |origin| if (!contains(result.items, origin)) try result.append(self.allocator, origin);
+            },
+            // Cells and opaque representations deliberately lose precision.
+            // Their reads cannot turn an untracked write into an empty set.
+            else => try result.appendSlice(self.allocator, &unknown),
+        }
+        const destination = &values[@intCast(instruction.destination)];
+        destination.clearRetainingCapacity();
+        try destination.appendSlice(self.allocator, result.items);
+    }
     fn transferBlock(self: *Values, id: usize, block_value: ir.Block) Error!void {
         const values = self.exits[id];
         // Re-evaluate this straight-line transfer from its monotone entry. Exit
@@ -376,33 +468,7 @@ const Values = struct {
             value.clearRetainingCapacity();
             try value.appendSlice(self.allocator, entry.items);
         }
-        for (block_value.instructions) |instruction| {
-            var result: Set = .empty;
-            defer result.deinit(self.allocator);
-            switch (instruction.opcode) {
-                .computation => {
-                    if (self.relative) {
-                        try result.append(self.allocator, .unknown);
-                    } else {
-                        for (instruction.operands, 0..) |operand, index| try self.join(&self.captures[@intCast(instruction.immediate)][index], values[@intCast(operand)].items);
-                        try result.append(self.allocator, .{ .constructor = instruction.immediate });
-                    }
-                },
-                .move, .product, .field, .variant, .variant_payload, .sequence, .sequence_get, .sequence_append, .sequence_concat, .sequence_pop, .sequence_set, .sequence_take, .sequence_pop_last, .resource_pack, .resource_unpack, .clone_resumption, .package, .unpack => {
-                    for (instruction.operands) |operand| for (values[@intCast(operand)].items) |origin|
-                        if (!contains(result.items, origin)) try result.append(self.allocator, origin);
-                },
-                .select => for (instruction.operands[1..]) |operand| {
-                    for (values[@intCast(operand)].items) |origin| if (!contains(result.items, origin)) try result.append(self.allocator, origin);
-                },
-                // Cells and opaque representations deliberately lose precision.
-                // Their reads cannot turn an untracked write into an empty set.
-                else => try result.appendSlice(self.allocator, &unknown),
-            }
-            const destination = &values[@intCast(instruction.destination)];
-            destination.clearRetainingCapacity();
-            try destination.appendSlice(self.allocator, result.items);
-        }
+        for (block_value.instructions) |operation| try self.transferInstruction(values, operation, true);
         const term = block_value.terminator;
         switch (term) {
             .return_value => |slot| try self.join(&self.returns[@intCast(block_value.function)], values[@intCast(slot)].items),

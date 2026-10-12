@@ -10,6 +10,7 @@ const contracts = @import("contracts.zig");
 const traits = @import("traits.zig");
 const borrows = @import("borrow_flow.zig");
 const state_effects = @import("state_effects.zig");
+const provenance = @import("control_provenance.zig");
 pub const Error = image.Error || @import("activation_ownership.zig").Error || error{ InvalidState, InvalidScope };
 
 pub fn node(state: anytype, reference: g.NodeRef) Error!g.Node {
@@ -108,6 +109,7 @@ fn validateInternal(allocator: std.mem.Allocator, program: stable_ir.Program, st
     var context: Context = .{
         .allocator = temporary,
         .program = program,
+        .control = try provenance.derive(temporary, program, &.{}, false),
         .state = state,
         .activations = activations,
         .flow = flow,
@@ -244,6 +246,8 @@ fn validateInternal(allocator: std.mem.Allocator, program: stable_ir.Program, st
         },
         else => if (owned != 0) return error.InvalidOwnership,
     };
+    try context.control.validateState(temporary, state.nodes, activations);
+    try context.effect_check.?.futureCaptures(&context, Context.visitFutureCapture);
 }
 
 fn ContextFor() type {
@@ -255,6 +259,7 @@ fn ContextFor() type {
         const BorrowFlow = borrows.StableFlow;
         allocator: std.mem.Allocator,
         program: Program,
+        control: *const provenance.Analysis,
         state: StateView,
         activations: []const ?ps.Activation,
         flow: ?*@import("activation_flow.zig").View,
@@ -1138,7 +1143,7 @@ fn ContextFor() type {
         }
 
         fn futureScopes(self: *Context, contexts: []UseScope, region_frames: []const ?g.NodeRef) Error!void {
-            var flow = try BorrowFlow.init(self.allocator, self.program, self.facts.exportable);
+            var flow = try BorrowFlow.initWithControl(self.allocator, self.program, self.facts.exportable, self.control);
             const children = try self.allocator.alloc(?g.NodeRef, self.state.nodes.len);
             @memset(children, null);
             for (self.state.nodes, 0..) |record, id| {
@@ -1330,31 +1335,40 @@ fn ContextFor() type {
             while (cursor) |ref| {
                 if (ref.id == token.delimiter.id) return;
                 const frame = try node(self.state, ref);
-                switch (frame) {
-                    .continuation => {
-                        for (self.activations[@intCast(ref.id)].?.bindings) |binding| try self.capturedValue(signature, binding.value);
-                    },
-                    .attachment => |attachment| {
-                        const handler = (try node(self.state, attachment.handler)).handler;
-                        for (handler.state) |item| try self.capturedValue(signature, item);
-                    },
-                    .disposal_return => |disposal| {
-                        for (disposal.values) |item| try self.capturedValue(signature, item);
-                    },
-                    else => {},
-                }
-                if (frame == .region_scope) {
-                    const region_node = (try node(self.state, frame.region_scope.region)).region;
-                    if (std.mem.indexOfScalar(p.Id, signature.owned_regions, region_node.descriptor) == null) return error.InvalidOwnership;
-                }
-                if ((frame == .protection or frame == .cleanup_return) and (!signature.obligations or signature.use == .multi)) return error.InvalidOwnership;
-                if (frame == .protection) if (frame.protection.loan) |loan| {
-                    const descriptor = (try node(self.state, loan)).region.descriptor;
-                    if (std.mem.indexOfScalar(p.Id, signature.owned_regions, descriptor) == null) return error.InvalidOwnership;
-                };
+                try self.captureFrame(signature, @intCast(ref.id));
                 cursor = frameParent(frame);
             }
             return error.InvalidScope;
+        }
+
+        fn visitFutureCapture(pointer: *anyopaque, frame_id: usize, schema: p.Id) Error!void {
+            const self: *Context = @ptrCast(@alignCast(pointer));
+            try self.captureFrame(try contracts.resumption(self.program, schema), frame_id);
+        }
+        fn captureFrame(self: *Context, signature: p.ResumptionType, frame_id: usize) Error!void {
+            const frame = self.state.nodes[frame_id];
+            switch (frame) {
+                .continuation => {
+                    for (self.activations[frame_id].?.bindings) |binding| try self.capturedValue(signature, binding.value);
+                },
+                .attachment => |attachment| {
+                    const handler = (try node(self.state, attachment.handler)).handler;
+                    for (handler.state) |item| try self.capturedValue(signature, item);
+                },
+                .disposal_return => |disposal| {
+                    for (disposal.values) |item| try self.capturedValue(signature, item);
+                },
+                else => {},
+            }
+            if (frame == .region_scope) {
+                const region_node = (try node(self.state, frame.region_scope.region)).region;
+                if (std.mem.indexOfScalar(p.Id, signature.owned_regions, region_node.descriptor) == null) return error.InvalidOwnership;
+            }
+            if ((frame == .protection or frame == .cleanup_return) and (!signature.obligations or signature.use == .multi)) return error.InvalidOwnership;
+            if (frame == .protection) if (frame.protection.loan) |loan| {
+                const descriptor = (try node(self.state, loan)).region.descriptor;
+                if (std.mem.indexOfScalar(p.Id, signature.owned_regions, descriptor) == null) return error.InvalidOwnership;
+            };
         }
 
         fn capturedValue(_: Context, signature: p.ResumptionType, item: g.Value) Error!void {

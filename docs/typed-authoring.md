@@ -171,6 +171,12 @@ successor rebinding currently fall back to that union. All declarations still
 undergo structural and intrinsic validation, including unused handlers. These
 facts are transient; transformations and final linking derive them again.
 
+Checkpoint admission also qualifies concrete activation and closure bindings
+against these facts. It checks possible future captures against actual runtime
+attachment identity: two installations of one handler descriptor are distinct
+delimiters. A restored binding cannot redirect a locally discharged operation
+through an outer delimiter whose intervening frames violate its capture contract.
+
 `returnFunction`, `clauseFunctionFor` and `handledSchema` derive typed interfaces.
 Deep resumptions return the handler answer; shallow resumptions return the handled
 body's input. `resumeWith` supplies the successor for shallow work. A statically

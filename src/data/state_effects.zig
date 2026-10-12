@@ -140,6 +140,39 @@ pub fn CheckFor(comptime Program: type, comptime State: type) type {
             if (signature.mode == .deep) try contracts.subset(definition.effects, signature.effects);
         }
 
+        /// Existing capability values can select an enclosing attachment after
+        /// recovery. Validate the frames they may cross, using attachment
+        /// identity rather than equality of handler descriptors. Fresh future
+        /// installations cannot capture frames outside their own delimiter.
+        pub fn futureCaptures(self: *Self, context: *anyopaque, comptime visit: anytype) !void {
+            for (self.state.nodes, 0..) |record, target_id| {
+                if (record != .attachment) continue;
+                const definition = try self.handler(record.attachment.handler);
+                for (definition.clauses) |clause| {
+                    if (!contracts.retainsResumption(clause)) continue;
+                    if (!self.origins.contains(clause.effect)) {
+                        var origins = try Origins.init(self, clause.effect);
+                        try origins.solve(self);
+                        try self.origins.put(self.allocator, clause.effect, origins);
+                    }
+                    const origins = self.origins.getPtr(clause.effect).?;
+                    const bit = origins.indices[target_id];
+                    if (bit == Origins.absent) continue;
+                    const scratch = try self.allocator.alloc(usize, origins.width);
+                    for (self.state.nodes, 0..) |frame, frame_id| {
+                        if (frame_id == target_id or !self.inside(.{ .id = frame_id }, .{ .id = target_id })) continue;
+                        switch (frame) {
+                            .continuation, .attachment, .region_scope, .protection, .cleanup_return, .disposal_return => {},
+                            else => continue,
+                        }
+                        @memset(scratch, 0);
+                        _ = try origins.child(self, frame_id, scratch, null);
+                        if (Origins.contains(scratch, bit)) try visit(context, frame_id, clause.resumption);
+                    }
+                }
+            }
+        }
+
         fn inside(self: Self, ref: g.NodeRef, scope: g.NodeRef) bool {
             return self.enter[@intCast(scope.id)] <= self.enter[@intCast(ref.id)] and
                 self.leave[@intCast(ref.id)] <= self.leave[@intCast(scope.id)];
