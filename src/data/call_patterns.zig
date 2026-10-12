@@ -47,7 +47,7 @@ const Budget = struct {
 /// every explicit use is specializable. Record that observation during original
 /// admission; a proposed representation must satisfy each observed capture.
 const ParameterCaptures = struct {
-    const Capture = struct { function: p.Id, slot: p.Id, effect: p.Id };
+    const Capture = struct { function: p.Id, slot: p.Id, site: *const ownership.CaptureSite };
     allocator: std.mem.Allocator,
     program: ir.Program,
     budget: *Budget,
@@ -55,7 +55,7 @@ const ParameterCaptures = struct {
     failure: ?Error = null,
     query_cost: usize = 0,
 
-    fn observe(context: *anyopaque, function: p.Id, effect: p.Id, slot: p.Id) void {
+    fn observe(context: *anyopaque, function: p.Id, site: *const ownership.CaptureSite, slot: p.Id) void {
         const self: *@This() = @ptrCast(@alignCast(context));
         if (self.failure != null) return;
         const inputs = self.program.functions[@intCast(function)].inputs;
@@ -68,7 +68,12 @@ const ParameterCaptures = struct {
             return;
         };
         if (std.mem.indexOfScalar(p.Id, inputs, slot) == null) return;
-        self.captures.append(self.allocator, .{ .function = function, .slot = slot, .effect = effect }) catch |err| {
+        const saved = site.copy(self.allocator) catch |err| {
+            self.failure = err;
+            return;
+        };
+        self.captures.append(self.allocator, .{ .function = function, .slot = slot, .site = saved }) catch |err| {
+            saved.destroyCopy(self.allocator);
             self.failure = err;
         };
     }
@@ -100,7 +105,7 @@ const ParameterCaptures = struct {
             if (capture.function != key.function or capture.slot != input) continue;
             for (replacement) |schema| {
                 try self.budget.take(self.query_cost);
-                if (!try ownership.captureSchemaAllowed(self.program, permissions, capture.effect, schema)) return false;
+                if (!try capture.site.captureAllowed(permissions, schema)) return false;
             }
         }
         return true;
@@ -400,7 +405,10 @@ pub fn construct(allocator: std.mem.Allocator, original: ir.Program, options: Op
     // specialization. An explicit pass limit still caps every phase.
     var budget: Budget = .{ .remaining = options.work_limit };
     var captured: ParameterCaptures = .{ .allocator = allocator, .program = original, .budget = &budget };
-    defer captured.captures.deinit(allocator);
+    defer {
+        for (captured.captures.items) |capture| capture.site.destroyCopy(allocator);
+        captured.captures.deinit(allocator);
+    }
     var discovered = facts.analyzeObservedWithLimit(allocator, original, options.work_limit, .{ .context = &captured, .capture = ParameterCaptures.observe }) catch |err| {
         // The observer cannot throw through the admission callback. Preserve its
         // allocation failure even if the subsequent fact search exhausts work.

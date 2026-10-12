@@ -163,4 +163,60 @@ test "two installations of one handler descriptor do not establish equal evidenc
     try std.testing.expect(candidate == null);
     try std.testing.expectEqual(program.blocks[0].terminator.handle.handler, program.blocks[2].terminator.handle.handler);
     try std.testing.expect(program.blocks[11].terminator.call.arguments[0] != program.blocks[11].terminator.call.arguments[1]);
+    const control = try @import("control_provenance.zig").derive(arena.allocator(), program, &.{}, false);
+    // The captured outer token survives discharge of the fresh inner formal,
+    // even though both installations use exactly the same handler descriptor.
+    const escaping = control.targets(.{ .block = 2, .role = .body }, 0);
+    try std.testing.expectEqual(@as(usize, 1), escaping.len);
+    try std.testing.expectEqual(@as(p.Id, 0), escaping[0].handler);
+}
+
+test "qualified targets preserve explicit outer forwarding and runtime capability unions" {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var program = try nestedFixture(allocator);
+    program.handlers = try allocator.dupe(ir.Handler, &.{ program.handlers[0], program.handlers[0] });
+    const blocks = try allocator.dupe(ir.Block, program.blocks);
+    blocks[2].terminator.handle.handler = 1;
+    program.blocks = blocks;
+    var admitted = try @import("activation_ownership.zig").analyze(a, program);
+    admitted.deinit();
+    const provenance = @import("control_provenance.zig");
+    const control = try provenance.derive(allocator, program, &.{}, false);
+    const outer = control.targets(.{ .block = 8, .role = .operation }, 0);
+    const inner = control.targets(.{ .block = 9, .role = .operation }, 0);
+    const escaped = control.targets(.{ .block = 2, .role = .body }, 0);
+    try std.testing.expectEqual(@as(usize, 1), outer.len);
+    try std.testing.expectEqual(@as(p.Id, 0), outer[0].handler);
+    try std.testing.expectEqual(@as(usize, 1), inner.len);
+    try std.testing.expectEqual(@as(p.Id, 1), inner[0].handler);
+    try std.testing.expectEqual(@as(usize, 1), escaped.len);
+    try std.testing.expectEqual(@as(p.Id, 0), escaped[0].handler);
+    const conservative = try provenance.derive(allocator, program, &.{}, true);
+    const open_site = try conservative.select(.{ .block = 8, .role = .operation }, 0);
+    try std.testing.expect(open_site.knowledge().conservative);
+    try std.testing.expectEqual(@as(usize, 2), open_site.targets().len);
+    try std.testing.expect(!(try control.select(.{ .block = 8, .role = .operation }, 0)).knowledge().conservative);
+
+    const functions = try allocator.dupe(ir.Function, program.functions);
+    functions[4].layout.slots = &.{ 5, 5, 0, 0, 0, 2, 5 };
+    program.functions = functions;
+    blocks[8].instructions = &.{
+        .{ .destination = 3, .opcode = .constant, .immediate = 0 },
+        .{ .destination = 5, .opcode = .less, .operands = &.{ 2, 3 } },
+        .{ .destination = 6, .opcode = .select, .operands = &.{ 5, 0, 1 } },
+    };
+    blocks[8].terminator.perform.capability = 6;
+    admitted = try @import("activation_ownership.zig").analyze(a, program);
+    admitted.deinit();
+    // Recompute after mutation; the old program-bound facts are never reused.
+    const joined = (try provenance.derive(allocator, program, &.{}, false)).targets(.{ .block = 8, .role = .operation }, 0);
+    try std.testing.expectEqual(@as(usize, 2), joined.len);
+    try std.testing.expectEqual(@as(p.Id, 0), joined[0].handler);
+    try std.testing.expectEqual(@as(p.Id, 1), joined[1].handler);
+    const handlers = try allocator.dupe(ir.Handler, &.{ program.handlers[0], program.handlers[1], program.handlers[0] });
+    handlers[2].return_function = program.functions.len;
+    program.handlers = handlers;
+    try std.testing.expectError(error.InvalidReference, @import("activation_ownership.zig").analyze(a, program));
 }

@@ -257,10 +257,10 @@ const Compiler = struct {
     constructors: std.ArrayList(p.Constructor) = .empty,
     constructor_ids: std.AutoHashMapUnmanaged(ConstructorKey, p.Id) = .empty,
 
-    fn observeCapture(pointer: *anyopaque, function: p.Id, effect: p.Id, slot: p.Id) void {
+    fn observeCapture(pointer: *anyopaque, function: p.Id, selected: *const data.activation_ownership.CaptureSite, slot: p.Id) void {
         const self: *Compiler = @ptrCast(@alignCast(pointer));
         if (self.slot_variables[@intCast(function)][@intCast(slot)]) |variable|
-            self.capture_observer.?.capture(self.capture_observer.?.context, effect, variable);
+            self.capture_observer.?.capture(self.capture_observer.?.context, selected, variable);
     }
 
     fn constructor(self: *Compiler, function: p.Id, schema: p.Id, value_id: p.Id) Error!p.Id {
