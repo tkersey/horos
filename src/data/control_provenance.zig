@@ -77,7 +77,9 @@ pub const Analysis = opaque {
     /// Query only the immutable image used for derivation. No replacement image
     /// or caller-supplied weaker target map enters this API.
     pub fn targets(self: *const Analysis, boundary: Boundary, effect: p.Id) []const Target {
-        if (boundary.role == .operation) if (self.data().operations[@intCast(boundary.block)]) |known| return known;
+        if (boundary.role == .operation) if (self.data().operations[@intCast(boundary.block)]) |known| {
+            if (self.data().image.blocks[@intCast(boundary.block)].terminator.perform.effect == effect) return known;
+        };
         for (self.data().calls[@intCast(boundary.block)]) |known| {
             if (known.role == boundary.role and known.effect == effect) return known.targets;
         }
@@ -86,7 +88,7 @@ pub const Analysis = opaque {
     pub fn select(self: *const Analysis, boundary: Boundary, effect: p.Id) Error!*const Selection {
         const stored = try self.data().allocator.create(SelectionData);
         var knowledge: Knowledge = .{ .conservative = true };
-        if (boundary.role == .operation and self.data().operations[@intCast(boundary.block)] != null)
+        if (boundary.role == .operation and self.data().operations[@intCast(boundary.block)] != null and self.data().image.blocks[@intCast(boundary.block)].terminator.perform.effect == effect)
             knowledge = .{ .conservative = false, .environmental = self.data().image.blocks[@intCast(boundary.block)].terminator.perform.capability == null };
         for (self.data().calls[@intCast(boundary.block)]) |known| {
             if (known.role == boundary.role and known.effect == effect) knowledge = .{ .conservative = false, .environmental = known.environmental };
