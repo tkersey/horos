@@ -11,7 +11,8 @@ const sets = @import("analysis_sets.zig");
 pub const Error = admission.Error || body_record.Error;
 pub const magic = "ABL_BPI3";
 pub const identity_domain = "boundary.program/v3\x00";
-pub const Limits = struct { max_decoded_bytes: usize = 64 << 20 };
+/// Native defaults follow the allocator; finite budgets are caller policy.
+pub const Limits = struct { max_decoded_bytes: usize = std.math.maxInt(usize) };
 
 pub fn encodedLength(program: ir.Program) Error!usize {
     var writer: wire.Writer = .{ .position = wire.header_length };

@@ -1,4 +1,5 @@
 //! Owned exchanges retain their recursive answer and pipeline signatures.
+const option_contract = @import("../authoring/option_contract.zig");
 const bridge = @import("bridge.zig");
 const a = bridge.a;
 const native = bridge.native;
@@ -92,6 +93,7 @@ fn OptionsParameters(comptime T: type) type {
     return bridge.namedShape(if (@hasField(T, "parameters")) @FieldType(T, "parameters") else @TypeOf(.{}));
 }
 pub fn create(c: *a.Context, identity: []const u8, input: anytype, element: anytype, result: anytype, options: anytype) a.Error!*const Exchange(Signature(bridge.schemaShape(@TypeOf(input)), bridge.schemaShape(@TypeOf(element)), bridge.schemaShape(@TypeOf(result)), OptionsParameters(@TypeOf(options)))) {
+    comptime option_contract.check("Generator.create", @TypeOf(options), &.{ "captures", "residual", "owned_regions", "borrowed_regions", "parameters", "body_use" });
     const captures = bridge.captures(options.captures);
     const residual = bridge.list(.operation, bridge.option(options, "residual", .{}));
     const owned = bridge.list(.region, bridge.option(options, "owned_regions", .{}));

@@ -145,7 +145,9 @@ test "BPI3 rejects redundant defaults and compressed expansion bombs" {
     const bomb = golden[0..37].* ++ [_]u8{ 128, 128, 128, 128, 4, 1, 1, 128, 128, 128, 128, 4, 0 } ++ golden[39..].*;
     var framed = bomb;
     std.mem.writeInt(u64, framed[12..20], framed.len - 20, .little);
-    try testing.expectError(error.Capacity, image.decode(testing.allocator, &framed));
+    // Expansion rejection is an explicitly selected resource policy. Canonical
+    // native decoding has no implicit application-size allowance.
+    try testing.expectError(error.Capacity, image.decodeLimited(testing.allocator, &framed, .{ .max_decoded_bytes = 64 << 20 }));
 }
 
 test "BPI3 owns decoded records and binds identity to its canonical bytes" {

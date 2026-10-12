@@ -1,5 +1,15 @@
 # Horos 4 authoring migration
 
+Canonical option records now reject unknown fields before runtime lowering.
+For example, `return_effect` is an error; use `return_effects`. Helpers passing
+superset records must explicitly construct the accepted options for each call.
+Callable, handler, collection/fault, Choice, Search, Generator, and nested
+capture options follow this rule. User-defined parameter and schema field names
+retain their own declaration checks. Option values, including handler mode and
+runtime rows, need not be comptime; empty `.{}` records remain supported where
+no fields are required. Omitted fields and explicit `null` keep their existing
+meanings.
+
 Horos 4.0.0 replaces the ordinary authoring interface. BMO1, BPI3, PST3,
 ABI 3 and nominal runtime authority retain their existing contracts.
 

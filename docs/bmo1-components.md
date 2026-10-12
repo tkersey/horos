@@ -42,7 +42,8 @@ instance. Bodyless imports cannot enter BPI3 admission.
 Decoding owns its input, checks all local records, and compares canonical
 re-emission. Unknown families/versions/flags, trailing bytes, overlong integers,
 invalid references and malformed symbols reject. Wire plus decoded-record
-storage has a 64 MiB admission budget. There is also a total catalog-entry limit
+storage follows the caller's allocator and representable sizes. The compile-work
+policy retains a total catalog-entry limit
 of 1,048,576 per object and per link, including declared regions; a tiny region
 count field cannot request an unbounded relocation table. Analysis scratch is
 additional caller-allocated memory and can fail with `OutOfMemory`.

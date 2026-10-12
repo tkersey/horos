@@ -126,10 +126,17 @@ checkpoint idempotence through the existing semantic source suite.
 writing caller output; input/output overlap is therefore safe. `emit` returns
 independently allocated bytes. Failed export does not mutate resident execution.
 
+`serialize` owns normalization, sizing, and canonical emission. Its destination
+selects no bytes, a caller buffer, or an output allocator; an optional SHA-256
+sink receives those same complete PST3 bytes. Digest-only emission still uses
+projection and normalization scratch. Invocation seeds its pending-state domain
+through `stateDigestHasher`; the state codec does not select a protocol domain.
+
 `decodeGraph` owns input bytes and parsed records. It checks discovery order in
-place, without constructing a second complete graph owner. `decodeGraphLimited`
-defaults to a 64 MiB physical budget for owned input plus requested decoded
-record storage. Count/size arithmetic is checked before allocation. Temporary
+place, without constructing a second complete graph owner. Native defaults use
+the caller's allocator and representable sizes. `decodeGraphLimited` accepts a
+caller-selected budget for owned input plus requested decoded record storage.
+Count/size arithmetic is checked before allocation. Temporary
 discovery indexes and allocator backing slack are separate from this budget.
 Record recursion has fixed type depth; runtime cycles use checked references.
 

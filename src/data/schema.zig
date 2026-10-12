@@ -137,7 +137,7 @@ pub fn encodeOwned(allocator: std.mem.Allocator, types: []const p.Schema, root: 
 }
 
 pub fn decode(allocator: std.mem.Allocator, input: []const u8) Error!Owned {
-    return decodeLimited(allocator, input, 64 << 20);
+    return decodeLimited(allocator, input, std.math.maxInt(usize));
 }
 
 pub fn decodeLimited(allocator: std.mem.Allocator, input: []const u8, max_decoded_bytes: usize) Error!Owned {

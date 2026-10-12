@@ -238,8 +238,9 @@ overlap checks before writing any output. `identity` also performs admission.
 `decode` copies input, checks framing, reads records, performs full stable
 admission and checks canonical bytes by re-emission. Its returned owner contains
 all record and literal storage and survives caller input overwrite/free. On any
-failure, all partial owners are released. The default physical decoded-storage
-budget is 64 MiB; `decodeLimited` takes an explicit `max_decoded_bytes`.
+failure, all partial owners are released. Native defaults use the caller's
+allocator and representable sizes; `decodeLimited` accepts an explicit finite
+`max_decoded_bytes` budget.
 It charges owned input plus requested expanded record/ID/literal bytes before
 each allocation. Arithmetic overflow rejects, and compressed descriptors are
 validated before expansion. The budget is not a semantic collection bound, peak

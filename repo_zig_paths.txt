@@ -6,6 +6,7 @@ src/allocation_testing.zig
 src/authoring.zig
 src/authoring/cache_key.zig
 src/authoring/checked_tests.zig
+src/authoring/option_contract.zig
 src/authoring/runtime.zig
 src/authoring_cases.zig
 src/authoring_tests.zig
@@ -141,6 +142,7 @@ src/data/loop_motion_tests.zig
 src/data/loop_regions.zig
 src/data/loop_unswitch.zig
 src/data/loop_unswitch_tests.zig
+src/data/native_decode_tests.zig
 src/data/native_shape.zig
 src/data/native_shape_tests.zig
 src/data/opcode_contract.zig

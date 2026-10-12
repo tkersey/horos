@@ -54,7 +54,7 @@ pub const Binding = struct {
 };
 pub const Request = struct { binding: Binding, request_identity: [32]u8 };
 pub const Result = struct { request_identity: [32]u8, value: []const u8 };
-pub const Limits = struct { max_bytes: usize = 64 << 20 };
+pub const Limits = struct { max_bytes: usize = std.math.maxInt(usize) };
 
 fn magic(comptime T: type) *const [8]u8 {
     return if (T == Input) "ABL_PKI3" else if (T == Outcome) "ABL_PKO3" else if (T == Request) "ABL_ERQ3" else if (T == Result) "ABL_ERS3" else @compileError("not an invocation record");
@@ -116,9 +116,14 @@ pub fn decodeLimited(comptime T: type, allocator: std.mem.Allocator, input: []co
     return .{ .allocator = allocator, .bytes = bytes, .value = value };
 }
 
-pub fn stateDigest(canonical_state: []const u8) [32]u8 {
+/// Seed the same domain for byte-backed and streaming canonical PST3 hashing.
+pub fn stateDigestHasher() std.crypto.hash.sha2.Sha256 {
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
     hash.update("boundary.pending-state/v3\x00");
+    return hash;
+}
+pub fn stateDigest(canonical_state: []const u8) [32]u8 {
+    var hash = stateDigestHasher();
     hash.update(canonical_state);
     return hash.finalResult();
 }
@@ -143,9 +148,9 @@ pub fn validate(comptime T: type, allocator: std.mem.Allocator, value: T) Error!
         const binding = value.binding;
         if (binding.semantic_identity.len == 0 or !std.unicode.utf8ValidateSlice(binding.semantic_identity)) return error.InvalidRequest;
         if (!std.mem.eql(u8, &value.request_identity, &try requestIdentity(binding))) return error.InvalidRequest;
-        var payload = try schema.decodeLimited(allocator, binding.payload_schema, 64 << 20);
+        var payload = try schema.decode(allocator, binding.payload_schema);
         defer payload.deinit();
-        var resumed = try schema.decodeLimited(allocator, binding.resume_schema, 64 << 20);
+        var resumed = try schema.decode(allocator, binding.resume_schema);
         defer resumed.deinit();
         try schema.validateValue(allocator, payload.descriptor, binding.payload);
     } else if (T == Outcome) {
@@ -178,7 +183,7 @@ pub fn validate(comptime T: type, allocator: std.mem.Allocator, value: T) Error!
 pub fn validateResult(allocator: std.mem.Allocator, expected: Request, result: Result) Error!void {
     try validate(Request, allocator, expected);
     if (!std.mem.eql(u8, &result.request_identity, &expected.request_identity)) return error.InvalidResult;
-    var descriptor = try schema.decodeLimited(allocator, expected.binding.resume_schema, 64 << 20);
+    var descriptor = try schema.decode(allocator, expected.binding.resume_schema);
     defer descriptor.deinit();
     try schema.validateValue(allocator, descriptor.descriptor, result.value);
 }
