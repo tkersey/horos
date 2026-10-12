@@ -8,6 +8,7 @@ const graph = @import("coalescing_graph.zig");
 const names = @import("coalescing_locals.zig");
 const wire = @import("wire.zig");
 const record = @import("record.zig");
+const roles = @import("reference_roles.zig");
 pub const Error = names.Error;
 pub const View = struct {
     node: graph.Node,
@@ -174,23 +175,6 @@ const Body = struct {
         try self.sink.natural(values.len);
         for (values) |value| try self.slot(value);
     }
-    fn optionalSlot(self: *Body, value: ?p.Id) Error!void {
-        try self.sink.raw(value != null);
-        if (value) |id| try self.slot(id);
-    }
-    fn edge(self: *Body, value: ir.Edge) Error!void {
-        const target = self.blocks.names.get(value.block) orelse return error.InvalidReference;
-        try self.sink.natural(target);
-        try self.sink.natural(value.assignments.len);
-        for (value.assignments) |assignment| {
-            try self.slot(assignment.destination);
-            try self.sink.raw(std.meta.activeTag(assignment.source));
-            switch (assignment.source) {
-                .returned => {},
-                .slot => |id| try self.slot(id),
-            }
-        }
-    }
     fn instruction(self: *Body, value: ir.Instruction) Error!void {
         try self.slot(value.destination);
         try self.sink.raw(value.opcode);
@@ -206,58 +190,32 @@ const Body = struct {
             try self.sink.global(.constant, failure.value);
         }
     }
-    fn terminator(self: *Body, value: ir.Terminator) Error!void {
-        try self.sink.raw(std.meta.activeTag(value));
-        switch (value) {
-            .return_value, .fail => |id| try self.slot(id),
-            .jump, .yield_value => |next| try self.edge(next),
-            .perform => |op| {
-                try self.sink.global(.effect, op.effect);
-                try self.optionalSlot(op.capability);
-                try self.slot(op.payload);
-                try self.slots(op.bodies);
-                try self.slots(op.use_site_capabilities);
-                try self.edge(op.next);
+    pub const VisitError = names.Error;
+    pub fn reference(self: *Body, comptime role: roles.Role, comptime cardinality: roles.Cardinality, value: anytype) Error!void {
+        if (comptime cardinality == .optional) {
+            try self.sink.raw(value != null);
+            if (value) |item| try self.reference(role, .one, item);
+        } else if (comptime cardinality == .list) {
+            try self.sink.natural(value.len);
+            for (value) |item| try self.reference(role, .one, item);
+        } else switch (role) {
+            .slot_read, .slot_write => try self.slot(value),
+            .function => try self.sink.global(.function, value),
+            .effect => try self.sink.global(.effect, value),
+            .handler => try self.sink.global(.handler, value),
+            .region => try self.sink.global(.region, value),
+            .block => try self.sink.natural(self.blocks.names.get(value) orelse return error.InvalidReference),
+            .edge => try roles.visitEdge(value, self),
+            .assignment => try roles.visitAssignment(value, self),
+            .source => {
+                try self.sink.raw(std.meta.activeTag(value));
+                try roles.visitSource(value, self);
             },
-            inline .branch,
-            .switch_variant,
-            .unpack_product,
-            .call,
-            .apply,
-            .handle,
-            .resume_value,
-            .resume_with,
-            .resume_computation,
-            .dispose,
-            .protect,
-            .with_region,
-            => |op| try self.control(op),
+            .nonreference => {},
         }
     }
-    fn control(self: *Body, value: anytype) Error!void {
-        inline for (@typeInfo(@TypeOf(value)).@"struct".field_names, @typeInfo(@TypeOf(value)).@"struct".field_types) |field_name, FieldType| {
-            const item = @field(value, field_name);
-            if (comptime std.mem.eql(u8, field_name, "function")) {
-                try self.sink.global(.function, item);
-            } else if (comptime std.mem.eql(u8, field_name, "handler")) {
-                try self.sink.global(.handler, item);
-            } else if (comptime std.mem.eql(u8, field_name, "region")) {
-                try self.sink.global(.region, item);
-            } else if (comptime std.mem.eql(u8, field_name, "loan_region")) {
-                try self.sink.raw(item != null);
-                if (item) |id| try self.sink.global(.region, id);
-            } else if (FieldType == ir.Edge) {
-                try self.edge(item);
-            } else if (FieldType == []const ir.Edge) {
-                try self.sink.natural(item.len);
-                for (item) |next| try self.edge(next);
-            } else if (FieldType == []const p.Id) {
-                try self.slots(item);
-            } else if (FieldType == ?p.Id) {
-                try self.optionalSlot(item);
-            } else if (FieldType == p.Id) {
-                try self.slot(item);
-            } else @compileError("classify new control field in coalescing view");
-        }
+    fn terminator(self: *Body, value: ir.Terminator) Error!void {
+        try self.sink.raw(std.meta.activeTag(value));
+        try roles.visitTerminator(value, self);
     }
 };

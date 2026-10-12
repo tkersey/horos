@@ -22,6 +22,19 @@ pub fn build(b: *std.Build) void {
         .imports = &.{.{ .name = "horos", .module = horos }},
     }) });
     b.step("reject", "Check rejected public-package neighbor").dependOn(&b.addRunArtifact(rejection).step);
+    const static = b.step("comptime-reject", "Reject incompatible shapes through the public package");
+    inline for (@import("static_cases.zig").cases) |case| {
+        const options = b.addOptions();
+        options.addOption([]const u8, "value", case[0]);
+        const wrong = b.addExecutable(.{ .name = case[0], .root_module = b.createModule(.{
+            .root_source_file = b.path("static.zig"),
+            .target = b.graph.host,
+            .imports = &.{.{ .name = "horos", .module = horos }},
+        }) });
+        wrong.root_module.addOptions("rejection_mode", options);
+        wrong.expect_errors = .{ .contains = case[1] };
+        static.dependOn(&wrong.step);
+    }
     inline for (.{ "category", "failure_literal_category", "lifecycle" }) |mode| {
         if (b.option(bool, mode, "Build a deliberate public API error") orelse false) {
             const wrong = b.addExecutable(.{ .name = mode, .root_module = b.createModule(.{

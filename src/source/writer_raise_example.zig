@@ -9,16 +9,16 @@ pub fn build(b: *source.Builder) source.Error!source.Module {
 }
 fn authored(b: *source.Builder) a.Error!source.Module {
     const c = try a.Context.init(b);
-    const unit = try c.scalar(void);
-    const integer = try c.scalar(u64);
+    const unit = try c.schema(void);
+    const integer = try c.schema(u64);
     const region = try c.region();
     const w = try writer.family(c, "example/writer", integer);
     const r = try raise.family(c, "example/raise", integer);
     const caught = try raise.catching(c, r, integer, .{ .continuation = &.{ unit, integer, w.capability() }, .body = &.{w.capability()} }, &.{w.effect()}, &.{region});
     const written = try writer.interpret(c, w, caught.answer, region, .{ .continuation = &.{ unit, integer, caught.answer, r.capability() } }, &.{});
-    const main = try c.function("entry", &.{}, written.answer, &.{});
+    const main = try c.function("entry", .{}, written.answer, &.{});
     const entry = try c.body(main);
-    const inside_type = try c.regionBodySchema(region, &.{}, written.answer, &.{}, .{ .use = .linear, .captures = &.{} });
+    const inside_type = try c.regionBodySchema(region, .{}, written.answer, &.{}, .{ .use = .linear, .captures = &.{} });
     const inside_fn = try c.functionFor("writer region", inside_type);
     const inside = try c.body(inside_fn);
     const written_type = try c.handledSchema(written.handler);
@@ -29,7 +29,7 @@ fn authored(b: *source.Builder) a.Error!source.Module {
     const caught_fn = try c.functionFor("caught work", caught_type);
     const caught_body = try written_body.closureBody(caught_fn);
     const raise_capability = try caught_body.parameter("capability");
-    const body_type = try c.callable(&.{}, integer, &.{ w.effect(), r.effect() }, .{
+    const body_type = try c.callable(.{}, integer, &.{ w.effect(), r.effect() }, .{
         .use = .linear,
         .captures = &.{ w.capability(), r.capability() },
         .regions = &.{region},
@@ -40,7 +40,7 @@ fn authored(b: *source.Builder) a.Error!source.Module {
     _ = try body.performLocal(r.effect(), raise_capability, try body.constant(u64, 9));
     _ = try body.performLocal(w.effect(), write_capability, try body.constant(u64, 2));
     try c.define(body_fn, try body.ret(try body.constant(u64, 42)));
-    const cleanup_type = try c.callable(&.{.{ .name = "exit", .schema = try c.cleanupInfo(unit) }}, unit, &.{w.effect()}, .{
+    const cleanup_type = try c.callable(.{ .exit = try c.cleanupInfo(unit) }, unit, &.{w.effect()}, .{
         .use = .linear,
         .captures = &.{w.capability()},
         .regions = &.{region},
@@ -51,11 +51,11 @@ fn authored(b: *source.Builder) a.Error!source.Module {
     try c.define(caught_fn, try caught_body.ret(try caught_body.protect(
         try caught_body.lambda(body_fn, body_type),
         try caught_body.lambda(cleanup_fn, cleanup_type),
-        &.{},
+        .{},
     )));
-    try c.define(written_fn, try written_body.ret(try written_body.handleWith(caught.handler, try written_body.lambda(caught_fn, caught_type), &.{})));
+    try c.define(written_fn, try written_body.ret(try written_body.handleWith(caught.handler, try written_body.lambda(caught_fn, caught_type), .{})));
     const cell = try inside.newCell(written.cell, try inside.parameter("region"), try inside.sequenceValue(written.sequence, &.{}));
-    try c.define(inside_fn, try inside.ret(try inside.handleWith(written.handler, try inside.lambda(written_fn, written_type), &.{.{ .name = "log", .value = cell }})));
-    try c.define(main, try entry.ret(try entry.withRegion(region, try entry.lambda(inside_fn, inside_type), &.{})));
+    try c.define(inside_fn, try inside.ret(try inside.handleWith(written.handler, try inside.lambda(written_fn, written_type), .{ .log = cell })));
+    try c.define(main, try entry.ret(try entry.withRegion(region, try entry.lambda(inside_fn, inside_type), .{})));
     return c.module(main, unit);
 }

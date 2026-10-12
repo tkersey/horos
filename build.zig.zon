@@ -1,6 +1,6 @@
 .{
     .name = .horos,
-    .version = "3.0.0",
+    .version = "4.0.0",
     .dependencies = .{},
     .minimum_zig_version = "0.17.0",
     .paths = .{
@@ -10,6 +10,7 @@
         "build.zig",
         "build.zig.zon",
         "docs/typed-authoring.md",
+        "docs/authoring-migration.md",
         "docs/coalescing.md",
         "docs/bpi3-wire.md",
         "docs/pst3-wire.md",

@@ -67,6 +67,7 @@ pub const scalar = @import("scalar.zig");
 pub const schema = @import("schema.zig");
 pub const state_admission = @import("state_admission.zig");
 pub const traits = @import("traits.zig");
+pub const contracts = @import("contracts.zig");
 pub const cleanup_contract = @import("cleanup_contract.zig");
 
 test {

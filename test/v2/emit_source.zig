@@ -172,10 +172,10 @@ const CleanupDisposal = struct {
         const integer = try b.scalar(u64);
         const region = b.region();
         const region_type = try b.schema(.{ .internal = .{ .region = region } });
-        const logging_family = try writer.family(c, "example/cleanup-owner-writer", try c.scalar(u64));
+        const logging_family = try writer.family(c, "example/cleanup-owner-writer", try c.schema(u64));
         const w = .{ .effect = try a.interop.operationId(c, logging_family.effect()), .capability = try a.interop.schemaId(c, logging_family.capability()) };
-        const definition = try generator.create(c, "example/cleanup-owned-yield", try c.scalar(void), try c.scalar(u64), try c.scalar(void), .{
-            .captures = .{ .continuation = &.{ try c.scalar(void), try c.scalar(u64), logging_family.capability() } },
+        const definition = try generator.create(c, "example/cleanup-owned-yield", try c.schema(void), try c.schema(u64), try c.schema(void), .{
+            .captures = .{ .continuation = &.{ try c.schema(void), try c.schema(u64), logging_family.capability() } },
             .borrowed_regions = &.{try a.interop.region(c, region)},
             .residual = &.{logging_family.effect()},
         });
@@ -190,9 +190,9 @@ const CleanupDisposal = struct {
             .resumption = try a.interop.schemaId(c, definition.resumption()),
         };
         const capture_ids = [_]horos.data.program.Id{ unit, integer, g.capability, g.answer, g.resumption, g.package, g.yielded };
-        var captures: [capture_ids.len]*const a.Schema = undefined;
+        var captures: [capture_ids.len]*const a.Schema(a.Dynamic) = undefined;
         for (capture_ids, &captures) |id, *schema| schema.* = try a.interop.schema(c, id);
-        const logging_handler = try writer.interpret(c, logging_family, try c.scalar(u64), try a.interop.region(c, region), .{ .continuation = &captures }, &.{});
+        const logging_handler = try writer.interpret(c, logging_family, try c.schema(u64), try a.interop.region(c, region), .{ .continuation = &captures }, &.{});
         const written = .{ .answer = try a.interop.schemaId(c, logging_handler.answer), .cell = try a.interop.schemaId(c, logging_handler.cell), .sequence = try a.interop.schemaId(c, logging_handler.sequence), .handler = try a.interop.handlerId(c, logging_handler.handler) };
         const fixture_entry = try b.declare(&.{}, written.answer, &.{}, &.{});
         const inside = try b.declare(&.{region_type}, written.answer, &.{}, &.{region});

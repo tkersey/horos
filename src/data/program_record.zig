@@ -5,6 +5,7 @@ const p = @import("program.zig");
 const ir = @import("activation.zig");
 const wire = @import("wire.zig");
 const record = @import("record.zig");
+const opcode_contract = @import("opcode_contract.zig");
 const sequence = @import("compact_sequence.zig");
 pub const Error = record.Error;
 
@@ -220,16 +221,7 @@ fn readEdge(reader: *wire.Reader, allocator: std.mem.Allocator, budget: *Budget)
 }
 
 fn faultKind(opcode: p.Opcode, index: usize) Error!p.Fault {
-    const kinds: []const p.Fault = switch (opcode) {
-        .integer_add, .integer_sub, .integer_mul, .integer_convert => &.{.arithmetic_overflow},
-        .integer_div, .integer_rem => &.{ .arithmetic_overflow, .division_by_zero },
-        .variant_payload => &.{.invalid_variant},
-        .sequence_set => &.{.invalid_index},
-        .sequence_append, .sequence_concat, .blob_concat => &.{.capacity_exceeded},
-        .blob_slice => &.{ .capacity_exceeded, .invalid_utf8 },
-        .text_scalar => &.{.invalid_utf8},
-        else => &.{},
-    };
+    const kinds = opcode_contract.describe(opcode).possible_wire_faults;
     return if (index < kinds.len) kinds[index] else error.InvalidTag;
 }
 fn writeInstruction(value: ir.Instruction, writer: *wire.Writer) Error!void {
@@ -244,7 +236,7 @@ fn writeInstruction(value: ir.Instruction, writer: *wire.Writer) Error!void {
     } else try sequence.write(p.Id, value.operands, writer);
     if (header & 64 != 0) try writer.natural(value.immediate);
     if (value.failures.len == 0) return;
-    if (value.opcode == .blob_slice) try writer.natural(value.failures.len);
+    if (opcode_contract.describe(value.opcode).failure_count_encoding == .counted) try writer.natural(value.failures.len);
     for (value.failures, 0..) |failure, index| {
         if (failure.kind != try faultKind(value.opcode, index)) return error.InvalidTag;
         try writer.natural(failure.value);
@@ -261,10 +253,10 @@ fn readInstruction(reader: *wire.Reader, allocator: std.mem.Allocator, budget: *
         break :blk operands;
     } else try read([]const p.Id, reader, allocator, budget, context);
     const immediate = if (header & 64 != 0) try reader.natural() else 0;
-    const count: usize = if (header & 128 == 0) 0 else switch (opcode) {
-        .integer_div, .integer_rem => 2,
-        .blob_slice => try reader.count(),
-        else => 1,
+    const count: usize = if (header & 128 == 0) 0 else switch (opcode_contract.describe(opcode).failure_count_encoding) {
+        .implied_two => 2,
+        .counted => try reader.count(),
+        .implied_one => 1,
     };
     if (count > 2) return error.InvalidLength;
     try budget.account(p.InstructionFailure, count);
@@ -277,11 +269,9 @@ fn readInstruction(reader: *wire.Reader, allocator: std.mem.Allocator, budget: *
 }
 
 fn operandCount(opcode: p.Opcode) ?usize {
-    return switch (opcode) {
-        .constant => 0,
-        .move, .integer_bit_not, .integer_convert, .enum_tag, .boolean_not, .package, .unpack, .clone_resumption => 1,
-        .integer_add, .integer_sub, .integer_mul, .integer_div, .integer_rem, .integer_bit_and, .integer_bit_or, .integer_bit_xor, .equal, .less => 2,
-        else => null,
+    return switch (opcode_contract.describe(opcode).operand_encoding) {
+        .fixed => |n| n,
+        .counted => null,
     };
 }
 

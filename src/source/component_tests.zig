@@ -271,15 +271,15 @@ test "one reusable combinator specializes for two residual effect contexts" {
     defer b.deinit();
     const a = @import("../authoring.zig");
     const c = try a.Context.init(&b);
-    const unit = try c.scalar(void);
-    const integer = try c.scalar(u64);
+    const unit = try c.schema(void);
+    const integer = try c.schema(u64);
     const read = try c.external("polymorphic/read", unit, integer);
     const write = try c.external("polymorphic/write", integer, unit);
-    const first = try c.callable(&.{}, integer, &.{read}, .{
+    const first = try c.callable(.{}, integer, &.{read}, .{
         .use = .reusable,
         .captures = &.{},
     });
-    const second = try c.callable(&.{}, integer, &.{ read, write }, .{
+    const second = try c.callable(.{}, integer, &.{ read, write }, .{
         .use = .reusable,
         .captures = &.{},
     });

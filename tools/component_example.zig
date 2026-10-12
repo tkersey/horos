@@ -104,12 +104,12 @@ fn package(r: Runner, zig: []const u8, repository: []const u8, output: []const u
     const consumer = try r.path(&.{ output, "consumer" });
     try Dir.cwd().createDirPath(r.io, consumer);
     try r.write(try r.path(&.{ consumer, "build.zig.zon" }), ".{ .name=.consumer, .version=\"0.0.0\", .fingerprint=0x705b3727bb03dcc2, .dependencies=.{ .horos=.{.path=\"../package\"}}, .paths=.{\"\"} }");
-    inline for (.{ "build.zig", "rejection.zig", "category.zig", "failure_literal_category.zig", "lifecycle.zig", "data.zig" }) |file| try r.write(try r.path(&.{ consumer, file }), try r.read(try r.path(&.{ source, "test/package_authoring", file })));
+    inline for (.{ "build.zig", "rejection.zig", "category.zig", "failure_literal_category.zig", "lifecycle.zig", "data.zig", "static.zig", "static_cases.zig" }) |file| try r.write(try r.path(&.{ consumer, file }), try r.read(try r.path(&.{ source, "test/package_authoring", file })));
     try r.write(try r.path(&.{ consumer, "client.zig" }), try r.read(try r.path(&.{ source, "examples/authoring_client.zig" })));
-    const image = try selected.run(&.{ zig, "build", "emit", "reject", "data" }, consumer, true);
+    const image = try selected.run(&.{ zig, "build", "emit", "reject", "data", "comptime-reject" }, consumer, true);
     var admitted = try horos.data.program_image.Admitted.decode(r.a, image.stdout);
     defer admitted.deinit();
-    inline for (.{ .{ "category", "Schema", "Operation" }, .{ "failure_literal_category", "FailureLiteral", "Value" }, .{ "lifecycle", "Body", "does not support field access" } }) |item| {
+    inline for (.{ .{ "category", "wrong handle family", "expected schema" }, .{ "failure_literal_category", "wrong handle family", "expected failure_literal" }, .{ "lifecycle", "Body", "does not support field access" } }) |item| {
         const rejected = try selected.run(&.{ zig, "build", "-D" ++ item[0] ++ "=true" }, consumer, false);
         try require(std.mem.indexOf(u8, rejected.stderr, item[0] ++ ".zig:") != null and std.mem.indexOf(u8, rejected.stderr, item[1]) != null and std.mem.indexOf(u8, rejected.stderr, item[2]) != null);
     }

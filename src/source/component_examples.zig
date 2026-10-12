@@ -86,31 +86,31 @@ fn suspension(b: *source.Builder, common_types: Common) !Built {
     const unit = try authoring.interop.schema(c, common_types.unit);
     const integer = try authoring.interop.schema(c, common_types.integer);
     const read = try authoring.interop.operation(c, common_types.read);
-    const compute_fn = try c.function("imported compute", &.{}, integer, &.{read});
+    const compute_fn = try c.function("imported compute", .{}, integer, &.{read});
     const release = try c.external("component/release", integer, unit);
     const generator = try gen.create(c, "component/yield", unit, integer, unit, .{
         .captures = .{ .continuation = &.{ unit, integer }, .body = &.{integer} },
         .residual = &.{release},
         .body_use = .reusable,
     });
-    const main_fn = try c.function("suspended component", &.{}, integer, &.{ read, release });
+    const main_fn = try c.function("suspended component", .{}, integer, &.{ read, release });
     const main_body = try c.body(main_fn);
-    const value = try main_body.call(compute_fn, &.{});
+    const value = try main_body.call(compute_fn, .{});
     const start_type = try c.handledSchema(generator.handler());
     const start_fn = try c.functionFor("component producer", start_type);
     const start = try main_body.closureBody(start_fn);
     const capability = try start.parameter("capability");
-    const body_type = try c.callable(&.{}, unit, &.{generator.effect()}, .{ .use = .reusable, .captures = &.{ generator.capability(), integer } });
+    const body_type = try c.callable(.{}, unit, &.{generator.effect()}, .{ .use = .reusable, .captures = &.{ generator.capability(), integer } });
     const body_fn = try c.functionFor("component suspension", body_type);
     const body = try start.closureBody(body_fn);
     _ = try body.performLocal(generator.effect(), capability, value);
     try c.define(body_fn, try body.ret(try body.constant(void, {})));
-    const cleanup_type = try c.callable(&.{.{ .name = "exit", .schema = try c.cleanupInfo(unit) }}, unit, &.{release}, .{ .use = .reusable, .captures = &.{integer} });
+    const cleanup_type = try c.callable(.{ .exit = try c.cleanupInfo(unit) }, unit, &.{release}, .{ .use = .reusable, .captures = &.{integer} });
     const cleanup_fn = try c.functionFor("component release", cleanup_type);
     const cleanup = try start.closureBody(cleanup_fn);
     try c.define(cleanup_fn, try cleanup.ret(try cleanup.perform(release, value)));
-    try c.define(start_fn, try start.ret(try start.protect(try start.lambda(body_fn, body_type), try start.lambda(cleanup_fn, cleanup_type), &.{})));
-    const answer = try main_body.handleWith(generator.handler(), try main_body.lambda(start_fn, start_type), &.{});
+    try c.define(start_fn, try start.ret(try start.protect(try start.lambda(body_fn, body_type), try start.lambda(cleanup_fn, cleanup_type), .{})));
+    const answer = try main_body.handleWith(generator.handler(), try main_body.lambda(start_fn, start_type), .{});
     const done = try main_body.caseOf(answer, "done");
     const yielded = try main_body.caseOf(answer, "yielded");
     const resumed = yielded.body();
@@ -119,7 +119,7 @@ fn suspension(b: *source.Builder, common_types: Common) !Built {
     const future = try parts.get("future");
     _ = try resumed.yieldNow();
     _ = try resumed.disposePackage(future);
-    try c.define(main_fn, try main_body.ret(try main_body.match(answer, &.{ try done.fail(integer, try done.body().constant(void, {})), try yielded.ret(label) })));
+    try c.define(main_fn, try main_body.ret(try main_body.match(answer, .{ .done = try done.fail(integer, try done.body().constant(void, {})), .yielded = try yielded.ret(label) })));
     const compute = try authoring.interop.functionId(c, compute_fn);
     const main = try authoring.interop.functionId(c, main_fn);
     const release_id = try authoring.interop.operationId(c, release);

@@ -1,2609 +1,1566 @@
-//! Checked staged authoring. Handles borrow the source builder's arena.
-//! Keep the source Builder at a stable address until all handles are discarded.
+//! Checked authoring with normalized structural interfaces and shared runtime ownership.
 const std = @import("std");
+const runtime = @import("authoring/runtime.zig");
 const source = @import("source.zig");
-const p = @import("horos_data").program;
-pub const Error = source.Error || error{
-    ForeignHandle,
-    OutOfScope,
-    ClosedBody,
-    PoisonedAuthoring,
-    SchemaMismatch,
-    UnknownName,
-    DuplicateName,
-    InvalidCategory,
-    InvalidBranch,
-    UndefinedBody,
-    UndefinedSchema,
-    SchemaAlreadyDefined,
-};
-// Record an escaping error before Zig's ordinary errdefer executes. The slot is
-// lexical: nested authoring calls cannot replace the caller's error, and cleanup
-// keeps its original order. Success values pass through without runtime work.
-inline fn captureError(destination: *anyerror, result: anytype) @TypeOf(result) {
-    return switch (@typeInfo(@TypeOf(result))) {
-        .error_union => result catch |err| {
-            destination.* = err;
-            return err;
-        },
-        .error_set => blk: {
-            destination.* = result;
-            break :blk result;
-        },
-        else => result,
-    };
-}
-
-pub const Schema = opaque {
-    pub fn fields(self: *const Schema) []const Field {
-        return data(SchemaData, self).fields;
-    }
-    pub fn resultSchema(self: *const Schema) ?*const Schema {
-        return data(SchemaData, self).result;
-    }
-    pub fn describe(self: *const Schema, writer: *std.Io.Writer) !void {
-        const item = data(SchemaData, self);
-        if (item.pending) |kind| return writer.print("unresolved {s}", .{@tagName(kind)});
-        const shape = contextData(item.owner).raw.schemas.items[@intCast(item.id)];
-        if (shape == .internal and shape.internal == .capability) {
-            const instance = shape.internal.capability;
-            if (instance >= contextData(item.owner).raw.effects.items.len)
-                return writer.writeAll("capability(invalid instance)");
-            return writer.print("capability({s}, instance {d})", .{
-                contextData(item.owner).raw.effects.items[@intCast(instance)].identity, instance,
-            });
-        }
-        if (shape == .internal) {
-            try writer.writeAll(@tagName(shape.internal));
-            if (shape.internal == .computation)
-                try writer.print("[{s}]", .{@tagName(shape.internal.computation.use)});
-            if (shape.internal == .resumption)
-                try writer.print("[{s}, {s}]", .{ @tagName(shape.internal.resumption.mode), @tagName(shape.internal.resumption.use) });
-        } else try writer.writeAll(@tagName(shape));
-        if (item.fields.len != 0) {
-            try writer.writeByte('(');
-            for (item.fields, 0..) |named, i| {
-                if (i != 0) try writer.writeAll(", ");
-                try writer.writeAll(named.name);
-            }
-            try writer.writeByte(')');
-        }
-        if (item.result) |returned| {
-            const result_info = data(SchemaData, returned);
-            try writer.print(" -> {s}", .{
-                @tagName(contextData(result_info.owner).raw.schemas.items[@intCast(result_info.id)]),
-            });
-        }
-    }
-};
-pub const Operation = opaque {};
-pub const SchemaKind = enum { alternatives, callable, resumption };
-pub const SchemaDeclaration = opaque {
-    pub fn schema(self: *const SchemaDeclaration) *const Schema {
-        return data(SchemaDeclarationData, self).schema;
-    }
-};
-pub const Function = opaque {};
-pub const Value = opaque {};
-pub const FailureLiteral = opaque {};
-pub const Computation = opaque {};
-pub const Handler = opaque {};
-pub const Region = opaque {};
-pub const Case = opaque {
-    pub fn body(self: *const Case) *Body {
-        return data(CaseData, self).body;
-    }
-    pub fn payload(self: *const Case) *const Value {
-        return data(CaseData, self).payload;
-    }
-    pub fn ret(self: *const Case, value: *const Value) Error!*const FinishedCase {
-        const item = data(CaseData, self);
-        const computation = try item.body.ret(value);
-        return handle(FinishedCase, try bodyData(item.body).context.save(FinishedCaseData, .{ .case = self, .computation = computation }));
-    }
-    pub fn fail(self: *const Case, result: *const Schema, failure: *const Value) Error!*const FinishedCase {
-        const item = data(CaseData, self);
-        const computation = try item.body.fail(result, failure);
-        return handle(FinishedCase, try bodyData(item.body).context.save(FinishedCaseData, .{ .case = self, .computation = computation }));
-    }
-};
-pub const FinishedCase = opaque {};
-pub const ProductParts = opaque {
-    pub fn get(self: *const ProductParts, name: []const u8) Error!*const Value {
-        const parts = data(ProductPartsData, self);
-        try parts.body.ready();
-        for (parts.fields) |field| if (std.mem.eql(u8, field.name, name)) return field.value;
-        return bodyData(parts.body).context.reject(error.UnknownName, "product", "unknown field");
-    }
-};
-pub const CallableOptions = struct {
-    use: p.Use,
-    captures: []const *const Schema,
-    regions: []const *const Region = &.{},
-};
-pub const HandlerOptions = struct {
-    /// Optional forward declarations, in operation order, completed by this handler.
-    resumption_slots: ?[]const *const SchemaDeclaration = null,
-    /// Permit protected cleanup obligations in captured resumptions.
-    obligations: bool = false,
-    mode: p.Mode,
-    use: p.Use,
-    residual: []const *const Operation,
-    /// Null preserves the handler's residual row; an empty row declares a pure return arm.
-    return_effects: ?[]const *const Operation = null,
-    /// Null preserves the residual row; a packaging-only clause can be pure.
-    clause_effects: ?[]const *const Operation = null,
-    escaping: []const *const Operation = &.{},
-    captures: []const *const Schema,
-    body_use: p.Use = .linear,
-    body_captures: []const *const Schema = &.{},
-    /// Explicit inputs following the automatically supplied capabilities.
-    body_parameters: []const Field = &.{},
-    owned_regions: []const *const Region = &.{},
-    borrowed_regions: []const *const Region = &.{},
-    state: []const Field = &.{},
-};
-pub const Field = struct { name: []const u8, schema: *const Schema };
-pub const CaptureBounds = struct { continuation: []const *const Schema, body: []const *const Schema = &.{} };
-pub const HandledOperation = struct { name: []const u8, operation: *const Operation };
-pub const Argument = struct { name: []const u8, value: *const Value };
-pub const Arithmetic = enum { add, subtract, multiply, divide, remainder };
-pub const ArithmeticFailures = struct {
-    overflow: *const FailureLiteral,
-    division_by_zero: ?*const FailureLiteral = null,
-};
+const data = @import("horos_data");
+const native = data.schema.native;
+const p = data.program;
+pub const Error = runtime.Error;
+pub const Dynamic = struct {};
+pub const Shape = native.Shape;
+pub const sourceError = runtime.sourceError;
 pub const Diagnostic = struct {
     code: ?anyerror = null,
     entity: []const u8 = "",
     relationship: []const u8 = "",
-    expected: ?*const Schema = null,
-    actual: ?*const Schema = null,
-    source: ?@import("source.zig").Diagnostic = null,
-
-    pub fn renderAlloc(
-        self: Diagnostic,
-        allocator: std.mem.Allocator,
-    ) std.mem.Allocator.Error![]u8 {
-        var output = std.Io.Writer.Allocating.init(allocator);
-        errdefer output.deinit();
-        // This writer's only failure cause is allocation, unlike an arbitrary I/O writer.
-        self.render(&output.writer) catch return error.OutOfMemory;
-        return output.toOwnedSlice();
+    expected: ?*const Schema(Dynamic) = null,
+    actual: ?*const Schema(Dynamic) = null,
+    source: ?source.Diagnostic = null,
+    fn fromRaw(value: runtime.Diagnostic) Diagnostic {
+        return .{ .code = value.code, .entity = value.entity, .relationship = value.relationship, .expected = @ptrCast(value.expected), .actual = @ptrCast(value.actual), .source = value.source };
+    }
+    fn raw(self: Diagnostic) runtime.Diagnostic {
+        return .{ .code = self.code, .entity = self.entity, .relationship = self.relationship, .expected = @ptrCast(self.expected), .actual = @ptrCast(self.actual), .source = self.source };
     }
     pub fn render(self: Diagnostic, writer: *std.Io.Writer) !void {
-        try writer.print("{s}: {s}: {s}", .{
-            if (self.code) |code| @errorName(code) else "ok", self.entity, self.relationship,
-        });
-        if (self.expected) |schema| {
-            try writer.writeAll("; expected ");
-            try schema.describe(writer);
-        }
-        if (self.actual) |schema| {
-            try writer.writeAll("; actual ");
-            try schema.describe(writer);
-        }
+        return self.raw().render(writer);
+    }
+    pub fn renderAlloc(self: Diagnostic, allocator: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
+        return self.raw().renderAlloc(allocator);
     }
 };
-const SchemaData = struct {
-    owner: *Context,
-    id: p.Id,
-    fields: []const Field = &.{},
-    result: ?*const Schema = null,
-    captures: []const *const Schema = &.{},
-    pending: ?SchemaKind = null,
-};
-const SchemaDeclarationData = struct { schema: *const Schema };
-const OperationData = struct {
-    owner: *Context,
-    id: p.Id,
-    name: []const u8,
-    payload: *const Schema,
-    result: *const Schema,
-    external: bool,
-    bodies: []const Field = &.{},
-};
-const FunctionData = struct {
-    owner: *Context,
-    id: p.Id,
-    name: []const u8,
-    parameters: []const Field,
-    result: *const Schema,
-    scope: ?*Scope = null,
-    callable_schema: ?*const Schema = null,
-};
-const ValueData = struct {
-    owner: *Context,
-    id: p.Id,
-    schema: *const Schema,
-    scope: ?*Scope,
-};
-const FailureLiteralData = struct {
-    owner: *Context,
-    value: *const Value,
-    literal: p.Id,
-};
-const ComputationData = struct {
-    owner: *Context,
-    id: p.Id,
-    schema: *const Schema,
-    scope: *Scope,
-};
-const HandlerData = struct {
-    owner: *Context,
-    id: p.Id,
-    clauses: []const HandlerClauseData,
-    input: *const Schema,
-    answer: *const Schema,
-    body_schema: *const Schema,
-    returns: *const Function,
-    state: []const Field,
-};
-const HandlerClauseData = struct { operation: *const Operation, resumption: *const Schema, function: *const Function };
-const CaseData = struct {
-    body: *Body,
-    payload: *const Value,
-    sum: *const Value,
-    index: usize,
-    variable: p.Id,
-};
-const FinishedCaseData = struct { case: *const Case, computation: *const Computation };
-const RegionData = struct { owner: *Context, id: p.Id };
-const Scope = struct { parent: ?*Scope, active: bool = true };
-const PublicationUse = struct {
-    anchor: union(enum) { value: p.Id, term: p.Id },
-    contract: union(enum) {
-        failure: *const Schema,
-        cleanup: *const Schema,
-        function_scope: struct { declaration: *const Function, scope: *Scope },
-    },
-};
-const ProductPartsData = struct { body: *Body, fields: []const Argument };
-const Binding = union(enum) {
-    bind: struct { variable: p.Id, term: p.Id },
-    unpack: struct { value: p.Id, variables: []const p.Id },
-    yield_now,
-};
-fn data(comptime T: type, pointer: anytype) *const T {
-    return @ptrCast(@alignCast(pointer));
+pub const Region = runtime.Region;
+pub const Arithmetic = runtime.Arithmetic;
+pub const SchemaKind = runtime.SchemaKind;
+
+pub const Family = enum { schema, value, function, body, computation, operation, failure_literal, case, finished_case, region, handler, declaration, product_parts };
+const Metadata = struct { family: Family, shape: type };
+
+fn Simple(comptime family: Family, comptime S: type) type {
+    return opaque {
+        pub const horos_handle: Metadata = .{ .family = family, .shape = S };
+    };
 }
-fn handle(comptime T: type, pointer: anytype) *const T {
-    return @ptrCast(pointer);
+pub fn Value(comptime S: type) type {
+    return Simple(.value, S);
+}
+pub fn Function(comptime S: type) type {
+    return Simple(.function, S);
+}
+pub fn Computation(comptime S: type) type {
+    return Simple(.computation, S);
+}
+pub fn Operation(comptime S: type) type {
+    return Simple(.operation, S);
+}
+pub fn FailureLiteral(comptime S: type) type {
+    return Simple(.failure_literal, S);
+}
+pub fn Handler(comptime S: type) type {
+    return Simple(.handler, S);
+}
+pub fn FinishedCase(comptime S: type) type {
+    return Simple(.finished_case, S);
 }
 
-/// One arena-owned authoring context. No global registry or runtime evaluator.
-const ContextData = struct {
-    raw: *source.Builder,
-    poisoned: bool = false,
-    diagnostic: Diagnostic = .{},
-    schemas: std.ArrayList(*const Schema) = .empty,
-    imported: std.AutoHashMapUnmanaged(p.Id, *const Schema) = .empty,
-    functions: std.ArrayList(*const Function) = .empty,
-    twice_definitions: std.AutoHashMapUnmanaged(*const Schema, *const Function) = .empty,
-    publication_uses: std.ArrayList(PublicationUse) = .empty,
-    variable_schemas: std.AutoHashMapUnmanaged(p.Id, *const Schema) = .empty,
-    lambda_schemas: std.AutoHashMapUnmanaged(p.Id, *const Schema) = .empty,
-    handlers: std.ArrayList(*const Handler) = .empty,
-    capture_failure: ?Error = null,
-};
-fn contextData(c: *const Context) *ContextData {
-    return @ptrCast(@alignCast(@constCast(c)));
+fn canonical(comptime family: Family, comptime S: type) type {
+    return switch (family) {
+        .schema => Schema(S),
+        .body => Body(S),
+        .case => Case(S),
+        .declaration => SchemaDeclaration(S),
+        .product_parts => ProductParts(S),
+        .region => Region,
+        else => Simple(family, S),
+    };
 }
+
+/// A declaration with the right spelling is insufficient: only the canonical
+/// opaque type produced by the corresponding factory passes this check.
+fn metadata(comptime T: type) Metadata {
+    @setEvalBranchQuota(10000);
+    if (@typeInfo(T) != .pointer or @typeInfo(T).pointer.size != .one)
+        @compileError("Horos authoring: expected a canonical handle pointer");
+    const Child = @typeInfo(T).pointer.child;
+    if (Child == Region) return .{ .family = .region, .shape = Dynamic };
+    if (@typeInfo(Child) != .@"opaque" or !@hasDecl(Child, "horos_handle"))
+        @compileError("Horos authoring: expected a canonical handle pointer");
+    if (@TypeOf(Child.horos_handle) != Metadata)
+        @compileError("Horos authoring: expected a canonical handle pointer");
+    const m = Child.horos_handle;
+    if (Child != canonical(m.family, m.shape))
+        @compileError("Horos authoring: expected a canonical handle pointer");
+    return m;
+}
+
+fn index(comptime family: Family, comptime T: type) type {
+    const m = metadata(T);
+    if (m.family != family) @compileError("Horos authoring: wrong handle family; expected " ++ @tagName(family));
+    return m.shape;
+}
+
+pub fn ShapeOf(comptime T: type) type {
+    return metadata(T).shape;
+}
+
+fn rawType(comptime family: Family) type {
+    return switch (family) {
+        .schema => runtime.Schema,
+        .value => runtime.Value,
+        .function => runtime.Function,
+        .body => runtime.Body,
+        .computation => runtime.Computation,
+        .operation => runtime.Operation,
+        .failure_literal => runtime.FailureLiteral,
+        .case => runtime.Case,
+        .finished_case => runtime.FinishedCase,
+        .region => runtime.Region,
+        .handler => runtime.Handler,
+        .declaration => runtime.SchemaDeclaration,
+        .product_parts => runtime.ProductParts,
+    };
+}
+fn erased(comptime family: Family, value: anytype) *const rawType(family) {
+    _ = comptime index(family, @TypeOf(value));
+    return @ptrCast(value);
+}
+fn rawContext(c: *Context) *runtime.Context {
+    return @ptrCast(c);
+}
+
+fn fieldsInfo(comptime T: type, comptime operation: []const u8) std.lang.Type.Struct {
+    if (@typeInfo(T) != .@"struct") @compileError("Horos " ++ operation ++ ": expected a named struct of handles");
+    const fields = @typeInfo(T).@"struct";
+    if (fields.is_tuple and fields.field_types.len != 0)
+        @compileError("Horos " ++ operation ++ ": expected a named struct of handles");
+    return fields;
+}
+
+fn namedShape(comptime family: Family, comptime T: type) type {
+    if (T == *const interop.RuntimeNamed(family)) return Dynamic;
+    const fields = fieldsInfo(T, "declaration");
+    var children: [fields.field_types.len]type = undefined;
+    for (fields.field_types, 0..) |Child, i| children[i] = index(family, Child);
+    return native.Fields(fields.field_names, &children);
+}
+
+fn Collection(comptime family: Family, comptime T: type) type {
+    const Raw = RawNamed(family);
+    const dynamic = T == *const interop.RuntimeNamed(family);
+    const count = if (dynamic) 0 else fieldsInfo(T, "named collection").field_types.len;
+    return struct {
+        owned: [count]Raw = undefined,
+        borrowed: []const Raw = &.{},
+        fn slice(self: *const @This()) []const Raw {
+            return if (dynamic) self.borrowed else &self.owned;
+        }
+    };
+}
+
+fn packSchemas(values: anytype) Collection(.schema, @TypeOf(values)) {
+    if (comptime @TypeOf(values) == *const interop.RuntimeNamed(.schema)) {
+        const stored: *const NamedData(.schema) = @ptrCast(@alignCast(values));
+        return .{ .borrowed = stored.entries };
+    }
+    return .{ .owned = schemas(values) };
+}
+
+fn packArguments(comptime Fields: type, values: anytype, comptime operation: []const u8) Collection(.value, @TypeOf(values)) {
+    if (comptime @TypeOf(values) == *const interop.RuntimeNamed(.value)) {
+        const stored: *const NamedData(.value) = @ptrCast(@alignCast(values));
+        return .{ .borrowed = stored.entries };
+    }
+    return .{ .owned = arguments(Fields, values, operation) };
+}
+
+fn recordShape(comptime kind: enum { product, sum }, comptime T: type) type {
+    const Fields = namedShape(.schema, T);
+    return if (Fields == Dynamic) Dynamic else native.Contract(@unionInit(native.Info, @tagName(kind), Fields));
+}
+
+fn schemas(values: anytype) [fieldsInfo(@TypeOf(values), "declaration").field_types.len]runtime.Field {
+    const fields = comptime fieldsInfo(@TypeOf(values), "declaration");
+    var result: [fields.field_types.len]runtime.Field = undefined;
+    inline for (fields.field_names, 0..) |name, i|
+        result[i] = .{ .name = name, .schema = erased(.schema, @field(values, name)) };
+    return result;
+}
+
+fn listCount(comptime T: type) ?usize {
+    return switch (@typeInfo(T)) {
+        .@"struct" => |s| s.field_types.len,
+        .array => |array| array.len,
+        .optional => |o| listCount(o.child),
+        .null => 0,
+        .pointer => |pointer| if (pointer.size == .slice) null else listCount(pointer.child),
+        else => @compileError("Horos handle collection: expected a tuple, array, or slice"),
+    };
+}
+fn HandleList(comptime family: Family, comptime T: type) type {
+    const count = listCount(T);
+    return struct {
+        present: bool = true,
+        owned: [count orelse 0]*const rawType(family) = undefined,
+        borrowed: []const *const rawType(family) = &.{},
+        fn optionalSlice(self: *const @This()) ?[]const *const rawType(family) {
+            return if (self.present) self.slice() else null;
+        }
+        fn slice(self: *const @This()) []const *const rawType(family) {
+            if (!self.present) return &.{};
+            return if (count == null) self.borrowed else &self.owned;
+        }
+    };
+}
+fn handles(comptime family: Family, values: anytype) HandleList(family, @TypeOf(values)) {
+    const T = @TypeOf(values);
+    var list: HandleList(family, T) = .{};
+    if (comptime @typeInfo(T) == .null) {
+        list.present = false;
+    } else if (comptime @typeInfo(T) == .optional) {
+        if (values) |present| {
+            const nested = handles(family, present);
+            list.present = nested.present;
+            if (nested.present) {
+                list.owned = nested.owned;
+                list.borrowed = nested.borrowed;
+            }
+        } else list.present = false;
+    } else if (comptime listCount(T) == null) {
+        _ = comptime index(family, @typeInfo(T).pointer.child);
+        list.borrowed = @as([*]const *const rawType(family), @ptrCast(values.ptr))[0..values.len];
+    } else if (comptime @typeInfo(T) == .@"struct") {
+        inline for (@typeInfo(T).@"struct".field_names, 0..) |name, i| list.owned[i] = erased(family, @field(values, name));
+    } else {
+        inline for (values, 0..) |value, i| list.owned[i] = erased(family, value);
+    }
+    return list;
+}
+fn OptionType(comptime T: type, comptime name: []const u8, comptime Default: type) type {
+    return if (@hasField(T, name)) @FieldType(T, name) else Default;
+}
+inline fn option(options: anytype, comptime name: []const u8, default: anytype) OptionType(@TypeOf(options), name, @TypeOf(default)) {
+    return if (@hasField(@TypeOf(options), name)) @field(options, name) else default;
+}
+
+fn optionalFailure(value: anytype) ?*const runtime.FailureLiteral {
+    return switch (@typeInfo(@TypeOf(value))) {
+        .null => null,
+        .optional => if (value) |present| erased(.failure_literal, present) else null,
+        else => erased(.failure_literal, value),
+    };
+}
+
+fn mismatch(comptime path: []const u8) noreturn {
+    @compileError("Horos " ++ path ++ ": incompatible schema shape");
+}
+
+const ShapePair = struct { expected: type, actual: type };
+const ShapeRelation = enum { compatible, declaration };
+
+fn compatible(comptime Expected: type, comptime Actual: type, comptime path: []const u8) void {
+    compareShapes(Expected, Actual, path, .compatible, &.{});
+}
+
+// A declaration promises facts that must survive completion. Ordinary uses may
+// instead defer unknown portions to the runtime compatibility owner.
+fn declarationCompatible(comptime Expected: type, comptime Actual: type, comptime path: []const u8) void {
+    compareShapes(Expected, Actual, path, .declaration, &.{});
+}
+
+fn compareShapes(comptime Expected: type, comptime Actual: type, comptime path: []const u8, comptime relation: ShapeRelation, comptime ancestors: []const ShapePair) void {
+    if (Expected == Actual or Expected == Dynamic) return;
+    if (Actual == Dynamic) {
+        if (relation == .declaration) @compileError("Horos " ++ path ++ ": refine the unknown input before fulfilling a known declaration shape");
+        return;
+    }
+    // Shape descriptions can be finite recursive graphs (Search and Reader).
+    // Re-entering the same pair adds no obligation; sibling fields still run.
+    for (ancestors) |pair| if (pair.expected == Expected and pair.actual == Actual) return;
+    const next = ancestors ++ [_]ShapePair{.{ .expected = Expected, .actual = Actual }};
+    if (@hasDecl(Expected, "internal") or @hasDecl(Actual, "internal")) {
+        if (!@hasDecl(Expected, "internal") or !@hasDecl(Actual, "internal")) mismatch(path);
+        const left = Expected.internal;
+        const right = Actual.internal;
+        if (std.meta.activeTag(left) != std.meta.activeTag(right)) mismatch(path);
+        switch (left) {
+            .region => {},
+            .callable => |signature| compareSignatures(signature, right.callable, path, relation, next),
+            .capability => |signature| {
+                if (signature == Dynamic) return;
+                if (right.capability == Dynamic) {
+                    if (relation == .declaration) @compileError("Horos " ++ path ++ ": unknown capability cannot fulfill a known declaration shape");
+                    return;
+                }
+                compareShapes(signature.payload, right.capability.payload, path ++ ".payload", relation, next);
+                compareShapes(signature.result, right.capability.result, path ++ ".reply", relation, next);
+                compareFields(signature.bodies, right.capability.bodies, path ++ ".bodies", relation, next);
+            },
+            .resumption => |signature| {
+                if (signature == Dynamic) return;
+                if (right.resumption == Dynamic) {
+                    if (relation == .declaration) @compileError("Horos " ++ path ++ ": unknown resumption cannot fulfill a known declaration shape");
+                    return;
+                }
+                if (signature.mode != right.resumption.mode) mismatch(path ++ ".mode");
+                compareShapes(signature.reply, right.resumption.reply, path ++ ".reply", relation, next);
+                compareShapes(signature.result, right.resumption.result, path ++ ".result", relation, next);
+            },
+            .cell, .resource, .borrowed, .package => |element, tag| compareShapes(element, @field(right, @tagName(tag)), path ++ ".element", relation, next),
+        }
+        return;
+    }
+    const left = Expected.contract;
+    const right = Actual.contract;
+    if (std.meta.activeTag(left) != std.meta.activeTag(right)) mismatch(path);
+    switch (left) {
+        .product, .sum => |Fields, tag| {
+            const lhs = @typeInfo(Fields).@"struct";
+            const rhs = @typeInfo(@field(right, @tagName(tag))).@"struct";
+            if (lhs.field_types.len != rhs.field_types.len) mismatch(path);
+            for (lhs.field_names, lhs.field_types, rhs.field_names, rhs.field_types) |ln, L, rn, R| {
+                if (!std.mem.eql(u8, ln, rn)) mismatch(path ++ "." ++ ln);
+                compareShapes(L, R, path ++ "." ++ ln, relation, next);
+            }
+        },
+        .array => |array| {
+            if (array.length != right.array.length) mismatch(path);
+            compareShapes(array.element, right.array.element, path ++ ".element", relation, next);
+        },
+        .sequence => |sequence| {
+            if (sequence.maximum != right.sequence.maximum) mismatch(path);
+            compareShapes(sequence.element, right.sequence.element, path ++ ".element", relation, next);
+        },
+        else => mismatch(path),
+    }
+}
+fn compareFields(comptime Expected: type, comptime Actual: type, comptime path: []const u8, comptime relation: ShapeRelation, comptime ancestors: []const ShapePair) void {
+    if (Expected == Actual or Expected == Dynamic) return;
+    if (Actual == Dynamic) {
+        if (relation == .declaration) @compileError("Horos " ++ path ++ ": runtime names cannot fulfill a known declaration without refinement");
+        return;
+    }
+    compareShapes(native.Contract(.{ .product = Expected }), native.Contract(.{ .product = Actual }), path, relation, ancestors);
+}
+fn compatibleSignature(comptime Expected: type, comptime Actual: type, comptime path: []const u8) void {
+    compareSignatures(Expected, Actual, path, .compatible, &.{});
+}
+fn compareSignatures(comptime Expected: type, comptime Actual: type, comptime path: []const u8, comptime relation: ShapeRelation, comptime ancestors: []const ShapePair) void {
+    if (Expected == Actual or Expected == Dynamic) return;
+    if (Actual == Dynamic) {
+        if (relation == .declaration) @compileError("Horos " ++ path ++ ": unknown callable cannot fulfill a known declaration shape");
+        return;
+    }
+    compareFields(Expected.parameters, Actual.parameters, path ++ ".parameters", relation, ancestors);
+    compareShapes(Expected.result, Actual.result, path ++ ".result", relation, ancestors);
+}
+
+pub const InternalInfo = union(enum) {
+    callable: type,
+    capability: type,
+    cell: type,
+    region,
+    resource: type,
+    borrowed: type,
+    package: type,
+    resumption: type,
+};
+pub fn Internal(comptime description: InternalInfo) type {
+    return struct {
+        pub const internal = description;
+    };
+}
+fn internalChild(comptime S: type, comptime kind: std.meta.Tag(InternalInfo), comptime operation: []const u8) type {
+    if (S == Dynamic) return Dynamic;
+    if (!@hasDecl(S, "internal") or std.meta.activeTag(S.internal) != kind)
+        @compileError("Horos " ++ operation ++ ": expected " ++ @tagName(kind) ++ " shape");
+    return @field(S.internal, @tagName(kind));
+}
+fn callableSignature(comptime S: type, comptime operation: []const u8) type {
+    return internalChild(S, .callable, operation);
+}
+fn resourceRepresentation(comptime S: type) type {
+    if (S == Dynamic) return Dynamic;
+    const Resource = if (@hasDecl(S, "internal") and S.internal == .borrowed) S.internal.borrowed else S;
+    return internalChild(Resource, .resource, "unpackResource");
+}
+
+fn child(comptime Fields: type, comptime name: []const u8, comptime operation: []const u8) type {
+    if (Fields == Dynamic) return Dynamic;
+    if (!@hasField(Fields, name)) @compileError("Horos " ++ operation ++ "." ++ name ++ ": unknown name");
+    return @FieldType(Fields, name);
+}
+
+fn productFields(comptime S: type, comptime operation: []const u8) type {
+    if (S == Dynamic) return Dynamic;
+    if (!@hasDecl(S, "contract") or S.contract != .product) @compileError("Horos " ++ operation ++ ": expected a product shape");
+    return S.contract.product;
+}
+fn sumFields(comptime S: type, comptime operation: []const u8) type {
+    if (S == Dynamic) return Dynamic;
+    if (!@hasDecl(S, "contract") or S.contract != .sum) @compileError("Horos " ++ operation ++ ": expected a sum shape");
+    return S.contract.sum;
+}
+
+fn CaseSignature(comptime Sum: type, comptime arm_index: usize) type {
+    return struct {
+        pub const sum = Sum;
+        pub const arm = arm_index;
+        pub const payload = @typeInfo(sumFields(Sum, "caseOf")).@"struct".field_types[arm_index];
+    };
+}
+fn caseSignature(comptime S: type, comptime name: []const u8) type {
+    if (S == Dynamic) return Dynamic;
+    const Fields = sumFields(S, "caseOf");
+    if (!@hasField(Fields, name)) @compileError("Horos caseOf." ++ name ++ ": unknown name");
+    return CaseSignature(S, @backingInt(@field(FieldOrdinals(Fields).Index, name)));
+}
+fn FieldOrdinals(comptime Fields: type) type {
+    return struct {
+        const Index = std.meta.FieldEnum(Fields);
+    };
+}
+fn casePayload(comptime S: type) type {
+    return if (S == Dynamic) Dynamic else S.payload;
+}
+fn FinishedSignature(comptime C: type, comptime R: type) type {
+    return struct {
+        pub const case = C;
+        pub const result = R;
+    };
+}
+pub fn Case(comptime S: type) type {
+    return opaque {
+        const Self = @This();
+        pub const horos_handle: Metadata = .{ .family = .case, .shape = S };
+        pub fn body(self: *const Self) *Body(native.Fields(&.{}, &.{})) {
+            return @ptrCast(erased(.case, self).body());
+        }
+        pub fn payload(self: *const Self) *const Value(casePayload(S)) {
+            return @ptrCast(erased(.case, self).payload());
+        }
+        pub fn ret(self: *const Self, value: anytype) Error!*const FinishedCase(FinishedSignature(S, index(.value, @TypeOf(value)))) {
+            return @ptrCast(try erased(.case, self).ret(erased(.value, value)));
+        }
+        pub fn fail(self: *const Self, returns: anytype, failure: anytype) Error!*const FinishedCase(FinishedSignature(S, index(.schema, @TypeOf(returns)))) {
+            return @ptrCast(try erased(.case, self).fail(erased(.schema, returns), erased(.value, failure)));
+        }
+    };
+}
+
+fn matchResult(comptime Sum: type, comptime Cases: type) type {
+    if (Cases == *const interop.RuntimeNamed(.finished_case)) return Dynamic;
+    const supplied = fieldsInfo(Cases, "match");
+    const Fields = sumFields(Sum, "match");
+    if (Fields != Dynamic) {
+        for (@typeInfo(Fields).@"struct".field_names) |name| if (!@hasField(Cases, name))
+            @compileError("Horos match." ++ name ++ ": missing case");
+        for (supplied.field_names) |name| if (!@hasField(Fields, name))
+            @compileError("Horos match." ++ name ++ ": extra case");
+    }
+    var R: type = Dynamic;
+    for (supplied.field_names, supplied.field_types) |name, T| {
+        const Finished = index(.finished_case, T);
+        if (Finished != Dynamic) {
+            if (Finished.case != Dynamic) {
+                compatible(Sum, Finished.case.sum, "match." ++ name);
+                const actual_name = @typeInfo(sumFields(Finished.case.sum, "match")).@"struct".field_names[Finished.case.arm];
+                if (!std.mem.eql(u8, name, actual_name)) @compileError("Horos match." ++ name ++ ": case belongs to a different arm");
+            }
+            compatible(R, Finished.result, "match." ++ name ++ " result");
+            if (R == Dynamic) R = Finished.result;
+        }
+    }
+    return R;
+}
+
+fn arguments(comptime Fields: type, values: anytype, comptime operation: []const u8) [fieldsInfo(@TypeOf(values), operation).field_types.len]runtime.Argument {
+    const supplied = comptime fieldsInfo(@TypeOf(values), operation);
+    comptime {
+        if (Fields != Dynamic) {
+            const expected = @typeInfo(Fields).@"struct";
+            for (expected.field_names, expected.field_types) |name, S| {
+                if (!@hasField(@TypeOf(values), name)) @compileError("Horos " ++ operation ++ "." ++ name ++ ": missing field");
+                compatible(S, index(.value, @FieldType(@TypeOf(values), name)), operation ++ "." ++ name);
+            }
+            for (supplied.field_names) |name| if (!@hasField(Fields, name))
+                @compileError("Horos " ++ operation ++ "." ++ name ++ ": extra field");
+        }
+    }
+    var result: [supplied.field_types.len]runtime.Argument = undefined;
+    inline for (supplied.field_names, 0..) |name, i|
+        result[i] = .{ .name = name, .value = erased(.value, @field(values, name)) };
+    return result;
+}
+
+pub fn Signature(comptime Parameters: type, comptime Result: type) type {
+    return struct {
+        pub const parameters = Parameters;
+        pub const result = Result;
+    };
+}
+pub fn OperationSignature(comptime Payload: type, comptime Reply: type, comptime Bodies: type) type {
+    return struct {
+        pub const payload = Payload;
+        pub const result = Reply;
+        pub const bodies = Bodies;
+    };
+}
+fn parameters(comptime S: type) type {
+    return if (S == Dynamic) Dynamic else S.parameters;
+}
+fn resultShape(comptime S: type) type {
+    return if (S == Dynamic) Dynamic else S.result;
+}
+
+fn DeclarationSignature(comptime declared_kind: SchemaKind, comptime S: type) type {
+    return struct {
+        pub const kind = declared_kind;
+        pub const shape = S;
+    };
+}
+pub fn SchemaDeclaration(comptime S: type) type {
+    return opaque {
+        pub const horos_handle: Metadata = .{ .family = .declaration, .shape = S };
+        pub fn schema(self: *const @This()) *const Schema(if (S == Dynamic) Dynamic else S.shape) {
+            return @ptrCast(erased(.declaration, self).schema());
+        }
+    };
+}
+pub fn ProductParts(comptime S: type) type {
+    return opaque {
+        pub const horos_handle: Metadata = .{ .family = .product_parts, .shape = S };
+        pub fn get(self: *const @This(), comptime name: []const u8) Error!*const Value(child(productFields(S, "ProductParts.get"), name, "ProductParts.get")) {
+            return @ptrCast(try erased(.product_parts, self).get(name));
+        }
+    };
+}
+fn declarationShape(comptime D: type, comptime kind: SchemaKind) type {
+    if (D == Dynamic) return Dynamic;
+    if (D.kind != kind) @compileError("Horos declaration: wrong schema category");
+    return D.shape;
+}
+fn reflectedFields(comptime S: type) type {
+    if (S == Dynamic) return Dynamic;
+    if (@hasDecl(S, "contract")) return switch (S.contract) {
+        .product, .sum => |fields| fields,
+        else => native.Fields(&.{}, &.{}),
+    };
+    return switch (S.internal) {
+        .callable => |Sig| parameters(Sig),
+        .resumption => |Sig| if (Sig == Dynamic) Dynamic else native.Fields(&.{"reply"}, &.{Sig.reply}),
+        else => native.Fields(&.{}, &.{}),
+    };
+}
+fn reflectedResult(comptime S: type) type {
+    if (S == Dynamic) return Dynamic;
+    if (@hasDecl(S, "contract")) return switch (S.contract) {
+        .sequence => |v| v.element,
+        .array => |v| v.element,
+        else => @compileError("Horos resultSchema: schema has no result or element"),
+    };
+    return switch (S.internal) {
+        .callable, .resumption => |Sig| resultShape(Sig),
+        .cell, .resource, .borrowed, .package => |Element| Element,
+        else => @compileError("Horos resultSchema: schema has no result or element"),
+    };
+}
+
+pub fn Schema(comptime S: type) type {
+    return opaque {
+        const Self = @This();
+        pub const horos_handle: Metadata = .{ .family = .schema, .shape = S };
+        pub fn fields(self: *const Self) Error!SchemaFields(S) {
+            const Fields = reflectedFields(S);
+            var out: SchemaFields(S) = undefined;
+            const stored = try erased(.schema, self).checkedFields();
+            inline for (@typeInfo(Fields).@"struct".field_names, 0..) |name, i|
+                @field(out, name) = @ptrCast(stored[i].schema);
+            return out;
+        }
+        pub fn resultSchema(self: *const Self) Error!(if (S == Dynamic) ?*const Schema(Dynamic) else *const Schema(reflectedResult(S))) {
+            const result = try erased(.schema, self).checkedResult();
+            if (comptime S == Dynamic) return @ptrCast(result);
+            return @ptrCast(result.?);
+        }
+        pub fn describe(self: *const Self, writer: *std.Io.Writer) !void {
+            return erased(.schema, self).describe(writer);
+        }
+    };
+}
+fn SchemaFields(comptime S: type) type {
+    const Fields = reflectedFields(S);
+    if (Fields == Dynamic) @compileError("Horos schema fields: use interop for runtime metadata");
+    const f = @typeInfo(Fields).@"struct";
+    var children: [f.field_types.len]type = undefined;
+    for (f.field_types, 0..) |Child, i| children[i] = *const Schema(Child);
+    return native.Fields(f.field_names, &children);
+}
+
+fn joinFields(comptime A: type, comptime B: type) type {
+    if (A == Dynamic or B == Dynamic) return Dynamic;
+    const a = @typeInfo(A).@"struct";
+    const b = @typeInfo(B).@"struct";
+    for (a.field_names) |name| if (@hasField(B, name)) @compileError("Horos interface: duplicate field " ++ name);
+    return native.Fields(a.field_names ++ b.field_names, a.field_types ++ b.field_types);
+}
+fn knownMode(comptime T: type) ?p.Mode {
+    const f = fieldsInfo(T, "handler options");
+    for (f.field_names, f.field_types, f.field_attrs) |name, Field, attributes| {
+        if (std.mem.eql(u8, name, "mode") and attributes.@"comptime") return @as(p.Mode, attributes.defaultValue(Field).?);
+    }
+    return null;
+}
+pub fn HandlerShape(comptime Ops: type, comptime Input: type, comptime Answer: type, comptime State: type, comptime BodyParameters: type, comptime selected_mode: p.Mode) type {
+    return struct {
+        pub const operations = Ops;
+        pub const input = Input;
+        pub const result = Answer;
+        pub const state = State;
+        pub const body_parameters = BodyParameters;
+        pub const mode = selected_mode;
+    };
+}
+fn HandlerSignature(comptime Ops: type, comptime Input: type, comptime Answer: type, comptime Options: type, comptime selected_mode: p.Mode) type {
+    return HandlerShape(Ops, Input, Answer, namedShape(.schema, OptionType(Options, "state", @TypeOf(.{}))), namedShape(.schema, OptionType(Options, "body_parameters", @TypeOf(.{}))), selected_mode);
+}
+fn HandlerResult(comptime Ops: type, comptime Input: type, comptime Answer: type, comptime Options: type) type {
+    if (knownMode(Options)) |mode| return *const Handler(HandlerSignature(Ops, Input, Answer, Options, mode));
+    return union(enum) {
+        deep: *const Handler(HandlerSignature(Ops, Input, Answer, Options, .deep)),
+        shallow: *const Handler(HandlerSignature(Ops, Input, Answer, Options, .shallow)),
+    };
+}
+fn returnedHandler(comptime Ops: type, comptime Input: type, comptime Answer: type, options: anytype, raw: *const runtime.Handler) HandlerResult(Ops, Input, Answer, @TypeOf(options)) {
+    if (comptime knownMode(@TypeOf(options)) != null) return @ptrCast(raw);
+    return switch (options.mode) {
+        .deep => .{ .deep = @ptrCast(raw) },
+        .shallow => .{ .shallow = @ptrCast(raw) },
+    };
+}
+fn validateSlot(comptime Slot: type, comptime Op: type, comptime Ops: type, comptime Input: type, comptime Answer: type, comptime Options: type) void {
+    const Expected = declarationShape(index(.declaration, Slot), .resumption);
+    if (knownMode(Options)) |mode| {
+        const H = HandlerSignature(Ops, Input, Answer, Options, mode);
+        declarationCompatible(Expected, handlerResumption(H, Op), "handler resumption declaration");
+    } else if (Expected != Dynamic) @compileError("Horos handler: runtime mode requires an explicitly unknown resumption declaration");
+}
+fn validateResumptionSlots(comptime Options: type, comptime Ops: type, comptime Input: type, comptime Answer: type) void {
+    if (!@hasField(Options, "resumption_slots")) return;
+    validateSlotCollection(@FieldType(Options, "resumption_slots"), Options, Ops, Input, Answer);
+}
+fn validateSlotCollection(comptime Slots: type, comptime Options: type, comptime Ops: type, comptime Input: type, comptime Answer: type) void {
+    switch (@typeInfo(Slots)) {
+        .null => return,
+        .optional => |optional| return validateSlotCollection(optional.child, Options, Ops, Input, Answer),
+        .pointer => |pointer| if (pointer.size == .one) return validateSlotCollection(pointer.child, Options, Ops, Input, Answer),
+        else => {},
+    }
+    if (@typeInfo(Slots) == .@"struct") {
+        const declarations = @typeInfo(Slots).@"struct";
+        if (Ops == Dynamic) {
+            for (declarations.field_types) |D| validateSlot(D, Dynamic, Ops, Input, Answer, Options);
+        } else {
+            const ops = @typeInfo(Ops).@"struct";
+            if (declarations.field_types.len != ops.field_types.len) @compileError("Horos handler: one resumption declaration is required per operation");
+            for (declarations.field_types, ops.field_types) |D, Op| validateSlot(D, Op, Ops, Input, Answer, Options);
+        }
+    } else {
+        const Slot = switch (@typeInfo(Slots)) {
+            .array => |array| array.child,
+            .pointer => |pointer| if (pointer.size == .slice) pointer.child else @compileError("Horos handle collection: expected a tuple, array, or slice"),
+            else => @compileError("Horos handle collection: expected a tuple, array, or slice"),
+        };
+        if (Ops == Dynamic) validateSlot(Slot, Dynamic, Ops, Input, Answer, Options) else {
+            for (@typeInfo(Ops).@"struct".field_types) |Op| validateSlot(Slot, Op, Ops, Input, Answer, Options);
+        }
+    }
+}
+
+fn handlerReturnSignature(comptime H: type) type {
+    return if (H == Dynamic) Dynamic else Signature(joinFields(H.state, native.Fields(&.{"result"}, &.{H.input})), H.result);
+}
+pub fn ResumptionSignature(comptime Reply: type, comptime Result: type, comptime selected_mode: p.Mode) type {
+    return struct {
+        pub const reply = Reply;
+        pub const result = Result;
+        pub const mode = selected_mode;
+    };
+}
+fn handlerResumption(comptime H: type, comptime Op: type) type {
+    return Internal(.{ .resumption = if (H == Dynamic or Op == Dynamic) Dynamic else ResumptionSignature(Op.result, if (H.mode == .deep) H.result else H.input, H.mode) });
+}
+fn handlerClauseSignature(comptime H: type, comptime Op: type) type {
+    if (H == Dynamic or Op == Dynamic) return Dynamic;
+    const prefix = joinFields(H.state, native.Fields(&.{"payload"}, &.{Op.payload}));
+    return Signature(joinFields(joinFields(prefix, Op.bodies), native.Fields(&.{"resumption"}, &.{handlerResumption(H, Op)})), H.result);
+}
+fn handlerBodySignature(comptime H: type) type {
+    if (H == Dynamic) return Dynamic;
+    if (H.operations == Dynamic) return Signature(Dynamic, H.input);
+    const ops = @typeInfo(H.operations).@"struct";
+    var children: [ops.field_types.len]type = undefined;
+    for (ops.field_types, 0..) |Op, i| children[i] = Internal(.{ .capability = Op });
+    return Signature(joinFields(native.Fields(ops.field_names, &children), H.body_parameters), H.input);
+}
+fn onlyOperation(comptime H: type) type {
+    if (H == Dynamic or H.operations == Dynamic) return Dynamic;
+    const ops = @typeInfo(H.operations).@"struct";
+    if (ops.field_types.len != 1) @compileError("Horos clauseFunction: select an operation for a multi-clause handler");
+    return ops.field_types[0];
+}
+
 pub const Context = opaque {
-    pub fn lastDiagnostic(self: *const Context) Diagnostic {
-        return contextData(self).diagnostic;
-    }
     pub fn init(raw: *source.Builder) Error!*Context {
-        const self = try raw.allocator().create(ContextData);
-        self.* = .{ .raw = raw };
-        return @ptrCast(self);
+        return @ptrCast(try runtime.Context.init(raw));
     }
-    fn poison(self: *Context, err: anyerror) void {
-        const state = contextData(self);
-        state.poisoned = true;
-        if (err == error.OutOfMemory) state.diagnostic = .{
-            .code = error.OutOfMemory,
-            .entity = "authoring",
-            .relationship = "allocation failed; discard this context",
-        };
+    pub fn lastDiagnostic(self: *Context) Diagnostic {
+        return Diagnostic.fromRaw(rawContext(self).lastDiagnostic());
     }
-    fn ready(self: *Context) Error!void {
-        if (contextData(self).poisoned) return error.PoisonedAuthoring;
+    pub fn schema(self: *Context, comptime T: type) Error!*const Schema(Shape(T)) {
+        return @ptrCast(try rawContext(self).nativeSchema(native.info(T)));
     }
-    fn save(self: *Context, comptime T: type, item: T) Error!*T {
-        var returned_error: anyerror = undefined;
-        errdefer self.poison(returned_error);
-        const result = try captureError(&returned_error, contextData(self).raw.allocator().create(T));
-        result.* = item;
-        return captureError(&returned_error, result);
+    /// Recursive edges may explicitly use Dynamic; completion still belongs to
+    /// this declaration's checked runtime slot.
+    pub fn declareSchema(self: *Context, comptime kind: SchemaKind, comptime S: type) Error!*const SchemaDeclaration(DeclarationSignature(kind, S)) {
+        return @ptrCast(try rawContext(self).declareSchema(kind));
     }
-    fn label(self: *Context, value: []const u8) Error![]const u8 {
-        var returned_error: anyerror = undefined;
-        errdefer self.poison(returned_error);
-        return captureError(&returned_error, contextData(self).raw.allocator().dupe(u8, value));
+    pub fn defineAlternatives(self: *Context, declaration: anytype, cases: anytype) Error!void {
+        comptime declarationCompatible(declarationShape(index(.declaration, @TypeOf(declaration)), .alternatives), recordShape(.sum, @TypeOf(cases)), "defineAlternatives");
+        const fields = packSchemas(cases);
+        return rawContext(self).defineAlternatives(erased(.declaration, declaration), fields.slice());
     }
-    fn reject(self: *Context, code: Error, entity: []const u8, relation: []const u8) Error {
-        contextData(self).diagnostic = .{ .code = code, .entity = entity, .relationship = relation };
-        return code;
+    pub fn defineCallable(self: *Context, declaration: anytype, params: anytype, returns: anytype, allowed: anytype, options: anytype) Error!void {
+        comptime declarationCompatible(declarationShape(index(.declaration, @TypeOf(declaration)), .callable), Internal(.{ .callable = Signature(namedShape(.schema, @TypeOf(params)), index(.schema, @TypeOf(returns))) }), "defineCallable");
+        const fields = packSchemas(params);
+        const effects = handles(.operation, allowed);
+        const captures = handles(.schema, option(options, "captures", .{}));
+        const regions = handles(.region, option(options, "regions", .{}));
+        return rawContext(self).defineCallable(erased(.declaration, declaration), fields.slice(), erased(.schema, returns), effects.slice(), .{ .use = options.use, .captures = captures.slice(), .regions = regions.slice() });
     }
-    fn origin(self: *Context, owner: *Context) Error!void {
-        try self.ready();
-        if (owner != self) return self.reject(error.ForeignHandle, "handle", "different builder");
+    pub fn record(self: *Context, values: anytype) Error!*const Schema(recordShape(.product, @TypeOf(values))) {
+        const fields = packSchemas(values);
+        return @ptrCast(try rawContext(self).record(fields.slice()));
     }
-    fn schemaId(self: *Context, schema: *const Schema) Error!p.Id {
-        const s = data(SchemaData, schema);
-        try self.origin(s.owner);
-        return s.id;
+    pub fn alternatives(self: *Context, values: anytype) Error!*const Schema(recordShape(.sum, @TypeOf(values))) {
+        const fields = packSchemas(values);
+        return @ptrCast(try rawContext(self).alternatives(fields.slice()));
     }
-    fn same(self: *Context, expected: *const Schema, actual: *const Schema) Error!void {
-        _ = try self.schemaId(expected);
-        _ = try self.schemaId(actual);
-        var returned_error: anyerror = undefined;
-        errdefer if (returned_error == error.OutOfMemory) {
-            self.poison(returned_error);
-        };
-        if (!try captureError(&returned_error, self.compatible(expected, actual))) {
-            contextData(self).diagnostic = .{
-                .code = error.SchemaMismatch,
-                .entity = "value",
-                .relationship = "schema or named layout differs",
-                .expected = expected,
-                .actual = actual,
-            };
-            return captureError(&returned_error, error.SchemaMismatch);
-        }
+    pub fn external(self: *Context, name: []const u8, payload: anytype, reply: anytype) Error!*const Operation(OperationSignature(index(.schema, @TypeOf(payload)), index(.schema, @TypeOf(reply)), native.Fields(&.{}, &.{}))) {
+        return @ptrCast(try rawContext(self).external(name, erased(.schema, payload), erased(.schema, reply)));
     }
-    /// Allocation identity is only a fast path. Raw schema identity preserves
-    /// nominal contracts; the metadata graph additionally preserves field names.
-    /// Each pair is visited once, including recursive and shared schema graphs.
-    fn compatible(self: *Context, expected: *const Schema, actual: *const Schema) Error!bool {
-        if (expected == actual) return true;
-        const Pair = struct { expected: *const Schema, actual: *const Schema };
-        const allocator = contextData(self).raw.arena.child_allocator;
-        var pending: std.ArrayList(Pair) = .empty;
-        defer pending.deinit(allocator);
-        var seen: std.AutoHashMapUnmanaged(Pair, void) = .empty;
-        defer seen.deinit(allocator);
-        try pending.append(allocator, .{ .expected = expected, .actual = actual });
-        var index: usize = 0;
-        while (index < pending.items.len) : (index += 1) {
-            const pair = pending.items[index];
-            if (pair.expected == pair.actual) continue;
-            const a = data(SchemaData, pair.expected);
-            const b = data(SchemaData, pair.actual);
-            try self.origin(a.owner);
-            try self.origin(b.owner);
-            if (a.id != b.id or a.fields.len != b.fields.len or a.captures.len != b.captures.len)
-                return false;
-            const visited = try seen.getOrPut(allocator, pair);
-            if (visited.found_existing) continue;
-            for (a.fields, b.fields) |left, right| {
-                if (!std.mem.eql(u8, left.name, right.name)) return false;
-                if (left.schema != right.schema) try pending.append(allocator, .{ .expected = left.schema, .actual = right.schema });
-            }
-            for (a.captures, b.captures) |left, right| {
-                if (left != right) try pending.append(allocator, .{ .expected = left, .actual = right });
-            }
-            if (a.result) |left| {
-                const right = b.result orelse return false;
-                if (left != right) try pending.append(allocator, .{ .expected = left, .actual = right });
-            } else if (b.result != null) return false;
-        }
-        return true;
+    pub fn local(self: *Context, name: []const u8, payload: anytype, reply: anytype, use: p.Use) Error!*const Operation(OperationSignature(index(.schema, @TypeOf(payload)), index(.schema, @TypeOf(reply)), native.Fields(&.{}, &.{}))) {
+        return @ptrCast(try rawContext(self).local(name, erased(.schema, payload), erased(.schema, reply), use));
     }
-    fn fields(self: *Context, input: []const Field) Error![]const Field {
-        var returned_error: anyerror = undefined;
-        errdefer self.poison(returned_error);
-        const allocator = contextData(self).raw.allocator();
-        const output = try captureError(&returned_error, allocator.alloc(Field, input.len));
-        const scratch = contextData(self).raw.arena.child_allocator;
-        var names: std.StringHashMapUnmanaged(void) = .empty;
-        defer names.deinit(scratch);
-        try captureError(&returned_error, names.ensureTotalCapacity(scratch, std.math.cast(u32, input.len) orelse return captureError(&returned_error, error.OutOfMemory)));
-        for (input, 0..) |field, i| {
-            _ = try captureError(&returned_error, self.schemaId(field.schema));
-            const entry = try captureError(&returned_error, names.getOrPut(scratch, field.name));
-            if (entry.found_existing)
-                return captureError(&returned_error, @as(Error![]const Field, self.reject(error.DuplicateName, "declaration", "duplicate field name")));
-            output[i] = .{ .name = try captureError(&returned_error, self.label(field.name)), .schema = field.schema };
-        }
-        return captureError(&returned_error, output);
+    pub fn scoped(self: *Context, name: []const u8, payload: anytype, reply: anytype, use: p.Use, bodies: anytype) Error!*const Operation(OperationSignature(index(.schema, @TypeOf(payload)), index(.schema, @TypeOf(reply)), namedShape(.schema, @TypeOf(bodies)))) {
+        const fields = packSchemas(bodies);
+        return @ptrCast(try rawContext(self).scoped(name, erased(.schema, payload), erased(.schema, reply), use, fields.slice()));
     }
-    fn intern(self: *Context, id: p.Id, names: []const Field) Error!*const Schema {
-        return self.internResult(id, names, null);
-    }
-    fn internResult(
-        self: *Context,
-        id: p.Id,
-        names: []const Field,
-        result: ?*const Schema,
-    ) Error!*const Schema {
-        return self.internComplete(id, names, result, &.{});
-    }
-    fn internComplete(
-        self: *Context,
-        id: p.Id,
-        names: []const Field,
-        result: ?*const Schema,
-        captures: []const *const Schema,
-    ) Error!*const Schema {
-        try self.ready();
-        var returned_error: anyerror = undefined;
-        errdefer self.poison(returned_error);
-        for (contextData(self).schemas.items) |existing| {
-            const s = data(SchemaData, existing);
-            if (s.id != id or s.result != result or s.fields.len != names.len or
-                !std.mem.eql(*const Schema, s.captures, captures)) continue;
-            var same_names = true;
-            for (s.fields, names) |a, b| {
-                if (a.schema != b.schema or !std.mem.eql(u8, a.name, b.name)) same_names = false;
-            }
-            if (same_names) return captureError(&returned_error, existing);
-        }
-        const item = handle(Schema, try captureError(&returned_error, self.save(SchemaData, .{
-            .owner = self,
-            .id = id,
-            .fields = try captureError(&returned_error, self.fields(names)),
-            .result = result,
-            .captures = try captureError(&returned_error, contextData(self).raw.allocator().dupe(*const Schema, captures)),
-        })));
-        try captureError(&returned_error, contextData(self).schemas.append(contextData(self).raw.allocator(), item));
-        return captureError(&returned_error, item);
-    }
-    pub fn scalar(self: *Context, comptime T: type) Error!*const Schema {
-        try self.ready();
-        var returned_error: anyerror = undefined;
-        errdefer self.poison(returned_error);
-        return captureError(&returned_error, self.intern(try captureError(&returned_error, contextData(self).raw.scalar(T)), &.{}));
-    }
-    /// A checked forward reference. Every declaration must be completed before publication.
-    pub fn declareSchema(self: *Context, kind: SchemaKind) Error!*const SchemaDeclaration {
-        try self.ready();
-        var returned_error: anyerror = undefined;
-        errdefer self.poison(returned_error);
-        const raw = contextData(self).raw;
-        const id = try captureError(&returned_error, raw.reserveSchema());
-        // This invalid nominal index cannot alias any ordinary schema, including
-        // the empty sum used by raw source binders.
-        raw.schemas.items[@intCast(id)] = .{ .internal = .{ .abstract_resource = std.math.maxInt(p.Id) } };
-        const schema = handle(Schema, try captureError(&returned_error, self.save(SchemaData, .{ .owner = self, .id = id, .pending = kind })));
-        try captureError(&returned_error, contextData(self).schemas.append(raw.allocator(), schema));
-        return captureError(&returned_error, handle(SchemaDeclaration, try captureError(&returned_error, self.save(SchemaDeclarationData, .{ .schema = schema }))));
-    }
-    fn declarationSlot(self: *Context, declaration: *const SchemaDeclaration, kind: SchemaKind) Error!*SchemaData {
-        const item = @constCast(data(SchemaData, declaration.schema()));
-        try self.origin(item.owner);
-        const pending = item.pending orelse return self.reject(error.SchemaAlreadyDefined, "schema", "declaration is already complete");
-        if (pending != kind) return self.reject(error.InvalidCategory, "schema", "declaration kind differs from its definition");
-        return item;
-    }
-    fn bindSchema(self: *Context, declaration: *const SchemaDeclaration, kind: SchemaKind, shape: p.Schema, names: []const Field, result: ?*const Schema, captures: []const *const Schema) Error!*const Schema {
-        const item = try self.declarationSlot(declaration, kind);
-        var returned_error: anyerror = undefined;
-        errdefer self.poison(returned_error);
-        const allocator = contextData(self).raw.allocator();
-        const fields_copy = try captureError(&returned_error, self.fields(names));
-        if (result) |value| _ = try captureError(&returned_error, self.schemaId(value));
-        _ = try captureError(&returned_error, self.schemaIds(captures));
-        const captures_copy = try captureError(&returned_error, allocator.dupe(*const Schema, captures));
-        const owned_shape = try captureError(&returned_error, source.own(p.Schema, allocator, shape));
-        contextData(self).raw.schemas.items[@intCast(item.id)] = owned_shape;
-        item.fields = fields_copy;
-        item.result = result;
-        item.captures = captures_copy;
-        item.pending = null;
-        return captureError(&returned_error, declaration.schema());
-    }
-    pub fn defineAlternatives(self: *Context, declaration: *const SchemaDeclaration, cases: []const Field) Error!void {
-        _ = try self.declarationSlot(declaration, .alternatives);
-        const completed = try self.alternatives(cases);
-        const info = data(SchemaData, completed);
-        _ = try self.bindSchema(declaration, .alternatives, contextData(self).raw.schemas.items[@intCast(info.id)], info.fields, null, &.{});
-    }
-    pub fn defineCallable(self: *Context, declaration: *const SchemaDeclaration, parameters: []const Field, result: *const Schema, allowed: []const *const Operation, options: CallableOptions) Error!void {
-        _ = try self.declarationSlot(declaration, .callable);
-        const completed = try self.callable(parameters, result, allowed, options);
-        const info = data(SchemaData, completed);
-        _ = try self.bindSchema(declaration, .callable, contextData(self).raw.schemas.items[@intCast(info.id)], info.fields, info.result, info.captures);
-    }
-    pub fn record(self: *Context, names: []const Field) Error!*const Schema {
-        try self.ready();
-        var returned_error: anyerror = undefined;
-        errdefer self.poison(returned_error);
-        const ids = try captureError(&returned_error, contextData(self).raw.allocator().alloc(p.Id, names.len));
-        for (names, ids) |field, *id| id.* = try captureError(&returned_error, self.schemaId(field.schema));
-        return captureError(&returned_error, self.intern(try captureError(&returned_error, contextData(self).raw.schema(.{ .product = ids })), names));
-    }
-    pub fn external(
-        self: *Context,
-        name: []const u8,
-        payload: *const Schema,
-        result: *const Schema,
-    ) Error!*const Operation {
-        return self.operation(name, payload, result, true, .linear);
-    }
-    pub fn local(
-        self: *Context,
-        name: []const u8,
-        payload: *const Schema,
-        result: *const Schema,
-        use: p.Use,
-    ) Error!*const Operation {
-        return self.operation(name, payload, result, false, use);
-    }
-    pub fn scoped(
-        self: *Context,
-        name: []const u8,
-        payload: *const Schema,
-        result: *const Schema,
-        use: p.Use,
-        bodies: []const Field,
-    ) Error!*const Operation {
-        const names = try self.fields(bodies);
-        var returned_error: anyerror = undefined;
-        errdefer self.poison(returned_error);
-        const ids = try captureError(&returned_error, contextData(self).raw.allocator().alloc(p.Id, names.len));
-        for (names, ids) |item, *id| {
-            id.* = try captureError(&returned_error, self.schemaId(item.schema));
-            const shape = contextData(self).raw.schemas.items[@intCast(id.*)];
-            if ((shape != .internal or shape.internal != .computation) and data(SchemaData, item.schema).pending != .callable)
-                return captureError(&returned_error, @as(Error!*const Operation, self.reject(error.InvalidCategory, "scoped operation", "body operands must be callable")));
-        }
-        const id = try captureError(&returned_error, contextData(self).raw.effect(.{
-            .identity = name,
-            .payload = try captureError(&returned_error, self.schemaId(payload)),
-            .result = try captureError(&returned_error, self.schemaId(result)),
-            .external = false,
-            .control_use = use,
-            .bodies = ids,
-        }));
-        return captureError(&returned_error, handle(Operation, try captureError(&returned_error, self.save(OperationData, .{
-            .owner = self,
-            .id = id,
-            .name = try captureError(&returned_error, self.label(name)),
-            .payload = payload,
-            .result = result,
-            .external = false,
-            .bodies = names,
-        }))));
-    }
-    fn operation(
-        self: *Context,
-        name: []const u8,
-        payload: *const Schema,
-        result: *const Schema,
-        external_operation: bool,
-        use: p.Use,
-    ) Error!*const Operation {
-        try self.ready();
-        var returned_error: anyerror = undefined;
-        errdefer self.poison(returned_error);
-        const id = try captureError(&returned_error, contextData(self).raw.effect(.{
-            .identity = name,
-            .payload = try captureError(&returned_error, self.schemaId(payload)),
-            .result = try captureError(&returned_error, self.schemaId(result)),
-            .external = external_operation,
-            .control_use = use,
-        }));
-        return captureError(&returned_error, handle(Operation, try captureError(&returned_error, self.save(OperationData, .{
-            .owner = self,
-            .id = id,
-            .name = try captureError(&returned_error, self.label(name)),
-            .payload = payload,
-            .result = result,
-            .external = external_operation,
-        }))));
-    }
-    fn row(self: *Context, operations: []const *const Operation) Error![]const p.Id {
-        var returned_error: anyerror = undefined;
-        errdefer self.poison(returned_error);
-        const ids = try captureError(&returned_error, contextData(self).raw.allocator().alloc(p.Id, operations.len));
-        for (operations, ids) |op, *id| {
-            const o = data(OperationData, op);
-            try captureError(&returned_error, self.origin(o.owner));
-            id.* = o.id;
-        }
-        std.mem.sort(p.Id, ids, {}, std.sort.asc(p.Id));
-        var length: usize = 0;
-        for (ids) |id| {
-            if (length == 0 or ids[length - 1] != id) {
-                ids[length] = id;
-                length += 1;
-            }
-        }
-        return captureError(&returned_error, ids[0..length]);
-    }
-    fn saveFunction(self: *Context, item: FunctionData) Error!*const Function {
-        var returned_error: anyerror = undefined;
-        errdefer self.poison(returned_error);
-        const result = handle(Function, try captureError(&returned_error, self.save(FunctionData, item)));
-        try captureError(&returned_error, contextData(self).functions.append(contextData(self).raw.allocator(), result));
-        return captureError(&returned_error, result);
-    }
-    pub fn function(
-        self: *Context,
-        name: []const u8,
-        parameters: []const Field,
-        result: *const Schema,
-        allowed: []const *const Operation,
-    ) Error!*const Function {
-        try self.ready();
-        var returned_error: anyerror = undefined;
-        errdefer self.poison(returned_error);
-        const names = try captureError(&returned_error, self.fields(parameters));
-        const ids = try captureError(&returned_error, contextData(self).raw.allocator().alloc(p.Id, names.len));
-        for (names, ids) |field, *id| id.* = try captureError(&returned_error, self.schemaId(field.schema));
-        const id = try captureError(&returned_error, contextData(self).raw.declare(ids, try captureError(&returned_error, self.schemaId(result)), try captureError(&returned_error, self.row(allowed)), &.{}));
-        return captureError(&returned_error, try captureError(&returned_error, self.saveFunction(.{
-            .owner = self,
-            .id = id,
-            .name = try captureError(&returned_error, self.label(name)),
-            .parameters = names,
-            .result = result,
-        })));
-    }
-    fn schemaIds(self: *Context, schemas: []const *const Schema) Error![]const p.Id {
-        var returned_error: anyerror = undefined;
-        errdefer self.poison(returned_error);
-        const ids = try captureError(&returned_error, contextData(self).raw.allocator().alloc(p.Id, schemas.len));
-        for (schemas, ids) |schema, *id| id.* = try captureError(&returned_error, self.schemaId(schema));
-        return captureError(&returned_error, ids);
-    }
-    fn regionIds(self: *Context, regions: []const *const Region) Error![]const p.Id {
-        var returned_error: anyerror = undefined;
-        errdefer self.poison(returned_error);
-        const ids = try captureError(&returned_error, contextData(self).raw.allocator().alloc(p.Id, regions.len));
-        for (regions, ids) |region_handle, *id| {
-            const r = data(RegionData, region_handle);
-            try captureError(&returned_error, self.origin(r.owner));
-            id.* = r.id;
-        }
-        std.mem.sort(p.Id, ids, {}, std.sort.asc(p.Id));
-        var length: usize = 0;
-        for (ids) |id| {
-            if (length == 0 or ids[length - 1] != id) {
-                ids[length] = id;
-                length += 1;
-            }
-        }
-        return captureError(&returned_error, ids[0..length]);
+    pub fn sequence(self: *Context, element: anytype) Error!*const Schema(native.Contract(.{ .sequence = .{ .element = index(.schema, @TypeOf(element)), .maximum = null } })) {
+        return @ptrCast(try rawContext(self).sequence(erased(.schema, element)));
     }
     pub fn region(self: *Context) Error!*const Region {
-        try self.ready();
-        return handle(Region, try self.save(RegionData, .{ .owner = self, .id = contextData(self).raw.region() }));
+        return rawContext(self).region();
     }
-    pub fn regionSchema(self: *Context, region_handle: *const Region) Error!*const Schema {
-        const r = data(RegionData, region_handle);
-        try self.origin(r.owner);
-        var returned_error: anyerror = undefined;
-        errdefer self.poison(returned_error);
-        return captureError(&returned_error, self.intern(try captureError(&returned_error, contextData(self).raw.schema(.{ .internal = .{ .region = r.id } })), &.{}));
+    pub fn regionSchema(self: *Context, region_handle: *const Region) Error!*const Schema(Internal(.region)) {
+        return @ptrCast(try rawContext(self).regionSchema(region_handle));
     }
-    pub fn cell(self: *Context, region_handle: *const Region, element: *const Schema) Error!*const Schema {
-        const r = data(RegionData, region_handle);
-        try self.origin(r.owner);
-        var returned_error: anyerror = undefined;
-        errdefer self.poison(returned_error);
-        const id = try captureError(&returned_error, contextData(self).raw.schema(.{ .internal = .{ .cell = .{
-            .region = r.id,
-            .element = try captureError(&returned_error, self.schemaId(element)),
-        } } }));
-        return captureError(&returned_error, self.internResult(id, &.{}, element));
+    pub fn capability(self: *Context, operation: anytype) Error!*const Schema(Internal(.{ .capability = index(.operation, @TypeOf(operation)) })) {
+        return @ptrCast(try rawContext(self).capability(erased(.operation, operation)));
     }
-    /// The first parameter is supplied by withRegion, not by the caller's arguments.
-    pub fn regionBodySchema(
-        self: *Context,
-        region_handle: *const Region,
-        parameters: []const Field,
-        result: *const Schema,
-        allowed: []const *const Operation,
-        options: CallableOptions,
-    ) Error!*const Schema {
-        const r = data(RegionData, region_handle);
-        try self.origin(r.owner);
-        var returned_error: anyerror = undefined;
-        errdefer self.poison(returned_error);
-        const token = try captureError(&returned_error, self.regionSchema(region_handle));
-        const names = try captureError(&returned_error, contextData(self).raw.allocator().alloc(Field, parameters.len + 1));
-        names[0] = .{ .name = "region", .schema = token };
-        @memcpy(names[1..], parameters);
-        const regions = try captureError(&returned_error, contextData(self).raw.allocator().alloc(*const Region, options.regions.len + 1));
-        regions[0] = region_handle;
-        @memcpy(regions[1..], options.regions);
-        return captureError(&returned_error, self.callable(names, result, allowed, .{
+    pub fn cell(self: *Context, region_handle: *const Region, element: anytype) Error!*const Schema(Internal(.{ .cell = index(.schema, @TypeOf(element)) })) {
+        return @ptrCast(try rawContext(self).cell(region_handle, erased(.schema, element)));
+    }
+    pub fn resource(self: *Context, representation: anytype) Error!*const Schema(Internal(.{ .resource = index(.schema, @TypeOf(representation)) })) {
+        return @ptrCast(try rawContext(self).resource(erased(.schema, representation)));
+    }
+    pub fn borrowed(self: *Context, representation: anytype, region_handle: *const Region) Error!*const Schema(Internal(.{ .borrowed = index(.schema, @TypeOf(representation)) })) {
+        return @ptrCast(try rawContext(self).borrowed(erased(.schema, representation), region_handle));
+    }
+    pub fn callable(self: *Context, params: anytype, returns: anytype, allowed: anytype, options: anytype) Error!*const Schema(Internal(.{ .callable = Signature(namedShape(.schema, @TypeOf(params)), index(.schema, @TypeOf(returns))) })) {
+        const fields = packSchemas(params);
+        const effects = handles(.operation, allowed);
+        const captures = handles(.schema, option(options, "captures", .{}));
+        const regions = handles(.region, option(options, "regions", .{}));
+        return @ptrCast(try rawContext(self).callable(fields.slice(), erased(.schema, returns), effects.slice(), .{
             .use = options.use,
-            .captures = options.captures,
-            .regions = regions,
+            .captures = captures.slice(),
+            .regions = regions.slice(),
         }));
     }
-    pub fn borrowed(
-        self: *Context,
-        schema: *const Schema,
-        region_handle: *const Region,
-    ) Error!*const Schema {
-        const r = data(RegionData, region_handle);
-        try self.origin(r.owner);
-        var returned_error: anyerror = undefined;
-        errdefer self.poison(returned_error);
-        return captureError(&returned_error, self.internResult(try captureError(&returned_error, contextData(self).raw.schema(.{ .internal = .{ .borrowed = .{
-            .value = try captureError(&returned_error, self.schemaId(schema)),
-            .region = r.id,
-        } } })), &.{}, schema));
+    pub fn regionBodySchema(self: *Context, region_handle: *const Region, params: anytype, returns: anytype, allowed: anytype, options: anytype) Error!*const Schema(Internal(.{ .callable = Signature(joinFields(native.Fields(&.{"region"}, &.{Internal(.region)}), namedShape(.schema, @TypeOf(params))), index(.schema, @TypeOf(returns))) })) {
+        const fields = packSchemas(params);
+        const effects = handles(.operation, allowed);
+        const captures = handles(.schema, option(options, "captures", .{}));
+        const regions = handles(.region, option(options, "regions", .{}));
+        return @ptrCast(try rawContext(self).regionBodySchema(region_handle, fields.slice(), erased(.schema, returns), effects.slice(), .{ .use = options.use, .captures = captures.slice(), .regions = regions.slice() }));
     }
-    pub fn resource(self: *Context, representation: *const Schema) Error!*const Schema {
-        const id = try self.schemaId(representation);
-        var returned_error: anyerror = undefined;
-        errdefer self.poison(returned_error);
-        return captureError(&returned_error, self.internResult(try captureError(&returned_error, contextData(self).raw.resource(id)), &.{}, representation));
+    pub fn cleanupInfo(self: *Context, failure: anytype) Error!*const Schema(CleanupShape(index(.schema, @TypeOf(failure)))) {
+        return @ptrCast(try rawContext(self).cleanupInfo(erased(.schema, failure)));
     }
-    fn authorityIds(self: *Context, functions: []const *const Function) Error![]const p.Id {
-        const ids = try contextData(self).raw.allocator().alloc(p.Id, functions.len);
-        for (functions, ids) |function_handle, *id| {
-            const f = data(FunctionData, function_handle);
-            try self.origin(f.owner);
-            id.* = f.id;
-        }
-        std.mem.sort(p.Id, ids, {}, std.sort.asc(p.Id));
-        var length: usize = 0;
-        for (ids) |id| {
-            if (length == 0 or ids[length - 1] != id) {
-                ids[length] = id;
-                length += 1;
-            }
-        }
-        return ids[0..length];
+    pub fn twice(self: *Context, schema_handle: anytype) Error!*const Function(Signature(native.Fields(&.{"callable"}, &.{index(.schema, @TypeOf(schema_handle))}), PairShape(resultShape(callableSignature(index(.schema, @TypeOf(schema_handle)), "twice"))))) {
+        const Sig = callableSignature(index(.schema, @TypeOf(schema_handle)), "twice");
+        if (comptime Sig != Dynamic and Sig.parameters != Dynamic and @typeInfo(Sig.parameters).@"struct".field_types.len != 0) @compileError("Horos twice: requires a zero-argument callable");
+        return @ptrCast(try rawContext(self).twice(erased(.schema, schema_handle)));
     }
-    /// Bind the existing nominal representation authority to typed declarations.
-    pub fn resourceAuthority(self: *Context, schema: *const Schema, introducers: []const *const Function, eliminators: []const *const Function) Error!void {
-        const id = try self.schemaId(schema);
-        const shape = contextData(self).raw.schemas.items[@intCast(id)];
-        if (shape != .internal or shape.internal != .abstract_resource)
-            return self.reject(error.InvalidCategory, "resource authority", "requires a nominal resource schema");
-        var returned_error: anyerror = undefined;
-        errdefer self.poison(returned_error);
-        try captureError(&returned_error, contextData(self).raw.resourceAuthority(id, try captureError(&returned_error, self.authorityIds(introducers)), try captureError(&returned_error, self.authorityIds(eliminators))));
+    pub fn functionFor(self: *Context, name: []const u8, schema_handle: anytype) Error!*const Function(callableSignature(index(.schema, @TypeOf(schema_handle)), "functionFor")) {
+        return @ptrCast(try rawContext(self).functionFor(name, erased(.schema, schema_handle)));
     }
-    pub fn cleanupInfo(self: *Context, failure: *const Schema) Error!*const Schema {
-        _ = try self.schemaId(failure);
-        var returned_error: anyerror = undefined;
-        errdefer self.poison(returned_error);
-        const unit = try captureError(&returned_error, self.scalar(void));
-        const text = try captureError(&returned_error, self.intern(try captureError(&returned_error, contextData(self).raw.schema(.text)), &.{}));
-        const bytes = try captureError(&returned_error, self.intern(try captureError(&returned_error, contextData(self).raw.schema(.bytes)), &.{}));
-        const reason = try captureError(&returned_error, self.alternatives(&.{
-            .{ .name = "0", .schema = text }, .{ .name = "1", .schema = bytes },
-        }));
-        const primary = try captureError(&returned_error, self.alternatives(&.{
-            .{ .name = "0", .schema = unit },   .{ .name = "1", .schema = failure },
-            .{ .name = "2", .schema = reason }, .{ .name = "3", .schema = unit },
-        }));
-        const cancellation = try captureError(&returned_error, self.alternatives(&.{
-            .{ .name = "0", .schema = unit }, .{ .name = "1", .schema = reason },
-        }));
-        return captureError(&returned_error, self.record(&.{
-            .{ .name = "0", .schema = primary },
-            .{ .name = "1", .schema = cancellation },
-            .{ .name = "2", .schema = try captureError(&returned_error, self.sequence(failure)) },
-        }));
+    pub fn resourceAuthority(self: *Context, schema_handle: anytype, introducers: anytype, eliminators: anytype) Error!void {
+        _ = comptime internalChild(index(.schema, @TypeOf(schema_handle)), .resource, "resourceAuthority");
+        const ins = handles(.function, introducers);
+        const outs = handles(.function, eliminators);
+        return rawContext(self).resourceAuthority(erased(.schema, schema_handle), ins.slice(), outs.slice());
     }
-    pub fn sequence(self: *Context, element: *const Schema) Error!*const Schema {
-        var returned_error: anyerror = undefined;
-        errdefer self.poison(returned_error);
-        const id = try captureError(&returned_error, contextData(self).raw.schema(.{ .seq = try captureError(&returned_error, self.schemaId(element)) }));
-        return captureError(&returned_error, self.internResult(id, &.{}, element));
+    pub fn handler(self: *Context, operation: anytype, input: anytype, answer: anytype, options: anytype) Error!HandlerResult(namedShape(.operation, @TypeOf(.{ .capability = operation })), index(.schema, @TypeOf(input)), index(.schema, @TypeOf(answer)), @TypeOf(options)) {
+        return self.handlerSet(.{ .capability = operation }, input, answer, options);
     }
-    pub fn suspensionPackage(self: *Context, resumption: *const Schema) Error!*const Schema {
-        const id = try self.schemaId(resumption);
-        const shape = contextData(self).raw.schemas.items[@intCast(id)];
-        if (shape != .internal or shape.internal != .resumption)
-            return self.reject(error.InvalidCategory, "package", "requires a resumption schema");
-        var returned_error: anyerror = undefined;
-        errdefer self.poison(returned_error);
-        const package_id = try captureError(&returned_error, contextData(self).raw.schema(.{
-            .internal = .{ .suspension_package = id },
-        }));
-        return captureError(&returned_error, self.internResult(package_id, &.{}, resumption));
-    }
-    pub fn alternatives(self: *Context, cases: []const Field) Error!*const Schema {
-        try self.ready();
-        var returned_error: anyerror = undefined;
-        errdefer self.poison(returned_error);
-        const ids = try captureError(&returned_error, contextData(self).raw.allocator().alloc(p.Id, cases.len));
-        for (cases, ids) |item, *id| id.* = try captureError(&returned_error, self.schemaId(item.schema));
-        return captureError(&returned_error, self.intern(try captureError(&returned_error, contextData(self).raw.schema(.{ .sum = ids })), cases));
-    }
-    pub fn callable(
-        self: *Context,
-        parameters: []const Field,
-        result: *const Schema,
-        allowed: []const *const Operation,
-        options: CallableOptions,
-    ) Error!*const Schema {
-        try self.ready();
-        var returned_error: anyerror = undefined;
-        errdefer self.poison(returned_error);
-        const names = try captureError(&returned_error, self.fields(parameters));
-        const ids = try captureError(&returned_error, contextData(self).raw.allocator().alloc(p.Id, names.len));
-        for (names, ids) |item, *id| id.* = try captureError(&returned_error, self.schemaId(item.schema));
-        const id = try captureError(&returned_error, contextData(self).raw.schema(.{ .internal = .{ .computation = .{
-            .parameters = ids,
-            .result = try captureError(&returned_error, self.schemaId(result)),
-            .effects = try captureError(&returned_error, self.row(allowed)),
-            .capture_bound = try captureError(&returned_error, self.schemaIds(options.captures)),
+    pub fn handlerSet(self: *Context, operations: anytype, input: anytype, answer: anytype, options: anytype) Error!HandlerResult(namedShape(.operation, @TypeOf(operations)), index(.schema, @TypeOf(input)), index(.schema, @TypeOf(answer)), @TypeOf(options)) {
+        const ops = packNamed(.operation, operations);
+        const residual = handles(.operation, option(options, "residual", .{}));
+        const escaping = handles(.operation, option(options, "escaping", .{}));
+        const captures = handles(.schema, option(options, "captures", .{}));
+        const body_captures = handles(.schema, option(options, "body_captures", .{}));
+        const owned_regions = handles(.region, option(options, "owned_regions", .{}));
+        const borrowed_regions = handles(.region, option(options, "borrowed_regions", .{}));
+        const state = packSchemas(option(options, "state", .{}));
+        const body_parameters = packSchemas(option(options, "body_parameters", .{}));
+        const return_effects = handles(.operation, option(options, "return_effects", .{}));
+        const clause_effects = handles(.operation, option(options, "clause_effects", .{}));
+        const slots = handles(.declaration, option(options, "resumption_slots", .{}));
+        comptime validateResumptionSlots(@TypeOf(options), namedShape(.operation, @TypeOf(operations)), index(.schema, @TypeOf(input)), index(.schema, @TypeOf(answer)));
+        const raw = try rawContext(self).handlerSet(ops.slice(), erased(.schema, input), erased(.schema, answer), .{
+            .mode = options.mode,
             .use = options.use,
-            .regions = try captureError(&returned_error, self.regionIds(options.regions)),
-        } } }));
-        return captureError(&returned_error, self.internComplete(id, names, result, options.captures));
-    }
-    pub fn capability(self: *Context, operation_handle: *const Operation) Error!*const Schema {
-        const op = data(OperationData, operation_handle);
-        try self.origin(op.owner);
-        if (op.external) return self.reject(error.InvalidCategory, op.name, "external operation has no local capability");
-        var returned_error: anyerror = undefined;
-        errdefer self.poison(returned_error);
-        return captureError(&returned_error, self.intern(try captureError(&returned_error, contextData(self).raw.schema(.{ .internal = .{ .capability = op.id } })), &.{}));
-    }
-    pub fn functionFor(
-        self: *Context,
-        name: []const u8,
-        schema: *const Schema,
-    ) Error!*const Function {
-        const id = try self.schemaId(schema);
-        const shape = contextData(self).raw.schemas.items[@intCast(id)];
-        if (shape != .internal or shape.internal != .computation)
-            return self.reject(error.InvalidCategory, "function", "requires callable schema");
-        const info = data(SchemaData, schema);
-        const result = info.result orelse return self.reject(error.InvalidSchema, "function declaration", "callable metadata lacks its result");
-        var returned_error: anyerror = undefined;
-        errdefer self.poison(returned_error);
-        const signature = shape.internal.computation;
-        return captureError(&returned_error, try captureError(&returned_error, self.saveFunction(.{
-            .owner = self,
-            .id = try captureError(&returned_error, contextData(self).raw.declare(signature.parameters, signature.result, signature.effects, signature.regions)),
-            .name = try captureError(&returned_error, self.label(name)),
-            .parameters = info.fields,
-            .result = result,
-            .callable_schema = schema,
-        })));
-    }
-    pub fn twice(self: *Context, schema: *const Schema) Error!*const Function {
-        var returned_error: anyerror = undefined;
-        errdefer if (returned_error == error.OutOfMemory) self.poison(returned_error);
-        const id = try captureError(&returned_error, self.schemaId(schema));
-        if (contextData(self).twice_definitions.get(schema)) |existing| return captureError(&returned_error, existing);
-        const shape = contextData(self).raw.schemas.items[@intCast(id)];
-        if (shape != .internal or shape.internal != .computation) return captureError(&returned_error, @as(Error!*const Function, self.reject(error.InvalidCategory, "twice", "requires a reusable zero-argument callable")));
-        const signature = shape.internal.computation;
-        if (signature.parameters.len != 0 or signature.use != .reusable)
-            return captureError(&returned_error, @as(Error!*const Function, self.reject(error.InvalidOwnership, "twice", "requires a reusable zero-argument callable")));
-        const info = data(SchemaData, schema);
-        const element = info.result orelse return captureError(&returned_error, @as(Error!*const Function, self.reject(error.InvalidSchema, "twice", "requires a reusable zero-argument callable")));
-        const pair = try captureError(&returned_error, self.record(&.{
-            .{ .name = "first", .schema = element },
-            .{ .name = "second", .schema = element },
-        }));
-        const effects = try captureError(&returned_error, contextData(self).raw.allocator().alloc(*const Operation, signature.effects.len));
-        for (signature.effects, effects) |effect_id, *out| out.* = try captureError(&returned_error, interop.operation(self, effect_id));
-        const function_handle = try captureError(&returned_error, self.function("twice", &.{.{ .name = "callable", .schema = schema }}, pair, effects));
-        const f = data(FunctionData, function_handle);
-        contextData(self).raw.functions.items[@intCast(f.id)].regions = signature.regions;
-        const forward = try captureError(&returned_error, self.body(function_handle));
-        const callable_value = try captureError(&returned_error, forward.parameter("callable"));
-        const first = try captureError(&returned_error, forward.apply(callable_value, &.{}));
-        const second = try captureError(&returned_error, forward.apply(callable_value, &.{}));
-        const result = try captureError(&returned_error, forward.product(pair, &.{
-            .{ .name = "first", .value = first },
-            .{ .name = "second", .value = second },
-        }));
-        try captureError(&returned_error, self.define(function_handle, try captureError(&returned_error, forward.ret(result))));
-        try captureError(&returned_error, contextData(self).twice_definitions.put(
-            contextData(self).raw.allocator(),
-            schema,
-            function_handle,
-        ));
-        return captureError(&returned_error, function_handle);
-    }
-    fn handlerReturn(self: *Context, input: *const Schema, answer: *const Schema, options: HandlerOptions) Error!*const Function {
-        const parameter_fields = try contextData(self).raw.allocator().alloc(Field, 1 + options.state.len);
-        @memcpy(parameter_fields[0..options.state.len], options.state);
-        parameter_fields[options.state.len] = .{ .name = "result", .schema = input };
-        const function_handle = try self.function("handler return", parameter_fields, answer, options.return_effects orelse options.residual);
-        contextData(self).raw.functions.items[@intCast(data(FunctionData, function_handle).id)].regions = try self.regionIds(options.borrowed_regions);
-        return function_handle;
-    }
-    fn handlerClause(self: *Context, op: *const OperationData, answer: *const Schema, resumption: *const Schema, options: HandlerOptions) Error!*const Function {
-        const parameter_fields = try contextData(self).raw.allocator().alloc(Field, 2 + options.state.len + op.bodies.len);
-        @memcpy(parameter_fields[0..options.state.len], options.state);
-        parameter_fields[options.state.len] = .{ .name = "payload", .schema = op.payload };
-        @memcpy(parameter_fields[options.state.len + 1 .. parameter_fields.len - 1], op.bodies);
-        parameter_fields[parameter_fields.len - 1] = .{ .name = "resumption", .schema = resumption };
-        const function_handle = try self.function("operation clause", parameter_fields, answer, options.clause_effects orelse options.residual);
-        contextData(self).raw.functions.items[@intCast(data(FunctionData, function_handle).id)].regions = try self.regionIds(options.borrowed_regions);
-        return function_handle;
-    }
-    pub fn handler(self: *Context, operation_handle: *const Operation, input: *const Schema, answer: *const Schema, options: HandlerOptions) Error!*const Handler {
-        return self.handlerSet(&.{.{ .name = "capability", .operation = operation_handle }}, input, answer, options);
-    }
-    /// One return arm and state vector, with a named capability and clause for each operation.
-    pub fn handlerSet(self: *Context, operations: []const HandledOperation, input: *const Schema, answer: *const Schema, options: HandlerOptions) Error!*const Handler {
-        try self.ready();
-        if (operations.len == 0) return self.reject(error.InvalidCategory, "handler", "requires at least one local operation");
-        if (options.resumption_slots) |slots| {
-            if (slots.len != operations.len) return self.reject(error.SchemaMismatch, "handler", "one resumption declaration is required per operation");
-            for (slots, 0..) |slot, index| {
-                _ = try self.declarationSlot(slot, .resumption);
-                for (slots[0..index]) |previous| if (previous == slot)
-                    return self.reject(error.DuplicateName, "handler", "resumption declarations must be distinct");
-            }
-        }
-        for (operations, 0..) |item, index| {
-            const op = data(OperationData, item.operation);
-            try self.origin(op.owner);
-            if (op.external) return self.reject(error.InvalidCategory, op.name, "handler requires local operation");
-            for (operations[0..index]) |previous| {
-                if (data(OperationData, previous.operation).id == op.id)
-                    return self.reject(error.InvalidEffect, op.name, "operation occurs twice in handler");
-                if (std.mem.eql(u8, previous.name, item.name))
-                    return self.reject(error.DuplicateName, item.name, "handler capability name occurs twice");
-            }
-        }
-        const allocator = contextData(self).raw.allocator();
-        var returned_error: anyerror = undefined;
-        errdefer self.poison(returned_error);
-        const handled = try captureError(&returned_error, allocator.alloc(p.Id, operations.len));
-        const parameters = try captureError(&returned_error, allocator.alloc(Field, operations.len + options.body_parameters.len));
-        const body_effects = try captureError(&returned_error, allocator.alloc(*const Operation, options.residual.len + operations.len));
-        @memcpy(body_effects[0..options.residual.len], options.residual);
-        for (operations, handled, parameters[0..operations.len], 0..) |item, *id, *parameter, index| {
-            const op = data(OperationData, item.operation);
-            id.* = op.id;
-            parameter.* = .{ .name = item.name, .schema = try captureError(&returned_error, self.capability(item.operation)) };
-            body_effects[options.residual.len + index] = item.operation;
-        }
-        @memcpy(parameters[operations.len..], options.body_parameters);
-        const body_schema = try captureError(&returned_error, self.callable(parameters, input, body_effects, .{
-            .use = options.body_use,
-            .captures = options.body_captures,
-            .regions = options.borrowed_regions,
-        }));
-        const residual = try captureError(&returned_error, self.row(options.residual));
-        const answer_id = try captureError(&returned_error, self.schemaId(answer));
-        const resume_answer = if (options.mode == .deep) answer else input;
-        const returns = try captureError(&returned_error, self.handlerReturn(input, answer, options));
-        const clauses = try captureError(&returned_error, allocator.alloc(p.Clause, operations.len));
-        const metadata = try captureError(&returned_error, allocator.alloc(HandlerClauseData, operations.len));
-        for (operations, clauses, metadata, 0..) |item, *clause, *meta, index| {
-            const op = data(OperationData, item.operation);
-            const resume_shape: p.Schema = .{ .internal = .{ .resumption = .{
-                .effect = op.id,
-                .input = try captureError(&returned_error, self.schemaId(op.result)),
-                .answer = try captureError(&returned_error, self.schemaId(resume_answer)),
-                .effects = residual,
-                .escaping = try captureError(&returned_error, self.row(options.escaping)),
-                .capture_bound = try captureError(&returned_error, self.schemaIds(options.captures)),
-                .handled = handled,
-                .mode = options.mode,
-                .use = options.use,
-                .owned_regions = try captureError(&returned_error, self.regionIds(options.owned_regions)),
-                .obligations = options.obligations,
-            } } };
-            const resumption = if (options.resumption_slots) |slots|
-                try captureError(&returned_error, self.bindSchema(slots[index], .resumption, resume_shape, &.{.{ .name = "reply", .schema = op.result }}, resume_answer, options.captures))
-            else
-                try captureError(&returned_error, self.internComplete(try captureError(&returned_error, contextData(self).raw.schema(resume_shape)), &.{.{ .name = "reply", .schema = op.result }}, resume_answer, options.captures));
-            const resume_id = try captureError(&returned_error, self.schemaId(resumption));
-            const function_handle = try captureError(&returned_error, self.handlerClause(op, answer, resumption, options));
-            clause.* = .{ .effect = op.id, .function = data(FunctionData, function_handle).id, .resumption = resume_id };
-            meta.* = .{ .operation = item.operation, .function = function_handle, .resumption = resumption };
-        }
-        const state_ids = try captureError(&returned_error, allocator.alloc(p.Id, options.state.len));
-        for (options.state, state_ids) |item, *id| id.* = try captureError(&returned_error, self.schemaId(item.schema));
-        const result = handle(Handler, try captureError(&returned_error, self.save(HandlerData, .{
-            .owner = self,
-            .id = try captureError(&returned_error, contextData(self).raw.handler(.{
-                .mode = options.mode,
-                .input = try captureError(&returned_error, self.schemaId(input)),
-                .answer = answer_id,
-                .return_function = data(FunctionData, returns).id,
-                .clauses = clauses,
-                .state = state_ids,
-                .effects = residual,
-            })),
-            .clauses = metadata,
-            .input = input,
-            .answer = answer,
-            .body_schema = body_schema,
-            .returns = returns,
-            .state = try captureError(&returned_error, self.fields(options.state)),
-        })));
-        try captureError(&returned_error, contextData(self).handlers.append(allocator, result));
-        return captureError(&returned_error, result);
-    }
-    /// Derive the resumption clause from a responder with an explicit residual contract.
-    pub fn responder(
-        self: *Context,
-        operation_handle: *const Operation,
-        answer: *const Schema,
-        responder_function: *const Function,
-        options: HandlerOptions,
-    ) Error!*const Handler {
-        const op = data(OperationData, operation_handle);
-        const f = data(FunctionData, responder_function);
-        try self.origin(op.owner);
-        try self.origin(f.owner);
-        if (f.parameters.len != 1 or options.state.len != 0)
-            return self.reject(error.SchemaMismatch, f.name, "responder requires one payload parameter and no handler state");
-        try self.same(op.payload, f.parameters[0].schema);
-        try self.same(op.result, f.result);
-        const h = try self.handler(operation_handle, answer, answer, options);
-        const hd = data(HandlerData, h);
-        const returns = try self.body(hd.returns);
-        try self.define(hd.returns, try returns.ret(try returns.parameter("result")));
-        const clause = try self.body(hd.clauses[0].function);
-        const reply = try clause.call(responder_function, &.{
-            .{
-                .name = f.parameters[0].name,
-                .value = try clause.parameter("payload"),
-            },
+            .resumption_slots = if (@hasField(@TypeOf(options), "resumption_slots")) slots.optionalSlice() else null,
+            .residual = residual.slice(),
+            .escaping = escaping.slice(),
+            .captures = captures.slice(),
+            .body_captures = body_captures.slice(),
+            .body_use = option(options, "body_use", p.Use.linear),
+            .owned_regions = owned_regions.slice(),
+            .borrowed_regions = borrowed_regions.slice(),
+            .state = state.slice(),
+            .body_parameters = body_parameters.slice(),
+            .return_effects = if (@hasField(@TypeOf(options), "return_effects")) return_effects.optionalSlice() else null,
+            .clause_effects = if (@hasField(@TypeOf(options), "clause_effects")) clause_effects.optionalSlice() else null,
+            .obligations = option(options, "obligations", false),
         });
-        const resumed = try clause.resumeValue(try clause.parameter("resumption"), reply);
-        try self.define(hd.clauses[0].function, try clause.ret(resumed));
-        return h;
+        return returnedHandler(namedShape(.operation, @TypeOf(operations)), index(.schema, @TypeOf(input)), index(.schema, @TypeOf(answer)), options, raw);
     }
-    pub fn returnFunction(self: *Context, handler_handle: *const Handler) Error!*const Function {
-        const h = data(HandlerData, handler_handle);
-        try self.origin(h.owner);
-        return h.returns;
-    }
-    pub fn clauseFunction(self: *Context, handler_handle: *const Handler) Error!*const Function {
-        const h = data(HandlerData, handler_handle);
-        try self.origin(h.owner);
-        if (h.clauses.len != 1) return self.reject(error.InvalidCategory, "clause", "select an operation for a multi-clause handler");
-        return h.clauses[0].function;
-    }
-    pub fn clauseFunctionFor(self: *Context, handler_handle: *const Handler, operation_handle: *const Operation) Error!*const Function {
-        return (try self.clauseFor(handler_handle, operation_handle)).function;
-    }
-    pub fn resumptionSchemaFor(self: *Context, handler_handle: *const Handler, operation_handle: *const Operation) Error!*const Schema {
-        return (try self.clauseFor(handler_handle, operation_handle)).resumption;
-    }
-    fn clauseFor(self: *Context, handler_handle: *const Handler, operation_handle: *const Operation) Error!*const HandlerClauseData {
-        const h = data(HandlerData, handler_handle);
-        try self.origin(h.owner);
-        try self.origin(data(OperationData, operation_handle).owner);
-        for (h.clauses) |*clause| if (data(OperationData, clause.operation).id == data(OperationData, operation_handle).id) return clause;
-        return self.reject(error.InvalidEffect, "clause", "operation is not handled here");
-    }
-    pub fn handledSchema(self: *Context, handler_handle: *const Handler) Error!*const Schema {
-        const h = data(HandlerData, handler_handle);
-        try self.origin(h.owner);
-        return h.body_schema;
-    }
-    pub fn body(self: *Context, function_handle: *const Function) Error!*Body {
-        return self.nestedBody(function_handle, null);
-    }
-    fn nestedBody(self: *Context, function_handle: *const Function, parent: ?*Scope) Error!*Body {
-        const f = @constCast(data(FunctionData, function_handle));
-        try self.origin(f.owner);
-        if (f.scope != null) return self.reject(error.ClosedBody, f.name, "body already started");
-        const scope = try self.save(Scope, .{ .parent = parent });
-        const result = try self.save(BodyData, .{
-            .context = self,
-            .scope = scope,
-            .function_handle = function_handle,
-        });
-        f.scope = scope;
-        return @ptrCast(result);
-    }
-    pub fn define(
-        self: *Context,
-        function_handle: *const Function,
-        computation: *const Computation,
-    ) Error!void {
-        const f = data(FunctionData, function_handle);
-        const c = data(ComputationData, computation);
-        try self.origin(f.owner);
-        try self.origin(c.owner);
-        if (f.scope != c.scope or c.scope.active)
-            return self.reject(error.OutOfScope, f.name, "definition belongs to another body");
-        self.same(f.result, c.schema) catch |err| {
-            contextData(self).diagnostic.entity = f.name;
-            contextData(self).diagnostic.relationship = "body result differs from the function result";
-            return err;
-        };
-        var returned_error: anyerror = undefined;
-        errdefer self.poison(returned_error);
-        try captureError(&returned_error, contextData(self).raw.define(f.id, c.id));
-    }
-    /// Source/target admission remains authoritative; diagnostics retain its causal site.
-    pub fn compile(
-        self: *Context,
-        allocator: std.mem.Allocator,
-        entry: *const Function,
-        failure: *const Schema,
-    ) Error!source.Compiled {
-        return self.lowerNamed(allocator, try self.publish(entry, failure, false));
-    }
-    /// Narrow options preserve the mandatory original-occurrence capture observer.
-    pub fn compileWithOptions(
-        self: *Context,
-        allocator: std.mem.Allocator,
-        entry: *const Function,
-        failure: *const Schema,
-        coalescing: @import("horos_data").coalescing.Options,
-    ) Error!source.Compiled {
-        return self.compileWithCompilation(allocator, entry, failure, .{ .coalescing = coalescing });
-    }
-    /// Select cross-build observation guarantees while retaining the Context's
-    /// original-occurrence capture observer and mandatory P01 validation.
-    pub fn compileWithCompilation(
-        self: *Context,
-        allocator: std.mem.Allocator,
-        entry: *const Function,
-        failure: *const Schema,
-        compilation: @import("horos_data").closed_compilation.Options,
-    ) Error!source.Compiled {
-        compilation.resetObservations();
-        return self.lowerNamedWithCompilation(allocator, try self.publish(entry, failure, false), compilation);
-    }
-    fn lowerNamed(self: *Context, allocator: std.mem.Allocator, module_value: source.Module) Error!source.Compiled {
-        return self.lowerNamedWithOptions(allocator, module_value, .{});
-    }
-    fn lowerNamedWithOptions(
-        self: *Context,
-        allocator: std.mem.Allocator,
-        module_value: source.Module,
-        coalescing: @import("horos_data").coalescing.Options,
-    ) Error!source.Compiled {
-        return self.lowerNamedWithCompilation(allocator, module_value, .{ .coalescing = coalescing });
-    }
-    fn lowerNamedWithCompilation(
-        self: *Context,
-        allocator: std.mem.Allocator,
-        module_value: source.Module,
-        compilation: @import("horos_data").closed_compilation.Options,
-    ) Error!source.Compiled {
-        var diagnostic: source.Diagnostic = .{};
-        var result = source.lowerObserved(allocator, module_value, .{
-            .diagnostic = &diagnostic,
-            .coalescing = compilation.coalescing,
-            .contract = compilation.contract,
-            .objective = compilation.objective,
-            .image_growth_bytes = compilation.image_growth_bytes,
-            .max_image_bytes = compilation.max_image_bytes,
-            .profile = compilation.profile,
-            .semantic_work_limit = compilation.work_limit,
-            .semantic_round_limit = compilation.round_limit,
-            .semantic_statistics = compilation.statistics,
-            .compilation_observer = compilation.observer,
-            .captures = if (contextData(self).lambda_schemas.count() != 0 or contextData(self).handlers.items.len != 0) .{ .context = self, .capture = observeCapture, .closure = observeClosure } else null,
-        }) catch |err| {
-            if (contextData(self).capture_failure) |failure| return failure;
-            const name = if (diagnostic.function) |id|
-                self.functionName(id) orelse "compiled source"
-            else
-                "compiled source";
-            contextData(self).diagnostic = .{ .code = err, .entity = name, .source = diagnostic, .relationship = switch (err) {
-                error.InvalidOwnership, error.OverwrittenOwner, error.UnavailableSlot => "capture, borrow or use obligation failed authoritative admission",
-                error.InvalidEffect => "effect exceeds declared residual allowance",
-                error.TypeMismatch => "argument, result or handler answer relationship differs",
-                error.UnboundVariable => "value is unavailable at this lexical use",
-                else => "authoritative source or target admission rejected the construction",
-            } };
-            return err;
-        };
-        if (contextData(self).capture_failure) |err| {
-            result.deinit();
-            return err;
+    pub fn responder(self: *Context, operation: anytype, answer: anytype, responder_function: anytype, options: anytype) Error!HandlerResult(namedShape(.operation, @TypeOf(.{ .capability = operation })), index(.schema, @TypeOf(answer)), index(.schema, @TypeOf(answer)), @TypeOf(options)) {
+        comptime {
+            const Op = index(.operation, @TypeOf(operation));
+            const F = index(.function, @TypeOf(responder_function));
+            if (F != Dynamic and F.parameters != Dynamic) {
+                const fields = @typeInfo(F.parameters).@"struct";
+                if (fields.field_types.len != 1) @compileError("Horos responder: requires one payload parameter");
+                if (Op != Dynamic) compatible(Op.payload, fields.field_types[0], "responder payload");
+            }
+            if (F != Dynamic and Op != Dynamic) compatible(Op.result, F.result, "responder reply");
         }
-        return result;
-    }
-    fn functionName(self: *const Context, id: p.Id) ?[]const u8 {
-        for (contextData(self).functions.items) |function_handle| {
-            const item = data(FunctionData, function_handle);
-            if (item.id == id) return item.name;
+        const state = packSchemas(option(options, "state", .{}));
+        try rawContext(self).validateResponder(erased(.operation, operation), erased(.function, responder_function), state.slice().len);
+        const selected = try self.handler(operation, answer, answer, options);
+        if (comptime knownMode(@TypeOf(options)) != null) {
+            try rawContext(self).finishResponder(erased(.handler, selected), erased(.operation, operation), erased(.function, responder_function));
+        } else switch (selected) {
+            inline else => |h| try rawContext(self).finishResponder(erased(.handler, h), erased(.operation, operation), erased(.function, responder_function)),
         }
-        return null;
+        return selected;
     }
-    pub fn literalFailure(self: *Context, comptime T: type, item: T) Error!*const FailureLiteral {
-        try self.ready();
-        var returned_error: anyerror = undefined;
-        errdefer self.poison(returned_error);
-        const schema = try captureError(&returned_error, self.scalar(T));
-        return captureError(&returned_error, interop.literalFailure(self, try captureError(&returned_error, contextData(self).raw.constant(T, item)), schema));
+    pub fn returnFunction(self: *Context, handler_handle: anytype) Error!*const Function(handlerReturnSignature(index(.handler, @TypeOf(handler_handle)))) {
+        return @ptrCast(try rawContext(self).returnFunction(erased(.handler, handler_handle)));
     }
-    fn notePublication(self: *Context, use: PublicationUse) Error!void {
-        var returned_error: anyerror = undefined;
-        errdefer self.poison(returned_error);
-        try captureError(&returned_error, contextData(self).publication_uses.append(contextData(self).raw.allocator(), use));
+    pub fn clauseFunction(self: *Context, handler_handle: anytype) Error!*const Function(handlerClauseSignature(index(.handler, @TypeOf(handler_handle)), onlyOperation(index(.handler, @TypeOf(handler_handle))))) {
+        return @ptrCast(try rawContext(self).clauseFunction(erased(.handler, handler_handle)));
     }
-    fn publication(self: *Context, failure: *const Schema) Error!void {
-        if (contextData(self).publication_uses.items.len == 0) return;
-        var scratch = std.heap.ArenaAllocator.init(contextData(self).raw.arena.child_allocator);
-        defer scratch.deinit();
-        const allocator = scratch.allocator();
-        const terms = try allocator.alloc(bool, contextData(self).raw.terms.items.len);
-        const values = try allocator.alloc(bool, contextData(self).raw.values.items.len);
-        @memset(terms, false);
-        @memset(values, false);
-        var pending_terms: std.ArrayList(p.Id) = .empty;
-        var pending_values: std.ArrayList(p.Id) = .empty;
-        for (contextData(self).raw.functions.items) |definition| if (definition.body) |term_id|
-            try pending_terms.append(allocator, term_id);
-        var refs: @import("source/check.zig").References = .{ .allocator = allocator };
-        while (pending_terms.pop()) |id| {
-            if (id >= terms.len) return error.InvalidReference;
-            if (terms[@intCast(id)]) continue;
-            terms[@intCast(id)] = true;
-            refs.values.clearRetainingCapacity();
-            refs.terms.clearRetainingCapacity();
-            refs.bound.clearRetainingCapacity();
-            try refs.collect(contextData(self).raw.terms.items[@intCast(id)]);
-            try pending_terms.appendSlice(allocator, refs.terms.items);
-            try pending_values.appendSlice(allocator, refs.values.items);
+    pub fn clauseFunctionFor(self: *Context, handler_handle: anytype, operation: anytype) Error!*const Function(handlerClauseSignature(index(.handler, @TypeOf(handler_handle)), index(.operation, @TypeOf(operation)))) {
+        return @ptrCast(try rawContext(self).clauseFunctionFor(erased(.handler, handler_handle), erased(.operation, operation)));
+    }
+    pub fn resumptionSchemaFor(self: *Context, handler_handle: anytype, operation: anytype) Error!*const Schema(handlerResumption(index(.handler, @TypeOf(handler_handle)), index(.operation, @TypeOf(operation)))) {
+        return @ptrCast(try rawContext(self).resumptionSchemaFor(erased(.handler, handler_handle), erased(.operation, operation)));
+    }
+    pub fn handledSchema(self: *Context, handler_handle: anytype) Error!*const Schema(Internal(.{ .callable = handlerBodySignature(index(.handler, @TypeOf(handler_handle))) })) {
+        return @ptrCast(try rawContext(self).handledSchema(erased(.handler, handler_handle)));
+    }
+    pub fn cloneableResumption(self: *Context, resumption: anytype) Error!*const Schema(index(.schema, @TypeOf(resumption))) {
+        _ = comptime internalChild(index(.schema, @TypeOf(resumption)), .resumption, "cloneableResumption");
+        return @ptrCast(try rawContext(self).cloneableResumption(erased(.schema, resumption)));
+    }
+    pub fn suspensionPackage(self: *Context, resumption: anytype) Error!*const Schema(Internal(.{ .package = index(.schema, @TypeOf(resumption)) })) {
+        _ = comptime internalChild(index(.schema, @TypeOf(resumption)), .resumption, "suspensionPackage");
+        return @ptrCast(try rawContext(self).suspensionPackage(erased(.schema, resumption)));
+    }
+    pub fn literalFailure(self: *Context, comptime T: type, value: T) Error!*const FailureLiteral(Shape(T)) {
+        return @ptrCast(try rawContext(self).literalFailure(T, value));
+    }
+    pub fn function(self: *Context, name: []const u8, params: anytype, returns: anytype, allowed: anytype) Error!*const Function(Signature(namedShape(.schema, @TypeOf(params)), index(.schema, @TypeOf(returns)))) {
+        const fields = packSchemas(params);
+        const effects = handles(.operation, allowed);
+        return @ptrCast(try rawContext(self).function(name, fields.slice(), erased(.schema, returns), effects.slice()));
+    }
+    pub fn body(self: *Context, function_handle: anytype) Error!*Body(parameters(index(.function, @TypeOf(function_handle)))) {
+        return @ptrCast(try rawContext(self).body(erased(.function, function_handle)));
+    }
+    pub fn define(self: *Context, function_handle: anytype, computation: anytype) Error!void {
+        comptime compatible(resultShape(index(.function, @TypeOf(function_handle))), index(.computation, @TypeOf(computation)), "define result");
+        return rawContext(self).define(erased(.function, function_handle), erased(.computation, computation));
+    }
+    pub fn module(self: *Context, entry: anytype, failure: anytype) Error!source.Module {
+        return rawContext(self).module(erased(.function, entry), erased(.schema, failure));
+    }
+    pub fn compile(self: *Context, allocator: std.mem.Allocator, entry: anytype, failure: anytype) Error!source.Compiled {
+        return rawContext(self).compile(allocator, erased(.function, entry), erased(.schema, failure));
+    }
+    pub fn compileWithOptions(self: *Context, allocator: std.mem.Allocator, entry: anytype, failure: anytype, options: data.coalescing.Options) Error!source.Compiled {
+        return rawContext(self).compileWithOptions(allocator, erased(.function, entry), erased(.schema, failure), options);
+    }
+    pub fn compileWithCompilation(self: *Context, allocator: std.mem.Allocator, entry: anytype, failure: anytype, options: data.closed_compilation.Options) Error!source.Compiled {
+        return rawContext(self).compileWithCompilation(allocator, erased(.function, entry), erased(.schema, failure), options);
+    }
+};
+
+pub fn Body(comptime Parameters: type) type {
+    return opaque {
+        const Self = @This();
+        pub const horos_handle: Metadata = .{ .family = .body, .shape = Parameters };
+        fn raw(self: *Self) *runtime.Body {
+            return @ptrCast(self);
         }
-        while (pending_values.pop()) |id| {
-            if (id >= values.len) return error.InvalidReference;
-            if (values[@intCast(id)]) continue;
-            values[@intCast(id)] = true;
-            const expression = contextData(self).raw.values.items[@intCast(id)].expression;
-            if (expression == .primitive)
-                try pending_values.appendSlice(allocator, expression.primitive.operands);
+        pub fn parameter(self: *Self, comptime name: []const u8) Error!*const Value(child(Parameters, name, "parameter")) {
+            return @ptrCast(try self.raw().parameter(name));
         }
-        var cleanup: ?*const Schema = null;
-        for (contextData(self).publication_uses.items) |use| {
-            const included = switch (use.anchor) {
-                .value => |id| id < values.len and values[@intCast(id)],
-                .term => |id| id < terms.len and terms[@intCast(id)],
-            };
-            if (!included) continue;
-            switch (use.contract) {
-                .function_scope => |pending| try self.functionVisible(data(FunctionData, pending.declaration), pending.scope),
-                .failure, .cleanup => |schema| {
-                    const is_cleanup = use.contract == .cleanup;
-                    if (is_cleanup and cleanup == null) cleanup = try self.cleanupInfo(failure);
-                    self.same(if (is_cleanup) cleanup.? else failure, schema) catch |err| {
-                        contextData(self).diagnostic.entity = if (is_cleanup) "cleanup" else "authored failure";
-                        contextData(self).diagnostic.relationship = "named failure layout differs from module failure contract";
-                        return err;
+        pub fn constant(self: *Self, comptime T: type, value: T) Error!*const Value(Shape(T)) {
+            return @ptrCast(try self.raw().constant(T, value));
+        }
+        pub fn field(self: *Self, value: anytype, comptime name: []const u8) Error!*const Value(child(productFields(index(.value, @TypeOf(value)), "field"), name, "field")) {
+            return @ptrCast(try self.raw().field(erased(.value, value), name));
+        }
+        pub fn variant(self: *Self, schema_handle: anytype, comptime name: []const u8, payload: anytype) Error!*const Value(index(.schema, @TypeOf(schema_handle))) {
+            comptime compatible(child(sumFields(index(.schema, @TypeOf(schema_handle)), "variant"), name, "variant"), index(.value, @TypeOf(payload)), "variant." ++ name);
+            return @ptrCast(try self.raw().variant(erased(.schema, schema_handle), name, erased(.value, payload)));
+        }
+        pub fn caseOf(self: *Self, sum: anytype, comptime name: []const u8) Error!*const Case(caseSignature(index(.value, @TypeOf(sum)), name)) {
+            return @ptrCast(try self.raw().caseOf(erased(.value, sum), name));
+        }
+        pub fn match(self: *Self, sum: anytype, cases: anytype) Error!*const Value(matchResult(index(.value, @TypeOf(sum)), @TypeOf(cases))) {
+            const packed_cases = packNamed(.finished_case, cases);
+            return @ptrCast(try self.raw().matchNamed(erased(.value, sum), packed_cases.slice()));
+        }
+        pub fn destructure(self: *Self, value: anytype) Error!*const ProductParts(index(.value, @TypeOf(value))) {
+            _ = comptime productFields(index(.value, @TypeOf(value)), "destructure");
+            return @ptrCast(try self.raw().destructure(erased(.value, value)));
+        }
+        pub fn product(self: *Self, schema_handle: anytype, values: anytype) Error!*const Value(index(.schema, @TypeOf(schema_handle))) {
+            const args = packArguments(productFields(index(.schema, @TypeOf(schema_handle)), "product"), values, "product");
+            return @ptrCast(try self.raw().product(erased(.schema, schema_handle), args.slice()));
+        }
+        pub fn call(self: *Self, function_handle: anytype, values: anytype) Error!*const Value(resultShape(index(.function, @TypeOf(function_handle)))) {
+            const args = packArguments(parameters(index(.function, @TypeOf(function_handle))), values, "call");
+            return @ptrCast(try self.raw().call(erased(.function, function_handle), args.slice()));
+        }
+        pub fn perform(self: *Self, operation: anytype, payload: anytype) Error!*const Value(resultShape(index(.operation, @TypeOf(operation)))) {
+            const Op = index(.operation, @TypeOf(operation));
+            if (comptime Op != Dynamic) comptime compatible(Op.payload, index(.value, @TypeOf(payload)), "perform payload");
+            return @ptrCast(try self.raw().perform(erased(.operation, operation), erased(.value, payload)));
+        }
+        pub fn performLocal(self: *Self, operation: anytype, capability: anytype, payload: anytype) Error!*const Value(resultShape(index(.operation, @TypeOf(operation)))) {
+            const Op = index(.operation, @TypeOf(operation));
+            if (comptime Op != Dynamic) comptime compatible(Op.payload, index(.value, @TypeOf(payload)), "performLocal payload");
+            comptime compatible(Internal(.{ .capability = Op }), index(.value, @TypeOf(capability)), "performLocal capability");
+            return @ptrCast(try self.raw().performLocal(erased(.operation, operation), erased(.value, capability), erased(.value, payload)));
+        }
+        pub fn performScoped(self: *Self, operation: anytype, capability: anytype, payload: anytype, bodies: anytype) Error!*const Value(resultShape(index(.operation, @TypeOf(operation)))) {
+            const Op = index(.operation, @TypeOf(operation));
+            if (comptime Op != Dynamic) comptime compatible(Op.payload, index(.value, @TypeOf(payload)), "performScoped payload");
+            comptime compatible(Internal(.{ .capability = Op }), index(.value, @TypeOf(capability)), "performScoped capability");
+            const args = packArguments(if (Op == Dynamic) Dynamic else Op.bodies, bodies, "performScoped bodies");
+            return @ptrCast(try self.raw().performScoped(erased(.operation, operation), erased(.value, capability), erased(.value, payload), args.slice()));
+        }
+        pub fn closureBody(self: *Self, function_handle: anytype) Error!*Body(parameters(index(.function, @TypeOf(function_handle)))) {
+            return @ptrCast(try self.raw().closureBody(erased(.function, function_handle)));
+        }
+        pub fn lambda(self: *Self, function_handle: anytype, schema_handle: anytype) Error!*const Value(index(.schema, @TypeOf(schema_handle))) {
+            comptime compatibleSignature(callableSignature(index(.schema, @TypeOf(schema_handle)), "lambda"), index(.function, @TypeOf(function_handle)), "lambda");
+            return @ptrCast(try self.raw().lambda(erased(.function, function_handle), erased(.schema, schema_handle)));
+        }
+        pub fn apply(self: *Self, callable: anytype, values: anytype) Error!*const Value(resultShape(callableSignature(index(.value, @TypeOf(callable)), "apply"))) {
+            const args = packArguments(parameters(callableSignature(index(.value, @TypeOf(callable)), "apply")), values, "apply");
+            return @ptrCast(try self.raw().apply(erased(.value, callable), args.slice()));
+        }
+        pub fn cloneResumption(self: *Self, target: anytype, resumption: anytype) Error!*const Value(index(.schema, @TypeOf(target))) {
+            _ = comptime internalChild(index(.schema, @TypeOf(target)), .resumption, "cloneResumption");
+            comptime compatible(index(.schema, @TypeOf(target)), index(.value, @TypeOf(resumption)), "cloneResumption target");
+            return @ptrCast(try self.raw().cloneResumption(erased(.schema, target), erased(.value, resumption)));
+        }
+        pub fn resumeValue(self: *Self, resumption: anytype, reply: anytype) Error!*const Value(resultShape(internalChild(index(.value, @TypeOf(resumption)), .resumption, "resumeValue"))) {
+            const R = internalChild(index(.value, @TypeOf(resumption)), .resumption, "resumeValue");
+            if (comptime R != Dynamic) comptime compatible(R.reply, index(.value, @TypeOf(reply)), "resumeValue reply");
+            return @ptrCast(try self.raw().resumeValue(erased(.value, resumption), erased(.value, reply)));
+        }
+        pub fn resumeWith(self: *Self, resumption: anytype, reply: anytype, successor: anytype, state: anytype) Error!*const Value(resultShape(index(.handler, @TypeOf(successor)))) {
+            const R = internalChild(index(.value, @TypeOf(resumption)), .resumption, "resumeWith");
+            const H = index(.handler, @TypeOf(successor));
+            comptime {
+                if (R != Dynamic) {
+                    if (R.mode != .shallow) @compileError("Horos resumeWith: requires a shallow resumption");
+                    compatible(R.reply, index(.value, @TypeOf(reply)), "resumeWith reply");
+                    if (H != Dynamic) compatible(R.result, H.input, "resumeWith successor input");
+                }
+            }
+            const args = packArguments(if (H == Dynamic) Dynamic else H.state, state, "resumeWith state");
+            return @ptrCast(try self.raw().resumeWith(erased(.value, resumption), erased(.value, reply), erased(.handler, successor), args.slice()));
+        }
+        pub fn handleWith(self: *Self, handler_handle: anytype, callable: anytype, state: anytype) Error!*const Value(resultShape(index(.handler, @TypeOf(handler_handle)))) {
+            return self.handleWithArguments(handler_handle, callable, .{}, state);
+        }
+        pub fn handleWithArguments(self: *Self, handler_handle: anytype, callable: anytype, args: anytype, state: anytype) Error!*const Value(resultShape(index(.handler, @TypeOf(handler_handle)))) {
+            const H = index(.handler, @TypeOf(handler_handle));
+            comptime compatibleSignature(handlerBodySignature(H), callableSignature(index(.value, @TypeOf(callable)), "handleWith"), "handleWith body");
+            const arguments_list = packArguments(if (H == Dynamic) Dynamic else H.body_parameters, args, "handleWith arguments");
+            const states = packArguments(if (H == Dynamic) Dynamic else H.state, state, "handleWith state");
+            return @ptrCast(try self.raw().handleWithArguments(erased(.handler, handler_handle), erased(.value, callable), arguments_list.slice(), states.slice()));
+        }
+        pub fn package(self: *Self, resumption: anytype) Error!*const Value(Internal(.{ .package = index(.value, @TypeOf(resumption)) })) {
+            _ = comptime internalChild(index(.value, @TypeOf(resumption)), .resumption, "package");
+            return @ptrCast(try self.raw().package(erased(.value, resumption)));
+        }
+        pub fn unpack(self: *Self, package_value: anytype) Error!*const Value(internalChild(index(.value, @TypeOf(package_value)), .package, "unpack")) {
+            return @ptrCast(try self.raw().unpack(erased(.value, package_value)));
+        }
+        pub fn resumePackage(self: *Self, package_value: anytype, reply: anytype) Error!*const Value(resultShape(internalChild(internalChild(index(.value, @TypeOf(package_value)), .package, "resumePackage"), .resumption, "resumePackage"))) {
+            const R = internalChild(internalChild(index(.value, @TypeOf(package_value)), .package, "resumePackage"), .resumption, "resumePackage");
+            comptime compatible(if (R == Dynamic) Dynamic else R.reply, index(.value, @TypeOf(reply)), "resumePackage reply");
+            return @ptrCast(try self.raw().resumePackage(erased(.value, package_value), erased(.value, reply)));
+        }
+        pub fn dispose(self: *Self, owned: anytype) Error!*const Value(Shape(void)) {
+            return @ptrCast(try self.raw().dispose(erased(.value, owned)));
+        }
+        pub fn disposePackage(self: *Self, package_value: anytype) Error!*const Value(Shape(void)) {
+            return @ptrCast(try self.raw().disposePackage(erased(.value, package_value)));
+        }
+        pub fn withRegion(self: *Self, region_handle: *const Region, work: anytype, args: anytype) Error!*const Value(resultShape(callableSignature(index(.value, @TypeOf(work)), "withRegion"))) {
+            const Sig = callableSignature(index(.value, @TypeOf(work)), "withRegion");
+            comptime compatible(Internal(.region), firstParameter(parameters(Sig), "withRegion"), "withRegion token");
+            const packed_args = packArguments(dropFirst(parameters(Sig), "withRegion"), args, "withRegion arguments");
+            return @ptrCast(try self.raw().withRegion(region_handle, erased(.value, work), packed_args.slice()));
+        }
+        pub fn protect(self: *Self, work: anytype, cleanup: anytype, args: anytype) Error!*const Value(resultShape(callableSignature(index(.value, @TypeOf(work)), "protect"))) {
+            const Sig = callableSignature(index(.value, @TypeOf(work)), "protect");
+            const Cleanup = callableSignature(index(.value, @TypeOf(cleanup)), "protect cleanup");
+            comptime if (Cleanup != Dynamic and Cleanup.parameters != Dynamic and @typeInfo(Cleanup.parameters).@"struct".field_types.len != 1) @compileError("Horos protect: cleanup requires one exit-information parameter");
+            const packed_args = packArguments(parameters(Sig), args, "protect arguments");
+            return @ptrCast(try self.raw().protect(erased(.value, work), erased(.value, cleanup), packed_args.slice()));
+        }
+        pub fn bracket(self: *Self, resource: anytype, region_handle: *const Region, work: anytype, cleanup: anytype, args: anytype) Error!*const Value(resultShape(callableSignature(index(.value, @TypeOf(work)), "bracket"))) {
+            const S = index(.value, @TypeOf(resource));
+            const Sig = callableSignature(index(.value, @TypeOf(work)), "bracket");
+            const Cleanup = callableSignature(index(.value, @TypeOf(cleanup)), "bracket cleanup");
+            comptime {
+                _ = internalChild(S, .resource, "bracket resource");
+                compatible(Internal(.{ .borrowed = S }), firstParameter(parameters(Sig), "bracket"), "bracket loan");
+                if (Cleanup != Dynamic) {
+                    compatible(Shape(void), Cleanup.result, "bracket cleanup result");
+                    if (Cleanup.parameters != Dynamic) {
+                        const fields = @typeInfo(Cleanup.parameters).@"struct";
+                        if (fields.field_types.len != 2) @compileError("Horos bracket: cleanup requires exit-information and resource parameters");
+                        compatible(S, fields.field_types[1], "bracket cleanup owner");
+                    }
+                }
+            }
+            const packed_args = packArguments(dropFirst(parameters(Sig), "bracket"), args, "bracket arguments");
+            return @ptrCast(try self.raw().bracket(erased(.value, resource), region_handle, erased(.value, work), erased(.value, cleanup), packed_args.slice()));
+        }
+        pub fn newCell(self: *Self, schema_handle: anytype, region_value: anytype, initial: anytype) Error!*const Value(index(.schema, @TypeOf(schema_handle))) {
+            comptime compatible(internalChild(index(.schema, @TypeOf(schema_handle)), .cell, "newCell"), index(.value, @TypeOf(initial)), "newCell initial");
+            comptime compatible(Internal(.region), index(.value, @TypeOf(region_value)), "newCell region");
+            return @ptrCast(try self.raw().newCell(erased(.schema, schema_handle), erased(.value, region_value), erased(.value, initial)));
+        }
+        pub fn readCell(self: *Self, cell_value: anytype) Error!*const Value(internalChild(index(.value, @TypeOf(cell_value)), .cell, "readCell")) {
+            return @ptrCast(try self.raw().readCell(erased(.value, cell_value)));
+        }
+        pub fn writeCell(self: *Self, cell_value: anytype, value: anytype) Error!*const Value(Shape(void)) {
+            comptime compatible(internalChild(index(.value, @TypeOf(cell_value)), .cell, "writeCell"), index(.value, @TypeOf(value)), "writeCell value");
+            return @ptrCast(try self.raw().writeCell(erased(.value, cell_value), erased(.value, value)));
+        }
+        pub fn packResource(self: *Self, schema_handle: anytype, representation: anytype) Error!*const Value(index(.schema, @TypeOf(schema_handle))) {
+            comptime compatible(internalChild(index(.schema, @TypeOf(schema_handle)), .resource, "packResource"), index(.value, @TypeOf(representation)), "packResource representation");
+            return @ptrCast(try self.raw().packResource(erased(.schema, schema_handle), erased(.value, representation)));
+        }
+        pub fn unpackResource(self: *Self, value: anytype) Error!*const Value(resourceRepresentation(index(.value, @TypeOf(value)))) {
+            return @ptrCast(try self.raw().unpackResource(erased(.value, value)));
+        }
+        pub fn sequenceValue(self: *Self, schema_handle: anytype, items: anytype) Error!*const Value(index(.schema, @TypeOf(schema_handle))) {
+            const S = index(.schema, @TypeOf(schema_handle));
+            comptime {
+                checkElements(sequenceElement(S, "sequenceValue"), @TypeOf(items), "sequenceValue");
+                if (S != Dynamic) if (listCount(@TypeOf(items))) |count| {
+                    if (S.contract == .array and count != S.contract.array.length) @compileError("Horos sequenceValue: wrong array length");
+                    if (S.contract == .sequence) if (S.contract.sequence.maximum) |maximum| {
+                        if (count > maximum) @compileError("Horos sequenceValue: vector maximum exceeded");
                     };
-                },
-            }
-        }
-    }
-    fn functionVisible(self: *Context, f: *const FunctionData, at: *Scope) Error!void {
-        try self.origin(f.owner);
-        if (f.scope) |scope| if (scope.parent) |parent| {
-            var cursor: ?*Scope = at;
-            while (cursor) |current| : (cursor = current.parent) if (current == parent) return;
-            return self.reject(error.OutOfScope, f.name, "closure belongs to another lexical scope");
-        };
-    }
-    fn checkCapture(self: *Context, bound: []const *const Schema, variable: p.Id) Error!void {
-        // Raw interoperation has no recoverable field names. Known authored
-        // metadata is never replaced by raw structural equality.
-        const actual = contextData(self).variable_schemas.get(variable) orelse return;
-        for (bound) |allowed| if (try self.compatible(allowed, actual)) return;
-        return self.reject(error.SchemaMismatch, "capture", "retained named value is outside its declared capture allowance");
-    }
-    fn observeCapture(pointer: *anyopaque, effect: p.Id, variable: p.Id) void {
-        const self: *Context = @ptrCast(@alignCast(pointer));
-        if (contextData(self).capture_failure != null) return;
-        for (contextData(self).handlers.items) |handler_handle| {
-            const h = data(HandlerData, handler_handle);
-            for (h.clauses) |clause| {
-                if (data(OperationData, clause.operation).id != effect) continue;
-                self.checkCapture(data(SchemaData, clause.resumption).captures, variable) catch |err| {
-                    contextData(self).capture_failure = err;
-                    return;
                 };
             }
+            const values = handles(.value, items);
+            return @ptrCast(try self.raw().sequenceValue(erased(.schema, schema_handle), values.slice()));
         }
-    }
-    fn observeClosure(pointer: *anyopaque, value_id: p.Id, variable: p.Id) void {
-        const self: *Context = @ptrCast(@alignCast(pointer));
-        if (contextData(self).capture_failure != null) return;
-        const schema = contextData(self).lambda_schemas.get(value_id) orelse return;
-        self.checkCapture(data(SchemaData, schema).captures, variable) catch |err| {
-            contextData(self).capture_failure = err;
-        };
-    }
-    fn capturePublication(self: *Context, module_value: source.Module) Error!void {
-        if (contextData(self).lambda_schemas.count() == 0 and contextData(self).handlers.items.len == 0) return;
-        var checked = try self.lowerNamed(contextData(self).raw.arena.child_allocator, module_value);
-        checked.deinit();
-    }
-    /// Copies all source arrays: later low-level builder growth cannot invalidate this snapshot.
-    /// Compilation still performs the authoritative source and target admission.
-    pub fn module(
-        self: *Context,
-        entry: *const Function,
-        failure: *const Schema,
-    ) Error!source.Module {
-        return self.publish(entry, failure, true);
-    }
-    fn publish(self: *Context, entry: *const Function, failure: *const Schema, check_captures: bool) Error!source.Module {
-        const f = data(FunctionData, entry);
-        try self.origin(f.owner);
-        const failure_id = try self.schemaId(failure);
-        for (contextData(self).schemas.items) |schema| if (data(SchemaData, schema).pending != null) {
-            const err = self.reject(error.UndefinedSchema, "schema", "forward declaration has no definition");
-            contextData(self).diagnostic.actual = schema;
-            return err;
-        };
-        for (contextData(self).raw.functions.items, 0..) |function_item, id| if (function_item.body == null)
-            return self.reject(error.UndefinedBody, self.functionName(id) orelse "unnamed source function", "declaration has no body");
-        var returned_error: anyerror = undefined;
-        errdefer self.poison(returned_error);
-        try captureError(&returned_error, self.publication(failure));
-        const result = contextData(self).raw.module(f.id, failure_id);
-        if (check_captures) try captureError(&returned_error, self.capturePublication(result));
-        return captureError(&returned_error, source.own(source.Module, contextData(self).raw.allocator(), result));
-    }
-};
-
-/// Forward statement builder. Finalization closes this scope to further authoring.
-const BodyData = struct {
-    context: *Context,
-    scope: *Scope,
-    function_handle: ?*const Function = null,
-    bindings: std.ArrayList(Binding) = .empty,
-    parameter_values: ?[]?*const Value = null,
-};
-fn bodyData(body: *Body) *BodyData {
-    return @ptrCast(@alignCast(body));
+        pub fn sequenceLength(self: *Self, sequence: anytype) Error!*const Value(Shape(u64)) {
+            _ = comptime sequenceElement(index(.value, @TypeOf(sequence)), "sequenceLength");
+            return @ptrCast(try self.raw().sequenceLength(erased(.value, sequence)));
+        }
+        pub fn sequenceGet(self: *Self, sequence: anytype, offset: anytype) Error!*const Value(OptionalShape(sequenceElement(index(.value, @TypeOf(sequence)), "sequenceGet"))) {
+            comptime compatible(Shape(u64), index(.value, @TypeOf(offset)), "sequenceGet index");
+            return @ptrCast(try self.raw().sequenceGet(erased(.value, sequence), erased(.value, offset)));
+        }
+        pub fn sequenceSet(self: *Self, sequence: anytype, offset: anytype, element: anytype, failure: anytype) Error!*const Value(index(.value, @TypeOf(sequence))) {
+            comptime compatible(Shape(u64), index(.value, @TypeOf(offset)), "sequenceSet index");
+            comptime compatible(sequenceElement(index(.value, @TypeOf(sequence)), "sequenceSet"), index(.value, @TypeOf(element)), "sequenceSet element");
+            return @ptrCast(try self.raw().sequenceSet(erased(.value, sequence), erased(.value, offset), erased(.value, element), erased(.failure_literal, failure)));
+        }
+        pub fn sequenceTake(self: *Self, sequence: anytype, length: anytype) Error!*const Value(index(.value, @TypeOf(sequence))) {
+            comptime requireSequence(index(.value, @TypeOf(sequence)), "sequenceTake");
+            comptime compatible(Shape(u64), index(.value, @TypeOf(length)), "sequenceTake length");
+            return @ptrCast(try self.raw().sequenceTake(erased(.value, sequence), erased(.value, length)));
+        }
+        pub fn append(self: *Self, sequence: anytype, element: anytype, options: anytype) Error!*const Value(index(.value, @TypeOf(sequence))) {
+            const S = index(.value, @TypeOf(sequence));
+            comptime compatible(sequenceElement(S, "append"), index(.value, @TypeOf(element)), "append element");
+            return @ptrCast(try self.raw().appendChecked(erased(.value, sequence), erased(.value, element), capacityFailure(S, options, "append")));
+        }
+        pub fn concat(self: *Self, left: anytype, right: anytype, options: anytype) Error!*const Value(index(.value, @TypeOf(left))) {
+            const S = index(.value, @TypeOf(left));
+            comptime compatible(S, index(.value, @TypeOf(right)), "concat operands");
+            return @ptrCast(try self.raw().concatChecked(erased(.value, left), erased(.value, right), capacityFailure(S, options, "concat")));
+        }
+        pub fn pop(self: *Self, sequence: anytype) Error!*const Value(PopShape(index(.value, @TypeOf(sequence)))) {
+            return @ptrCast(try self.raw().pop(erased(.value, sequence)));
+        }
+        pub fn sequencePopLast(self: *Self, sequence: anytype) Error!*const Value(PopLastShape(index(.value, @TypeOf(sequence)))) {
+            return @ptrCast(try self.raw().sequencePopLast(erased(.value, sequence)));
+        }
+        pub fn update(self: *Self, value: anytype, replacements: anytype) Error!*const Value(index(.value, @TypeOf(value))) {
+            comptime {
+                const Fields = productFields(index(.value, @TypeOf(value)), "update");
+                if (@TypeOf(replacements) != *const interop.RuntimeNamed(.value)) {
+                    const supplied = fieldsInfo(@TypeOf(replacements), "update");
+                    for (supplied.field_names, supplied.field_types) |name, T| compatible(child(Fields, name, "update"), index(.value, T), "update." ++ name);
+                }
+            }
+            const args = packArguments(Dynamic, replacements, "update");
+            return @ptrCast(try self.raw().update(erased(.value, value), args.slice()));
+        }
+        pub fn convertInteger(self: *Self, target: anytype, value: anytype, options: anytype) Error!*const Value(index(.schema, @TypeOf(target))) {
+            const Target = index(.schema, @TypeOf(target));
+            const From = index(.value, @TypeOf(value));
+            comptime {
+                requireInteger(Target, "convertInteger target");
+                requireInteger(From, "convertInteger source");
+                if (Target != Dynamic and From != Dynamic) {
+                    const needed = data.scalar.conversionCanFail(@unionInit(p.Schema, @typeName(From.contract.integer), {}), @unionInit(p.Schema, @typeName(Target.contract.integer), {}));
+                    if (needed != @hasField(@TypeOf(options), "overflow")) @compileError("Horos convertInteger: overflow failure required exactly for a narrowing conversion");
+                }
+            }
+            return @ptrCast(try self.raw().convertInteger(erased(.schema, target), erased(.value, value), if (@hasField(@TypeOf(options), "overflow")) erased(.failure_literal, options.overflow) else null));
+        }
+        pub fn booleanNot(self: *Self, value: anytype) Error!*const Value(Shape(bool)) {
+            comptime compatible(Shape(bool), index(.value, @TypeOf(value)), "booleanNot");
+            return @ptrCast(try self.raw().booleanNot(erased(.value, value)));
+        }
+        pub fn bitNot(self: *Self, value: anytype) Error!*const Value(index(.value, @TypeOf(value))) {
+            comptime requireInteger(index(.value, @TypeOf(value)), "bitNot");
+            return @ptrCast(try self.raw().bitNot(erased(.value, value)));
+        }
+        pub fn bitwise(self: *Self, operation: @typeInfo(@TypeOf(runtime.Body.bitwise)).@"fn".param_types[1].?, left: anytype, right: anytype) Error!*const Value(index(.value, @TypeOf(left))) {
+            comptime requireInteger(index(.value, @TypeOf(left)), "bitwise");
+            comptime compatible(index(.value, @TypeOf(left)), index(.value, @TypeOf(right)), "bitwise operands");
+            return @ptrCast(try self.raw().bitwise(operation, erased(.value, left), erased(.value, right)));
+        }
+        pub fn textInteger(self: *Self, value: anytype) Error!*const Value(Shape(native.Text(null))) {
+            comptime requireInteger(index(.value, @TypeOf(value)), "textInteger");
+            return @ptrCast(try self.raw().textInteger(erased(.value, value)));
+        }
+        pub fn textScalar(self: *Self, value: anytype, failure: anytype) Error!*const Value(Shape(native.Text(null))) {
+            comptime compatible(Shape(u32), index(.value, @TypeOf(value)), "textScalar");
+            return @ptrCast(try self.raw().textScalar(erased(.value, value), erased(.failure_literal, failure)));
+        }
+        pub fn blobFromByte(self: *Self, value: anytype) Error!*const Value(Shape(native.Bytes(null))) {
+            comptime compatible(Shape(u8), index(.value, @TypeOf(value)), "blobFromByte");
+            return @ptrCast(try self.raw().blobFromByte(erased(.value, value)));
+        }
+        pub fn blobConcat(self: *Self, target: anytype, left: anytype, right: anytype, failure: anytype) Error!*const Value(index(.schema, @TypeOf(target))) {
+            comptime compatibleBlob(index(.schema, @TypeOf(target)), index(.value, @TypeOf(left)), "blobConcat left");
+            comptime compatibleBlob(index(.schema, @TypeOf(target)), index(.value, @TypeOf(right)), "blobConcat right");
+            return @ptrCast(try self.raw().blobConcat(erased(.schema, target), erased(.value, left), erased(.value, right), erased(.failure_literal, failure)));
+        }
+        pub fn blobSlice(self: *Self, target: anytype, value: anytype, start: anytype, length: anytype, options: anytype) Error!*const Value(index(.schema, @TypeOf(target))) {
+            const S = index(.schema, @TypeOf(target));
+            comptime {
+                compatibleBlob(S, index(.value, @TypeOf(value)), "blobSlice value");
+                compatible(Shape(u64), index(.value, @TypeOf(start)), "blobSlice start");
+                compatible(Shape(u64), index(.value, @TypeOf(length)), "blobSlice length");
+                if (S != Dynamic and (S.contract == .text) != @hasField(@TypeOf(options), "invalid_utf8")) @compileError("Horos blobSlice: invalid_utf8 failure required exactly for text");
+            }
+            return @ptrCast(try self.raw().blobSlice(erased(.schema, target), erased(.value, value), erased(.value, start), erased(.value, length), erased(.failure_literal, options.capacity), if (@hasField(@TypeOf(options), "invalid_utf8")) erased(.failure_literal, options.invalid_utf8) else null));
+        }
+        pub fn blobLength(self: *Self, blob: anytype) Error!*const Value(Shape(u64)) {
+            comptime requireBlob(index(.value, @TypeOf(blob)), "blobLength");
+            return @ptrCast(try self.raw().blobLength(erased(.value, blob)));
+        }
+        pub fn blobByte(self: *Self, blob: anytype, offset: anytype) Error!*const Value(OptionalShape(Shape(u8))) {
+            comptime requireBlob(index(.value, @TypeOf(blob)), "blobByte");
+            comptime compatible(Shape(u64), index(.value, @TypeOf(offset)), "blobByte index");
+            return @ptrCast(try self.raw().blobByte(erased(.value, blob), erased(.value, offset)));
+        }
+        pub fn blobCompare(self: *Self, left: anytype, right: anytype) Error!*const Value(Shape(i8)) {
+            comptime requireBlob(index(.value, @TypeOf(left)), "blobCompare");
+            comptime compatible(index(.value, @TypeOf(left)), index(.value, @TypeOf(right)), "blobCompare operands");
+            return @ptrCast(try self.raw().blobCompare(erased(.value, left), erased(.value, right)));
+        }
+        pub fn enumTag(self: *Self, value: anytype) Error!*const Value(Shape(u32)) {
+            const S = index(.value, @TypeOf(value));
+            if (comptime S != Dynamic) if (!@hasDecl(S, "contract") or S.contract != .enumeration) @compileError("Horos enumTag: expected enumeration");
+            return @ptrCast(try self.raw().enumTag(erased(.value, value)));
+        }
+        pub fn variantTag(self: *Self, value: anytype) Error!*const Value(Shape(u64)) {
+            _ = comptime sumFields(index(.value, @TypeOf(value)), "variantTag");
+            return @ptrCast(try self.raw().variantTag(erased(.value, value)));
+        }
+        pub fn variantPayload(self: *Self, value: anytype, comptime name: []const u8, failure: anytype) Error!*const Value(child(sumFields(index(.value, @TypeOf(value)), "variantPayload"), name, "variantPayload")) {
+            return @ptrCast(try self.raw().variantPayload(erased(.value, value), name, erased(.failure_literal, failure)));
+        }
+        pub fn yieldNow(self: *Self) Error!*const Value(Shape(void)) {
+            return @ptrCast(try self.raw().yieldNow());
+        }
+        pub fn checked(self: *Self, operation: Arithmetic, left: anytype, right: anytype, failures: anytype) Error!*const Value(index(.value, @TypeOf(left))) {
+            comptime requireInteger(index(.value, @TypeOf(left)), "checked arithmetic");
+            comptime compatible(index(.value, @TypeOf(left)), index(.value, @TypeOf(right)), "checked arithmetic operands");
+            return @ptrCast(try self.raw().checked(operation, erased(.value, left), erased(.value, right), .{
+                .overflow = erased(.failure_literal, failures.overflow),
+                .division_by_zero = if (@hasField(@TypeOf(failures), "division_by_zero")) optionalFailure(failures.division_by_zero) else null,
+            }));
+        }
+        pub fn equal(self: *Self, left: anytype, right: anytype) Error!*const Value(Shape(bool)) {
+            comptime compatible(index(.value, @TypeOf(left)), index(.value, @TypeOf(right)), "equal operands");
+            return @ptrCast(try self.raw().equal(erased(.value, left), erased(.value, right)));
+        }
+        pub fn less(self: *Self, left: anytype, right: anytype) Error!*const Value(Shape(bool)) {
+            comptime compatible(index(.value, @TypeOf(left)), index(.value, @TypeOf(right)), "less operands");
+            comptime requireInteger(index(.value, @TypeOf(left)), "less");
+            return @ptrCast(try self.raw().less(erased(.value, left), erased(.value, right)));
+        }
+        pub fn select(self: *Self, condition: anytype, yes: anytype, no: anytype) Error!*const Value(index(.value, @TypeOf(yes))) {
+            comptime compatible(Shape(bool), index(.value, @TypeOf(condition)), "select condition");
+            comptime compatible(index(.value, @TypeOf(yes)), index(.value, @TypeOf(no)), "select operands");
+            return @ptrCast(try self.raw().select(erased(.value, condition), erased(.value, yes), erased(.value, no)));
+        }
+        pub fn checkedAdd(self: *Self, left: anytype, right: anytype, failure: anytype) Error!*const Value(index(.value, @TypeOf(left))) {
+            comptime compatible(index(.value, @TypeOf(left)), index(.value, @TypeOf(right)), "checkedAdd operands");
+            comptime requireInteger(index(.value, @TypeOf(left)), "checkedAdd");
+            return @ptrCast(try self.raw().checkedAdd(erased(.value, left), erased(.value, right), erased(.failure_literal, failure)));
+        }
+        pub fn branch(self: *Self) Error!*Body(native.Fields(&.{}, &.{})) {
+            return @ptrCast(try self.raw().branch());
+        }
+        pub fn block(self: *Self, computation: anytype) Error!*const Value(index(.computation, @TypeOf(computation))) {
+            return @ptrCast(try self.raw().block(erased(.computation, computation)));
+        }
+        pub fn conditional(self: *Self, condition: anytype, yes: anytype, no: anytype) Error!*const Value(index(.computation, @TypeOf(yes))) {
+            comptime compatible(Shape(bool), index(.value, @TypeOf(condition)), "conditional condition");
+            comptime compatible(index(.computation, @TypeOf(yes)), index(.computation, @TypeOf(no)), "conditional result");
+            return @ptrCast(try self.raw().conditional(erased(.value, condition), erased(.computation, yes), erased(.computation, no)));
+        }
+        pub fn ret(self: *Self, value: anytype) Error!*const Computation(index(.value, @TypeOf(value))) {
+            return @ptrCast(try self.raw().ret(erased(.value, value)));
+        }
+        pub fn fail(self: *Self, returns: anytype, failure: anytype) Error!*const Computation(index(.schema, @TypeOf(returns))) {
+            return @ptrCast(try self.raw().fail(erased(.schema, returns), erased(.value, failure)));
+        }
+        pub fn abandon(self: *Self) void {
+            self.raw().abandon();
+        }
+    };
 }
-pub const Body = opaque {
-    fn ready(self: *Body) Error!void {
-        try bodyData(self).context.ready();
-        var cursor: ?*Scope = bodyData(self).scope;
-        while (cursor) |scope| : (cursor = scope.parent) {
-            if (!scope.active)
-                return bodyData(self).context.reject(error.ClosedBody, "body", "body or ancestor already finalized");
-        }
-    }
-    fn useValue(self: *Body, value: *const Value) Error!*const ValueData {
-        try self.ready();
-        const v = data(ValueData, value);
-        try bodyData(self).context.origin(v.owner);
-        if (v.scope) |origin| {
-            var cursor: ?*Scope = bodyData(self).scope;
-            while (cursor) |scope| : (cursor = scope.parent) if (scope == origin) return v;
-            return bodyData(self).context.reject(error.OutOfScope, "value", "not introduced in lexical ancestry");
-        }
-        return v;
-    }
-    fn makeValue(self: *Body, id: p.Id, schema: *const Schema) Error!*const Value {
-        var returned_error: anyerror = undefined;
-        errdefer if (returned_error == error.OutOfMemory) bodyData(self).context.poison(returned_error);
-        const expression = contextData(bodyData(self).context).raw.values.items[@intCast(id)].expression;
-        if (expression == .variable) {
-            if (contextData(bodyData(self).context).variable_schemas.get(expression.variable)) |prior| try captureError(&returned_error, bodyData(self).context.same(prior, schema));
-            try captureError(&returned_error, contextData(bodyData(self).context).variable_schemas.put(contextData(bodyData(self).context).raw.allocator(), expression.variable, schema));
-        }
-        return captureError(&returned_error, handle(Value, try captureError(&returned_error, bodyData(self).context.save(ValueData, .{
-            .owner = bodyData(self).context,
-            .id = id,
-            .schema = schema,
-            .scope = bodyData(self).scope,
-        }))));
-    }
-    fn bind(self: *Body, term: p.Id, schema: *const Schema) Error!*const Value {
-        try self.ready();
-        const c = bodyData(self).context;
-        var returned_error: anyerror = undefined;
-        errdefer c.poison(returned_error);
-        const variable = try captureError(&returned_error, contextData(c).raw.variable(try captureError(&returned_error, c.schemaId(schema))));
-        const result = try captureError(&returned_error, self.makeValue(try captureError(&returned_error, contextData(c).raw.reference(variable)), schema));
-        try captureError(&returned_error, bodyData(self).bindings.append(contextData(c).raw.allocator(), .{
-            .bind = .{ .variable = variable, .term = term },
-        }));
-        return captureError(&returned_error, result);
-    }
-    pub fn parameter(self: *Body, name: []const u8) Error!*const Value {
-        try self.ready();
-        const f = data(FunctionData, bodyData(self).function_handle orelse
-            return bodyData(self).context.reject(error.UnknownName, "branch", "branch has no parameters"));
-        for (f.parameters, 0..) |named, i| if (std.mem.eql(u8, name, named.name)) {
-            var returned_error: anyerror = undefined;
-            errdefer bodyData(self).context.poison(returned_error);
-            if (bodyData(self).parameter_values == null) {
-                const values = try captureError(&returned_error, contextData(bodyData(self).context).raw.allocator().alloc(?*const Value, f.parameters.len));
-                @memset(values, null);
-                bodyData(self).parameter_values = values;
-            }
-            if (bodyData(self).parameter_values.?[i]) |present| return captureError(&returned_error, present);
-            const result = try captureError(&returned_error, self.makeValue(try captureError(&returned_error, contextData(bodyData(self).context).raw.reference(contextData(bodyData(self).context).raw.parameter(f.id, i))), named.schema));
-            bodyData(self).parameter_values.?[i] = result;
-            return captureError(&returned_error, result);
-        };
-        return bodyData(self).context.reject(error.UnknownName, f.name, "unknown named parameter");
-    }
-    pub fn constant(self: *Body, comptime T: type, item: T) Error!*const Value {
-        try self.ready();
-        var returned_error: anyerror = undefined;
-        errdefer bodyData(self).context.poison(returned_error);
-        return captureError(&returned_error, self.makeValue(try captureError(&returned_error, contextData(bodyData(self).context).raw.constant(T, item)), try captureError(&returned_error, bodyData(self).context.scalar(T))));
-    }
-    fn arguments(self: *Body, fields: []const Field, args: []const Argument) Error![]const p.Id {
-        const c = bodyData(self).context;
-        if (fields.len != args.len)
-            return c.reject(error.SchemaMismatch, "arguments", "wrong number of named arguments");
-        var returned_error: anyerror = undefined;
-        errdefer c.poison(returned_error);
-        const allocator = contextData(c).raw.allocator();
-        const ids = try captureError(&returned_error, allocator.alloc(p.Id, fields.len));
-        const Match = struct { value: *const Value, duplicate: bool = false };
-        const scratch = contextData(c).raw.arena.child_allocator;
-        var matches: std.StringHashMapUnmanaged(Match) = .empty;
-        defer matches.deinit(scratch);
-        try captureError(&returned_error, matches.ensureTotalCapacity(scratch, std.math.cast(u32, args.len) orelse return captureError(&returned_error, error.OutOfMemory)));
-        for (args) |arg| {
-            const entry = try captureError(&returned_error, matches.getOrPut(scratch, arg.name));
-            if (entry.found_existing) entry.value_ptr.duplicate = true else entry.value_ptr.* = .{ .value = arg.value };
-        }
-        // Validate in declaration order, as before. In particular, a duplicate
-        // later argument must not hide an earlier missing name or foreign value.
-        for (fields, ids) |named, *id| {
-            const found = matches.get(named.name) orelse
-                return captureError(&returned_error, @as(Error![]const p.Id, c.reject(error.UnknownName, "arguments", "missing declared name")));
-            if (found.duplicate) return captureError(&returned_error, @as(Error![]const p.Id, c.reject(error.DuplicateName, "arguments", "duplicate name")));
-            const v = try captureError(&returned_error, self.useValue(found.value));
-            c.same(named.schema, v.schema) catch |err| {
-                contextData(c).diagnostic.entity = named.name;
-                contextData(c).diagnostic.relationship = "argument or product field differs from its declared schema";
-                return captureError(&returned_error, @as(Error![]const p.Id, err));
-            };
-            id.* = v.id;
-        }
-        return captureError(&returned_error, ids);
-    }
-    pub fn call(
-        self: *Body,
-        function_handle: *const Function,
-        args: []const Argument,
-    ) Error!*const Value {
-        try self.ready();
-        const f = try self.visibleFunction(function_handle);
-        var returned_error: anyerror = undefined;
-        errdefer bodyData(self).context.poison(returned_error);
-        const term = try captureError(&returned_error, contextData(bodyData(self).context).raw.term(.{
-            .call = .{
-                .function = f.id,
-                .arguments = try captureError(&returned_error, self.arguments(f.parameters, args)),
-            },
-        }));
-        try captureError(&returned_error, self.noteForwardUse(function_handle, .{ .term = term }));
-        return captureError(&returned_error, self.bind(term, f.result));
-    }
-    pub fn perform(
-        self: *Body,
-        operation_handle: *const Operation,
-        payload: *const Value,
-    ) Error!*const Value {
-        try self.ready();
-        const c = bodyData(self).context;
-        const op = data(OperationData, operation_handle);
-        try c.origin(op.owner);
-        if (!op.external) return c.reject(error.InvalidCategory, op.name, "local operation needs capability");
-        const v = try self.useValue(payload);
-        try c.same(op.payload, v.schema);
-        var returned_error: anyerror = undefined;
-        errdefer c.poison(returned_error);
-        return captureError(&returned_error, self.bind(try captureError(&returned_error, contextData(c).raw.term(.{ .perform = .{ .effect = op.id, .payload = v.id } })), op.result));
-    }
-    pub fn product(
-        self: *Body,
-        schema: *const Schema,
-        fields: []const Argument,
-    ) Error!*const Value {
-        const c = bodyData(self).context;
-        const id = try c.schemaId(schema);
-        if (contextData(c).raw.schemas.items[@intCast(id)] != .product)
-            return c.reject(error.InvalidCategory, "product", "requires a record schema");
-        var returned_error: anyerror = undefined;
-        errdefer c.poison(returned_error);
-        return captureError(&returned_error, self.bind(try captureError(&returned_error, contextData(c).raw.pure(try captureError(&returned_error, contextData(c).raw.primitive(id, .product, try captureError(&returned_error, self.arguments(data(SchemaData, schema).fields, fields)), 0)))), schema));
-    }
-    pub fn field(self: *Body, product_value: *const Value, name: []const u8) Error!*const Value {
-        const c = bodyData(self).context;
-        const v = try self.useValue(product_value);
-        const s = data(SchemaData, v.schema);
-        if (contextData(c).raw.schemas.items[@intCast(s.id)] != .product)
-            return c.reject(error.InvalidCategory, "field", "requires a named record value");
-        for (s.fields, 0..) |item, index| if (std.mem.eql(u8, item.name, name)) {
-            var returned_error: anyerror = undefined;
-            errdefer c.poison(returned_error);
-            return captureError(&returned_error, self.bind(try captureError(&returned_error, contextData(c).raw.pure(try captureError(&returned_error, contextData(c).raw.primitive(try captureError(&returned_error, c.schemaId(item.schema)), .field, &.{v.id}, index)))), item.schema));
-        };
-        return c.reject(error.UnknownName, "field", "unknown named product field");
-    }
-    pub fn closureBody(self: *Body, function_handle: *const Function) Error!*Body {
-        try self.ready();
-        return bodyData(self).context.nestedBody(function_handle, bodyData(self).scope);
-    }
-    fn visibleFunction(self: *Body, function_handle: *const Function) Error!*const FunctionData {
-        try self.ready();
-        const f = data(FunctionData, function_handle);
-        try bodyData(self).context.functionVisible(f, bodyData(self).scope);
-        return f;
-    }
-    fn noteForwardUse(self: *Body, declaration: *const Function, anchor: @FieldType(PublicationUse, "anchor")) Error!void {
-        // A declaration may acquire its lexical parent after this use. Only
-        // published uses constrain that eventual parent; abandoned AST does not.
-        if (data(FunctionData, declaration).scope == null)
-            try bodyData(self).context.notePublication(.{ .anchor = anchor, .contract = .{
-                .function_scope = .{ .declaration = declaration, .scope = bodyData(self).scope },
-            } });
-    }
-    pub fn lambda(
-        self: *Body,
-        function_handle: *const Function,
-        schema: *const Schema,
-    ) Error!*const Value {
-        const c = bodyData(self).context;
-        const f = try self.visibleFunction(function_handle);
-        const id = try c.schemaId(schema);
-        const shape = contextData(c).raw.schemas.items[@intCast(id)];
-        if (shape != .internal or shape.internal != .computation)
-            return c.reject(error.InvalidCategory, f.name, "lambda requires callable schema");
-        const info = data(SchemaData, schema);
-        if (f.callable_schema) |declared| try c.same(declared, schema);
-        try c.same(f.result, info.result orelse return error.InvalidSchema);
-        if (f.parameters.len != info.fields.len)
-            return c.reject(error.SchemaMismatch, f.name, "callable parameter count differs from declaration");
-        for (f.parameters, info.fields) |actual, expected| {
-            if (!std.mem.eql(u8, actual.name, expected.name))
-                return c.reject(error.SchemaMismatch, f.name, "callable parameter names differ from declaration");
-            try c.same(expected.schema, actual.schema);
-        }
-        var returned_error: anyerror = undefined;
-        errdefer c.poison(returned_error);
-        const value_id = try captureError(&returned_error, contextData(c).raw.lambda(f.id, id));
-        try captureError(&returned_error, self.noteForwardUse(function_handle, .{ .value = value_id }));
-        try captureError(&returned_error, contextData(c).lambda_schemas.put(contextData(c).raw.allocator(), value_id, schema));
-        return captureError(&returned_error, self.bind(try captureError(&returned_error, contextData(c).raw.pure(value_id)), schema));
-    }
-    pub fn apply(
-        self: *Body,
-        callable_value: *const Value,
-        args: []const Argument,
-    ) Error!*const Value {
-        const v = try self.useValue(callable_value);
-        const c = bodyData(self).context;
-        const info = data(SchemaData, v.schema);
-        const shape = contextData(c).raw.schemas.items[@intCast(info.id)];
-        if (shape != .internal or shape.internal != .computation)
-            return c.reject(error.InvalidCategory, "apply", "value is not callable");
-        var returned_error: anyerror = undefined;
-        errdefer c.poison(returned_error);
-        return captureError(&returned_error, self.bind(try captureError(&returned_error, contextData(c).raw.term(.{
-            .apply = .{
-                .computation = v.id,
-                .arguments = try captureError(&returned_error, self.arguments(info.fields, args)),
-            },
-        })), info.result orelse return captureError(&returned_error, error.InvalidSchema)));
-    }
-    pub fn performLocal(
-        self: *Body,
-        operation_handle: *const Operation,
-        capability_value: *const Value,
-        payload: *const Value,
-    ) Error!*const Value {
-        return self.performScoped(operation_handle, capability_value, payload, &.{});
-    }
-    pub fn performScoped(
-        self: *Body,
-        operation_handle: *const Operation,
-        capability_value: *const Value,
-        payload: *const Value,
-        bodies: []const Argument,
-    ) Error!*const Value {
-        const c = bodyData(self).context;
-        const op = data(OperationData, operation_handle);
-        try c.origin(op.owner);
-        const cap = try self.useValue(capability_value);
-        const expected_capability = try c.capability(operation_handle);
-        c.same(expected_capability, cap.schema) catch |err| {
-            contextData(c).diagnostic.entity = op.name;
-            contextData(c).diagnostic.relationship = "capability belongs to a different operation instance";
-            return err;
-        };
-        const v = try self.useValue(payload);
-        try c.same(op.payload, v.schema);
-        var returned_error: anyerror = undefined;
-        errdefer c.poison(returned_error);
-        return captureError(&returned_error, self.bind(try captureError(&returned_error, contextData(c).raw.term(.{
-            .perform = .{
-                .effect = op.id,
-                .payload = v.id,
-                .capability = cap.id,
-                .bodies = try captureError(&returned_error, self.arguments(op.bodies, bodies)),
-            },
-        })), op.result));
-    }
-    pub fn package(self: *Body, resumption: *const Value) Error!*const Value {
-        const token = try self.useValue(resumption);
-        const c = bodyData(self).context;
-        const schema = try c.suspensionPackage(token.schema);
-        var returned_error: anyerror = undefined;
-        errdefer c.poison(returned_error);
-        const value = try captureError(&returned_error, contextData(c).raw.primitive(
-            try captureError(&returned_error, c.schemaId(schema)),
-            .package,
-            &.{token.id},
-            0,
-        ));
-        return captureError(&returned_error, self.bind(try captureError(&returned_error, contextData(c).raw.pure(value)), schema));
-    }
-    pub fn unpack(self: *Body, package_value: *const Value) Error!*const Value {
-        const value = try self.unpackOperand(package_value);
-        const c = bodyData(self).context;
-        var returned_error: anyerror = undefined;
-        errdefer c.poison(returned_error);
-        const info = data(ValueData, value);
-        return captureError(&returned_error, self.bind(try captureError(&returned_error, contextData(c).raw.pure(info.id)), info.schema));
-    }
-    /// Consume a suspension package directly, without exposing an intermediate
-    /// continuation owner to the caller's statement scope.
-    pub fn resumePackage(self: *Body, package_value: *const Value, reply: *const Value) Error!*const Value {
-        return self.resumeValue(try self.unpackOperand(package_value), reply);
-    }
-    pub fn disposePackage(self: *Body, package_value: *const Value) Error!*const Value {
-        return self.dispose(try self.unpackOperand(package_value));
-    }
-    fn unpackOperand(self: *Body, package_value: *const Value) Error!*const Value {
-        const packaged = try self.useValue(package_value);
-        const c = bodyData(self).context;
-        const info = data(SchemaData, packaged.schema);
-        const shape = contextData(c).raw.schemas.items[@intCast(info.id)];
-        if (shape != .internal or shape.internal != .suspension_package)
-            return c.reject(error.InvalidCategory, "unpack", "requires a suspension package");
-        const result = info.result orelse return error.InvalidSchema;
-        var returned_error: anyerror = undefined;
-        errdefer c.poison(returned_error);
-        const value = try captureError(&returned_error, contextData(c).raw.primitive(
-            try captureError(&returned_error, c.schemaId(result)),
-            .unpack,
-            &.{packaged.id},
-            0,
-        ));
-        return captureError(&returned_error, self.makeValue(value, result));
-    }
-    pub fn resumeValue(
-        self: *Body,
-        resumption: *const Value,
-        reply: *const Value,
-    ) Error!*const Value {
-        const token = try self.useValue(resumption);
-        const v = try self.useValue(reply);
-        const c = bodyData(self).context;
-        const info = data(SchemaData, token.schema);
-        const shape = contextData(c).raw.schemas.items[@intCast(info.id)];
-        if (shape != .internal or shape.internal != .resumption)
-            return c.reject(error.InvalidCategory, "resume", "value is not a resumption");
-        if (info.fields.len != 1) return error.InvalidSchema;
-        try c.same(info.fields[0].schema, v.schema);
-        var returned_error: anyerror = undefined;
-        errdefer c.poison(returned_error);
-        return captureError(&returned_error, self.bind(try captureError(&returned_error, contextData(c).raw.term(.{ .resume_value = .{ .resumption = token.id, .argument = v.id } })), info.result orelse return captureError(&returned_error, error.InvalidSchema)));
-    }
-    pub fn handleWith(
-        self: *Body,
-        handler_handle: *const Handler,
-        callable_value: *const Value,
-        state: []const Argument,
-    ) Error!*const Value {
-        return self.handleWithArguments(handler_handle, callable_value, &.{}, state);
-    }
-    pub fn handleWithArguments(self: *Body, handler_handle: *const Handler, callable_value: *const Value, args: []const Argument, state: []const Argument) Error!*const Value {
-        const c = bodyData(self).context;
-        const h = data(HandlerData, handler_handle);
-        try c.origin(h.owner);
-        const v = try self.useValue(callable_value);
-        try c.same(h.body_schema, v.schema);
-        var returned_error: anyerror = undefined;
-        errdefer c.poison(returned_error);
-        return captureError(&returned_error, self.bind(try captureError(&returned_error, contextData(c).raw.term(.{
-            .handle = .{
-                .handler = h.id,
-                .body = v.id,
-                .arguments = try captureError(&returned_error, self.arguments(data(SchemaData, h.body_schema).fields[h.clauses.len..], args)),
-                .state = try captureError(&returned_error, self.arguments(h.state, state)),
-            },
-        })), h.answer));
-    }
-    pub fn checkedAdd(self: *Body, left: *const Value, right: *const Value, failure: *const FailureLiteral) Error!*const Value {
-        return self.checked(.add, left, right, .{ .overflow = failure });
-    }
-    pub fn checked(
-        self: *Body,
-        operation: Arithmetic,
-        left: *const Value,
-        right: *const Value,
-        failures: ArithmeticFailures,
-    ) Error!*const Value {
-        const c = bodyData(self).context;
-        const a = try self.useValue(left);
-        const b = try self.useValue(right);
-        try c.same(a.schema, b.schema);
-        const schema = try c.schemaId(a.schema);
-        switch (contextData(c).raw.schemas.items[@intCast(schema)]) {
-            .i8, .i16, .i32, .i64, .u8, .u16, .u32, .u64 => {},
-            else => return c.reject(error.InvalidCategory, "arithmetic", "requires scalar integer operands"),
-        }
-        const opcode: p.Opcode = switch (operation) {
-            .add => .integer_add,
-            .subtract => .integer_sub,
-            .multiply => .integer_mul,
-            .divide => .integer_div,
-            .remainder => .integer_rem,
-        };
-        const overflow = data(FailureLiteralData, failures.overflow);
-        try c.origin(overflow.owner);
-        var faults: [2]p.InstructionFailure = undefined;
-        faults[0] = .{ .kind = .arithmetic_overflow, .value = overflow.literal };
-        const division = operation == .divide or operation == .remainder;
-        if (division) {
-            const zero = data(FailureLiteralData, failures.division_by_zero orelse
-                return c.reject(error.InvalidCategory, "division", "requires an authored zero-divisor failure"));
-            try c.origin(zero.owner);
-            faults[1] = .{ .kind = .division_by_zero, .value = zero.literal };
-        } else if (failures.division_by_zero != null)
-            return c.reject(error.InvalidCategory, "arithmetic", "zero-divisor failure only applies to division or remainder");
-        var returned_error: anyerror = undefined;
-        errdefer c.poison(returned_error);
-        const value_id = try captureError(&returned_error, contextData(c).raw.value(.{ .schema = schema, .expression = .{ .primitive = .{
-            .opcode = opcode,
-            .operands = &.{ a.id, b.id },
-            .failures = faults[0..@as(usize, if (division) 2 else 1)],
-        } } }));
-        try captureError(&returned_error, c.notePublication(.{ .anchor = .{ .value = value_id }, .contract = .{ .failure = data(ValueData, overflow.value).schema } }));
-        if (division) try captureError(&returned_error, c.notePublication(.{ .anchor = .{ .value = value_id }, .contract = .{ .failure = data(ValueData, data(FailureLiteralData, failures.division_by_zero.?).value).schema } }));
-        return captureError(&returned_error, self.bind(try captureError(&returned_error, contextData(c).raw.pure(value_id)), a.schema));
-    }
-    /// Consume one product and bind its fields in the current lexical body.
-    pub fn destructure(self: *Body, product_value: *const Value) Error!*const ProductParts {
-        const tuple = try self.useValue(product_value);
-        const c = bodyData(self).context;
-        const info = data(SchemaData, tuple.schema);
-        if (contextData(c).raw.schemas.items[@intCast(info.id)] != .product)
-            return c.reject(error.InvalidCategory, "destructure", "requires a product value");
-        var returned_error: anyerror = undefined;
-        errdefer c.poison(returned_error);
-        const allocator = contextData(c).raw.allocator();
-        const variables = try captureError(&returned_error, allocator.alloc(p.Id, info.fields.len));
-        const fields = try captureError(&returned_error, allocator.alloc(Argument, info.fields.len));
-        for (info.fields, variables, fields) |named, *variable, *out| {
-            variable.* = try captureError(&returned_error, contextData(c).raw.variable(try captureError(&returned_error, c.schemaId(named.schema))));
-            out.* = .{ .name = named.name, .value = try captureError(&returned_error, self.makeValue(
-                try captureError(&returned_error, contextData(c).raw.reference(variable.*)),
-                named.schema,
-            )) };
-        }
-        const result = handle(ProductParts, try captureError(&returned_error, c.save(ProductPartsData, .{
-            .body = self,
-            .fields = fields,
-        })));
-        try captureError(&returned_error, bodyData(self).bindings.append(allocator, .{
-            .unpack = .{ .value = tuple.id, .variables = variables },
-        }));
-        return captureError(&returned_error, result);
-    }
-    pub fn equal(self: *Body, left: *const Value, right: *const Value) Error!*const Value {
-        const a = try self.useValue(left);
-        const b = try self.useValue(right);
-        const c = bodyData(self).context;
-        try c.same(a.schema, b.schema);
-        var returned_error: anyerror = undefined;
-        errdefer c.poison(returned_error);
-        const boolean = try captureError(&returned_error, c.scalar(bool));
-        return captureError(&returned_error, self.bind(try captureError(&returned_error, contextData(c).raw.pure(try captureError(&returned_error, contextData(c).raw.primitive(
-            try captureError(&returned_error, c.schemaId(boolean)),
-            .equal,
-            &.{ a.id, b.id },
-            0,
-        )))), boolean));
-    }
-    /// Select between already-staged values. Ownership admission still checks
-    /// that the unselected value may be dropped.
-    pub fn select(self: *Body, condition: *const Value, yes: *const Value, no: *const Value) Error!*const Value {
-        const flag = try self.useValue(condition);
-        const left = try self.useValue(yes);
-        const right = try self.useValue(no);
-        const c = bodyData(self).context;
-        try c.same(try c.scalar(bool), flag.schema);
-        try c.same(left.schema, right.schema);
-        var returned_error: anyerror = undefined;
-        errdefer c.poison(returned_error);
-        return captureError(&returned_error, self.bind(try captureError(&returned_error, contextData(c).raw.pure(try captureError(&returned_error, contextData(c).raw.primitive(try captureError(&returned_error, c.schemaId(left.schema)), .select, &.{ flag.id, left.id, right.id }, 0)))), left.schema));
-    }
-    pub fn less(self: *Body, left: *const Value, right: *const Value) Error!*const Value {
-        const lhs = try self.useValue(left);
-        const rhs = try self.useValue(right);
-        const c = bodyData(self).context;
-        try c.same(lhs.schema, rhs.schema);
-        const id = try c.schemaId(lhs.schema);
-        switch (contextData(c).raw.schemas.items[@intCast(id)]) {
-            .i8, .i16, .i32, .i64, .u8, .u16, .u32, .u64 => {},
-            else => return c.reject(error.InvalidCategory, "less", "requires matching integer values"),
-        }
-        var returned_error: anyerror = undefined;
-        errdefer c.poison(returned_error);
-        const boolean = try captureError(&returned_error, c.scalar(bool));
-        return captureError(&returned_error, self.bind(try captureError(&returned_error, contextData(c).raw.pure(try captureError(&returned_error, contextData(c).raw.primitive(try captureError(&returned_error, c.schemaId(boolean)), .less, &.{ lhs.id, rhs.id }, 0)))), boolean));
-    }
-    pub fn enumTag(self: *Body, value: *const Value) Error!*const Value {
-        return self.tagValue(value, .enumeration, .enum_tag, u32);
-    }
-    pub fn variantTag(self: *Body, value: *const Value) Error!*const Value {
-        return self.tagValue(value, .sum, .variant_tag, u64);
-    }
-    fn tagValue(self: *Body, value: *const Value, comptime kind: p.SchemaTag, comptime opcode: p.Opcode, comptime T: type) Error!*const Value {
-        const item = try self.useValue(value);
-        const c = bodyData(self).context;
-        if (std.meta.activeTag(contextData(c).raw.schemas.items[@intCast(try c.schemaId(item.schema))]) != kind)
-            return c.reject(error.InvalidCategory, "tag", "value has the wrong category for this tag operation");
-        var returned_error: anyerror = undefined;
-        errdefer c.poison(returned_error);
-        const result = try captureError(&returned_error, c.scalar(T));
-        return captureError(&returned_error, self.bind(try captureError(&returned_error, contextData(c).raw.pure(try captureError(&returned_error, contextData(c).raw.primitive(try captureError(&returned_error, c.schemaId(result)), opcode, &.{item.id}, 0)))), result));
-    }
-    /// Checked projection of a named alternative with an explicit authored fault.
-    pub fn variantPayload(self: *Body, value: *const Value, name: []const u8, failure: *const FailureLiteral) Error!*const Value {
-        const item = try self.useValue(value);
-        const c = bodyData(self).context;
-        const info = data(SchemaData, item.schema);
-        if (contextData(c).raw.schemas.items[@intCast(info.id)] != .sum)
-            return c.reject(error.InvalidCategory, "variant payload", "requires an alternative value");
-        const fault = data(FailureLiteralData, failure);
-        try c.origin(fault.owner);
-        for (info.fields, 0..) |alternative, index| if (std.mem.eql(u8, alternative.name, name)) {
-            var returned_error: anyerror = undefined;
-            errdefer c.poison(returned_error);
-            const id = try captureError(&returned_error, contextData(c).raw.value(.{ .schema = try captureError(&returned_error, c.schemaId(alternative.schema)), .expression = .{ .primitive = .{
-                .opcode = .variant_payload,
-                .operands = &.{item.id},
-                .immediate = index,
-                .failures = &.{.{ .kind = .invalid_variant, .value = fault.literal }},
-            } } }));
-            try captureError(&returned_error, c.notePublication(.{ .anchor = .{ .value = id }, .contract = .{ .failure = data(ValueData, fault.value).schema } }));
-            return captureError(&returned_error, self.bind(try captureError(&returned_error, contextData(c).raw.pure(id)), alternative.schema));
-        };
-        return c.reject(error.UnknownName, "variant payload", "unknown alternative");
-    }
-    pub fn sequenceLength(self: *Body, sequence: *const Value) Error!*const Value {
-        const value = try self.useValue(sequence);
-        const c = bodyData(self).context;
-        const shape = contextData(c).raw.schemas.items[@intCast(try c.schemaId(value.schema))];
-        if (shape != .seq and shape != .vector and shape != .array) return c.reject(error.InvalidCategory, "length", "requires a sequence, vector, or array");
-        var returned_error: anyerror = undefined;
-        errdefer c.poison(returned_error);
-        const integer = try captureError(&returned_error, c.scalar(u64));
-        return captureError(&returned_error, self.bind(try captureError(&returned_error, contextData(c).raw.pure(try captureError(&returned_error, contextData(c).raw.primitive(try captureError(&returned_error, c.schemaId(integer)), .sequence_length, &.{value.id}, 0)))), integer));
-    }
-    pub fn sequenceGet(self: *Body, sequence: *const Value, index: *const Value) Error!*const Value {
-        const value = try self.useValue(sequence);
-        const offset = try self.useValue(index);
-        const c = bodyData(self).context;
-        const info = data(SchemaData, value.schema);
-        const shape = contextData(c).raw.schemas.items[@intCast(info.id)];
-        if (shape != .seq and shape != .vector and shape != .array)
-            return c.reject(error.InvalidCategory, "sequence get", "requires a sequence, vector, or array");
-        try c.same(try c.scalar(u64), offset.schema);
-        var returned_error: anyerror = undefined;
-        errdefer c.poison(returned_error);
-        const optional = try captureError(&returned_error, c.alternatives(&.{ .{ .name = "none", .schema = try captureError(&returned_error, c.scalar(void)) }, .{ .name = "some", .schema = info.result orelse return captureError(&returned_error, error.InvalidSchema) } }));
-        return captureError(&returned_error, self.bind(try captureError(&returned_error, contextData(c).raw.pure(try captureError(&returned_error, contextData(c).raw.primitive(try captureError(&returned_error, c.schemaId(optional)), .sequence_get, &.{ value.id, offset.id }, 0)))), optional));
-    }
-    pub fn blobLength(self: *Body, blob: *const Value) Error!*const Value {
-        const value = try self.blobValue(blob);
-        const c = bodyData(self).context;
-        var returned_error: anyerror = undefined;
-        errdefer c.poison(returned_error);
-        const integer = try captureError(&returned_error, c.scalar(u64));
-        return captureError(&returned_error, self.bind(try captureError(&returned_error, contextData(c).raw.pure(try captureError(&returned_error, contextData(c).raw.primitive(try captureError(&returned_error, c.schemaId(integer)), .blob_length, &.{value.id}, 0)))), integer));
-    }
-    /// Byte indexing, including for UTF-8 text; absence is an explicit case.
-    pub fn blobByte(self: *Body, blob: *const Value, index: *const Value) Error!*const Value {
-        const value = try self.blobValue(blob);
-        const offset = try self.useValue(index);
-        const c = bodyData(self).context;
-        try c.same(try c.scalar(u64), offset.schema);
-        var returned_error: anyerror = undefined;
-        errdefer c.poison(returned_error);
-        const optional = try captureError(&returned_error, c.alternatives(&.{ .{ .name = "none", .schema = try captureError(&returned_error, c.scalar(void)) }, .{ .name = "some", .schema = try captureError(&returned_error, c.scalar(u8)) } }));
-        return captureError(&returned_error, self.bind(try captureError(&returned_error, contextData(c).raw.pure(try captureError(&returned_error, contextData(c).raw.primitive(try captureError(&returned_error, c.schemaId(optional)), .blob_byte, &.{ value.id, offset.id }, 0)))), optional));
-    }
-    pub fn blobCompare(self: *Body, left: *const Value, right: *const Value) Error!*const Value {
-        const lhs = try self.blobValue(left);
-        const rhs = try self.blobValue(right);
-        const c = bodyData(self).context;
-        try c.same(lhs.schema, rhs.schema);
-        var returned_error: anyerror = undefined;
-        errdefer c.poison(returned_error);
-        const result = try captureError(&returned_error, c.scalar(i8));
-        return captureError(&returned_error, self.bind(try captureError(&returned_error, contextData(c).raw.pure(try captureError(&returned_error, contextData(c).raw.primitive(try captureError(&returned_error, c.schemaId(result)), .blob_compare, &.{ lhs.id, rhs.id }, 0)))), result));
-    }
-    fn blobValue(self: *Body, blob: *const Value) Error!*const ValueData {
-        const value = try self.useValue(blob);
-        const c = bodyData(self).context;
-        switch (contextData(c).raw.schemas.items[@intCast(try c.schemaId(value.schema))]) {
-            .bytes, .text, .bounded_bytes, .bounded_text => return value,
-            else => return c.reject(error.InvalidCategory, "blob", "requires bytes or UTF-8 text"),
-        }
-    }
-    pub fn yieldNow(self: *Body) Error!*const Value {
-        try self.ready();
-        const c = bodyData(self).context;
-        var returned_error: anyerror = undefined;
-        errdefer c.poison(returned_error);
-        try captureError(&returned_error, bodyData(self).bindings.append(contextData(c).raw.allocator(), .yield_now));
-        return captureError(&returned_error, self.constant(void, {}));
-    }
-    pub fn newCell(self: *Body, schema: *const Schema, region: *const Value, initial: *const Value) Error!*const Value {
-        try self.ready();
-        const c = bodyData(self).context;
-        const id = try c.schemaId(schema);
-        const shape = contextData(c).raw.schemas.items[@intCast(id)];
-        if (shape != .internal or shape.internal != .cell)
-            return c.reject(error.InvalidCategory, "cell", "requires a cell schema");
-        const token = try self.useValue(region);
-        const token_shape = contextData(c).raw.schemas.items[@intCast(try c.schemaId(token.schema))];
-        if (token_shape != .internal or token_shape.internal != .region or token_shape.internal.region != shape.internal.cell.region)
-            return c.reject(error.SchemaMismatch, "cell", "allocation requires its region token");
-        const value = try self.useValue(initial);
-        try c.same(data(SchemaData, schema).result orelse return error.InvalidSchema, value.schema);
-        var returned_error: anyerror = undefined;
-        errdefer c.poison(returned_error);
-        return captureError(&returned_error, self.bind(try captureError(&returned_error, contextData(c).raw.pure(try captureError(&returned_error, contextData(c).raw.primitive(id, .cell_new, &.{ token.id, value.id }, 0)))), schema));
-    }
-    pub fn readCell(self: *Body, cell_value: *const Value) Error!*const Value {
-        const value = try self.useValue(cell_value);
-        const c = bodyData(self).context;
-        const info = data(SchemaData, value.schema);
-        const shape = contextData(c).raw.schemas.items[@intCast(info.id)];
-        if (shape != .internal or shape.internal != .cell)
-            return c.reject(error.InvalidCategory, "cell", "read requires a cell");
-        const element = info.result orelse return error.InvalidSchema;
-        var returned_error: anyerror = undefined;
-        errdefer c.poison(returned_error);
-        return captureError(&returned_error, self.bind(try captureError(&returned_error, contextData(c).raw.pure(try captureError(&returned_error, contextData(c).raw.primitive(try captureError(&returned_error, c.schemaId(element)), .cell_get, &.{value.id}, 0)))), element));
-    }
-    pub fn writeCell(self: *Body, cell_value: *const Value, new_value: *const Value) Error!*const Value {
-        const target = try self.useValue(cell_value);
-        const value = try self.useValue(new_value);
-        const c = bodyData(self).context;
-        const info = data(SchemaData, target.schema);
-        const shape = contextData(c).raw.schemas.items[@intCast(info.id)];
-        if (shape != .internal or shape.internal != .cell)
-            return c.reject(error.InvalidCategory, "cell", "write requires a cell");
-        try c.same(info.result orelse return error.InvalidSchema, value.schema);
-        var returned_error: anyerror = undefined;
-        errdefer c.poison(returned_error);
-        const unit = try captureError(&returned_error, c.scalar(void));
-        return captureError(&returned_error, self.bind(try captureError(&returned_error, contextData(c).raw.pure(try captureError(&returned_error, contextData(c).raw.primitive(try captureError(&returned_error, c.schemaId(unit)), .cell_set, &.{ target.id, value.id }, 0)))), unit));
-    }
-    pub fn append(self: *Body, sequence: *const Value, element: *const Value) Error!*const Value {
-        const seq = try self.useValue(sequence);
-        const item = try self.useValue(element);
-        const c = bodyData(self).context;
-        const info = data(SchemaData, seq.schema);
-        if (contextData(c).raw.schemas.items[@intCast(info.id)] != .seq)
-            return c.reject(error.InvalidCategory, "append", "requires an unbounded sequence");
-        try c.same(info.result orelse return error.InvalidSchema, item.schema);
-        var returned_error: anyerror = undefined;
-        errdefer c.poison(returned_error);
-        return captureError(&returned_error, self.bind(try captureError(&returned_error, contextData(c).raw.pure(try captureError(&returned_error, contextData(c).raw.primitive(
-            info.id,
-            .sequence_append,
-            &.{ seq.id, item.id },
-            0,
-        )))), seq.schema));
-    }
-    pub fn pop(self: *Body, sequence: *const Value) Error!*const Value {
-        const seq = try self.useValue(sequence);
-        const c = bodyData(self).context;
-        const info = data(SchemaData, seq.schema);
-        if (contextData(c).raw.schemas.items[@intCast(info.id)] != .seq)
-            return c.reject(error.InvalidCategory, "pop", "requires an unbounded sequence");
-        var returned_error: anyerror = undefined;
-        errdefer c.poison(returned_error);
-        const item = try captureError(&returned_error, c.record(&.{
-            .{ .name = "head", .schema = info.result orelse return captureError(&returned_error, error.InvalidSchema) },
-            .{ .name = "tail", .schema = seq.schema },
-        }));
-        const result = try captureError(&returned_error, c.alternatives(&.{
-            .{ .name = "empty", .schema = try captureError(&returned_error, c.scalar(void)) },
-            .{ .name = "item", .schema = item },
-        }));
-        return captureError(&returned_error, self.bind(try captureError(&returned_error, contextData(c).raw.pure(try captureError(&returned_error, contextData(c).raw.primitive(
-            try captureError(&returned_error, c.schemaId(result)),
-            .sequence_pop,
-            &.{seq.id},
-            0,
-        )))), result));
-    }
-    pub fn sequenceValue(
-        self: *Body,
-        schema: *const Schema,
-        items: []const *const Value,
-    ) Error!*const Value {
-        const c = bodyData(self).context;
-        const id = try c.schemaId(schema);
-        const shape = contextData(c).raw.schemas.items[@intCast(id)];
-        if (shape != .seq) return c.reject(error.InvalidCategory, "sequence", "requires a sequence schema and matching element metadata");
-        const element = data(SchemaData, schema).result orelse return c.reject(error.InvalidSchema, "sequence", "requires a sequence schema and matching element metadata");
-        var returned_error: anyerror = undefined;
-        errdefer c.poison(returned_error);
-        const ids = try captureError(&returned_error, contextData(c).raw.allocator().alloc(p.Id, items.len));
-        for (items, ids) |item, *out| {
-            const v = try captureError(&returned_error, self.useValue(item));
-            try captureError(&returned_error, c.same(element, v.schema));
-            out.* = v.id;
-        }
-        return captureError(&returned_error, self.bind(try captureError(&returned_error, contextData(c).raw.pure(try captureError(&returned_error, contextData(c).raw.primitive(id, .sequence, ids, 0)))), schema));
-    }
-    pub fn concat(self: *Body, left: *const Value, right: *const Value) Error!*const Value {
-        const a = try self.useValue(left);
-        const b = try self.useValue(right);
-        const c = bodyData(self).context;
-        try c.same(a.schema, b.schema);
-        const id = try c.schemaId(a.schema);
-        if (contextData(c).raw.schemas.items[@intCast(id)] != .seq) return c.reject(error.InvalidCategory, "concatenation", "requires sequence operands");
-        var returned_error: anyerror = undefined;
-        errdefer c.poison(returned_error);
-        return captureError(&returned_error, self.bind(try captureError(&returned_error, contextData(c).raw.pure(try captureError(&returned_error, contextData(c).raw.primitive(id, .sequence_concat, &.{ a.id, b.id }, 0)))), a.schema));
-    }
-    pub fn variant(
-        self: *Body,
-        schema: *const Schema,
-        name: []const u8,
-        payload_value: *const Value,
-    ) Error!*const Value {
-        const c = bodyData(self).context;
-        const id = try c.schemaId(schema);
-        const v = try self.useValue(payload_value);
-        if (contextData(c).raw.schemas.items[@intCast(id)] != .sum) return c.reject(error.InvalidCategory, "variant", "requires a tagged alternative schema");
-        for (data(SchemaData, schema).fields, 0..) |item, index| {
-            if (!std.mem.eql(u8, item.name, name)) continue;
-            try c.same(item.schema, v.schema);
-            var returned_error: anyerror = undefined;
-            errdefer c.poison(returned_error);
-            return captureError(&returned_error, self.bind(try captureError(&returned_error, contextData(c).raw.pure(try captureError(&returned_error, contextData(c).raw.primitive(id, .variant, &.{v.id}, index)))), schema));
-        }
-        return c.reject(error.UnknownName, "variant", "unknown alternative");
-    }
-    pub fn caseOf(self: *Body, sum: *const Value, name: []const u8) Error!*const Case {
-        const v = try self.useValue(sum);
-        const c = bodyData(self).context;
-        const schema = data(SchemaData, v.schema);
-        if (contextData(c).raw.schemas.items[@intCast(schema.id)] != .sum) return c.reject(error.InvalidCategory, "match case", "requires a tagged alternative value");
-        for (schema.fields, 0..) |item, index| {
-            if (!std.mem.eql(u8, item.name, name)) continue;
-            var returned_error: anyerror = undefined;
-            errdefer c.poison(returned_error);
-            const arm = try captureError(&returned_error, self.branch());
-            const variable = try captureError(&returned_error, contextData(c).raw.variable(try captureError(&returned_error, c.schemaId(item.schema))));
-            const payload = try captureError(&returned_error, arm.makeValue(try captureError(&returned_error, contextData(c).raw.reference(variable)), item.schema));
-            return captureError(&returned_error, handle(Case, try captureError(&returned_error, c.save(CaseData, .{
-                .body = arm,
-                .payload = payload,
-                .sum = sum,
-                .index = index,
-                .variable = variable,
-            }))));
-        }
-        return c.reject(error.UnknownName, "match", "unknown alternative");
-    }
-    pub fn match(
-        self: *Body,
-        sum: *const Value,
-        cases: []const *const FinishedCase,
-    ) Error!*const Value {
-        const v = try self.useValue(sum);
-        const c = bodyData(self).context;
-        const schema = data(SchemaData, v.schema);
-        if (contextData(c).raw.schemas.items[@intCast(schema.id)] != .sum or
-            cases.len != schema.fields.len or cases.len == 0) return c.reject(error.InvalidCategory, "match", "cases must cover this value once and return compatible schemas");
-        var returned_error: anyerror = undefined;
-        errdefer c.poison(returned_error);
-        const RawCase = @FieldType(@FieldType(source.ast.Term, "match_sum"), "cases");
-        const raw_cases = try captureError(&returned_error, contextData(c).raw.allocator().alloc(@typeInfo(RawCase).pointer.child, cases.len));
-        const seen = try captureError(&returned_error, contextData(c).raw.allocator().alloc(bool, cases.len));
-        @memset(seen, false);
-        var result: ?*const Schema = null;
-        for (cases) |finished| {
-            const f = data(FinishedCaseData, finished);
-            const arm = data(CaseData, f.case);
-            const computation = data(ComputationData, f.computation);
-            try captureError(&returned_error, c.origin(computation.owner));
-            if (arm.sum != sum or bodyData(arm.body).scope.parent != bodyData(self).scope or
-                arm.index >= cases.len or seen[arm.index]) return captureError(&returned_error, @as(Error!*const Value, c.reject(error.InvalidBranch, "match", "cases must cover this value once and return compatible schemas")));
-            if (result) |expected| try captureError(&returned_error, c.same(expected, computation.schema));
-            result = computation.schema;
-            seen[arm.index] = true;
-            raw_cases[arm.index] = .{ .variable = arm.variable, .body = computation.id };
-        }
-        return captureError(&returned_error, self.bind(try captureError(&returned_error, contextData(c).raw.term(.{ .match_sum = .{ .value = v.id, .cases = raw_cases } })), result.?));
-    }
-    pub fn resumeWith(
-        self: *Body,
-        resumption: *const Value,
-        reply: *const Value,
-        successor: *const Handler,
-        state: []const Argument,
-    ) Error!*const Value {
-        const token = try self.useValue(resumption);
-        const v = try self.useValue(reply);
-        const c = bodyData(self).context;
-        const info = data(SchemaData, token.schema);
-        const shape = contextData(c).raw.schemas.items[@intCast(info.id)];
-        if (shape != .internal or shape.internal != .resumption) return c.reject(error.InvalidCategory, "resumption", "resumeWith requires a shallow token and compatible successor");
-        const h = data(HandlerData, successor);
-        try c.origin(h.owner);
-        if (shape.internal.resumption.mode != .shallow or info.fields.len != 1)
-            return c.reject(error.InvalidCategory, "resumption", "resumeWith requires a shallow token and compatible successor");
-        try c.same(info.fields[0].schema, v.schema);
-        try c.same(info.result orelse return c.reject(error.InvalidSchema, "resumption", "resumeWith requires a shallow token and compatible successor"), h.input);
-        var returned_error: anyerror = undefined;
-        errdefer c.poison(returned_error);
-        return captureError(&returned_error, self.bind(try captureError(&returned_error, contextData(c).raw.term(.{
-            .resume_with = .{
-                .resumption = token.id,
-                .argument = v.id,
-                .handler = h.id,
-                .state = try captureError(&returned_error, self.arguments(h.state, state)),
-            },
-        })), h.answer));
-    }
-    pub fn dispose(self: *Body, owned: *const Value) Error!*const Value {
-        const v = try self.useValue(owned);
-        const c = bodyData(self).context;
-        var returned_error: anyerror = undefined;
-        errdefer c.poison(returned_error);
-        return captureError(&returned_error, self.bind(try captureError(&returned_error, contextData(c).raw.term(.{ .dispose = v.id })), try captureError(&returned_error, c.scalar(void))));
-    }
-    pub fn withRegion(
-        self: *Body,
-        region_handle: *const Region,
-        work: *const Value,
-        args: []const Argument,
-    ) Error!*const Value {
-        const c = bodyData(self).context;
-        const r = data(RegionData, region_handle);
-        try c.origin(r.owner);
-        const v = try self.useValue(work);
-        const info = data(SchemaData, v.schema);
-        const shape = contextData(c).raw.schemas.items[@intCast(info.id)];
-        if (shape != .internal or shape.internal != .computation) return c.reject(error.InvalidCategory, "region", "requires a callable with the matching implicit region parameter");
-        if (info.fields.len == 0) return c.reject(error.SchemaMismatch, "region", "requires a callable with the matching implicit region parameter");
-        const token_id = try c.schemaId(info.fields[0].schema);
-        const token = contextData(c).raw.schemas.items[@intCast(token_id)];
-        if (token != .internal or token.internal != .region or token.internal.region != r.id)
-            return c.reject(error.SchemaMismatch, "region", "body belongs to another region");
-        var returned_error: anyerror = undefined;
-        errdefer c.poison(returned_error);
-        return captureError(&returned_error, self.bind(try captureError(&returned_error, contextData(c).raw.term(.{
-            .with_region = .{
-                .region = r.id,
-                .body = v.id,
-                .arguments = try captureError(&returned_error, self.arguments(info.fields[1..], args)),
-            },
-        })), info.result orelse return captureError(&returned_error, @as(Error!*const Value, c.reject(error.InvalidSchema, "region", "requires a callable with the matching implicit region parameter")))));
-    }
-    pub fn protect(
-        self: *Body,
-        work: *const Value,
-        cleanup: *const Value,
-        args: []const Argument,
-    ) Error!*const Value {
-        const v = try self.useValue(work);
-        const finalizer = try self.useValue(cleanup);
-        const c = bodyData(self).context;
-        const info = data(SchemaData, v.schema);
-        const shape = contextData(c).raw.schemas.items[@intCast(info.id)];
-        if (shape != .internal or shape.internal != .computation) return c.reject(error.InvalidCategory, "protection", "requires callable body and cleanup contracts");
-        const cleanup_shape = contextData(c).raw.schemas.items[@intCast(data(SchemaData, finalizer.schema).id)];
-        if (cleanup_shape != .internal or cleanup_shape.internal != .computation)
-            return c.reject(error.InvalidCategory, "protection", "requires callable body and cleanup contracts");
-        const cleanup_info = data(SchemaData, finalizer.schema);
-        if (cleanup_info.fields.len != 1)
-            return c.reject(error.SchemaMismatch, "cleanup", "requires one exit-information parameter");
-        var returned_error: anyerror = undefined;
-        errdefer c.poison(returned_error);
-        const term = try captureError(&returned_error, contextData(c).raw.term(.{
-            .protect = .{
-                .body = v.id,
-                .cleanup = finalizer.id,
-                .arguments = try captureError(&returned_error, self.arguments(info.fields, args)),
-            },
-        }));
-        try captureError(&returned_error, c.notePublication(.{ .anchor = .{ .term = term }, .contract = .{ .cleanup = cleanup_info.fields[0].schema } }));
-        return captureError(&returned_error, self.bind(term, info.result orelse return captureError(&returned_error, @as(Error!*const Value, c.reject(error.InvalidSchema, "protection", "requires callable body and cleanup contracts")))));
-    }
-    pub fn packResource(self: *Body, schema: *const Schema, representation: *const Value) Error!*const Value {
-        try self.ready();
-        const c = bodyData(self).context;
-        const id = try c.schemaId(schema);
-        const shape = contextData(c).raw.schemas.items[@intCast(id)];
-        if (shape != .internal or shape.internal != .abstract_resource)
-            return c.reject(error.InvalidCategory, "resource pack", "requires a nominal resource schema");
-        const value = try self.useValue(representation);
-        try c.same(data(SchemaData, schema).result orelse return error.InvalidSchema, value.schema);
-        var returned_error: anyerror = undefined;
-        errdefer c.poison(returned_error);
-        return captureError(&returned_error, self.bind(try captureError(&returned_error, contextData(c).raw.pure(try captureError(&returned_error, contextData(c).raw.primitive(id, .resource_pack, &.{value.id}, 0)))), schema));
-    }
-    pub fn unpackResource(self: *Body, resource_value: *const Value) Error!*const Value {
-        const value = try self.useValue(resource_value);
-        const c = bodyData(self).context;
-        var info = data(SchemaData, value.schema);
-        var shape = contextData(c).raw.schemas.items[@intCast(info.id)];
-        if (shape == .internal and shape.internal == .borrowed) {
-            info = data(SchemaData, info.result orelse return error.InvalidSchema);
-            shape = contextData(c).raw.schemas.items[@intCast(info.id)];
-        }
-        if (shape != .internal or shape.internal != .abstract_resource)
-            return c.reject(error.InvalidCategory, "resource unpack", "requires an owned or borrowed nominal resource");
-        const representation = info.result orelse return error.InvalidSchema;
-        var returned_error: anyerror = undefined;
-        errdefer c.poison(returned_error);
-        return captureError(&returned_error, self.bind(try captureError(&returned_error, contextData(c).raw.pure(try captureError(&returned_error, contextData(c).raw.primitive(try captureError(&returned_error, c.schemaId(representation)), .resource_unpack, &.{value.id}, 0)))), representation));
-    }
-    /// Transfer an owner to cleanup; the body receives only its scoped loan.
-    pub fn bracket(self: *Body, resource_value: *const Value, region_handle: *const Region, work: *const Value, cleanup: *const Value, args: []const Argument) Error!*const Value {
-        const owned = try self.useValue(resource_value);
-        const v = try self.useValue(work);
-        const finalizer = try self.useValue(cleanup);
-        const c = bodyData(self).context;
-        const r = data(RegionData, region_handle);
-        try c.origin(r.owner);
-        const resource_shape = contextData(c).raw.schemas.items[@intCast(try c.schemaId(owned.schema))];
-        if (resource_shape != .internal or resource_shape.internal != .abstract_resource)
-            return c.reject(error.InvalidCategory, "bracket", "requires an owned nominal resource");
-        const info = data(SchemaData, v.schema);
-        const cleanup_info = data(SchemaData, finalizer.schema);
-        const work_shape = contextData(c).raw.schemas.items[@intCast(info.id)];
-        const cleanup_shape = contextData(c).raw.schemas.items[@intCast(cleanup_info.id)];
-        if (work_shape != .internal or work_shape.internal != .computation or cleanup_shape != .internal or cleanup_shape.internal != .computation)
-            return c.reject(error.InvalidCategory, "bracket", "requires callable body and cleanup contracts");
-        if (info.fields.len == 0 or cleanup_info.fields.len != 2)
-            return c.reject(error.SchemaMismatch, "bracket", "requires a body loan and cleanup exit-info/owner parameters");
-        try c.same(try c.borrowed(owned.schema, region_handle), info.fields[0].schema);
-        try c.same(owned.schema, cleanup_info.fields[1].schema);
-        try c.same(try c.scalar(void), cleanup_info.result orelse return error.InvalidSchema);
-        var returned_error: anyerror = undefined;
-        errdefer c.poison(returned_error);
-        const term = try captureError(&returned_error, contextData(c).raw.term(.{ .protect = .{
-            .body = v.id,
-            .cleanup = finalizer.id,
-            .resource = owned.id,
-            .loan_region = r.id,
-            .arguments = try captureError(&returned_error, self.arguments(info.fields[1..], args)),
-        } }));
-        try captureError(&returned_error, c.notePublication(.{ .anchor = .{ .term = term }, .contract = .{ .cleanup = cleanup_info.fields[0].schema } }));
-        return captureError(&returned_error, self.bind(term, info.result orelse return captureError(&returned_error, error.InvalidSchema)));
-    }
-    pub fn branch(self: *Body) Error!*Body {
-        try self.ready();
-        return @ptrCast(try bodyData(self).context.save(BodyData, .{
-            .context = bodyData(self).context,
-            .scope = try bodyData(self).context.save(Scope, .{ .parent = bodyData(self).scope }),
-        }));
-    }
-    pub fn block(self: *Body, finished: *const Computation) Error!*const Value {
-        try self.ready();
-        const c = bodyData(self).context;
-        const value = data(ComputationData, finished);
-        try c.origin(value.owner);
-        if (value.scope.parent != bodyData(self).scope) return c.reject(error.InvalidBranch, "block", "completed body must belong to this parent scope");
-        return self.bind(value.id, value.schema);
-    }
-    pub fn conditional(
-        self: *Body,
-        condition: *const Value,
-        when_true: *const Computation,
-        when_false: *const Computation,
-    ) Error!*const Value {
-        const c = bodyData(self).context;
-        const v = try self.useValue(condition);
-        try c.same(try c.scalar(bool), v.schema);
-        const a = data(ComputationData, when_true);
-        const b = data(ComputationData, when_false);
-        try c.origin(a.owner);
-        try c.origin(b.owner);
-        if (a.scope.parent != bodyData(self).scope or b.scope.parent != bodyData(self).scope or a.scope == b.scope)
-            return c.reject(error.InvalidBranch, "conditional", "requires two direct child branches");
-        try c.same(a.schema, b.schema);
-        var returned_error: anyerror = undefined;
-        errdefer c.poison(returned_error);
-        return captureError(&returned_error, self.bind(try captureError(&returned_error, contextData(c).raw.term(.{
-            .conditional = .{ .condition = v.id, .when_true = a.id, .when_false = b.id },
-        })), a.schema));
-    }
-    /// Close unused staging work. Abandoning a function leaves it undefined;
-    /// module publication will reject it. Descendant bodies become unusable.
-    pub fn abandon(self: *Body) void {
-        bodyData(self).scope.active = false;
-    }
-    pub fn ret(self: *Body, result: *const Value) Error!*const Computation {
-        const v = try self.useValue(result);
-        const c = bodyData(self).context;
-        var returned_error: anyerror = undefined;
-        errdefer c.poison(returned_error);
-        const bindings = &bodyData(self).bindings;
-        const expression = contextData(c).raw.values.items[@intCast(v.id)].expression;
-        if (bindings.items.len != 0 and expression == .variable) {
-            const last = bindings.items[bindings.items.len - 1];
-            if (last == .bind and last.bind.variable == expression.variable) {
-                // bind x = operation; return x is exactly operation in tail position.
-                // Keep all preceding work; no other use or intervening effect moves.
-                bindings.items.len -= 1;
-                return captureError(&returned_error, self.finish(last.bind.term, v.schema));
-            }
-        }
-        return captureError(&returned_error, self.finish(try captureError(&returned_error, contextData(c).raw.pure(v.id)), v.schema));
-    }
-    /// Fail with an authored value and close this body. The result schema lets
-    /// a failing branch compose with another branch that returns that type.
-    /// Publication checks the failure value against the module failure contract.
-    pub fn fail(
-        self: *Body,
-        result: *const Schema,
-        failure: *const Value,
-    ) Error!*const Computation {
-        const value = try self.useValue(failure);
-        const c = bodyData(self).context;
-        _ = try c.schemaId(result);
-        var returned_error: anyerror = undefined;
-        errdefer c.poison(returned_error);
-        const term = try captureError(&returned_error, contextData(c).raw.term(.{ .fail = value.id }));
-        try captureError(&returned_error, c.notePublication(.{
-            .anchor = .{ .term = term },
-            .contract = .{ .failure = value.schema },
-        }));
-        return captureError(&returned_error, self.finish(term, result));
-    }
-    fn finish(self: *Body, final: p.Id, schema: *const Schema) Error!*const Computation {
-        const c = bodyData(self).context;
-        var returned_error: anyerror = undefined;
-        errdefer c.poison(returned_error);
-        var term = final;
-        var index = bodyData(self).bindings.items.len;
-        while (index != 0) {
-            index -= 1;
-            const binding = bodyData(self).bindings.items[index];
-            term = switch (binding) {
-                .bind => |value| try captureError(&returned_error, contextData(c).raw.bind(value.variable, value.term, term)),
-                .yield_now => try captureError(&returned_error, contextData(c).raw.term(.{ .yield_then = term })),
-                .unpack => |value| try captureError(&returned_error, contextData(c).raw.term(.{ .unpack_product = .{
-                    .value = value.value,
-                    .variables = value.variables,
-                    .body = term,
-                } })),
-            };
-        }
-        const computation = handle(Computation, try captureError(&returned_error, c.save(ComputationData, .{
-            .owner = c,
-            .id = term,
-            .schema = schema,
-            .scope = bodyData(self).scope,
-        })));
-        bodyData(self).scope.active = false;
-        return captureError(&returned_error, computation);
-    }
-};
 
-/// Explicit low-level integration. Numeric IDs have no recoverable historical
-/// provenance. The caller promises they belong to contextData(c).raw; available bounds and
-/// categories are checked. These adapters never certify raw source admission.
 pub const interop = struct {
-    pub fn builder(c: *Context) *source.Builder {
-        return contextData(c).raw;
+    pub fn NamedEntry(comptime family: Family) type {
+        return struct { name: []const u8, handle: *const canonical(family, Dynamic) };
     }
-    /// Adopt a raw literal with an explicit named schema. Raw ID provenance remains caller-owned.
-    pub fn literalFailure(c: *Context, id: p.Id, expected: *const Schema) Error!*const FailureLiteral {
-        try c.ready();
-        if (id >= contextData(c).raw.values.items.len) return error.InvalidReference;
-        if (contextData(c).raw.values.items[@intCast(id)].schema != try c.schemaId(expected))
-            return error.SchemaMismatch;
-        const literal = try contextData(c).raw.failureLiteral(id);
-        var returned_error: anyerror = undefined;
-        errdefer c.poison(returned_error);
-        const value = handle(Value, try captureError(&returned_error, c.save(ValueData, .{
-            .owner = c,
-            .id = id,
-            .schema = expected,
-            .scope = null,
-        })));
-        return captureError(&returned_error, handle(FailureLiteral, try captureError(&returned_error, c.save(FailureLiteralData, .{
-            .owner = c,
-            .value = value,
-            .literal = literal,
-        }))));
-    }
-
-    pub fn scope(c: *Context) Error!*Body {
-        try c.ready();
-        return @ptrCast(try c.save(BodyData, .{ .context = c, .scope = try c.save(Scope, .{ .parent = null }) }));
-    }
-    pub fn adoptValue(body: *Body, id: p.Id, expected: *const Schema) Error!*const Value {
-        try body.ready();
-        const c = bodyData(body).context;
-        if (id >= contextData(c).raw.values.items.len) return error.InvalidReference;
-        if (contextData(c).raw.values.items[@intCast(id)].schema != try c.schemaId(expected)) return error.SchemaMismatch;
-        const expression = contextData(c).raw.values.items[@intCast(id)].expression;
-        if (expression == .variable or expression == .literal) return body.makeValue(id, expected);
-        var returned_error: anyerror = undefined;
-        errdefer c.poison(returned_error);
-        return captureError(&returned_error, body.bind(try captureError(&returned_error, contextData(c).raw.pure(id)), expected));
-    }
-    pub fn valueId(body: *Body, item: *const Value) Error!p.Id {
-        return (try body.useValue(item)).id;
-    }
-    pub fn term(body: *Body, id: p.Id, result: *const Schema) Error!*const Value {
-        try body.ready();
-        if (id >= contextData(bodyData(body).context).raw.terms.items.len) return error.InvalidReference;
-        _ = try bodyData(body).context.schemaId(result);
-        return body.bind(id, result);
-    }
-    pub fn computationId(c: *Context, item: *const Computation) Error!p.Id {
-        const v = data(ComputationData, item);
-        try c.origin(v.owner);
-        return v.id;
-    }
-    pub fn schema(c: *Context, id: p.Id) Error!*const Schema {
-        try c.ready();
-        if (id >= contextData(c).raw.schemas.items.len) return error.InvalidSchema;
-        if (contextData(c).imported.get(id)) |present| return present;
-        var returned_error: anyerror = undefined;
-        errdefer c.poison(returned_error);
-        const shape = contextData(c).raw.schemas.items[@intCast(id)];
-        switch (shape) {
-            .product, .sum, .seq, .vector, .array => {},
-            .internal => |inner| switch (inner) {
-                .computation, .resumption, .borrowed, .suspension_package, .cell, .abstract_resource => {},
-                else => return captureError(&returned_error, c.intern(id, &.{})),
-            },
-            else => return captureError(&returned_error, c.intern(id, &.{})),
-        }
-        // Install a stable placeholder before following recursive schema edges.
-        const info = try captureError(&returned_error, c.save(SchemaData, .{ .owner = c, .id = id }));
-        const result = handle(Schema, info);
-        try captureError(&returned_error, contextData(c).imported.put(contextData(c).raw.allocator(), id, result));
-        const ids: []const p.Id = switch (shape) {
-            .product => |v| v,
-            .sum => |v| v,
-            .internal => |v| if (v == .computation) v.computation.parameters else &.{},
-            else => &.{},
+    pub fn RuntimeNamed(comptime family: Family) type {
+        _ = RawNamed(family);
+        return opaque {
+            const Self = @This();
+            pub fn len(self: *const Self) usize {
+                const stored: *const NamedData(family) = @ptrCast(@alignCast(self));
+                return stored.entries.len;
+            }
+            pub fn at(self: *const Self, offset: usize) ?NamedEntry(family) {
+                const stored: *const NamedData(family) = @ptrCast(@alignCast(self));
+                if (offset >= stored.entries.len) return null;
+                const item = stored.entries[offset];
+                return .{ .name = item.name, .handle = @ptrCast(if (family == .schema) item.schema else if (family == .operation) item.operation else item.value) };
+            }
+            pub fn init(c: *Context, entries: []const NamedEntry(family)) Error!*const Self {
+                const Raw = RawNamed(family);
+                const allocator = builder(c).arena.child_allocator;
+                const temporary = try runtime.interop.namedTemporary(rawContext(c), Raw, entries.len);
+                defer allocator.free(temporary);
+                for (entries, temporary) |entry, *target| {
+                    target.* = if (family == .schema)
+                        .{ .name = entry.name, .schema = erased(.schema, entry.handle) }
+                    else if (family == .operation)
+                        .{ .name = entry.name, .operation = erased(.operation, entry.handle) }
+                    else
+                        .{ .name = entry.name, .value = erased(family, entry.handle) };
+                }
+                const saved = switch (family) {
+                    .schema => try runtime.interop.namedFields(rawContext(c), temporary),
+                    .value => try runtime.interop.namedArguments(rawContext(c), temporary),
+                    .operation => try runtime.interop.namedOperations(rawContext(c), temporary),
+                    .finished_case => try runtime.interop.namedCases(rawContext(c), temporary),
+                    else => unreachable,
+                };
+                return @ptrCast(try runtime.interop.namedStorage(rawContext(c), NamedData(family), .{ .entries = saved }));
+            }
         };
-        info.fields = try captureError(&returned_error, positionalFields(c, ids));
-        info.result = switch (shape) {
-            .seq => |element| try captureError(&returned_error, schema(c, element)),
-            .vector => |vector| try captureError(&returned_error, schema(c, vector.element)),
-            .array => |array| try captureError(&returned_error, schema(c, array.element)),
-            .internal => |v| switch (v) {
-                .computation => |signature| try captureError(&returned_error, schema(c, signature.result)),
-                .resumption => |signature| try captureError(&returned_error, schema(c, signature.answer)),
-                .borrowed => |borrow| try captureError(&returned_error, schema(c, borrow.value)),
-                .suspension_package => |token| try captureError(&returned_error, schema(c, token)),
-                .cell => |cell_shape| try captureError(&returned_error, schema(c, cell_shape.element)),
-                .abstract_resource => |resource_id| if (resource_id < contextData(c).raw.resources.items.len)
-                    try captureError(&returned_error, schema(c, contextData(c).raw.resources.items[@intCast(resource_id)].representation))
-                else
-                    return captureError(&returned_error, error.InvalidReference),
-                else => null,
-            },
-            else => null,
-        };
-        if (shape == .internal and shape.internal == .resumption) {
-            const input = try captureError(&returned_error, schema(c, shape.internal.resumption.input));
-            info.fields = try captureError(&returned_error, c.fields(&.{.{ .name = "reply", .schema = input }}));
-        }
-        const capture_ids: []const p.Id = if (shape == .internal) switch (shape.internal) {
-            .computation => |signature| signature.capture_bound,
-            .resumption => |signature| signature.capture_bound,
-            else => &.{},
-        } else &.{};
-        const captures = try captureError(&returned_error, contextData(c).raw.allocator().alloc(*const Schema, capture_ids.len));
-        for (capture_ids, captures) |child, *item| item.* = try captureError(&returned_error, schema(c, child));
-        info.captures = captures;
-        return captureError(&returned_error, result);
     }
-    pub fn namedCallable(c: *Context, id: p.Id, names: []const []const u8) Error!*const Schema {
-        const imported = try schema(c, id);
-        const shape = contextData(c).raw.schemas.items[@intCast(id)];
-        if (shape != .internal or shape.internal != .computation) return error.InvalidCategory;
-        const info = data(SchemaData, imported);
-        if (names.len != info.fields.len) return error.SchemaMismatch;
-        var returned_error: anyerror = undefined;
-        errdefer c.poison(returned_error);
-        const fields = try captureError(&returned_error, contextData(c).raw.allocator().alloc(Field, names.len));
-        for (fields, names, info.fields) |*item, name, old| item.* = .{ .name = name, .schema = old.schema };
-        return captureError(&returned_error, c.internComplete(id, fields, info.result, info.captures));
+    pub fn field(body: anytype, value: anytype, name: []const u8) Error!*const Value(Dynamic) {
+        _ = comptime index(.body, @TypeOf(body));
+        const raw_body: *runtime.Body = @ptrCast(body);
+        return @ptrCast(try raw_body.field(erased(.value, value), name));
     }
-    fn positionalFields(c: *Context, ids: []const p.Id) Error![]const Field {
-        var returned_error: anyerror = undefined;
-        errdefer c.poison(returned_error);
-        const fields = try captureError(&returned_error, contextData(c).raw.allocator().alloc(Field, ids.len));
-        for (ids, fields, 0..) |child, *item, i| item.* = .{
-            .name = try captureError(&returned_error, contextData(c).raw.allocator().print("{d}", .{i})),
-            .schema = try captureError(&returned_error, schema(c, child)),
-        };
-        return captureError(&returned_error, fields);
+    /// Select a destructured field at runtime, retaining the consuming unpack.
+    pub fn get(parts: anytype, name: []const u8) Error!*const Value(Dynamic) {
+        return @ptrCast(try erased(.product_parts, parts).get(name));
     }
-    pub fn operation(c: *Context, id: p.Id) Error!*const Operation {
-        try c.ready();
-        if (id >= contextData(c).raw.effects.items.len) return error.InvalidEffect;
-        const op = contextData(c).raw.effects.items[@intCast(id)];
-        return handle(Operation, try c.save(OperationData, .{
-            .owner = c,
-            .id = id,
-            .name = try c.label(op.identity),
-            .payload = try schema(c, op.payload),
-            .result = try schema(c, op.result),
-            .external = op.external,
-            .bodies = try positionalFields(c, op.bodies),
-        }));
+    /// The arm is runtime-selected; the checked result retains the whole sum.
+    pub fn variant(body: anytype, schema_handle: anytype, name: []const u8, payload: anytype) Error!*const Value(index(.schema, @TypeOf(schema_handle))) {
+        _ = comptime index(.body, @TypeOf(body));
+        _ = comptime sumFields(index(.schema, @TypeOf(schema_handle)), "interop.variant");
+        const raw_body: *runtime.Body = @ptrCast(body);
+        return @ptrCast(try raw_body.variant(erased(.schema, schema_handle), name, erased(.value, payload)));
+    }
+    pub fn parameter(body: anytype, name: []const u8) Error!*const Value(Dynamic) {
+        _ = comptime index(.body, @TypeOf(body));
+        const raw_body: *runtime.Body = @ptrCast(body);
+        return @ptrCast(try raw_body.parameter(name));
+    }
+    pub fn caseOf(body: anytype, sum: anytype, name: []const u8) Error!*const Case(Dynamic) {
+        _ = comptime index(.body, @TypeOf(body));
+        const raw_body: *runtime.Body = @ptrCast(body);
+        return @ptrCast(try raw_body.caseOf(erased(.value, sum), name));
+    }
+    pub fn variantPayload(body: anytype, sum: anytype, name: []const u8, failure: anytype) Error!*const Value(Dynamic) {
+        _ = comptime index(.body, @TypeOf(body));
+        const raw_body: *runtime.Body = @ptrCast(body);
+        return @ptrCast(try raw_body.variantPayload(erased(.value, sum), name, erased(.failure_literal, failure)));
+    }
+    pub fn schema(c: *Context, id: p.Id) Error!*const Schema(Dynamic) {
+        return @ptrCast(try runtime.interop.schema(rawContext(c), id));
+    }
+    pub fn refineSchema(c: *Context, current: anytype, expected: anytype) Error!*const Schema(index(.schema, @TypeOf(expected))) {
+        comptime compatible(index(.schema, @TypeOf(expected)), index(.schema, @TypeOf(current)), "refineSchema");
+        return @ptrCast(try runtime.interop.refineSchema(rawContext(c), erased(.schema, current), erased(.schema, expected), false));
+    }
+    /// Imported portable fields have positions, not authoring names. This
+    /// explicit mapping validates their contract and supplies expected names.
+    pub fn mapSchema(c: *Context, imported: anytype, expected: anytype) Error!*const Schema(index(.schema, @TypeOf(expected))) {
+        return @ptrCast(try runtime.interop.refineSchema(rawContext(c), erased(.schema, imported), erased(.schema, expected), true));
+    }
+    pub fn refineValue(body: anytype, value: anytype, expected: anytype) Error!*const Value(index(.schema, @TypeOf(expected))) {
+        _ = comptime index(.body, @TypeOf(body));
+        comptime compatible(index(.schema, @TypeOf(expected)), index(.value, @TypeOf(value)), "refineValue");
+        return @ptrCast(try runtime.interop.refineValue(@ptrCast(body), erased(.value, value), erased(.schema, expected), false));
+    }
+    pub fn mapValue(body: anytype, value: anytype, expected: anytype) Error!*const Value(index(.schema, @TypeOf(expected))) {
+        _ = comptime index(.body, @TypeOf(body));
+        return @ptrCast(try runtime.interop.refineValue(@ptrCast(body), erased(.value, value), erased(.schema, expected), true));
+    }
+    pub fn refineFunction(c: *Context, function_handle: anytype, expected: anytype) Error!*const Function(callableSignature(index(.schema, @TypeOf(expected)), "refineFunction")) {
+        comptime compatibleSignature(callableSignature(index(.schema, @TypeOf(expected)), "refineFunction"), index(.function, @TypeOf(function_handle)), "refineFunction");
+        return @ptrCast(try runtime.interop.refineFunction(rawContext(c), erased(.function, function_handle), erased(.schema, expected)));
+    }
+    pub fn declaredFunction(c: *Context, id: p.Id) Error!*const Function(Dynamic) {
+        return @ptrCast(try runtime.interop.declaredFunction(rawContext(c), id));
+    }
+    pub fn externalOperation(c: *Context, id: p.Id, payload: anytype, result: anytype) Error!*const Operation(OperationSignature(index(.schema, @TypeOf(payload)), index(.schema, @TypeOf(result)), native.Fields(&.{}, &.{}))) {
+        return @ptrCast(try runtime.interop.externalOperation(rawContext(c), id, erased(.schema, payload), erased(.schema, result)));
+    }
+    pub fn performSite(body: anytype, operation_handle: anytype, payload: anytype) Error!struct { value: *const Value(resultShape(index(.operation, @TypeOf(operation_handle)))), term: p.Id } {
+        _ = comptime index(.body, @TypeOf(body));
+        const Op = index(.operation, @TypeOf(operation_handle));
+        if (comptime Op != Dynamic) comptime compatible(Op.payload, index(.value, @TypeOf(payload)), "performSite");
+        const site = try runtime.interop.performSite(@ptrCast(body), erased(.operation, operation_handle), erased(.value, payload));
+        return .{ .value = @ptrCast(site.value), .term = site.term };
+    }
+    pub fn operation(c: *Context, id: p.Id) Error!*const Operation(Dynamic) {
+        return @ptrCast(try runtime.interop.operation(rawContext(c), id));
     }
     pub fn region(c: *Context, id: p.Id) Error!*const Region {
-        try c.ready();
-        if (id >= contextData(c).raw.region_count) return error.InvalidReference;
-        return handle(Region, try c.save(RegionData, .{ .owner = c, .id = id }));
+        return runtime.interop.region(rawContext(c), id);
     }
-    pub fn schemaId(c: *Context, value: *const Schema) Error!p.Id {
-        return c.schemaId(value);
+    pub fn operationId(c: *Context, operation_handle: anytype) Error!p.Id {
+        return runtime.interop.operationId(rawContext(c), erased(.operation, operation_handle));
     }
-    pub fn failureLiteralId(c: *Context, value: *const FailureLiteral) Error!p.Id {
-        const item = data(FailureLiteralData, value);
-        try c.origin(item.owner);
-        return item.literal;
+    pub fn functionId(c: *Context, function_handle: anytype) Error!p.Id {
+        return runtime.interop.functionId(rawContext(c), erased(.function, function_handle));
     }
-    pub fn regionId(c: *Context, value: *const Region) Error!p.Id {
-        const item = data(RegionData, value);
-        try c.origin(item.owner);
-        return item.id;
+    pub fn resumptionSchema(c: *Context, handler_handle: anytype) Error!*const Schema(Dynamic) {
+        return @ptrCast(try runtime.interop.resumptionSchema(rawContext(c), erased(.handler, handler_handle)));
     }
-    pub fn operationId(c: *Context, value: *const Operation) Error!p.Id {
-        const item = data(OperationData, value);
-        try c.origin(item.owner);
-        return item.id;
+    pub fn handlerId(c: *Context, handler_handle: anytype) Error!p.Id {
+        return runtime.interop.handlerId(rawContext(c), erased(.handler, handler_handle));
     }
-    /// Recover a function already declared by this context, preserving its
-    /// named signature and lexical scope. This does not import raw functions.
-    pub fn declaredFunction(c: *Context, id: p.Id) Error!*const Function {
-        try c.ready();
-        for (contextData(c).functions.items) |function| {
-            if (data(FunctionData, function).id == id) return function;
-        }
-        return error.InvalidReference;
+    pub fn regionId(c: *Context, region_handle: *const Region) Error!p.Id {
+        return runtime.interop.regionId(rawContext(c), region_handle);
     }
-    pub fn functionId(c: *Context, value: *const Function) Error!p.Id {
-        const item = data(FunctionData, value);
-        try c.origin(item.owner);
-        return item.id;
+    pub fn failureLiteralId(c: *Context, literal: anytype) Error!p.Id {
+        return runtime.interop.failureLiteralId(rawContext(c), erased(.failure_literal, literal));
     }
-    pub fn handlerId(c: *Context, value: *const Handler) Error!p.Id {
-        const item = data(HandlerData, value);
-        try c.origin(item.owner);
-        return item.id;
+    /// Context access requires a global value; Body access also checks lexical use.
+    pub fn valueId(owner: anytype, value: anytype) Error!p.Id {
+        if (comptime @TypeOf(owner) == *Context) return runtime.interop.globalValueId(rawContext(owner), erased(.value, value));
+        _ = comptime index(.body, @TypeOf(owner));
+        return runtime.interop.valueId(@ptrCast(owner), erased(.value, value));
     }
-    pub fn resumptionSchema(c: *Context, value: *const Handler) Error!*const Schema {
-        const item = data(HandlerData, value);
-        try c.origin(item.owner);
-        if (item.clauses.len != 1) return c.reject(error.InvalidCategory, "resumption", "select a clause through its function parameter");
-        return item.clauses[0].resumption;
+    pub fn computationId(c: *Context, computation: anytype) Error!p.Id {
+        return runtime.interop.computationId(rawContext(c), erased(.computation, computation));
     }
-    pub fn resultSchema(c: *Context, value: *const Schema) Error!*const Schema {
-        _ = try c.schemaId(value);
-        return data(SchemaData, value).result orelse error.InvalidSchema;
+    pub fn fields(c: *Context, schema_handle: anytype) Error!*const RuntimeNamed(.schema) {
+        _ = try schemaId(c, schema_handle);
+        const entries = try erased(.schema, schema_handle).checkedFields();
+        return @ptrCast(try runtime.interop.namedStorage(rawContext(c), NamedData(.schema), .{ .entries = entries }));
+    }
+    pub fn resultSchema(c: *Context, schema_handle: anytype) Error!*const Schema(Dynamic) {
+        _ = try schemaId(c, schema_handle);
+        return @ptrCast((try erased(.schema, schema_handle).checkedResult()) orelse return error.InvalidSchema);
+    }
+    /// Bytes are validated against the reachable expected contract before the
+    /// checked runtime owner creates a scope-free immutable literal.
+    pub fn encodedLiteral(c: *Context, expected: anytype, bytes: []const u8) Error!*const Value(index(.schema, @TypeOf(expected))) {
+        return @ptrCast(try runtime.interop.encodedLiteral(rawContext(c), erased(.schema, expected), bytes));
+    }
+    pub fn literalFailure(c: *Context, value: anytype) Error!*const FailureLiteral(index(.value, @TypeOf(value))) {
+        return @ptrCast(try runtime.interop.checkedLiteralFailure(rawContext(c), erased(.value, value)));
+    }
+    pub fn builder(c: *Context) *source.Builder {
+        return runtime.interop.builder(rawContext(c));
+    }
+    pub fn schemaId(c: *Context, schema_handle: anytype) Error!p.Id {
+        return runtime.interop.schemaId(rawContext(c), erased(.schema, schema_handle));
+    }
+    pub fn erase(value: anytype) (if (metadata(@TypeOf(value)).family == .body) *Body(Dynamic) else *const canonical(metadata(@TypeOf(value)).family, Dynamic)) {
+        const info = comptime metadata(@TypeOf(value));
+        if (comptime info.family == .declaration and info.shape != Dynamic and info.shape.shape != Dynamic)
+            @compileError("Horos authoring: cannot erase a declaration with a known completion shape");
+        return @ptrCast(value);
     }
 };
 
-/// Compatibility adapters retain the existing low-level error set.
-pub fn sourceError(err: Error) source.Error {
-    return switch (err) {
-        error.ForeignHandle, error.OutOfScope, error.ClosedBody, error.PoisonedAuthoring, error.SchemaMismatch, error.UnknownName, error.DuplicateName, error.InvalidCategory, error.InvalidBranch, error.UndefinedBody, error.UndefinedSchema, error.SchemaAlreadyDefined => error.InvalidSource,
-        else => |other| other,
+fn RawNamed(comptime family: Family) type {
+    return switch (family) {
+        .schema => runtime.Field,
+        .value => runtime.Argument,
+        .operation => runtime.HandledOperation,
+        .finished_case => runtime.NamedCase,
+        else => @compileError("Horos runtime named collection: unsupported family"),
     };
+}
+fn packNamed(comptime family: Family, values: anytype) Collection(family, @TypeOf(values)) {
+    if (comptime @TypeOf(values) == *const interop.RuntimeNamed(family)) {
+        const stored: *const NamedData(family) = @ptrCast(@alignCast(values));
+        return .{ .borrowed = stored.entries };
+    }
+    const fields = comptime fieldsInfo(@TypeOf(values), "named collection");
+    var result: Collection(family, @TypeOf(values)) = .{};
+    inline for (fields.field_names, 0..) |name, i| {
+        result.owned[i] = if (family == .operation)
+            .{ .name = name, .operation = erased(family, @field(values, name)) }
+        else
+            .{ .name = name, .value = erased(family, @field(values, name)) };
+    }
+    return result;
+}
+
+fn NamedData(comptime family: Family) type {
+    return struct { entries: []const RawNamed(family) };
+}
+
+fn sequenceElement(comptime S: type, comptime operation: []const u8) type {
+    if (S == Dynamic) return Dynamic;
+    if (!@hasDecl(S, "contract")) @compileError("Horos " ++ operation ++ ": expected a sequence, vector, or array");
+    return switch (S.contract) {
+        .sequence => |v| v.element,
+        .array => |v| v.element,
+        else => @compileError("Horos " ++ operation ++ ": expected a sequence, vector, or array"),
+    };
+}
+fn requireSequence(comptime S: type, comptime operation: []const u8) void {
+    _ = sequenceElement(S, operation);
+    if (S != Dynamic and S.contract != .sequence) @compileError("Horos " ++ operation ++ ": arrays cannot change length");
+}
+fn requireBlob(comptime S: type, comptime operation: []const u8) void {
+    if (S == Dynamic) return;
+    if (!@hasDecl(S, "contract") or (S.contract != .text and S.contract != .bytes)) @compileError("Horos " ++ operation ++ ": expected text or bytes");
+}
+fn OptionalShape(comptime S: type) type {
+    return native.Contract(.{ .sum = native.Fields(&.{ "none", "some" }, &.{ Shape(void), S }) });
+}
+fn PopShape(comptime S: type) type {
+    requireSequence(S, "pop");
+    return native.Contract(.{ .sum = native.Fields(&.{ "empty", "item" }, &.{ Shape(void), native.Contract(.{ .product = native.Fields(&.{ "head", "tail" }, &.{ sequenceElement(S, "pop"), S }) }) }) });
+}
+fn PopLastShape(comptime S: type) type {
+    requireSequence(S, "sequencePopLast");
+    return native.Contract(.{ .product = native.Fields(&.{ "rest", "last" }, &.{ S, OptionalShape(sequenceElement(S, "sequencePopLast")) }) });
+}
+fn compatibleBlob(comptime Target: type, comptime Source: type, comptime operation: []const u8) void {
+    requireBlob(Target, operation);
+    requireBlob(Source, operation);
+    if (Target != Dynamic and Source != Dynamic and std.meta.activeTag(Target.contract) != std.meta.activeTag(Source.contract)) mismatch(operation);
+}
+fn capacityFailure(comptime S: type, options: anytype, comptime operation: []const u8) ?*const runtime.FailureLiteral {
+    comptime {
+        requireSequence(S, operation);
+        if (S != Dynamic) {
+            const needed = S.contract.sequence.maximum != null;
+            if (needed != @hasField(@TypeOf(options), "capacity")) @compileError("Horos " ++ operation ++ ": capacity failure required exactly for a bounded vector");
+        }
+    }
+    return if (@hasField(@TypeOf(options), "capacity")) erased(.failure_literal, options.capacity) else null;
+}
+fn checkElements(comptime S: type, comptime T: type, comptime operation: []const u8) void {
+    switch (@typeInfo(T)) {
+        .@"struct" => |fields| for (fields.field_types) |Item| compatible(S, index(.value, Item), operation ++ " element"),
+        .array => |array| compatible(S, index(.value, array.child), operation ++ " element"),
+        .pointer => |ptr| if (ptr.size == .slice) compatible(S, index(.value, ptr.child), operation ++ " element") else checkElements(S, ptr.child, operation),
+        else => @compileError("Horos " ++ operation ++ ": expected handle tuple, array, or slice"),
+    }
+}
+
+fn firstParameter(comptime Fields: type, comptime operation: []const u8) type {
+    if (Fields == Dynamic) return Dynamic;
+    const f = @typeInfo(Fields).@"struct";
+    if (f.field_types.len == 0) @compileError("Horos " ++ operation ++ ": missing implicit first parameter");
+    return f.field_types[0];
+}
+fn dropFirst(comptime Fields: type, comptime operation: []const u8) type {
+    if (Fields == Dynamic) return Dynamic;
+    _ = firstParameter(Fields, operation);
+    const f = @typeInfo(Fields).@"struct";
+    return native.Fields(f.field_names[1..], f.field_types[1..]);
+}
+fn PairShape(comptime S: type) type {
+    return native.Contract(.{ .product = native.Fields(&.{ "first", "second" }, &.{ S, S }) });
+}
+fn CleanupShape(comptime Failure: type) type {
+    const Unit = Shape(void);
+    const Reason = native.Contract(.{ .sum = native.Fields(&.{ "0", "1" }, &.{ Shape(native.Text(null)), Shape(native.Bytes(null)) }) });
+    const Primary = native.Contract(.{ .sum = native.Fields(&.{ "0", "1", "2", "3" }, &.{ Unit, Failure, Reason, Unit }) });
+    const Cancel = native.Contract(.{ .sum = native.Fields(&.{ "0", "1" }, &.{ Unit, Reason }) });
+    return native.Contract(.{ .product = native.Fields(&.{ "0", "1", "2" }, &.{ Primary, Cancel, native.Contract(.{ .sequence = .{ .element = Failure, .maximum = null } }) }) });
+}
+
+fn requireInteger(comptime S: type, comptime operation: []const u8) void {
+    if (S == Dynamic) return;
+    if (!@hasDecl(S, "contract") or S.contract != .integer) @compileError("Horos " ++ operation ++ ": expected an integer shape");
 }

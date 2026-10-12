@@ -1,10 +1,9 @@
 // Copyright (c) 2026 Boundary contributors. MIT license.
-pub const package_version = "3.0.0";
+pub const package_version = "4.0.0";
 pub const authoring = @import("authoring.zig");
 pub const source = @import("source.zig");
 pub const library = struct {
     pub const hyper = @import("library/hyper.zig");
-    pub const hyper_authoring = @import("library/hyper_authoring.zig");
     pub const choice = @import("library/choice.zig");
     pub const generator = @import("library/generator.zig");
     pub const cleanup = @import("library/cleanup.zig");

@@ -1,95 +1,68 @@
-// Copyright (c) 2026 Boundary contributors. MIT license.
-//! One get/put interpretation owns explicit cell state and one answer policy.
-const std = @import("std");
-const a = @import("../authoring.zig");
-pub const Answer = enum { value, with_state, optional };
-pub const Interpretation = struct { handler: *const a.Handler, answer: *const a.Schema, cell: *const a.Schema };
-pub const Family = opaque {
-    pub fn get(self: *const Family) *const a.Operation {
-        return familyData(self).get;
-    }
-    pub fn put(self: *const Family) *const a.Operation {
-        return familyData(self).put;
-    }
-    pub fn getCapability(self: *const Family) *const a.Schema {
-        return familyData(self).get_capability;
-    }
-    pub fn putCapability(self: *const Family) *const a.Schema {
-        return familyData(self).put_capability;
-    }
-};
-const FamilyData = struct {
-    get: *const a.Operation,
-    put: *const a.Operation,
-    get_capability: *const a.Schema,
-    put_capability: *const a.Schema,
-    element: *const a.Schema,
-    interpretations: std.ArrayList(Cached) = .empty,
-};
-const Cached = struct {
-    result: *const a.Schema,
-    region: *const a.Region,
-    captures: []const *const a.Schema,
-    body_captures: []const *const a.Schema,
-    residual: []const *const a.Operation,
-    disposition: Answer,
-    value: Interpretation,
-};
-fn familyData(f: *const Family) *FamilyData {
-    return @ptrCast(@alignCast(@constCast(f)));
+//! State interpretations retain the selected answer policy in their result tag.
+const bridge = @import("bridge.zig");
+const a = bridge.a;
+const native = bridge.native;
+const runtime = @import("runtime/state.zig");
+pub const Answer = runtime.Answer;
+fn Get(comptime S: type) type {
+    return a.OperationSignature(bridge.Unit, S, bridge.Empty);
 }
-pub fn family(c: *a.Context, identity: []const u8, element: *const a.Schema) a.Error!*const Family {
-    const allocator = a.interop.builder(c).allocator();
-    const unit = try c.scalar(void);
-    const get = try c.local(try allocator.print("{s}/get", .{identity}), unit, element, .linear);
-    const put = try c.local(try allocator.print("{s}/put", .{identity}), element, unit, .linear);
-    const saved = try allocator.create(FamilyData);
-    saved.* = .{ .get = get, .put = put, .get_capability = try c.capability(get), .put_capability = try c.capability(put), .element = element };
-    return @ptrCast(saved);
+fn Put(comptime S: type) type {
+    return a.OperationSignature(S, bridge.Unit, bridge.Empty);
 }
-pub fn interpret(c: *a.Context, state: *const Family, result: *const a.Schema, region: *const a.Region, captures: a.CaptureBounds, residual: []const *const a.Operation, disposition: Answer) a.Error!Interpretation {
-    const f = familyData(state);
-    _ = try c.capability(f.get);
-    for (f.interpretations.items) |entry| {
-        if (entry.result == result and entry.region == region and entry.disposition == disposition and
-            std.mem.eql(*const a.Schema, entry.captures, captures.continuation) and std.mem.eql(*const a.Schema, entry.body_captures, captures.body) and std.mem.eql(*const a.Operation, entry.residual, residual)) return entry.value;
-    }
-    const allocator = a.interop.builder(c).allocator();
-    const cell = try c.cell(region, f.element);
-    const answer = switch (disposition) {
-        .value => result,
-        .with_state => try c.record(&.{ .{ .name = "value", .schema = result }, .{ .name = "state", .schema = f.element } }),
-        .optional => try c.alternatives(&.{ .{ .name = "none", .schema = try c.scalar(void) }, .{ .name = "some", .schema = result } }),
+pub fn Family(comptime S: type) type {
+    return opaque {
+        pub const family_shape = S;
+        pub fn get(self: *const @This()) *const a.Operation(Get(S)) {
+            return @ptrCast(@as(*const runtime.Family, @ptrCast(self)).get());
+        }
+        pub fn put(self: *const @This()) *const a.Operation(Put(S)) {
+            return @ptrCast(@as(*const runtime.Family, @ptrCast(self)).put());
+        }
+        pub fn getCapability(self: *const @This()) *const a.Schema(a.Internal(.{ .capability = Get(S) })) {
+            return @ptrCast(@as(*const runtime.Family, @ptrCast(self)).getCapability());
+        }
+        pub fn putCapability(self: *const @This()) *const a.Schema(a.Internal(.{ .capability = Put(S) })) {
+            return @ptrCast(@as(*const runtime.Family, @ptrCast(self)).putCapability());
+        }
     };
-    const handler = try c.handlerSet(&.{ .{ .name = "get", .operation = f.get }, .{ .name = "put", .operation = f.put } }, result, answer, .{
-        .mode = .deep,
-        .use = .linear,
-        .residual = residual,
-        .return_effects = &.{},
-        .captures = captures.continuation,
-        .body_captures = captures.body,
-        .borrowed_regions = &.{region},
-        .state = &.{.{ .name = "state", .schema = cell }},
-    });
-    const returns_fn = try c.returnFunction(handler);
-    const returns = try c.body(returns_fn);
-    const returned = try returns.parameter("result");
-    try c.define(returns_fn, try returns.ret(switch (disposition) {
-        .value => returned,
-        .with_state => try returns.product(answer, &.{ .{ .name = "value", .value = returned }, .{ .name = "state", .value = try returns.readCell(try returns.parameter("state")) } }),
-        .optional => try returns.variant(answer, "some", returned),
-    }));
-    for ([_]*const a.Operation{ f.get, f.put }, 0..) |operation, index| {
-        const clause_fn = try c.clauseFunctionFor(handler, operation);
-        const clause = try c.body(clause_fn);
-        const target = try clause.parameter("state");
-        const reply = if (index == 0) try clause.readCell(target) else blk: {
-            _ = try clause.writeCell(target, try clause.parameter("payload"));
-            break :blk try clause.constant(void, {});
-        };
-        try c.define(clause_fn, try clause.ret(try clause.resumeValue(try clause.parameter("resumption"), reply)));
-    }
-    const value: Interpretation = .{ .handler = handler, .answer = answer, .cell = cell };
-    try f.interpretations.append(allocator, .{ .result = result, .region = region, .captures = try allocator.dupe(*const a.Schema, captures.continuation), .body_captures = try allocator.dupe(*const a.Schema, captures.body), .residual = try allocator.dupe(*const a.Operation, residual), .disposition = disposition, .value = value });
-    return value;
+}
+fn familyShape(comptime T: type) type {
+    if (@typeInfo(T) != .pointer or @typeInfo(T).pointer.size != .one) @compileError("Horos State: expected canonical family");
+    const Child = @typeInfo(T).pointer.child;
+    if (!@hasDecl(Child, "family_shape")) @compileError("Horos State: expected canonical family");
+    const S = Child.family_shape;
+    if (T != *const Family(S)) @compileError("Horos State: expected canonical family");
+    return S;
+}
+fn answerShape(comptime S: type, comptime R: type, comptime policy: Answer) type {
+    return switch (policy) {
+        .value => R,
+        .with_state => native.Contract(.{ .product = native.Fields(&.{ "value", "state" }, &.{ R, S }) }),
+        .optional => bridge.optional(R),
+    };
+}
+pub fn Interpretation(comptime S: type, comptime R: type, comptime policy: Answer) type {
+    const Result = answerShape(S, R, policy);
+    const Cell = a.Internal(.{ .cell = S });
+    const H = a.HandlerShape(native.Fields(&.{ "get", "put" }, &.{ Get(S), Put(S) }), R, Result, native.Fields(&.{"state"}, &.{Cell}), bridge.Empty, .deep);
+    return struct { handler: *const a.Handler(H), answer: *const a.Schema(Result), cell: *const a.Schema(Cell) };
+}
+pub fn Selected(comptime S: type, comptime R: type) type {
+    return union(Answer) {
+        value: Interpretation(S, R, .value),
+        with_state: Interpretation(S, R, .with_state),
+        optional: Interpretation(S, R, .optional),
+    };
+}
+pub fn family(c: *a.Context, identity: []const u8, element: anytype) a.Error!*const Family(bridge.schemaShape(@TypeOf(element))) {
+    return @ptrCast(try runtime.family(bridge.context(c), identity, bridge.schema(element)));
+}
+pub fn interpret(c: *a.Context, state: anytype, result: anytype, region: *const a.Region, capture_bounds: anytype, residual: anytype, disposition: Answer) a.Error!Selected(familyShape(@TypeOf(state)), bridge.schemaShape(@TypeOf(result))) {
+    const bounds = bridge.captures(capture_bounds);
+    const effects = bridge.list(.operation, residual);
+    const raw = try runtime.interpret(bridge.context(c), @ptrCast(state), bridge.schema(result), region, bounds.value(), effects.slice(), disposition);
+    return switch (disposition) {
+        inline else => |policy| @unionInit(Selected(familyShape(@TypeOf(state)), bridge.schemaShape(@TypeOf(result))), @tagName(policy), .{ .handler = @ptrCast(raw.handler), .answer = @ptrCast(raw.answer), .cell = @ptrCast(raw.cell) }),
+    };
 }

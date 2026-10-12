@@ -3,6 +3,7 @@
 const std = @import("std");
 const p = @import("program.zig");
 const ir = @import("activation.zig");
+const roles = @import("reference_roles.zig");
 pub const Kind = enum(u8) { schema, constant, effect, function, block, handler, capture, region, resource, constructor };
 pub const Reference = struct { kind: Kind, id: p.Id };
 pub const kind_count = @typeInfo(Kind).@"enum".field_names.len;
@@ -118,19 +119,13 @@ pub const Mapper = struct {
     pub fn function(self: Mapper, value: ir.Function) Error!ir.Function {
         return .{ .entry = if (value.entry == missing) missing else try self.id(.block, value.entry), .inputs = try self.local(p.Id, value.inputs), .layout = .{ .slots = try self.ids(.schema, value.layout.slots, false) }, .custody = try self.local(ir.CustodyScope, value.custody), .result = try self.id(.schema, value.result), .effects = try self.ids(.effect, value.effects, true), .regions = try self.ids(.region, value.regions, true) };
     }
-    fn edge(self: Mapper, value: ir.Edge) Error!ir.Edge {
-        return .{ .block = try self.id(.block, value.block), .assignments = try self.local(ir.Assignment, value.assignments) };
-    }
-    fn perform(self: Mapper, value: ir.Perform) Error!ir.Perform {
-        return .{ .effect = try self.id(.effect, value.effect), .capability = value.capability, .payload = value.payload, .bodies = try self.local(p.Id, value.bodies), .use_site_capabilities = try self.local(p.Id, value.use_site_capabilities), .next = try self.edge(value.next) };
-    }
     fn instruction(self: Mapper, value: ir.Instruction) Error!ir.Instruction {
         const failures = try self.allocator.alloc(p.InstructionFailure, value.failures.len);
         for (failures, value.failures) |*target, failure| target.* = .{ .kind = failure.kind, .value = try self.id(.constant, failure.value) };
-        return .{ .destination = value.destination, .opcode = value.opcode, .operands = try self.local(p.Id, value.operands), .failures = failures, .immediate = switch (value.opcode) {
+        return .{ .destination = value.destination, .opcode = value.opcode, .operands = try self.local(p.Id, value.operands), .failures = failures, .immediate = switch (@import("opcode_contract.zig").describe(value.opcode).immediate_role) {
             .constant => try self.id(.constant, value.immediate),
-            .computation => try self.id(.constructor, value.immediate),
-            else => value.immediate,
+            .constructor => try self.id(.constructor, value.immediate),
+            .numeric => value.immediate,
         } };
     }
     pub fn block(self: Mapper, value: ir.Block) Error!ir.Block {
@@ -139,29 +134,8 @@ pub const Mapper = struct {
         return .{ .function = try self.id(.function, value.function), .custody = value.custody, .instructions = instructions, .terminator = try self.terminator(value.terminator) };
     }
     fn terminator(self: Mapper, value: ir.Terminator) Error!ir.Terminator {
-        return switch (value) {
-            .return_value, .fail => value,
-            .jump => |v| .{ .jump = try self.edge(v) },
-            .yield_value => |v| .{ .yield_value = try self.edge(v) },
-            .branch => |v| .{ .branch = .{ .condition = v.condition, .when_true = try self.edge(v.when_true), .when_false = try self.edge(v.when_false) } },
-            .switch_variant => |v| blk: {
-                const cases = try self.allocator.alloc(ir.Edge, v.cases.len);
-                for (cases, v.cases) |*target, source| target.* = try self.edge(source);
-                break :blk .{ .switch_variant = .{ .value = v.value, .cases = cases } };
-            },
-            .unpack_product => |v| .{ .unpack_product = .{ .value = v.value, .destinations = try self.local(p.Id, v.destinations), .next = try self.edge(v.next) } },
-            .call => |v| .{ .call = .{ .function = try self.id(.function, v.function), .arguments = try self.local(p.Id, v.arguments), .next = try self.edge(v.next) } },
-            .perform => |v| .{ .perform = try self.perform(v) },
-
-            .apply => |v| .{ .apply = .{ .computation = v.computation, .arguments = try self.local(p.Id, v.arguments), .next = try self.edge(v.next) } },
-            .handle => |v| .{ .handle = .{ .handler = try self.id(.handler, v.handler), .body = v.body, .arguments = try self.local(p.Id, v.arguments), .state = try self.local(p.Id, v.state), .next = try self.edge(v.next) } },
-            .resume_value => |v| .{ .resume_value = .{ .resumption = v.resumption, .argument = v.argument, .next = try self.edge(v.next) } },
-            .resume_with => |v| .{ .resume_with = .{ .resumption = v.resumption, .argument = v.argument, .handler = try self.id(.handler, v.handler), .state = try self.local(p.Id, v.state), .next = try self.edge(v.next) } },
-            .resume_computation => |v| .{ .resume_computation = .{ .resumption = v.resumption, .computation = v.computation, .next = try self.edge(v.next) } },
-            .dispose => |v| .{ .dispose = .{ .owned = v.owned, .next = try self.edge(v.next) } },
-            .protect => |v| .{ .protect = .{ .body = v.body, .cleanup = v.cleanup, .arguments = try self.local(p.Id, v.arguments), .resource = v.resource, .loan_region = if (v.loan_region) |region| try self.id(.region, region) else null, .next = try self.edge(v.next) } },
-            .with_region => |v| .{ .with_region = .{ .region = try self.id(.region, v.region), .body = v.body, .arguments = try self.local(p.Id, v.arguments), .next = try self.edge(v.next) } },
-        };
+        var control: ControlMapper = .{ .mapper = self };
+        return roles.mapTerminator(value, &control);
     }
     pub fn handler(self: Mapper, value: ir.Handler) Error!ir.Handler {
         const clauses = try self.allocator.alloc(ir.Clause, value.clauses.len);
@@ -176,6 +150,31 @@ pub const Mapper = struct {
     }
     pub fn constructor(self: Mapper, value: p.Constructor) Error!p.Constructor {
         return .{ .function = try self.id(.function, value.function), .capture = try self.id(.capture, value.capture), .schema = try self.id(.schema, value.schema) };
+    }
+};
+
+const ControlMapper = struct {
+    pub const VisitError = Error;
+    mapper: Mapper,
+    pub fn reference(self: *ControlMapper, comptime role: roles.Role, comptime cardinality: roles.Cardinality, value: anytype) Error!@TypeOf(value) {
+        if (comptime cardinality == .optional) return if (value) |present| try self.reference(role, .one, present) else null;
+        if (comptime cardinality == .list) {
+            const Child = @typeInfo(@TypeOf(value)).pointer.child;
+            const result = try self.mapper.allocator.alloc(Child, value.len);
+            for (value, result) |item, *out| out.* = try self.reference(role, .one, item);
+            return result;
+        }
+        return switch (role) {
+            .slot_read, .slot_write, .nonreference => value,
+            .function => try self.mapper.id(.function, value),
+            .effect => try self.mapper.id(.effect, value),
+            .handler => try self.mapper.id(.handler, value),
+            .region => try self.mapper.id(.region, value),
+            .block => try self.mapper.id(.block, value),
+            .edge => try roles.mapEdge(value, self),
+            .assignment => try roles.mapAssignment(value, self),
+            .source => try roles.mapSource(value, self),
+        };
     }
 };
 

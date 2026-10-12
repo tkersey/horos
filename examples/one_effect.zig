@@ -5,13 +5,13 @@ const horos = @import("horos");
 pub const Application = struct {
     pub fn emit(b: *horos.source.Builder) !horos.source.Module {
         const c = try horos.authoring.Context.init(b);
-        const integer = try c.scalar(u32);
+        const integer = try c.schema(u32);
         const lookup = try c.external("example.lookup.v2", integer, integer);
-        const entry = try c.function("lookup", &.{.{ .name = "key", .schema = integer }}, integer, &.{lookup});
+        const entry = try c.function("lookup", .{ .key = integer }, integer, &.{lookup});
         const body = try c.body(entry);
         const answer = try body.perform(lookup, try body.parameter("key"));
         try c.define(entry, try body.ret(answer));
-        return c.module(entry, try c.scalar(void));
+        return c.module(entry, try c.schema(void));
     }
 };
 

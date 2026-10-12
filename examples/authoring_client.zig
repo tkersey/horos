@@ -6,16 +6,16 @@ const a = horos.authoring;
 pub const Application = struct {
     pub fn emit(raw: *horos.source.Builder) !horos.source.Module {
         const c = try a.Context.init(raw);
-        const integer = try c.scalar(u64);
-        const boolean = try c.scalar(bool);
-        const unit = try c.scalar(void);
-        const input = try c.record(&.{ .{ .name = "input", .schema = integer }, .{ .name = "offset", .schema = integer } });
+        const integer = try c.schema(u64);
+        const boolean = try c.schema(bool);
+        const unit = try c.schema(void);
+        const input = try c.record(.{ .input = integer, .offset = integer });
         const lookup = try c.external("client/lookup", integer, integer);
         const question = try c.local("client/question", integer, integer, .linear);
         const capability = try c.capability(question);
-        const callable = try c.callable(&.{}, integer, &.{question}, .{ .use = .reusable, .captures = &.{ integer, capability } });
+        const callable = try c.callable(.{}, integer, &.{question}, .{ .use = .reusable, .captures = &.{ integer, capability } });
         const failure = try c.literalFailure(void, {});
-        const responder = try c.function("lookup responder", &.{.{ .name = "key", .schema = integer }}, integer, &.{lookup});
+        const responder = try c.function("lookup responder", .{ .key = integer }, integer, &.{lookup});
         const response = try c.body(responder);
         try c.define(responder, try response.ret(try response.perform(lookup, try response.parameter("key"))));
         const h = try c.responder(question, integer, responder, .{
@@ -25,7 +25,7 @@ pub const Application = struct {
             .captures = &.{ integer, input, capability, callable },
             .body_captures = &.{integer},
         });
-        const entry = try c.function("entry", &.{ .{ .name = "use_effect", .schema = boolean }, .{ .name = "numbers", .schema = input } }, integer, &.{lookup});
+        const entry = try c.function("entry", .{ .use_effect = boolean, .numbers = input }, integer, &.{lookup});
         const body = try c.body(entry);
         const numbers = try body.parameter("numbers");
         const x = try body.field(numbers, "input");
@@ -40,12 +40,12 @@ pub const Application = struct {
         const query_body = try interpreted.closureBody(query);
         try c.define(query, try query_body.ret(try query_body.performLocal(question, cap, x)));
         const ask = try interpreted.lambda(query, callable);
-        const first = try interpreted.apply(ask, &.{});
+        const first = try interpreted.apply(ask, .{});
         const partial = try interpreted.checkedAdd(first, offset, failure);
-        const second = try interpreted.apply(ask, &.{});
+        const second = try interpreted.apply(ask, .{});
         const result = try interpreted.checkedAdd(partial, second, failure);
         try c.define(work, try interpreted.ret(result));
-        const true_result = try yes.handleWith(h, try yes.lambda(work, handled), &.{});
+        const true_result = try yes.handleWith(h, try yes.lambda(work, handled), .{});
         const false_result = try no.checkedAdd(x, offset, failure);
         const joined = try body.conditional(try body.parameter("use_effect"), try yes.ret(true_result), try no.ret(false_result));
         try c.define(entry, try body.ret(joined));
