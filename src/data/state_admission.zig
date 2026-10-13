@@ -352,7 +352,7 @@ fn ContextFor() type {
                     .injection,
                     .protection,
                     => if (frameParent(record)) |parent|
-                        self.normal_return[@intCast(parent.id)] and try self.acceptsReturn(parent)
+                        self.normal_return[@intCast(parent.id)]
                     else
                         true,
                     // A disposal marker continues an existing unwind; it has no answer.
@@ -505,26 +505,15 @@ fn ContextFor() type {
             return contracts.programSlotSchema(self.program, block, slot);
         }
 
-        /// Explicit disposal and nested disposal markers advance an unwind,
-        /// never deliver a return value. Their children cannot be normal return
-        /// paths, even though the continuation after disposal can run normally.
-        fn acceptsReturn(self: Context, reference: g.NodeRef) Error!bool {
-            return switch (try node(self.state, reference)) {
-                .disposal_return => false,
-                .continuation => |saved| blk: {
-                    if (saved.source_block >= self.program.blocks.len) return error.InvalidReference;
-                    break :blk self.program.blocks[@intCast(saved.source_block)].terminator != .dispose;
-                },
-                else => true,
-            };
-        }
-
         fn checkParent(self: Context, reference: ?g.NodeRef, result_type: p.Id) Error!void {
-            if (reference) |ref| if (!try self.acceptsReturn(ref)) return;
             if (reference) |ref| switch (try node(self.state, ref)) {
                 .continuation => |saved| {
                     if (saved.source_block >= self.program.blocks.len) return error.InvalidReference;
-                    if (result_type != try self.expectedResult(self.program.blocks[@intCast(saved.source_block)])) return error.TypeMismatch;
+                    const source = self.program.blocks[@intCast(saved.source_block)];
+                    // Cleanup can invoke a handler clause that returns to the
+                    // disposal continuation. Its edge binds no result, so the
+                    // clause's answer is ignored rather than token-answer typed.
+                    if (source.terminator != .dispose and result_type != try self.expectedResult(source)) return error.TypeMismatch;
                 },
                 .attachment => |attachment| {
                     const activation = (try node(self.state, attachment.handler)).handler;
@@ -549,6 +538,9 @@ fn ContextFor() type {
                     const signature = try contracts.computation(self.program, try self.slotType(source, source.terminator.protect.cleanup));
                     if (result_type != signature.result) return error.TypeMismatch;
                 },
+                // A nested disposal marker continues an unwind, not ordinary
+                // execution. normal_return checks the complete return path.
+                .disposal_return => {},
                 else => return error.InvalidState,
             } else if (result_type != self.program.roots.result) return error.TypeMismatch;
         }

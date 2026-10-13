@@ -176,9 +176,10 @@ A disposal marker links an unwind to its remaining work; it does not accept a
 normal return value. A shallow handler reinstated for disposal can therefore
 have a different answer type from its token. The frame forest rejects active
 execution, resumable captures and normal-exit destinations whose return path
-crosses a disposal marker or enters an explicit-disposal continuation as a normal
-return. The continuation after disposal can run, and cleanup can resume its
-checked exit; neither operation fabricates a return value for disposal.
+crosses a disposal marker. An explicit-disposal continuation is different:
+cleanup may invoke a handler clause that returns to it. Its edge binds no result,
+so that answer is ignored; it need not match the disposed token's answer type.
+The continuation after disposal can run, and cleanup can resume its checked exit.
 All existing custody, captured-region, cleanup and resumption-use checks still
 run independently.
 
