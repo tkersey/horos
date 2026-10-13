@@ -137,16 +137,16 @@ pub fn encodeOwned(allocator: std.mem.Allocator, types: []const p.Schema, root: 
 }
 
 pub fn decode(allocator: std.mem.Allocator, input: []const u8) Error!Owned {
-    return decodeLimited(allocator, input, 64 << 20);
+    return decodeLimited(allocator, input, null);
 }
 
-pub fn decodeLimited(allocator: std.mem.Allocator, input: []const u8, max_decoded_bytes: usize) Error!Owned {
-    if (input.len > max_decoded_bytes) return error.Capacity;
+pub fn decodeLimited(allocator: std.mem.Allocator, input: []const u8, max_decoded_bytes: ?usize) Error!Owned {
+    if (max_decoded_bytes) |maximum| if (input.len > maximum) return error.Capacity;
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
     var reader: wire.Reader = .{ .input = input };
-    var remaining = max_decoded_bytes - input.len;
-    const decoded = try record.readBounded(Descriptor, &reader, scratch.allocator(), &remaining);
+    var remaining: ?usize = if (max_decoded_bytes) |maximum| maximum - input.len else null;
+    const decoded = try record.readBounded(Descriptor, &reader, scratch.allocator(), if (remaining) |*maximum| maximum else null);
     try reader.finish();
     var canonical = try canonicalize(allocator, decoded.types, decoded.root);
     errdefer canonical.deinit();

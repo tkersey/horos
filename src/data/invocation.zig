@@ -54,7 +54,7 @@ pub const Binding = struct {
 };
 pub const Request = struct { binding: Binding, request_identity: [32]u8 };
 pub const Result = struct { request_identity: [32]u8, value: []const u8 };
-pub const Limits = struct { max_bytes: usize = 64 << 20 };
+pub const Limits = struct { max_bytes: ?usize = null };
 
 fn magic(comptime T: type) *const [8]u8 {
     return if (T == Input) "ABL_PKI3" else if (T == Outcome) "ABL_PKO3" else if (T == Request) "ABL_ERQ3" else if (T == Result) "ABL_ERS3" else @compileError("not an invocation record");
@@ -99,7 +99,7 @@ pub fn decode(comptime T: type, allocator: std.mem.Allocator, input: []const u8)
 }
 pub fn decodeLimited(comptime T: type, allocator: std.mem.Allocator, input: []const u8, limits: Limits) Error!Owned(T) {
     if (input.len < wire.header_length) return error.Truncated;
-    if (input.len > limits.max_bytes) return error.Capacity;
+    if (limits.max_bytes) |maximum| if (input.len > maximum) return error.Capacity;
     const bytes = try allocator.dupe(u8, input);
     errdefer allocator.free(bytes);
     var reader: wire.Reader = .{ .input = bytes };
@@ -143,9 +143,9 @@ pub fn validate(comptime T: type, allocator: std.mem.Allocator, value: T) Error!
         const binding = value.binding;
         if (binding.semantic_identity.len == 0 or !std.unicode.utf8ValidateSlice(binding.semantic_identity)) return error.InvalidRequest;
         if (!std.mem.eql(u8, &value.request_identity, &try requestIdentity(binding))) return error.InvalidRequest;
-        var payload = try schema.decodeLimited(allocator, binding.payload_schema, 64 << 20);
+        var payload = try schema.decode(allocator, binding.payload_schema);
         defer payload.deinit();
-        var resumed = try schema.decodeLimited(allocator, binding.resume_schema, 64 << 20);
+        var resumed = try schema.decode(allocator, binding.resume_schema);
         defer resumed.deinit();
         try schema.validateValue(allocator, payload.descriptor, binding.payload);
     } else if (T == Outcome) {
@@ -178,7 +178,7 @@ pub fn validate(comptime T: type, allocator: std.mem.Allocator, value: T) Error!
 pub fn validateResult(allocator: std.mem.Allocator, expected: Request, result: Result) Error!void {
     try validate(Request, allocator, expected);
     if (!std.mem.eql(u8, &result.request_identity, &expected.request_identity)) return error.InvalidResult;
-    var descriptor = try schema.decodeLimited(allocator, expected.binding.resume_schema, 64 << 20);
+    var descriptor = try schema.decode(allocator, expected.binding.resume_schema);
     defer descriptor.deinit();
     try schema.validateValue(allocator, descriptor.descriptor, result.value);
 }

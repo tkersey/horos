@@ -7,7 +7,7 @@ const record = @import("record.zig");
 const order = @import("graph_order.zig");
 pub const Error = order.Error;
 pub const Owned = order.Owned(s.State);
-pub const Limits = struct { max_decoded_bytes: usize = 64 << 20 };
+pub const Limits = struct { max_decoded_bytes: ?usize = null };
 pub const magic = "ABL_PST3";
 
 /// Structural checks only. Types, scopes, custody and code positions require
@@ -103,7 +103,7 @@ pub fn decodeGraph(allocator: std.mem.Allocator, input: []const u8) Error!Owned 
 
 pub fn decodeGraphLimited(allocator: std.mem.Allocator, input: []const u8, limits: Limits) Error!Owned {
     if (input.len < wire.header_length) return error.Truncated;
-    if (input.len > limits.max_decoded_bytes) return error.Capacity;
+    if (limits.max_decoded_bytes) |maximum| if (input.len > maximum) return error.Capacity;
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
     const owned = try arena.allocator().dupe(u8, input);
@@ -112,8 +112,8 @@ pub fn decodeGraphLimited(allocator: std.mem.Allocator, input: []const u8, limit
     if (try reader.fixed(u16) != 3) return error.UnsupportedVersion;
     if (try reader.fixed(u16) != 0) return error.InvalidFlags;
     if (try reader.fixed(u64) != owned.len - wire.header_length) return error.InvalidLength;
-    var remaining = limits.max_decoded_bytes - owned.len;
-    const state = try record.readBounded(s.State, &reader, arena.allocator(), &remaining);
+    var remaining: ?usize = if (limits.max_decoded_bytes) |maximum| maximum - owned.len else null;
+    const state = try record.readBounded(s.State, &reader, arena.allocator(), if (remaining) |*maximum| maximum else null);
     try reader.finish();
     try order.checkCanonical(allocator, state);
     try shape(state, allocator);

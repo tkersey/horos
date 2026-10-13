@@ -133,7 +133,6 @@ pub const Decoded = struct {
 };
 pub fn decode(allocator: std.mem.Allocator, input: []const u8) Error!Decoded {
     if (input.len < wire.header_length) return error.Truncated;
-    if (input.len > 64 << 20) return error.Capacity;
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
     const bytes = try arena.allocator().dupe(u8, input);
@@ -142,13 +141,12 @@ pub fn decode(allocator: std.mem.Allocator, input: []const u8) Error!Decoded {
     if (try reader.fixed(u16) != 1) return error.UnsupportedVersion;
     if (try reader.fixed(u16) != 0) return error.InvalidFlags;
     if (try reader.fixed(u64) != bytes.len - wire.header_length) return error.InvalidLength;
-    var budget: program_record.Budget = .{ .used = bytes.len, .maximum = 64 << 20 };
+    var budget: program_record.Budget = .{ .used = bytes.len };
     var context: program_record.Context = .{};
     const program = try program_record.read(ir.Program, &reader, arena.allocator(), &budget, &context);
-    var remaining = budget.maximum - budget.used;
-    const imports = try record.readBounded([]const Symbol, &reader, arena.allocator(), &remaining);
-    const exports = try record.readBounded([]const Symbol, &reader, arena.allocator(), &remaining);
-    const borrows = try record.readBounded([]const @import("borrow_contract.zig").Summary, &reader, arena.allocator(), &remaining);
+    const imports = try record.read([]const Symbol, &reader, arena.allocator());
+    const exports = try record.read([]const Symbol, &reader, arena.allocator());
+    const borrows = try record.read([]const @import("borrow_contract.zig").Summary, &reader, arena.allocator());
     try reader.finish();
     const object: Object = .{ .program = program, .imports = imports, .exports = exports, .borrows = borrows };
     try validate(allocator, object);

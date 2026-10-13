@@ -95,11 +95,10 @@ pub fn write(comptime T: type, value: T, writer: *wire.Writer) wire.Error!void {
 /// Allocations and decoded slices belong to allocator; use an invocation arena.
 /// Counts are bounded by remaining bytes before allocating, including empty rows.
 pub fn read(comptime T: type, reader: *wire.Reader, allocator: std.mem.Allocator) Error!T {
-    var remaining: usize = std.math.maxInt(usize);
-    return readBounded(T, reader, allocator, &remaining);
+    return readBounded(T, reader, allocator, null);
 }
 
-pub fn readBounded(comptime T: type, reader: *wire.Reader, allocator: std.mem.Allocator, remaining: *usize) Error!T {
+pub fn readBounded(comptime T: type, reader: *wire.Reader, allocator: std.mem.Allocator, remaining: ?*usize) Error!T {
     return switch (@typeInfo(T)) {
         .void => {},
         .bool => switch (try reader.byte()) {
@@ -126,8 +125,10 @@ pub fn readBounded(comptime T: type, reader: *wire.Reader, allocator: std.mem.Al
             if (count > reader.input.len - reader.position) return error.Truncated;
             if (info.child == u8) break :blk try reader.take(count);
             const bytes = std.math.mul(usize, @sizeOf(info.child), count) catch return error.InvalidLength;
-            if (bytes > remaining.*) return error.Capacity;
-            remaining.* -= bytes;
+            if (remaining) |maximum| {
+                if (bytes > maximum.*) return error.Capacity;
+                maximum.* -= bytes;
+            }
             const result = try allocator.alloc(info.child, count);
             for (result) |*element| element.* = try readBounded(info.child, reader, allocator, remaining);
             break :blk result;

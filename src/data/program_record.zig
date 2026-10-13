@@ -11,11 +11,11 @@ pub const Error = record.Error;
 
 pub const Budget = struct {
     used: usize = 0,
-    maximum: usize,
+    maximum: ?usize = null,
     pub fn account(self: *Budget, comptime T: type, count: usize) Error!void {
         const size = std.math.mul(usize, @sizeOf(T), count) catch return error.InvalidLength;
         const next = std.math.add(usize, self.used, size) catch return error.InvalidLength;
-        if (next > self.maximum) return error.Capacity;
+        if (self.maximum) |maximum| if (next > maximum) return error.Capacity;
         self.used = next;
     }
 };
@@ -303,4 +303,14 @@ fn readLiteral(reader: *wire.Reader, allocator: std.mem.Allocator, budget: *Budg
         else => return error.InvalidTag,
     };
     return .{ .schema = schema, .bytes = try reader.take(count) };
+}
+
+test "decoded allocation accounting has no default ceiling and preserves explicit bounds" {
+    var unbounded: Budget = .{};
+    try unbounded.account(u8, (64 << 20) + 1);
+    try std.testing.expectEqual(@as(usize, (64 << 20) + 1), unbounded.used);
+    var explicit: Budget = .{ .maximum = 8 };
+    try explicit.account(u32, 2);
+    try std.testing.expectError(error.Capacity, explicit.account(u8, 1));
+    try std.testing.expectEqual(@as(usize, 8), explicit.used);
 }

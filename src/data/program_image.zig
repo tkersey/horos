@@ -11,7 +11,7 @@ const sets = @import("analysis_sets.zig");
 pub const Error = admission.Error || body_record.Error;
 pub const magic = "ABL_BPI3";
 pub const identity_domain = "boundary.program/v3\x00";
-pub const Limits = struct { max_decoded_bytes: usize = 64 << 20 };
+pub const Limits = struct { max_decoded_bytes: ?usize = null };
 
 pub fn encodedLength(program: ir.Program) Error!usize {
     var writer: wire.Writer = .{ .position = wire.header_length };
@@ -88,7 +88,7 @@ const Checked = struct {
 };
 fn decodeChecked(allocator: std.mem.Allocator, input: []const u8, limits: Limits) Error!Checked {
     if (input.len < wire.header_length) return error.Truncated;
-    if (input.len > limits.max_decoded_bytes) return error.Capacity;
+    if (limits.max_decoded_bytes) |maximum| if (input.len > maximum) return error.Capacity;
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
     var block_catalog: []ir.Block = &.{};

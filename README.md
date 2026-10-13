@@ -136,3 +136,12 @@ release artifacts are unchanged. The next coordinated consumers use the actual
 successor source/package hash, not a relabeled release.
 
 See [.github/CI.md](.github/CI.md) for source preflight, package checks and caching.
+
+## Decoder allocation policy
+
+Default portable program, state, component, schema, and invocation decoding has
+no preset byte/allocation ceiling. Checked lengths, remaining-input checks,
+canonicalization, schema/ownership admission, and allocator failures still apply.
+Existing explicitly bounded decoder APIs retain their limits when supplied;
+`null` means no extra ceiling rather than a large sentinel. This changes admission
+policy, not BMO1/BPI3/PST3/ABI bytes or execution authority.
