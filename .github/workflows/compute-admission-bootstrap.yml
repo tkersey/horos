@@ -1,0 +1,42 @@
+name: Prepare compute admission correction
+on:
+  pull_request:
+    paths: [.github/workflows/compute-admission-bootstrap.yml]
+permissions:
+  contents: write
+jobs:
+  prepare:
+    if: github.head_ref == 'codex/compute-admission' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: 19b607b8d0eecdb60abc28399acfa1e577d79049
+          fetch-depth: 1
+      - name: Apply the scoped admission correction
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          for name in ['program_image', 'state_image']:
+              p=Path('src/data/'+name+'.zig');s=p.read_text()
+              assert 'max_decoded_bytes: usize = 64 << 20' in s
+              s=s.replace('max_decoded_bytes: usize = 64 << 20','max_decoded_bytes: ?usize = null').replace('if (input.len > limits.max_decoded_bytes) return error.Capacity;','if (limits.max_decoded_bytes) |maximum| if (input.len > maximum) return error.Capacity;')
+              if name=='state_image':
+                  s=s.replace('var remaining = limits.max_decoded_bytes - owned.len;','var remaining: ?usize = if (limits.max_decoded_bytes) |maximum| maximum - owned.len else null;').replace('arena.allocator(), &remaining)','arena.allocator(), if (remaining) |*maximum| maximum else null)')
+              p.write_text(s)
+          p=Path('src/data/program_record.zig');s=p.read_text().replace('    maximum: usize,','    maximum: ?usize = null,').replace('if (next > self.maximum) return error.Capacity;','if (self.maximum) |maximum| if (next > maximum) return error.Capacity;')
+          s+='\ntest "decoded allocation accounting has no default ceiling and preserves explicit bounds" {\n    var unbounded: Budget = .{};\n    try unbounded.account(u8, (64 << 20) + 1);\n    try std.testing.expectEqual(@as(usize, (64 << 20) + 1), unbounded.used);\n    var explicit: Budget = .{ .maximum = 8 };\n    try explicit.account(u32, 2);\n    try std.testing.expectError(error.Capacity, explicit.account(u8, 1));\n    try std.testing.expectEqual(@as(usize, 8), explicit.used);\n}\n';p.write_text(s)
+          p=Path('src/data/record.zig');s=p.read_text().replace('    var remaining: usize = std.math.maxInt(usize);\n    return readBounded(T, reader, allocator, &remaining);','    return readBounded(T, reader, allocator, null);').replace('remaining: *usize) Error!T','remaining: ?*usize) Error!T').replace('            if (bytes > remaining.*) return error.Capacity;\n            remaining.* -= bytes;','            if (remaining) |maximum| {\n                if (bytes > maximum.*) return error.Capacity;\n                maximum.* -= bytes;\n            }');p.write_text(s)
+          p=Path('src/data/schema.zig');s=p.read_text().replace('return decodeLimited(allocator, input, 64 << 20);','return decodeLimited(allocator, input, null);').replace('max_decoded_bytes: usize) Error!Owned','max_decoded_bytes: ?usize) Error!Owned').replace('if (input.len > max_decoded_bytes) return error.Capacity;','if (max_decoded_bytes) |maximum| if (input.len > maximum) return error.Capacity;').replace('var remaining = max_decoded_bytes - input.len;','var remaining: ?usize = if (max_decoded_bytes) |maximum| maximum - input.len else null;').replace('scratch.allocator(), &remaining)','scratch.allocator(), if (remaining) |*maximum| maximum else null)');p.write_text(s)
+          p=Path('src/data/invocation.zig');s=p.read_text().replace('max_bytes: usize = 64 << 20','max_bytes: ?usize = null').replace('if (input.len > limits.max_bytes) return error.Capacity;','if (limits.max_bytes) |maximum| if (input.len > maximum) return error.Capacity;').replace('schema.decodeLimited(allocator, binding.payload_schema, 64 << 20)','schema.decode(allocator, binding.payload_schema)').replace('schema.decodeLimited(allocator, binding.resume_schema, 64 << 20)','schema.decode(allocator, binding.resume_schema)').replace('schema.decodeLimited(allocator, expected.binding.resume_schema, 64 << 20)','schema.decode(allocator, expected.binding.resume_schema)');p.write_text(s)
+          p=Path('src/data/component.zig');s=p.read_text().replace('    if (input.len > 64 << 20) return error.Capacity;\n','').replace('.{ .used = bytes.len, .maximum = 64 << 20 }','.{ .used = bytes.len }').replace('    var remaining = budget.maximum - budget.used;\n','').replace('record.readBounded([]const Symbol, &reader, arena.allocator(), &remaining)','record.read([]const Symbol, &reader, arena.allocator())').replace('record.readBounded([]const @import("borrow_contract.zig").Summary, &reader, arena.allocator(), &remaining)','record.read([]const @import("borrow_contract.zig").Summary, &reader, arena.allocator())');p.write_text(s)
+          p=Path('README.md');s=p.read_text();s+='\n## Decoder allocation policy\n\nDefault portable program, state, component, schema, and invocation decoding has\nno preset byte/allocation ceiling. Checked lengths, remaining-input checks,\ncanonicalization, schema/ownership admission, and allocator failures still apply.\nExisting explicitly bounded decoder APIs retain their limits when supplied;\n`null` means no extra ceiling rather than a large sentinel. This changes admission\npolicy, not BMO1/BPI3/PST3/ABI bytes or execution authority.\n';p.write_text(s)
+          PY
+          git diff --check
+          git add README.md src/data/component.zig src/data/invocation.zig src/data/program_image.zig src/data/program_record.zig src/data/record.zig src/data/schema.zig src/data/state_image.zig
+          git config user.name 'Tim Kersey'
+          git config user.email 'tkersey@users.noreply.github.com'
+          git commit -m 'Remove implicit byte ceilings from portable admission'
+          git push origin HEAD:refs/heads/codex/compute-admission-prepared
