@@ -73,6 +73,7 @@ const Storage = struct {
 };
 const CallTargets = struct { role: Role = .callee, effect: p.Id, targets: ?[]const Target, environmental: bool = false };
 pub const SuspensionSources = struct { slots: []const p.Id = &.{}, conservative: bool = false };
+pub const InvocationSources = struct { inputs: []const p.Id = &.{}, conservative: bool = false };
 const PositionSources = struct { block: p.Id, position: usize, returned: bool, effects: []const SuspensionSources };
 
 pub const Analysis = opaque {
@@ -119,6 +120,24 @@ pub const Analysis = opaque {
         const relative = self.data().relative orelse return true;
         const disposal = relative.disposal orelse return true;
         return disposal.contains(schema, @intCast(effect));
+    }
+    /// Instantiate this immutable constructor's suspension summary with its
+    /// concrete environment and supplied arguments. These are formal input
+    /// ordinals, not activation slots or all capabilities retained by a value.
+    pub fn constructorSources(self: *const Analysis, constructor: p.Id, effect: p.Id) Error!InvocationSources {
+        const stored = self.data();
+        const relative = stored.relative orelse return .{ .conservative = true };
+        const function = stored.image.constructors[@intCast(constructor)].function;
+        var result: InvocationSources = .{};
+        var inputs: std.ArrayList(p.Id) = .empty;
+        var iterator = relative.origins.iterator(relative.suspensions[@intCast(function)][@intCast(effect)]);
+        while (iterator.next()) |origin| switch (origin) {
+            .input => |input| try inputs.append(stored.allocator, @intCast(input)),
+            .environmental => {},
+            else => result.conservative = true,
+        };
+        result.inputs = try inputs.toOwnedSlice(stored.allocator);
+        return result;
     }
     /// Sources are stable slots at this exact position, never callee input
     /// ordinals. A saved continuation starts after its awaited invocation;

@@ -166,7 +166,14 @@ consumes that frame before its own suffix runs. A continuation's executable row
 therefore combines child execution with its own later suffix for its ancestors.
 Attachments mask only origins inside the actual reinstated delimiter; handler
 effects remain conservatively represented. Protection also includes possible
-cleanup effects for enclosing frames. Regions and injected computations forward
+cleanup effects for enclosing frames. Pending cleanup instantiates
+`Analysis.constructorSources` from the retained computation's actual constructor,
+captured environment and supplied resource. This reuses the same relative
+function summaries as program admission: a declared effect with a known empty
+suspension set adds no recipient, and only contributing captured inputs supply
+concrete origins. Unknown summaries or unrepresented supplied inputs retain
+reachable origins conservatively. The summary also includes latent disposal
+effects outside the declared invocation row. Regions and injected computations forward
 child execution. Dormant token children retain their use-site capabilities for
 possible injection; environmental pending children add none because their
 response values are first-order. Cancellation and failure also discard owned

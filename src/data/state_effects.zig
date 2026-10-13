@@ -388,6 +388,37 @@ pub fn CheckFor(comptime Program: type, comptime State: type) type {
                 return self.merge(check, into, value.body.owned.node, null);
             }
 
+            fn cleanup(self: Origins, check: *Self, into: []usize, ref: g.NodeRef) Error!void {
+                const record = try check.node(ref);
+                if (record != .obligation) return error.InvalidState;
+                const obligation = record.obligation;
+                const value = obligation.cleanup orelse return error.InvalidState;
+                const closure = try check.node(switch (value.body) {
+                    .reference => |node_ref| node_ref,
+                    .owned => |owned_ref| owned_ref.node,
+                    else => return error.InvalidValue,
+                });
+                if (closure != .computation) return error.InvalidState;
+                const environment = try check.node(closure.computation.environment);
+                if (environment != .environment) return error.InvalidState;
+                const sources = if (check.control) |control|
+                    try control.constructorSources(closure.computation.constructor, self.effect)
+                else
+                    @import("control_provenance.zig").InvocationSources{ .conservative = true };
+                if (sources.conservative) _ = try self.merge(check, into, ref, null);
+                for (sources.inputs) |input| {
+                    if (input < environment.environment.values.len) {
+                        _ = try self.valueOrigins(check, into, environment.environment.values[@intCast(input)]);
+                    } else if (input - environment.environment.values.len == 1 and obligation.resource != null) {
+                        _ = try self.valueOrigins(check, into, obligation.resource.?);
+                    } else {
+                        // Supplied arguments are exit context, then resource.
+                        // Preserve the conservative bound for unrepresented inputs.
+                        _ = try self.merge(check, into, ref, null);
+                    }
+                }
+            }
+
             /// Discarding a container traverses only its owned fields. It never
             /// invokes a retained computation or a copied capability. A one-shot
             /// token, however, activates its captured cleanup when discarded.
@@ -455,9 +486,7 @@ pub fn CheckFor(comptime Program: type, comptime State: type) type {
                             _ = try self.merge(check, into, .{ .id = id }, null);
                         },
                         .attachment, .region_scope, .injection, .pending => {},
-                        .protection => |scope| if (try check.scopeEffects(scope.source_block, true, self.effect)) {
-                            _ = try self.merge(check, into, scope.obligation.node, null);
-                        },
+                        .protection => |scope| try self.cleanup(check, into, scope.obligation.node),
                         .cleanup_return => |v| _ = try disposal.merge(check, into, v.exit, null),
                         .disposal_return => |v| for (v.values) |value| {
                             _ = try disposal.owned(check, into, value);
