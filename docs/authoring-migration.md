@@ -85,3 +85,47 @@ a package pin, source inventory and kernel binding from different candidates do
 not form a supported rollback.
 
 See [the authoring guide](typed-authoring.md) for current construction patterns.
+
+## Admission measurements (Horos 5)
+
+`zig build bench-admission -Doptimize=safe` writes
+`zig-out/admission-compile.jsonl` and `zig-out/admission-derive.jsonl`.
+The optional target is separate from correctness checks. It uses the ordinary
+structural compiler, canonical image admission, and the private control owner;
+it neither changes optimization policy nor exports another analysis API.
+
+The measured core is `f04359ca8b958a07d1bcc14748e35adfacd3ffed`, with the
+benchmark sources in this revision. On Apple M2 Pro, macOS 27.2 (26B5101f),
+Zig 0.17.0, `safe`, these are medians of ten repetitions after the first
+observation. Each repetition constructs fresh owners; this is not a cached
+admission benchmark. Builders, image encoding, file I/O, output formatting and
+owner destruction are outside the timed operations. The compilation and private
+derivation executables run sequentially. All seven named semantic examples
+retain their frozen BPI3 bytes; every repetition checks its image identity.
+
+| Fixture | Compile µs | Admit µs | Derive µs | Derivation arena bytes, maximum | Admitted owner bytes |
+|---|---:|---:|---:|---:|---:|
+| recursive | 44.5 | 9.2 | 0.1 | 760 | 9396 |
+| generator | 292.2 | 74.1 | 34.2 | 94092 | 35054 |
+| scoped-reader | 1587.4 | 216.9 | 55.6 | 97520 | 32046 |
+| state-local | 419.8 | 62.7 | 31.8 | 36220 | 30808 |
+| state-shared | 385.5 | 56.2 | 26.8 | 33656 | 31048 |
+| choices-all | 108.5 | 23.5 | 11.8 | 30564 | 11108 |
+| recursive-choice | 1573.9 | 290.4 | 179.1 | 211448 | 65106 |
+| install-8 | 193.9 | 59.4 | 30.3 | 41616 | 30720 |
+| install-64 | 1532.9 | 441.1 | 292.0 | 678328 | 94980 |
+| install-128 | 3212.4 | 927.8 | 642.6 | 1112992 | 152144 |
+
+The existing allocation meter forwards allocation, resize, remap and free to the
+process allocator. Counts are requested live bytes, not RSS or allocator metadata.
+The derivation column includes arena backing and intermediate dataflow storage
+retained until the invocation ends, not just a minimal set of resulting facts.
+Admission's temporary control derivation is released before the admitted-owner
+measurement. The small recursive example has no handlers; `recursive-choice`
+measures the existing recursive depth-first Queens/Choice example as well.
+
+Raw JSONL retains the first observation, all individual times, image hashes,
+peak and retained allocations, and admitted storage estimates. Every measured
+owner must release all of its allocations. Small operations and process-allocator
+reuse are sensitive to clock resolution, power state and concurrent load. These
+are local cost observations, not a baseline-relative speedup or a timing gate.

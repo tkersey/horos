@@ -67,6 +67,28 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{.{ .name = "horos_data", .module = data }},
     });
+    // Optional measurements use the ordinary structural compiler and admission.
+    // Timing is deliberately not a correctness threshold or part of `check`.
+    const admission_bench = b.addExecutable(.{ .name = "admission-bench", .root_module = b.createModule(.{
+        .root_source_file = b.path("src/admission_bench.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "horos_data", .module = data }},
+    }) });
+    const run_admission_bench = b.addRunArtifact(admission_bench);
+    run_admission_bench.has_side_effects = true;
+    const bench_images = run_admission_bench.addOutputDirectoryArg("admission-images");
+    const control_bench = b.addExecutable(.{ .name = "control-provenance-bench", .root_module = b.createModule(.{
+        .root_source_file = b.path("src/control_provenance_bench.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    }) });
+    const run_control_bench = b.addRunArtifact(control_bench);
+    run_control_bench.has_side_effects = true;
+    run_control_bench.addDirectoryArg(bench_images);
+    const bench_step = b.step("bench-admission", "Measure structural compilation, admission and private control derivation (JSONL)");
+    bench_step.dependOn(&b.addInstallFile(run_admission_bench.captureStdOut(.{}), "admission-compile.jsonl").step);
+    bench_step.dependOn(&b.addInstallFile(run_control_bench.captureStdOut(.{}), "admission-derive.jsonl").step);
     const static_authoring = b.step("check-static-authoring", "Reject incompatible authoring shapes through the public module");
     inline for (@import("test/package_authoring/static_cases.zig").cases) |case| {
         const options = b.addOptions();
