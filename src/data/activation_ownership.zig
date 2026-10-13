@@ -110,7 +110,12 @@ const Check = struct {
             },
             .apply => |apply| try self.control(slots, (try self.computation(slots, apply.computation)).effects, apply.next, .callee),
             .handle => |handle| try self.checkHandler(slots, handle),
-            inline .resume_value, .resume_computation => |operation| try self.control(slots, (try self.resumption(slots, operation.resumption)).effects, operation.next, .resumed),
+            .resume_value => |operation| try self.control(slots, (try self.resumption(slots, operation.resumption)).effects, operation.next, .resumed),
+            .resume_computation => |operation| {
+                const token = try self.resumption(slots, operation.resumption);
+                try self.control(slots, token.effects, operation.next, .resumed);
+                try self.provenance.capturesInjected(.{ .block = self.boundary.block, .role = .injected }, token, self.uses);
+            },
             .resume_with => |operation| try self.resumeWith(slots, operation),
             .with_region => |region| try self.control(slots, (try self.computation(slots, region.body)).effects, region.next, .body),
             .protect => |protect| {
@@ -139,11 +144,12 @@ const Check = struct {
     fn resumeWith(self: *Check, slots: []const p.Id, operation: anytype) Error!void {
         const signature = try self.resumption(slots, operation.resumption);
         const successor = self.image.handlers[@intCast(operation.handler)];
-        for (signature.effects) |effect| {
+        const effects = try self.provenance.effectRow(.{ .block = self.boundary.block, .role = .resumed }, signature.effects);
+        for (effects) |effect| {
             const escapes = !contracts.containsEffect(signature.handled, effect) or
                 contracts.containsEffect(signature.escaping, effect);
-            if (!escapes) continue;
-            try self.control(slots, &.{effect}, operation.next, .resumed);
+            if (contracts.containsEffect(signature.effects, effect) and !escapes) continue;
+            try self.controlEffects(slots, &.{effect}, operation.next, .resumed);
             const selected = try self.provenance.select(.{ .block = self.boundary.block, .role = .resumed }, effect);
             for (operation.state) |slot| try self.capture(slots, selected, slot);
         }

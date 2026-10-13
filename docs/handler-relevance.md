@@ -83,12 +83,18 @@ Function summaries also include effects from disposing owned values on failure,
 instruction faults or cancellation, including functions with an empty declared
 invocation row. A finite schema/effect relation follows owned containers and
 one-shot captures. Multi-shot templates and copied capabilities have no such
-disposal action; handled token effects remain inside their reinstated delimiter
-unless declared escaping. The relation conservatively seeds every function
-layout, and direct calls, compatible closures and handler clauses propagate it.
+disposal action. Deep tokens retain their declared outer effects, including
+same-family effects; shallow tokens mask handled effects unless marked escaping.
+The relation conservatively seeds every function layout, and direct calls,
+compatible closures and handler clauses propagate it. Resume and explicit-disposal
+boundaries also include cleanup carried by captured owned values.
 Contextual capture, region and cleanup queries expand their invocation row from
 these same derived summaries. Concrete position queries still use actual state
 custody rather than assuming every slot in a function layout is currently owned.
+An injected computation can add disposal effects beyond the original operation's
+use-site row. Admission checks these against both the caller and the resumed
+token's capture, region and cleanup bounds. The token's ordinary resume row does
+not prove those effects were checked when its continuation was captured.
 
 The step argument follows these transfers from the admitted inputs. Union joins
 preserve the invariant across branches and iteration; the finite fixed point
@@ -170,7 +176,9 @@ A disposal marker links an unwind to its remaining work; it does not accept a
 normal return value. A shallow handler reinstated for disposal can therefore
 have a different answer type from its token. The frame forest rejects active
 execution, resumable captures and normal-exit destinations whose return path
-crosses a disposal marker, while allowing cleanup to resume its checked exit.
+crosses a disposal marker or enters an explicit-disposal continuation as a normal
+return. The continuation after disposal can run, and cleanup can resume its
+checked exit; neither operation fabricates a return value for disposal.
 All existing custody, captured-region, cleanup and resumption-use checks still
 run independently.
 
@@ -213,9 +221,11 @@ with effect-free helpers, yielded cleanup and nested same-descriptor handlers, a
 local effectful dispatch from a retained outer capability. Original and restored
 execution must agree on the exact result. `test/v2/implicit_disposal.zig`
 checks failure, instruction faults and cancellation through direct calls, nested
-calls and closures, both with and without a declared effect row. Narrow caller
-capture bounds reject; valid bounds restore before and during cleanup, then
-produce the same terminal bytes as uninterrupted execution. The independent Horos source oracle and Kosmos's
+calls and closures, both with and without a declared effect row. It also covers
+injection into captured state, deep same-family outer cleanup, explicit disposal,
+ordinary resume and successor resume. Narrow capture bounds reject; valid bounds
+restore before and during cleanup, then produce the same terminal bytes as
+uninterrupted execution. The independent Horos source oracle and Kosmos's
 44-fixture source/native/WASM comparison retain deep, shallow, successor,
 injection, cleanup and local one-/multi-shot observations. The 42 historical
 BPI3 fixtures stay unchanged. These are falsification and preservation evidence

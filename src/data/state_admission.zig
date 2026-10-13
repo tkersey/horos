@@ -352,7 +352,7 @@ fn ContextFor() type {
                     .injection,
                     .protection,
                     => if (frameParent(record)) |parent|
-                        self.normal_return[@intCast(parent.id)]
+                        self.normal_return[@intCast(parent.id)] and try self.acceptsReturn(parent)
                     else
                         true,
                     // A disposal marker continues an existing unwind; it has no answer.
@@ -457,7 +457,6 @@ fn ContextFor() type {
                 .resume_computation => |resuming| (try contracts.resumption(self.program, try self.slotType(source, resuming.resumption))).answer,
                 .with_region => |scope| (try contracts.computation(self.program, try self.slotType(source, scope.body))).result,
                 .protect => |protection| (try contracts.computation(self.program, try self.slotType(source, protection.body))).result,
-                .dispose => |disposal| (try contracts.resumption(self.program, try self.slotType(source, disposal.owned))).answer,
                 else => error.InvalidState,
             };
         }
@@ -506,7 +505,22 @@ fn ContextFor() type {
             return contracts.programSlotSchema(self.program, block, slot);
         }
 
+        /// Explicit disposal and nested disposal markers advance an unwind,
+        /// never deliver a return value. Their children cannot be normal return
+        /// paths, even though the continuation after disposal can run normally.
+        fn acceptsReturn(self: Context, reference: g.NodeRef) Error!bool {
+            return switch (try node(self.state, reference)) {
+                .disposal_return => false,
+                .continuation => |saved| blk: {
+                    if (saved.source_block >= self.program.blocks.len) return error.InvalidReference;
+                    break :blk self.program.blocks[@intCast(saved.source_block)].terminator != .dispose;
+                },
+                else => true,
+            };
+        }
+
         fn checkParent(self: Context, reference: ?g.NodeRef, result_type: p.Id) Error!void {
+            if (reference) |ref| if (!try self.acceptsReturn(ref)) return;
             if (reference) |ref| switch (try node(self.state, ref)) {
                 .continuation => |saved| {
                     if (saved.source_block >= self.program.blocks.len) return error.InvalidReference;
@@ -535,11 +549,6 @@ fn ContextFor() type {
                     const signature = try contracts.computation(self.program, try self.slotType(source, source.terminator.protect.cleanup));
                     if (result_type != signature.result) return error.TypeMismatch;
                 },
-                // Disposal reinstates the delimiter only to unwind it. In
-                // particular a shallow handler's answer need not match the
-                // disposed token's answer. normal_return prevents execution
-                // or resumption from returning through this marker.
-                .disposal_return => {},
                 else => return error.InvalidState,
             } else if (result_type != self.program.roots.result) return error.TypeMismatch;
         }

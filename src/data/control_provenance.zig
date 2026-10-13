@@ -137,21 +137,39 @@ pub const Analysis = opaque {
         return effects[@intCast(effect)];
     }
     pub fn capturesRegion(self: *const Analysis, boundary: Boundary, effects: []const p.Id, region: p.Id) Error!void {
-        for (try self.effectRow(boundary, effects)) |effect| for (self.targets(boundary, effect)) |target| {
+        for (try self.effectRow(boundary, effects)) |effect| try self.captureRegion(boundary, effect, region);
+    }
+    fn captureRegion(self: *const Analysis, boundary: Boundary, effect: p.Id, region: p.Id) Error!void {
+        for (self.targets(boundary, effect)) |target| {
             if (!target.retains) continue;
             const signature = try contracts.resumption(self.data().image, target.resumption);
             if (std.mem.indexOfScalar(p.Id, signature.owned_regions, region) == null) return error.InvalidOwnership;
-        };
-    }
-    pub fn capturesCleanup(self: *const Analysis, boundary: Boundary, effects: []const p.Id) Error!void {
-        for (try self.effectRow(boundary, effects)) |effect| {
-            // Intrinsic multi-shot prohibition is independent of relevance.
-            if (self.data().image.effects[@intCast(effect)].control_use == .multi) return error.InvalidOwnership;
-            for (self.targets(boundary, effect)) |target|
-                if (!(try contracts.resumption(self.data().image, target.resumption)).obligations) return error.InvalidOwnership;
         }
     }
-
+    pub fn capturesCleanup(self: *const Analysis, boundary: Boundary, effects: []const p.Id) Error!void {
+        for (try self.effectRow(boundary, effects)) |effect| try self.captureCleanup(boundary, effect);
+    }
+    fn captureCleanup(self: *const Analysis, boundary: Boundary, effect: p.Id) Error!void {
+        // Intrinsic multi-shot prohibition is independent of relevance.
+        if (self.data().image.effects[@intCast(effect)].control_use == .multi) return error.InvalidOwnership;
+        for (self.targets(boundary, effect)) |target|
+            if (!(try contracts.resumption(self.data().image, target.resumption)).obligations) return error.InvalidOwnership;
+    }
+    /// An injected closure can dispose owned captures before the saved body
+    /// resumes. Additional effects must cover that body's retained state too,
+    /// not just the continuation outside resume_computation.
+    pub fn capturesInjected(self: *const Analysis, boundary: Boundary, token: p.ResumptionType, uses: @import("traits.zig").Facts) Error!void {
+        const admitted = self.data().image.effects[@intCast(token.effect)].use_site_effects;
+        for (try self.effectRow(boundary, admitted)) |effect| {
+            // Declared injection effects were checked when the token captured
+            // its continuation. Its broader resume row is not that witness.
+            if (contracts.containsEffect(admitted, effect)) continue;
+            const selected = try self.select(boundary, effect);
+            for (token.capture_bound) |schema| if (!try selected.captureAllowed(uses, schema)) return error.InvalidOwnership;
+            for (token.owned_regions) |region| try self.captureRegion(boundary, effect, region);
+            if (token.obligations) try self.captureCleanup(boundary, effect);
+        }
+    }
     /// After ordinary graph/type/custody admission, qualify concrete values
     /// against the same abstract bindings that justified reduced target sets.
     /// Restoring bytes is a second constructor of execution state; schema
@@ -281,7 +299,26 @@ pub fn derive(allocator: std.mem.Allocator, image: ir.Program, imports: []const 
                     try closureTargets(stored, &flow, &relative, &rows, id, .body, v.body, v.arguments, image.handlers[@intCast(v.handler)].clauses.len, v.handler);
                     try handlerTargets(stored, &relative, &rows, v.handler);
                 },
+                .resume_value, .dispose => {},
                 .resume_with => |v| try handlerTargets(stored, &relative, &rows, v.handler),
+                .resume_computation => |v| {
+                    const slots = image.functions[@intCast(block.function)].layout.slots;
+                    const thunk = try contracts.computation(image, slots[@intCast(v.computation)]);
+                    const token = try contracts.resumption(image, slots[@intCast(v.resumption)]);
+                    var injected: std.ArrayList(CallTargets) = .empty;
+                    try closureTargets(stored, &flow, &relative, &injected, id, .injected, v.computation, &.{}, thunk.parameters.len, null);
+                    // The token's ordinary execution keeps its conservative
+                    // recipients. Injection can add disposal effects outside
+                    // that row without replacing any of those recipients.
+                    for (injected.items) |row| {
+                        try rows.append(allocator, row);
+                        if (!contracts.containsEffect(token.effects, row.effect)) {
+                            var resumed = row;
+                            resumed.role = .resumed;
+                            try rows.append(allocator, resumed);
+                        }
+                    }
+                },
                 .with_region => |v| try closureTargets(stored, &flow, &relative, &rows, id, .body, v.body, v.arguments, 1, null),
                 .protect => |v| {
                     try closureTargets(stored, &flow, &relative, &rows, id, .body, v.body, v.arguments, @intFromBool(v.resource != null), null);
@@ -289,10 +326,35 @@ pub fn derive(allocator: std.mem.Allocator, image: ir.Program, imports: []const 
                 },
                 else => continue,
             }
+            try resumptionTargets(stored, &relative, &rows, block);
             stored.calls[id] = try rows.toOwnedSlice(allocator);
         }
     }
     return @ptrCast(stored);
+}
+
+fn resumptionTargets(stored: *Storage, relative: *const Values, rows: *std.ArrayList(CallTargets), block: ir.Block) Error!void {
+    const slot = switch (block.terminator) {
+        inline .resume_value, .resume_computation, .resume_with => |v| v.resumption,
+        .dispose => |v| v.owned,
+        else => return,
+    };
+    const schema = stored.image.functions[@intCast(block.function)].layout.slots[@intCast(slot)];
+    const signature = try contracts.resumption(stored.image, schema);
+    for (stored.image.effects, 0..) |_, effect| {
+        if (contracts.containsEffect(signature.effects, effect) or !relative.disposal.?.contains(schema, effect)) continue;
+        var present = false;
+        for (rows.items) |*row| {
+            if (row.role != .resumed or row.effect != effect) continue;
+            // A closure's known origin cannot restrict separate captured
+            // values whose cleanup may run during disposal or cancellation.
+            row.targets = null;
+            row.environmental = false;
+            present = true;
+            break;
+        }
+        if (!present) try rows.append(stored.allocator, .{ .role = .resumed, .effect = effect, .targets = null });
+    }
 }
 
 fn handlerTargets(stored: *Storage, relative: *const Values, rows: *std.ArrayList(CallTargets), id: p.Id) Error!void {
@@ -668,9 +730,15 @@ const DisposalEffects = struct {
                     .internal => |internal| switch (internal) {
                         .computation => |v| result.any(v.capture_bound, effect),
                         .suspension_package => |v| result.contains(v, effect),
-                        .resumption => |v| v.use != .multi and
-                            (!contracts.containsEffect(v.handled, effect) or contracts.containsEffect(v.escaping, effect)) and
-                            (contracts.containsEffect(v.effects, effect) or result.any(v.capture_bound, effect)),
+                        .resumption => |v| blk: {
+                            if (v.use == .multi) break :blk false;
+                            const escapes = !contracts.containsEffect(v.handled, effect) or contracts.containsEffect(v.escaping, effect);
+                            // A deep token lists same-family effects only when
+                            // they can select outside its own delimiter. Shallow
+                            // rows also list local effects, so require escaping.
+                            break :blk (contracts.containsEffect(v.effects, effect) and (v.mode == .deep or escapes)) or
+                                (escapes and result.any(v.capture_bound, effect));
+                        },
                         .capability, .cell, .region, .abstract_resource, .borrowed => false,
                     },
                     else => false,
@@ -686,6 +754,7 @@ const DisposalEffects = struct {
 };
 
 const Values = struct {
+    disposal: ?DisposalEffects = null,
     allocator: std.mem.Allocator,
     origins: *Origins,
     image: ir.Program,
@@ -761,6 +830,7 @@ const Values = struct {
             self.captures[id] = try sets(a, image.scopes.captures[@intCast(constructor.capture)].fields.len);
         if (relative) {
             const disposal = try DisposalEffects.derive(a, image);
+            self.disposal = disposal;
             for (image.functions, 0..) |function, id| {
                 self.suspensions[id] = try sets(a, image.effects.len);
                 // Cancellation can discard an owned slot at any execution
