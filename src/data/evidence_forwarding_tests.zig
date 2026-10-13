@@ -221,6 +221,31 @@ test "qualified targets preserve explicit outer forwarding and runtime capabilit
     try std.testing.expectError(error.InvalidReference, @import("activation_ownership.zig").analyze(a, program));
 }
 
+test "conservative provenance preserves valid admission and rejects an unsafe retained capture" {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var program = base;
+    const blocks = try allocator.dupe(ir.Block, program.blocks);
+    // The original argument, not the operation's reply, remains live across
+    // this perform. Its u64 schema must be allowed by the selected resumption.
+    blocks[3].instructions = &.{};
+    blocks[3].terminator = .{ .return_value = 0 };
+    program.blocks = blocks;
+    const ownership = @import("activation_ownership.zig");
+    var precise = try ownership.analyze(a, program);
+    precise.deinit();
+    var conservative = try ownership.analyzeComponent(a, program, &.{}, &.{});
+    conservative.deinit();
+    const control = try @import("control_provenance.zig").derive(allocator, program, &.{}, true);
+    try std.testing.expect((try control.select(.{ .block = 2, .role = .operation }, 0)).knowledge().conservative);
+    const schemas = try allocator.dupe(p.Schema, program.schemas);
+    schemas[4].internal.resumption.capture_bound = &.{5};
+    program.schemas = schemas;
+    try std.testing.expectError(error.InvalidOwnership, ownership.analyze(a, program));
+    try std.testing.expectError(error.InvalidOwnership, ownership.analyzeComponent(a, program, &.{}, &.{}));
+}
+
 test "successor bindings retain original views without poisoning unrelated deep handlers" {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
