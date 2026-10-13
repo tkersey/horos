@@ -120,25 +120,25 @@ pub const Analysis = opaque {
     pub fn validateState(self: *const Analysis, allocator: std.mem.Allocator, nodes: []const @import("graph.zig").Node, activations: []const ?@import("process_state.zig").Activation) Error!void {
         const values = self.data().values orelse return;
         const g = @import("graph.zig");
-        const Pending = struct { value: g.Value, allowed: *const Set };
+        const Pending = struct { value: g.Value, allowed: Set };
         var pending: std.ArrayList(Pending) = .empty;
-        var seen: std.AutoHashMapUnmanaged(struct { node: p.Id, allowed: *const Set }, void) = .empty;
+        var seen: std.AutoHashMapUnmanaged(struct { node: p.Id, allowed: Set }, void) = .empty;
         for (nodes, activations) |node, activation| {
             if (activation) |frame| {
                 const block = if (node == .control) node.control.block else node.continuation.source_block;
                 const row = try values.at(allocator, @intCast(block), @intCast(frame.position));
-                for (frame.bindings) |binding| try pending.append(allocator, .{ .value = binding.value, .allowed = &row[@intCast(binding.slot)] });
+                for (frame.bindings) |binding| try pending.append(allocator, .{ .value = binding.value, .allowed = row.get(@intCast(binding.slot)) });
             }
             if (node == .computation) {
                 const closure = node.computation;
                 const fields = nodes[@intCast(closure.environment.id)].environment.values;
-                for (fields, values.captures[@intCast(closure.constructor)]) |value, *allowed|
+                for (fields, values.captures[@intCast(closure.constructor)]) |value, allowed|
                     try pending.append(allocator, .{ .value = value, .allowed = allowed });
             }
         }
         while (pending.pop()) |item| {
-            const allowed = item.allowed.items;
-            if (contains(allowed, .unknown)) continue;
+            const allowed = item.allowed;
+            if (values.origins.contains(allowed, .unknown)) continue;
             const ref = switch (item.value.body) {
                 .reference => |ref| ref,
                 .owned => |owned| owned.node,
@@ -152,7 +152,7 @@ pub const Analysis = opaque {
             }
             if ((try seen.getOrPut(allocator, .{ .node = ref.id, .allowed = item.allowed })).found_existing) continue;
             switch (node) {
-                .computation => |closure| if (!contains(allowed, .{ .constructor = closure.constructor })) return error.InvalidOwnership,
+                .computation => |closure| if (!values.origins.contains(allowed, .{ .constructor = closure.constructor })) return error.InvalidOwnership,
                 .aggregate => |aggregate| for (aggregate.fields) |field| {
                     try pending.append(allocator, .{ .value = field, .allowed = item.allowed });
                 },
@@ -163,7 +163,7 @@ pub const Analysis = opaque {
                     const definition = nodes[@intCast(attachment.handler.id)].handler.definition;
                     // A token names the receiving clause's delimiter at capture.
                     // Successors belong to fresh resumed views, not the template.
-                    if (!contains(allowed, .{ .resumption = definition })) return error.InvalidOwnership;
+                    if (!values.origins.contains(allowed, .{ .resumption = definition })) return error.InvalidOwnership;
                 },
                 // These opaque/mutable values have conservative transfers. Their
                 // concrete capture, lifetime and cleanup checks remain mandatory.
@@ -192,7 +192,8 @@ pub fn derive(allocator: std.mem.Allocator, image: ir.Program, imports: []const 
         row.* = try targets.toOwnedSlice(allocator);
     }
     if (!component and imports.len == 0 and image.handlers.len != 0) {
-        var flow = try Values.init(allocator, image, false);
+        const origins = try Origins.init(allocator, image);
+        var flow = try Values.init(allocator, image, origins, false);
         try flow.solve();
         const concrete = try allocator.create(Values);
         concrete.* = flow;
@@ -203,27 +204,26 @@ pub fn derive(allocator: std.mem.Allocator, image: ir.Program, imports: []const 
                 stored.operations[id] = &.{}; // Environmental, never nearest-handler dispatch.
                 continue;
             }
-            const origins = flow.exits[id][@intCast(op.capability.?)].items;
-            if (origins.len == 0 or contains(origins, .unknown)) continue;
+            const targets = flow.exits[id].get(@intCast(op.capability.?));
+            if (targets == empty or origins.contains(targets, .unknown)) continue;
             var selected: std.ArrayList(Target) = .empty;
             for (stored.conservative[@intCast(op.effect)]) |target| {
-                if (flow.receives(origins, target.handler)) try selected.append(allocator, target);
+                if (flow.receives(targets, target.handler)) try selected.append(allocator, target);
             }
             stored.operations[id] = try selected.toOwnedSlice(allocator);
         };
-        var relative = try Values.init(allocator, image, true);
+        var relative = try Values.init(allocator, image, origins, true);
         try relative.solve();
         for (image.blocks, 0..) |block, id| if (block.terminator == .call) {
             const call = block.terminator.call;
             var rows: std.ArrayList(CallTargets) = .empty;
             for (image.functions[@intCast(call.function)].effects) |effect| {
-                var actual: Set = .empty;
-                try substitute(allocator, &actual, relative.suspensions[@intCast(call.function)][@intCast(effect)].items, call.arguments, flow.exits[id]);
-                if (contains(actual.items, .unknown)) continue;
+                const actual = try origins.substitute(relative.suspensions[@intCast(call.function)][@intCast(effect)], call.arguments, flow.exits[id]);
+                if (origins.contains(actual, .unknown)) continue;
                 var selected: std.ArrayList(Target) = .empty;
                 for (stored.conservative[@intCast(effect)]) |target|
-                    if (flow.receives(actual.items, target.handler)) try selected.append(allocator, target);
-                try rows.append(allocator, .{ .effect = effect, .targets = try selected.toOwnedSlice(allocator), .environmental = contains(actual.items, .environmental) });
+                    if (flow.receives(actual, target.handler)) try selected.append(allocator, target);
+                try rows.append(allocator, .{ .effect = effect, .targets = try selected.toOwnedSlice(allocator), .environmental = origins.contains(actual, .environmental) });
             }
             stored.calls[id] = try rows.toOwnedSlice(allocator);
         };
@@ -247,43 +247,45 @@ pub fn derive(allocator: std.mem.Allocator, image: ir.Program, imports: []const 
 
 fn closureTargets(stored: *Storage, flow: *const Values, relative: *const Values, rows: *std.ArrayList(CallTargets), block: usize, role: Role, slot: p.Id, arguments: []const p.Id, supplied: usize, installed: ?p.Id) Error!void {
     const values = flow.exits[block];
-    const origins = values[@intCast(slot)].items;
-    if (origins.len == 0 or contains(origins, .unknown)) return;
+    const origin_set = values.get(@intCast(slot));
+    const origins = flow.origins;
+    if (origin_set == empty or origins.contains(origin_set, .unknown)) return;
     const image = stored.image;
     const schema = image.functions[@intCast(image.blocks[block].function)].layout.slots[@intCast(slot)];
     const signature = try contracts.computation(image, schema);
     for (signature.effects) |effect| {
-        var actual: Set = .empty;
+        var actual: Set = empty;
         var found = false;
         for (image.constructors, 0..) |constructor, id| {
-            if (constructor.schema != schema or !contains(origins, .{ .constructor = id })) continue;
+            if (constructor.schema != schema or !origins.contains(origin_set, .{ .constructor = id })) continue;
             found = true;
             const captures = flow.captures[id];
-            for (relative.suspensions[@intCast(constructor.function)][@intCast(effect)].items) |origin| {
+            var iter = origins.iterator(relative.suspensions[@intCast(constructor.function)][@intCast(effect)]);
+            while (iter.next()) |origin| {
                 if (origin == .environmental) {
-                    if (!contains(actual.items, .environmental)) try actual.append(stored.allocator, .environmental);
+                    actual = try origins.unite(actual, try origins.one(.environmental));
                     continue;
                 }
-                var source: []const Origin = &unknown;
+                var source = try origins.one(.unknown);
                 if (origin == .input) {
                     const index = origin.input;
                     if (index < captures.len) {
-                        source = captures[index].items;
+                        source = captures[index];
                     } else if (index < captures.len + supplied) {
                         // Only these formal parameters are supplied by this fresh
                         // installation. Captured outer capabilities with the same
                         // abstract handler ID are deliberately not discharged.
                         if (installed != null) continue;
-                    } else source = values[@intCast(arguments[index - captures.len - supplied])].items;
+                    } else source = values.get(@intCast(arguments[index - captures.len - supplied]));
                 }
-                for (source) |value| if (!contains(actual.items, value)) try actual.append(stored.allocator, value);
+                actual = try origins.unite(actual, source);
             }
         }
-        if (!found or contains(actual.items, .unknown)) continue;
+        if (!found or origins.contains(actual, .unknown)) continue;
         var selected: std.ArrayList(Target) = .empty;
         for (stored.conservative[@intCast(effect)]) |target|
-            if (flow.receives(actual.items, target.handler)) try selected.append(stored.allocator, target);
-        try rows.append(stored.allocator, .{ .role = role, .effect = effect, .targets = try selected.toOwnedSlice(stored.allocator), .environmental = contains(actual.items, .environmental) });
+            if (flow.receives(actual, target.handler)) try selected.append(stored.allocator, target);
+        try rows.append(stored.allocator, .{ .role = role, .effect = effect, .targets = try selected.toOwnedSlice(stored.allocator), .environmental = origins.contains(actual, .environmental) });
     }
 }
 
@@ -294,26 +296,221 @@ fn closureTargets(stored: *Storage, flow: *const Values, relative: *const Values
 // calls and known closure boundaries instantiate them. Unrepresented saved
 // contexts retain the conservative upper bound.
 const Origin = union(enum) { unknown, environmental, handler: p.Id, resumption: p.Id, constructor: p.Id, input: usize };
-const Set = std.ArrayList(Origin);
-fn contains(set: []const Origin, value: Origin) bool {
-    for (set) |item| if (std.meta.eql(item, value)) return true;
-    return false;
-}
-const unknown = [_]Origin{.unknown};
+const set_pool = @import("analysis_sets.zig");
+const Set = set_pool.Root;
+const empty = set_pool.empty;
 
-fn substitute(a: std.mem.Allocator, into: *Set, summary: []const Origin, arguments: []const p.Id, values: []const Set) Error!void {
-    for (summary) |origin| {
-        const singleton = [_]Origin{origin};
-        const source = if (origin == .input) values[@intCast(arguments[origin.input])].items else &singleton;
-        for (source) |value| if (!contains(into.items, value)) try into.append(a, value);
+// Disjoint finite ranges retain every origin distinction. Rows hold canonical
+// roots, so copying a slot never copies or allocates its origin membership.
+const Origins = struct {
+    pool: set_pool.Pool,
+    resumptions: u64,
+    constructors: u64,
+    inputs: u64,
+
+    fn init(allocator: std.mem.Allocator, image: ir.Program) Error!*Origins {
+        const resumptions = std.math.add(u64, 2, image.handlers.len) catch return error.Capacity;
+        const constructors = std.math.add(u64, resumptions, image.handlers.len) catch return error.Capacity;
+        const inputs = std.math.add(u64, constructors, image.constructors.len) catch return error.Capacity;
+        var count: usize = 0;
+        for (image.functions) |function| count = @max(count, function.inputs.len);
+        const limit = std.math.add(u64, inputs, count) catch return error.Capacity;
+        const self = try allocator.create(Origins);
+        self.* = .{ .pool = .{ .allocator = allocator, .limit = limit }, .resumptions = resumptions, .constructors = constructors, .inputs = inputs };
+        return self;
+    }
+    fn member(self: *const Origins, value: Origin) u64 {
+        return switch (value) {
+            .unknown => 0,
+            .environmental => 1,
+            .handler => |id| 2 + id,
+            .resumption => |id| self.resumptions + id,
+            .constructor => |id| self.constructors + id,
+            .input => |id| self.inputs + id,
+        };
+    }
+    fn origin(self: *const Origins, id: u64) Origin {
+        if (id == 0) return .unknown;
+        if (id == 1) return .environmental;
+        if (id < self.resumptions) return .{ .handler = id - 2 };
+        if (id < self.constructors) return .{ .resumption = id - self.resumptions };
+        if (id < self.inputs) return .{ .constructor = id - self.constructors };
+        return .{ .input = @intCast(id - self.inputs) };
+    }
+    fn one(self: *Origins, value: Origin) Error!Set {
+        return self.pool.insert(empty, self.member(value));
+    }
+    fn contains(self: *const Origins, set: Set, value: Origin) bool {
+        return self.pool.contains(set, self.member(value));
+    }
+    fn unite(self: *Origins, left: Set, right: Set) Error!Set {
+        return self.pool.unite(left, right);
+    }
+    const Iterator = struct {
+        owner: *const Origins,
+        members: set_pool.Iterator,
+        fn next(self: *Iterator) ?Origin {
+            return self.owner.origin(self.members.next() orelse return null);
+        }
+    };
+    fn iterator(self: *const Origins, set: Set) Iterator {
+        return .{ .owner = self, .members = self.pool.iterator(set) };
+    }
+    fn substitute(self: *Origins, summary: Set, arguments: []const p.Id, values: Row) Error!Set {
+        var result: Set = empty;
+        var iter = self.iterator(summary);
+        while (iter.next()) |value| {
+            const source = if (value == .input) values.get(@intCast(arguments[value.input])) else try self.one(value);
+            result = try self.unite(result, source);
+        }
+        return result;
+    }
+};
+
+// Immutable slot vectors share unchanged ranges across predecessor copies.
+// Splits follow the finite slot interval, so lookup and update depth are bounded
+// by the machine index width, not the number of predecessor versions.
+const Row = struct {
+    len: usize,
+    root: View = .{ .uniform = empty },
+    const Pair = struct { left: View, right: View };
+    const View = union(enum) { uniform: Set, split: *const Pair };
+
+    fn get(self: Row, index: usize) Set {
+        std.debug.assert(index < self.len);
+        var view = self.root;
+        var offset = index;
+        var length = self.len;
+        while (view == .split) {
+            const middle = length / 2;
+            if (offset < middle) {
+                view = view.split.left;
+                length = middle;
+            } else {
+                view = view.split.right;
+                offset -= middle;
+                length -= middle;
+            }
+        }
+        return view.uniform;
+    }
+    fn updated(allocator: std.mem.Allocator, view: View, length: usize, index: usize, value: Set) Error!View {
+        if (view == .uniform and view.uniform == value) return view;
+        if (length == 1) return .{ .uniform = value };
+        const middle = length / 2;
+        var left = if (view == .split) view.split.left else view;
+        var right = if (view == .split) view.split.right else view;
+        if (index < middle) {
+            left = try updated(allocator, left, middle, index, value);
+        } else {
+            right = try updated(allocator, right, length - middle, index - middle, value);
+        }
+        if (left == .uniform and right == .uniform and left.uniform == right.uniform) return left;
+        const pair = try allocator.create(Pair);
+        pair.* = .{ .left = left, .right = right };
+        return .{ .split = pair };
+    }
+    fn set(self: *Row, allocator: std.mem.Allocator, index: usize, value: Set) Error!void {
+        std.debug.assert(index < self.len);
+        if (self.get(index) == value) return;
+        self.root = try updated(allocator, self.root, self.len, index, value);
+    }
+    fn same(left: View, right: View) bool {
+        if (std.meta.activeTag(left) != std.meta.activeTag(right)) return false;
+        return switch (left) {
+            .uniform => |value| value == right.uniform,
+            .split => |pair| pair == right.split,
+        };
+    }
+    fn merged(allocator: std.mem.Allocator, pool: *set_pool.Pool, left: View, right: View) Error!View {
+        if (same(left, right) or (right == .uniform and right.uniform == empty)) return left;
+        if (left == .uniform and left.uniform == empty) return right;
+        if (left == .uniform and right == .uniform) return .{ .uniform = try pool.unite(left.uniform, right.uniform) };
+        const lower = try merged(allocator, pool, if (left == .split) left.split.left else left, if (right == .split) right.split.left else right);
+        const upper = try merged(allocator, pool, if (left == .split) left.split.right else left, if (right == .split) right.split.right else right);
+        if (lower == .uniform and upper == .uniform and lower.uniform == upper.uniform) return lower;
+        if (left == .split and same(lower, left.split.left) and same(upper, left.split.right)) return left;
+        if (right == .split and same(lower, right.split.left) and same(upper, right.split.right)) return right;
+        const pair = try allocator.create(Pair);
+        pair.* = .{ .left = lower, .right = upper };
+        return .{ .split = pair };
+    }
+    fn join(self: *Row, allocator: std.mem.Allocator, pool: *set_pool.Pool, source: Row) Error!bool {
+        std.debug.assert(self.len == source.len);
+        const joined = try merged(allocator, pool, self.root, source.root);
+        const changed = !same(joined, self.root);
+        self.root = joined;
+        return changed;
+    }
+    fn copyFrom(self: *Row, source: Row) void {
+        std.debug.assert(self.len == source.len);
+        self.root = source.root;
+    }
+};
+
+// The oracle is an ordinary dense vector, independent of shared tree updates.
+test "control provenance slot rows preserve exact values and independent copies" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var row: Row = .{ .len = 64 };
+    var copied: Row = .{ .len = 64 };
+    var dense: [64]Set = @splat(empty);
+    var seed: u64 = 37;
+    for (0..2048) |round| {
+        seed = seed *% 6364136223846793005 +% 1;
+        const index: usize = @intCast((seed >> 32) % dense.len);
+        const value: Set = @intCast((seed >> 48) % 5);
+        try row.set(allocator, index, value);
+        dense[index] = value;
+        for (dense, 0..) |expected, slot| try std.testing.expectEqual(expected, row.get(slot));
+        if (round % 31 == 0) {
+            copied.copyFrom(row);
+            try row.set(allocator, index, empty);
+            for (dense, 0..) |expected, slot| try std.testing.expectEqual(expected, copied.get(slot));
+            dense[index] = empty;
+        }
+    }
+    for (0..dense.len) |index| try row.set(allocator, index, 3);
+    try std.testing.expect(row.root == .uniform);
+    try std.testing.expectEqual(3, row.root.uniform);
+}
+
+test "control provenance row joins agree with dense unions and retain prior views" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var pool: set_pool.Pool = .{ .allocator = allocator, .limit = 8 };
+    for ([_]usize{ 1, 7, 33, 64 }) |length| {
+        var left: Row = .{ .len = length };
+        var right: Row = .{ .len = length };
+        var expected: [64]u64 = @splat(0);
+        for (0..length) |slot| {
+            const a = try pool.run(slot % 8, slot % 8 + 1);
+            const b = try pool.run((slot * 3) % 8, (slot * 3) % 8 + 1);
+            try left.set(allocator, slot, a);
+            if (slot % 3 != 0) try right.set(allocator, slot, b);
+            expected[slot] = pool.lowWord(a) | (if (slot % 3 != 0) pool.lowWord(b) else @as(u64, 0));
+        }
+        const saved = left;
+        _ = try left.join(allocator, &pool, right);
+        for (0..length) |slot| {
+            try std.testing.expectEqual(expected[slot], pool.lowWord(left.get(slot)));
+            try std.testing.expectEqual(@as(u64, 1) << @intCast(slot % 8), pool.lowWord(saved.get(slot)));
+        }
+        try std.testing.expect(!try left.join(allocator, &pool, right));
+        var copied: Row = .{ .len = length };
+        _ = try copied.join(allocator, &pool, left);
+        try std.testing.expect(Row.same(left.root, copied.root));
     }
 }
 
 const Values = struct {
     allocator: std.mem.Allocator,
+    origins: *Origins,
     image: ir.Program,
-    entries: [][]Set,
-    exits: [][]Set,
+    entries: []Row,
+    exits: []Row,
     returns: []Set,
     captures: [][]Set,
     bindings: [][]bool,
@@ -323,11 +520,11 @@ const Values = struct {
 
     fn sets(a: std.mem.Allocator, count: usize) Error![]Set {
         const result = try a.alloc(Set, count);
-        @memset(result, .empty);
+        @memset(result, empty);
         return result;
     }
-    fn init(a: std.mem.Allocator, image: ir.Program, relative: bool) Error!Values {
-        var self: Values = .{ .allocator = a, .image = image, .entries = try a.alloc([]Set, image.blocks.len), .exits = try a.alloc([]Set, image.blocks.len), .returns = try sets(a, image.functions.len), .captures = try a.alloc([]Set, image.constructors.len), .bindings = try a.alloc([]bool, image.handlers.len), .relative = relative, .suspensions = try a.alloc([]Set, if (relative) image.functions.len else 0) };
+    fn init(a: std.mem.Allocator, image: ir.Program, origins: *Origins, relative: bool) Error!Values {
+        var self: Values = .{ .allocator = a, .origins = origins, .image = image, .entries = try a.alloc(Row, image.blocks.len), .exits = try a.alloc(Row, image.blocks.len), .returns = try sets(a, image.functions.len), .captures = try a.alloc([]Set, image.constructors.len), .bindings = try a.alloc([]bool, image.handlers.len), .relative = relative, .suspensions = try a.alloc([]Set, if (relative) image.functions.len else 0) };
         for (self.bindings, 0..) |*row, id| {
             row.* = try a.alloc(bool, image.handlers.len);
             @memset(row.*, false);
@@ -335,15 +532,15 @@ const Values = struct {
         }
         for (image.blocks, 0..) |block, id| {
             const count = image.functions[@intCast(block.function)].layout.slots.len;
-            self.entries[id] = try sets(a, count);
-            self.exits[id] = try sets(a, count);
+            self.entries[id] = .{ .len = count };
+            self.exits[id] = .{ .len = count };
         }
         for (image.constructors, 0..) |constructor, id|
             self.captures[id] = try sets(a, image.scopes.captures[@intCast(constructor.capture)].fields.len);
         if (relative) {
             for (image.functions, 0..) |function, id| {
                 self.suspensions[id] = try sets(a, image.effects.len);
-                for (function.inputs, 0..) |_, index| try self.input(id, index, &.{.{ .input = index }});
+                for (function.inputs, 0..) |_, index| try self.input(id, index, try origins.one(.{ .input = index }));
             }
             return self;
         }
@@ -354,26 +551,35 @@ const Values = struct {
                 const function = image.functions[@intCast(clause.function)];
                 for (function.inputs, 0..) |_, index| {
                     if (contracts.retainsResumption(clause) and index == function.inputs.len - 1) {
-                        try self.input(clause.function, index, &.{.{ .resumption = handler_id }});
-                    } else try self.input(clause.function, index, &unknown);
+                        try self.input(clause.function, index, try origins.one(.{ .resumption = handler_id }));
+                    } else try self.input(clause.function, index, try self.origins.one(.unknown));
                 }
             }
         }
         return self;
     }
-    fn join(self: *Values, into: *Set, source: []const Origin) Error!void {
-        for (source) |origin| if (!contains(into.items, origin)) {
-            try into.append(self.allocator, origin);
+    fn join(self: *Values, into: *Set, source: Set) Error!void {
+        const merged = try self.origins.unite(into.*, source);
+        if (merged != into.*) {
+            into.* = merged;
             self.changed = true;
-        };
+        }
     }
-    fn input(self: *Values, function: p.Id, index: usize, value: []const Origin) Error!void {
+    fn joinSlot(self: *Values, row: *Row, slot: usize, source: Set) Error!void {
+        const original = row.get(slot);
+        const merged = try self.origins.unite(original, source);
+        if (merged != original) {
+            try row.set(self.allocator, slot, merged);
+            self.changed = true;
+        }
+    }
+    fn input(self: *Values, function: p.Id, index: usize, value: Set) Error!void {
         const f = self.image.functions[@intCast(function)];
         if (f.entry == @import("relocation.zig").missing) return;
-        try self.join(&self.entries[@intCast(f.entry)][@intCast(f.inputs[index])], value);
+        try self.joinSlot(&self.entries[@intCast(f.entry)], @intCast(f.inputs[index]), value);
     }
     fn unknownInputs(self: *Values, function: p.Id) Error!void {
-        for (self.image.functions[@intCast(function)].inputs, 0..) |_, index| try self.input(function, index, &unknown);
+        for (self.image.functions[@intCast(function)].inputs, 0..) |_, index| try self.input(function, index, try self.origins.one(.unknown));
     }
     fn solve(self: *Values) Error!void {
         try self.converge();
@@ -383,7 +589,7 @@ const Values = struct {
         for (self.image.functions, 0..) |function, id| {
             if (function.entry == @import("relocation.zig").missing) continue;
             for (function.inputs, 0..) |slot, index|
-                if (self.entries[@intCast(function.entry)][@intCast(slot)].items.len == 0) try self.input(id, index, &unknown);
+                if (self.entries[@intCast(function.entry)].get(@intCast(slot)) == empty) try self.input(id, index, try self.origins.one(.unknown));
         }
         try self.converge();
         try self.deriveBindings();
@@ -396,9 +602,9 @@ const Values = struct {
         for (self.image.blocks, 0..) |block, id| {
             if (block.terminator != .resume_with) continue;
             const operation = block.terminator.resume_with;
-            const origins = self.exits[id][@intCast(operation.resumption)].items;
+            const origins = self.exits[id].get(@intCast(operation.resumption));
             for (self.bindings, 0..) |row, handler_id| {
-                if (origins.len == 0 or contains(origins, .unknown) or contains(origins, .{ .resumption = handler_id }))
+                if (origins == empty or self.origins.contains(origins, .unknown) or self.origins.contains(origins, .{ .resumption = handler_id }))
                     row[@intCast(operation.handler)] = true;
             }
         }
@@ -410,8 +616,9 @@ const Values = struct {
             };
         };
     }
-    fn receives(self: *const Values, origins: []const Origin, handler: p.Id) bool {
-        for (origins) |origin| if (origin == .handler and self.bindings[@intCast(origin.handler)][@intCast(handler)]) return true;
+    fn receives(self: *const Values, origins: Set, handler: p.Id) bool {
+        var iter = self.origins.iterator(origins);
+        while (iter.next()) |origin| if (origin == .handler and self.bindings[@intCast(origin.handler)][@intCast(handler)]) return true;
         return false;
     }
     fn converge(self: *Values) Error!void {
@@ -424,91 +631,84 @@ const Values = struct {
     fn body(self: *Values, block_id: usize, slot: p.Id, arguments: []const p.Id, supplied: usize, handler: ?p.Id) Error!void {
         if (self.relative) return;
         const values = self.exits[block_id];
-        const origins = values[@intCast(slot)].items;
+        const origin_set = values.get(@intCast(slot));
         const schema = self.image.functions[@intCast(self.image.blocks[block_id].function)].layout.slots[@intCast(slot)];
         for (self.image.constructors, 0..) |constructor, id| {
             if (constructor.schema != schema) continue;
-            const uncertain = contains(origins, .unknown);
-            if (!contains(origins, .{ .constructor = id }) and !uncertain) continue;
-            for (self.captures[id], 0..) |capture, index| try self.input(constructor.function, index, if (uncertain) &unknown else capture.items);
+            const uncertain = self.origins.contains(origin_set, .unknown);
+            if (!self.origins.contains(origin_set, .{ .constructor = id }) and !uncertain) continue;
+            for (self.captures[id], 0..) |capture, index| try self.input(constructor.function, index, if (uncertain) try self.origins.one(.unknown) else capture);
             const prefix = self.captures[id].len;
             for (0..supplied) |index| {
-                const fresh = [_]Origin{if (handler) |h| .{ .handler = h } else .unknown};
-                try self.input(constructor.function, prefix + index, &fresh);
+                const fresh = try self.origins.one(if (handler) |h| .{ .handler = h } else .unknown);
+                try self.input(constructor.function, prefix + index, fresh);
             }
-            for (arguments, 0..) |argument, index| try self.input(constructor.function, prefix + supplied + index, values[@intCast(argument)].items);
+            for (arguments, 0..) |argument, index| try self.input(constructor.function, prefix + supplied + index, values.get(@intCast(argument)));
         }
     }
-    fn edge(self: *Values, id: usize, next: ir.Edge, returned: []const Origin, unpack: ?ir.Terminator) Error!void {
+    fn edge(self: *Values, id: usize, next: ir.Edge, returned: Set, unpack: ?ir.Terminator) Error!void {
         const source = self.exits[id];
-        for (self.entries[@intCast(next.block)], 0..) |*destination, slot| {
-            var value: []const Origin = source[slot].items;
-            if (unpack) |term| switch (term) {
-                .unpack_product => |v| if (std.mem.indexOfScalar(p.Id, v.destinations, slot) != null) {
-                    value = source[@intCast(v.value)].items;
-                },
-                else => {},
+        var incoming = source;
+        if (unpack) |term| switch (term) {
+            .unpack_product => |v| for (v.destinations) |destination| {
+                try incoming.set(self.allocator, @intCast(destination), source.get(@intCast(v.value)));
+            },
+            else => {},
+        };
+        // Every assignment reads the same predecessor, including permutations.
+        for (next.assignments) |assignment| {
+            const value = switch (assignment.source) {
+                .slot => |from| if (unpack != null and std.mem.indexOfScalar(p.Id, unpack.?.unpack_product.destinations, from) != null) source.get(@intCast(unpack.?.unpack_product.value)) else source.get(@intCast(from)),
+                .returned => returned,
             };
-            // Every source reads the same predecessor, including permutations.
-            for (next.assignments) |assignment| if (assignment.destination == slot) {
-                value = switch (assignment.source) {
-                    .slot => |from| if (unpack != null and std.mem.indexOfScalar(p.Id, unpack.?.unpack_product.destinations, from) != null) source[@intCast(unpack.?.unpack_product.value)].items else source[@intCast(from)].items,
-                    .returned => returned,
-                };
-            };
-            try self.join(destination, value);
+            try incoming.set(self.allocator, @intCast(assignment.destination), value);
         }
+        const destination = &self.entries[@intCast(next.block)];
+        if (try destination.join(self.allocator, &self.origins.pool, incoming)) self.changed = true;
     }
-    fn at(self: *const Values, allocator: std.mem.Allocator, block_id: usize, position: usize) Error![]Set {
+    fn at(self: *const Values, allocator: std.mem.Allocator, block_id: usize, position: usize) Error!Row {
         var reader = self.*;
         reader.allocator = allocator;
-        const row = try sets(allocator, self.entries[block_id].len);
-        for (row, self.entries[block_id]) |*value, entry| try value.appendSlice(allocator, entry.items);
-        for (self.image.blocks[block_id].instructions[0..position]) |instruction| try reader.transferInstruction(row, instruction, false);
+        var row: Row = .{ .len = self.entries[block_id].len };
+        row.copyFrom(self.entries[block_id]);
+        for (self.image.blocks[block_id].instructions[0..position]) |instruction| try reader.transferInstruction(&row, instruction, false);
         return row;
     }
-    fn transferInstruction(self: *Values, values: []Set, instruction: ir.Instruction, record_captures: bool) Error!void {
-        var result: Set = .empty;
-        defer result.deinit(self.allocator);
+    fn transferInstruction(self: *Values, values: *Row, instruction: ir.Instruction, record_captures: bool) Error!void {
+        var result: Set = empty;
         switch (instruction.opcode) {
             .computation => {
                 if (self.relative) {
-                    try result.append(self.allocator, .unknown);
+                    result = try self.origins.one(.unknown);
                 } else {
-                    if (record_captures) for (instruction.operands, 0..) |operand, index| try self.join(&self.captures[@intCast(instruction.immediate)][index], values[@intCast(operand)].items);
-                    try result.append(self.allocator, .{ .constructor = instruction.immediate });
+                    if (record_captures) for (instruction.operands, 0..) |operand, index| try self.join(&self.captures[@intCast(instruction.immediate)][index], values.get(@intCast(operand)));
+                    result = try self.origins.one(.{ .constructor = instruction.immediate });
                 }
             },
             .move, .product, .field, .variant, .variant_payload, .sequence, .sequence_get, .sequence_append, .sequence_concat, .sequence_pop, .sequence_set, .sequence_take, .sequence_pop_last, .resource_pack, .resource_unpack, .clone_resumption, .package, .unpack => {
-                for (instruction.operands) |operand| for (values[@intCast(operand)].items) |origin|
-                    if (!contains(result.items, origin)) try result.append(self.allocator, origin);
+                for (instruction.operands) |operand| result = try self.origins.unite(result, values.get(@intCast(operand)));
             },
             .select => for (instruction.operands[1..]) |operand| {
-                for (values[@intCast(operand)].items) |origin| if (!contains(result.items, origin)) try result.append(self.allocator, origin);
+                result = try self.origins.unite(result, values.get(@intCast(operand)));
             },
             // Cells and opaque representations deliberately lose precision.
             // Their reads cannot turn an untracked write into an empty set.
-            else => try result.appendSlice(self.allocator, &unknown),
+            else => result = try self.origins.one(.unknown),
         }
-        const destination = &values[@intCast(instruction.destination)];
-        destination.clearRetainingCapacity();
-        try destination.appendSlice(self.allocator, result.items);
+        try values.set(self.allocator, @intCast(instruction.destination), result);
     }
     fn transferBlock(self: *Values, id: usize, block_value: ir.Block) Error!void {
-        const values = self.exits[id];
+        const values = &self.exits[id];
         // Re-evaluate this straight-line transfer from its monotone entry. Exit
         // rows are retained between rounds, but each instruction is a strong
         // assignment within this one activation view.
-        for (values, self.entries[id]) |*value, entry| {
-            value.clearRetainingCapacity();
-            try value.appendSlice(self.allocator, entry.items);
-        }
+        values.copyFrom(self.entries[id]);
         for (block_value.instructions) |operation| try self.transferInstruction(values, operation, true);
         const term = block_value.terminator;
         switch (term) {
-            .return_value => |slot| try self.join(&self.returns[@intCast(block_value.function)], values[@intCast(slot)].items),
+            .return_value => |slot| try self.join(&self.returns[@intCast(block_value.function)], values.get(@intCast(slot))),
             .call => |v| if (!self.relative) {
-                for (v.arguments, 0..) |slot, index| try self.input(v.function, index, values[@intCast(slot)].items);
+                for (v.arguments, 0..) |slot, index| try self.input(v.function, index, values.get(@intCast(slot)));
             },
             .apply => |v| try self.body(id, v.computation, v.arguments, 0, null),
             .handle => |v| try self.body(id, v.body, v.arguments, self.image.handlers[@intCast(v.handler)].clauses.len, v.handler),
@@ -527,28 +727,26 @@ const Values = struct {
             },
             else => {},
         }
-        var mapped: Set = .empty;
-        defer mapped.deinit(self.allocator);
-        if (self.relative and term == .call) try substitute(self.allocator, &mapped, self.returns[@intCast(term.call.function)].items, term.call.arguments, values);
-        const returned: []const Origin = if (term == .call) (if (self.relative) mapped.items else self.returns[@intCast(term.call.function)].items) else &unknown;
+        const returned: Set = if (term == .call)
+            (if (self.relative) try self.origins.substitute(self.returns[@intCast(term.call.function)], term.call.arguments, values.*) else self.returns[@intCast(term.call.function)])
+        else
+            try self.origins.one(.unknown);
         if (self.relative) {
             const summary = self.suspensions[@intCast(block_value.function)];
             switch (term) {
                 .perform => |v| {
                     if (v.capability) |slot| {
-                        try self.join(&summary[@intCast(v.effect)], values[@intCast(slot)].items);
-                    } else try self.join(&summary[@intCast(v.effect)], &.{.environmental});
-                    for (self.image.effects[@intCast(v.effect)].use_site_effects) |effect| try self.join(&summary[@intCast(effect)], &unknown);
+                        try self.join(&summary[@intCast(v.effect)], values.get(@intCast(slot)));
+                    } else try self.join(&summary[@intCast(v.effect)], try self.origins.one(.environmental));
+                    for (self.image.effects[@intCast(v.effect)].use_site_effects) |effect| try self.join(&summary[@intCast(effect)], try self.origins.one(.unknown));
                 },
                 .call => |v| for (self.image.functions[@intCast(v.function)].effects) |effect| {
-                    var targets: Set = .empty;
-                    defer targets.deinit(self.allocator);
-                    try substitute(self.allocator, &targets, self.suspensions[@intCast(v.function)][@intCast(effect)].items, v.arguments, values);
-                    try self.join(&summary[@intCast(effect)], targets.items);
+                    const targets = try self.origins.substitute(self.suspensions[@intCast(v.function)][@intCast(effect)], v.arguments, values.*);
+                    try self.join(&summary[@intCast(effect)], targets);
                 },
                 .return_value, .jump, .branch, .switch_variant, .unpack_product, .yield_value, .fail => {},
                 else => for (self.image.functions[@intCast(block_value.function)].effects) |effect| {
-                    try self.join(&summary[@intCast(effect)], &unknown);
+                    try self.join(&summary[@intCast(effect)], try self.origins.one(.unknown));
                 },
             }
         }
