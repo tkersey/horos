@@ -72,9 +72,9 @@ const Storage = struct {
     positions: std.ArrayList(PositionSources) = .empty,
 };
 const CallTargets = struct { role: Role = .callee, effect: p.Id, targets: ?[]const Target, environmental: bool = false };
-pub const SuspensionSources = struct { slots: []const p.Id = &.{}, conservative: bool = false };
+pub const SuspensionSources = struct { slots: []const p.Id = &.{}, pending_return: bool = false, conservative: bool = false };
 pub const InvocationSources = struct { inputs: []const p.Id = &.{}, conservative: bool = false };
-const PositionSources = struct { block: p.Id, position: usize, returned: bool, effects: []const SuspensionSources };
+const PositionSources = struct { block: p.Id, position: usize, returned: bool, effects: []const SuspensionSources, returns: SuspensionSources };
 
 pub const Analysis = opaque {
     fn data(self: *const Analysis) *const Storage {
@@ -139,29 +139,41 @@ pub const Analysis = opaque {
         result.inputs = try inputs.toOwnedSlice(stored.allocator);
         return result;
     }
-    /// Sources are stable slots at this exact position, never callee input
-    /// ordinals. A saved continuation starts after its awaited invocation;
-    /// the returned value is unknown until its child actually returns.
+    /// Position summaries retain an awaited result as a separate source. The
+    /// validated saved child, not stale caller arguments, supplies its origins.
     pub fn suspensionSources(self: *const Analysis, block: p.Id, position: usize, returned: bool, effect: p.Id) Error!SuspensionSources {
+        return (try self.positionSources(block, position, returned)).effects[@intCast(effect)];
+    }
+    pub fn returnSources(self: *const Analysis, block: p.Id, position: usize, returned: bool) Error!SuspensionSources {
+        return (try self.positionSources(block, position, returned)).returns;
+    }
+    fn positionSources(self: *const Analysis, block: p.Id, position: usize, returned: bool) Error!PositionSources {
         const stored: *Storage = @ptrCast(@alignCast(@constCast(self)));
-        const relative = stored.relative orelse return .{ .conservative = true };
         for (stored.positions.items) |query| if (query.block == block and query.position == position and query.returned == returned)
-            return query.effects[@intCast(effect)];
-        const summaries = try relative.fromPosition(block, position, returned);
-        const effects = try stored.allocator.alloc(SuspensionSources, summaries.len);
-        for (summaries, effects) |summary, *sources| {
-            sources.* = .{};
-            var slots: std.ArrayList(p.Id) = .empty;
-            var iterator = relative.origins.iterator(summary);
-            while (iterator.next()) |origin| switch (origin) {
-                .input => |slot| try slots.append(stored.allocator, slot),
-                .environmental => {},
-                else => sources.conservative = true,
-            };
-            sources.slots = try slots.toOwnedSlice(stored.allocator);
-        }
-        try stored.positions.append(stored.allocator, .{ .block = block, .position = position, .returned = returned, .effects = effects });
-        return effects[@intCast(effect)];
+            return query;
+        const effects = try stored.allocator.alloc(SuspensionSources, stored.image.effects.len);
+        var result: PositionSources = .{ .block = block, .position = position, .returned = returned, .effects = effects, .returns = .{ .conservative = true } };
+        if (stored.relative) |relative| {
+            const query = try relative.fromPosition(block, position, returned);
+            for (query.suspensions, effects) |summary, *sources|
+                sources.* = try positionSource(stored, relative, summary);
+            result.returns = try positionSource(stored, relative, query.returns);
+        } else @memset(effects, .{ .conservative = true });
+        try stored.positions.append(stored.allocator, result);
+        return result;
+    }
+    fn positionSource(stored: *Storage, relative: *const Values, summary: Set) Error!SuspensionSources {
+        var sources: SuspensionSources = .{};
+        var slots: std.ArrayList(p.Id) = .empty;
+        var iterator = relative.origins.iterator(summary);
+        while (iterator.next()) |origin| switch (origin) {
+            .input => |slot| try slots.append(stored.allocator, slot),
+            .returned => sources.pending_return = true,
+            .environmental => {},
+            else => sources.conservative = true,
+        };
+        sources.slots = try slots.toOwnedSlice(stored.allocator);
+        return sources;
     }
     pub fn capturesRegion(self: *const Analysis, boundary: Boundary, effects: []const p.Id, region: p.Id) Error!void {
         for (try self.effectRow(boundary, effects)) |effect| try self.captureRegion(boundary, effect, region);
@@ -456,7 +468,7 @@ fn closureTargets(stored: *Storage, flow: *const Values, relative: *const Values
 // The same transfer computes input-relative return/suspension summaries. Direct
 // calls and known closure boundaries instantiate them. Unrepresented saved
 // contexts retain the conservative upper bound.
-const Origin = union(enum) { unknown, environmental, handler: p.Id, resumption: p.Id, constructor: p.Id, input: usize };
+const Origin = union(enum) { unknown, environmental, returned, handler: p.Id, resumption: p.Id, constructor: p.Id, input: usize };
 const set_pool = @import("analysis_sets.zig");
 const Set = set_pool.Root;
 const empty = set_pool.empty;
@@ -470,7 +482,7 @@ const Origins = struct {
     inputs: u64,
 
     fn init(allocator: std.mem.Allocator, image: ir.Program) Error!*Origins {
-        const resumptions = std.math.add(u64, 2, image.handlers.len) catch return error.Capacity;
+        const resumptions = std.math.add(u64, 3, image.handlers.len) catch return error.Capacity;
         const constructors = std.math.add(u64, resumptions, image.handlers.len) catch return error.Capacity;
         const inputs = std.math.add(u64, constructors, image.constructors.len) catch return error.Capacity;
         var count: usize = 0;
@@ -484,7 +496,8 @@ const Origins = struct {
         return switch (value) {
             .unknown => 0,
             .environmental => 1,
-            .handler => |id| 2 + id,
+            .returned => 2,
+            .handler => |id| 3 + id,
             .resumption => |id| self.resumptions + id,
             .constructor => |id| self.constructors + id,
             .input => |id| self.inputs + id,
@@ -493,7 +506,8 @@ const Origins = struct {
     fn origin(self: *const Origins, id: u64) Origin {
         if (id == 0) return .unknown;
         if (id == 1) return .environmental;
-        if (id < self.resumptions) return .{ .handler = id - 2 };
+        if (id == 2) return .returned;
+        if (id < self.resumptions) return .{ .handler = id - 3 };
         if (id < self.constructors) return .{ .resumption = id - self.resumptions };
         if (id < self.inputs) return .{ .constructor = id - self.constructors };
         return .{ .input = @intCast(id - self.inputs) };
@@ -690,12 +704,12 @@ test "position suspension sources distinguish a suffix from its full-block backe
     const returned = try relative.fromPosition(0, 1, true);
     const input0 = try origins.one(.{ .input = 0 });
     const input1 = try origins.one(.{ .input = 1 });
-    try std.testing.expectEqual(input1, before[0]);
-    try std.testing.expectEqual(try origins.unite(input0, input1), after[0]);
-    try std.testing.expectEqual(input1, returned[0]);
+    try std.testing.expectEqual(input1, before.suspensions[0]);
+    try std.testing.expectEqual(try origins.unite(input0, input1), after.suspensions[0]);
+    try std.testing.expectEqual(input1, returned.suspensions[0]);
 }
 
-test "position suspension sources substitute callee inputs and preserve an unknown delivery" {
+test "position suspension sources substitute callee inputs and preserve an awaited delivery" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -719,8 +733,8 @@ test "position suspension sources substitute callee inputs and preserve an unkno
     const origins = try Origins.init(allocator, image);
     var relative = try Values.init(allocator, image, origins, true);
     try relative.solve();
-    try std.testing.expectEqual(try origins.one(.{ .input = 0 }), (try relative.fromPosition(0, 0, false))[0]);
-    try std.testing.expectEqual(try origins.one(.unknown), (try relative.fromPosition(0, 0, true))[0]);
+    try std.testing.expectEqual(try origins.one(.{ .input = 0 }), (try relative.fromPosition(0, 0, false)).suspensions[0]);
+    try std.testing.expectEqual(try origins.one(.returned), (try relative.fromPosition(0, 0, true)).suspensions[0]);
 }
 
 /// The schema projection of Kosmos's owned-value disposal traversal. Copied
@@ -839,9 +853,9 @@ const Values = struct {
     position_query: ?*PositionQuery = null,
     changed: bool = false,
 
-    const PositionQuery = struct { reachable: []bool, suspensions: []Set };
+    const PositionQuery = struct { reachable: []bool, suspensions: []Set, returns: Set = empty };
 
-    fn fromPosition(self: *const Values, start: p.Id, position: usize, returned: bool) Error![]const Set {
+    fn fromPosition(self: *const Values, start: p.Id, position: usize, returned: bool) Error!PositionQuery {
         const code = self.image.blocks[@intCast(start)];
         var reader = self.*;
         reader.entries = try self.allocator.alloc(Row, self.image.blocks.len);
@@ -861,7 +875,7 @@ const Values = struct {
         if (returned) {
             reader.exits[@intCast(start)] = seed;
             switch (code.terminator) {
-                inline .call, .perform, .apply, .handle, .resume_value, .resume_with, .resume_computation, .dispose, .protect, .with_region => |v| try reader.edge(@intCast(start), v.next, try self.origins.one(.unknown), null),
+                inline .call, .perform, .apply, .handle, .resume_value, .resume_with, .resume_computation, .dispose, .protect, .with_region => |v| try reader.edge(@intCast(start), v.next, try self.origins.one(.returned), null),
                 else => return error.InvalidReference,
             }
         } else {
@@ -877,7 +891,7 @@ const Values = struct {
                 try reader.transferBlock(id, block);
             if (!reader.changed) break;
         }
-        return query.suspensions;
+        return query;
     }
 
     fn sets(a: std.mem.Allocator, count: usize) Error![]Set {
@@ -1105,8 +1119,9 @@ const Values = struct {
         for (block_value.instructions) |operation| try self.transferInstruction(values, operation, true);
         const term = block_value.terminator;
         switch (term) {
-            .return_value => |slot| if (self.position_query == null)
-                try self.join(&self.returns[@intCast(block_value.function)], values.get(@intCast(slot))),
+            .return_value => |slot| if (self.position_query) |query| {
+                try self.join(&query.returns, values.get(@intCast(slot)));
+            } else try self.join(&self.returns[@intCast(block_value.function)], values.get(@intCast(slot))),
             .call => |v| if (!self.relative) {
                 for (v.arguments, 0..) |slot, index| try self.input(v.function, index, values.get(@intCast(slot)));
             },

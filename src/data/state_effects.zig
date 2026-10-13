@@ -363,7 +363,71 @@ pub fn CheckFor(comptime Program: type, comptime State: type) type {
                 return changed;
             }
 
-            fn suspension(self: Origins, check: *Self, id: usize, into: []usize) Error!void {
+            fn positionSources(self: Origins, check: *Self, id: usize, into: []usize, sources: @import("control_provenance.zig").SuspensionSources, returns: Origins) Error!bool {
+                var changed = false;
+                if (sources.conservative) changed = try self.merge(check, into, .{ .id = id }, null);
+                if (sources.pending_return) {
+                    if (check.children[id]) |child_ref| {
+                        changed = try returns.merge(check, into, child_ref, null) or changed;
+                    } else {
+                        // A detached or externally supplied result has no saved
+                        // child whose current activation proves its provenance.
+                        changed = try self.merge(check, into, .{ .id = id }, null) or changed;
+                    }
+                }
+                for (sources.slots) |slot| {
+                    var found = false;
+                    for (check.activations[id].?.bindings) |binding| if (binding.slot == slot) {
+                        changed = try self.valueOrigins(check, into, binding.value) or changed;
+                        found = true;
+                        break;
+                    };
+                    if (!found) return error.InvalidState;
+                }
+                return changed;
+            }
+
+            /// Interpret return sources from current saved positions. Inputs to
+            /// an earlier invocation may already have been dropped or overwritten;
+            /// only the child's remaining computation can justify its result.
+            fn returnOrigins(self: Origins, check: *Self) Error!Origins {
+                var result = self;
+                result.bits = try check.allocator.alloc(usize, self.bits.len);
+                @memset(result.bits, 0);
+                var changed = true;
+                while (changed) {
+                    changed = false;
+                    for (check.state.nodes, 0..) |record, id| {
+                        const into = result.row(id);
+                        switch (record) {
+                            .control, .continuation => {
+                                const frame = check.activations[id] orelse return error.InvalidState;
+                                const block_id = if (record == .control) record.control.block else record.continuation.source_block;
+                                const sources = if (check.control) |control|
+                                    try control.returnSources(block_id, @intCast(frame.position), record == .continuation)
+                                else
+                                    @import("control_provenance.zig").SuspensionSources{ .conservative = true };
+                                changed = try self.positionSources(check, id, into, sources, result) or changed;
+                            },
+                            .region_scope, .protection, .injection => {
+                                if (check.children[id]) |child_ref|
+                                    changed = try result.merge(check, into, child_ref, null) or changed;
+                            },
+                            .cleanup_return => |v| {
+                                const exit = (try check.node(v.exit)).exit;
+                                if (exit.reason == .normal)
+                                    changed = try self.valueOrigins(check, into, exit.reason.normal) or changed;
+                            },
+                            // Handler return clauses, captured invocations and
+                            // opaque records retain the reachable-origin bound.
+                            else => changed = try self.merge(check, into, .{ .id = id }, null) or changed,
+                        }
+                    }
+                }
+                return result;
+            }
+
+            fn suspension(self: Origins, check: *Self, id: usize, into: []usize, returns: Origins) Error!void {
                 const record = check.state.nodes[id];
                 const frame = check.activations[id] orelse return error.InvalidState;
                 const block_id = if (record == .control) record.control.block else record.continuation.source_block;
@@ -371,16 +435,7 @@ pub fn CheckFor(comptime Program: type, comptime State: type) type {
                     try control.suspensionSources(block_id, @intCast(frame.position), record == .continuation, self.effect)
                 else
                     @import("control_provenance.zig").SuspensionSources{ .conservative = true };
-                if (sources.conservative) _ = try self.merge(check, into, .{ .id = id }, null);
-                for (sources.slots) |slot| {
-                    var found = false;
-                    for (frame.bindings) |binding| if (binding.slot == slot) {
-                        _ = try self.valueOrigins(check, into, binding.value);
-                        found = true;
-                        break;
-                    };
-                    if (!found) return error.InvalidState;
-                }
+                _ = try self.positionSources(check, id, into, sources, returns);
             }
 
             fn owned(self: Origins, check: *Self, into: []usize, value: g.Value) Error!bool {
@@ -474,11 +529,12 @@ pub fn CheckFor(comptime Program: type, comptime State: type) type {
                 result.bits = try check.allocator.alloc(usize, self.bits.len);
                 @memset(result.bits, 0);
                 const disposal = try self.disposals(check);
+                const returns = try self.returnOrigins(check);
                 for (check.state.nodes, 0..) |record, id| {
                     const into = result.row(id);
                     switch (record) {
                         .control, .continuation => {
-                            try self.suspension(check, id, into);
+                            try self.suspension(check, id, into, returns);
                             for (check.activations[id].?.bindings) |binding|
                                 _ = try disposal.owned(check, into, binding.value);
                         },

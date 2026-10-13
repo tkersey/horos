@@ -32,10 +32,10 @@ their outputs afresh; no fact is serialized into BPI3 or BMO1.
 
 ## Finite domain and convergence
 
-An origin set contains members of six disjoint finite kinds: unknown,
-environmental suspension, handler descriptor, resumption delimiter descriptor,
-closure constructor, and formal input position. Their ranges are computed with
-checked arithmetic from the program's catalogs and maximum slot count (which
+An origin set contains members of seven disjoint finite kinds: unknown,
+environmental suspension, awaited return, handler descriptor, resumption delimiter
+descriptor, closure constructor, and formal input position. Their ranges are
+computed with checked arithmetic from the program's catalogs and maximum slot count (which
 also bounds formal inputs and position-query sources).
 These descriptor IDs represent possibly many runtime objects; they never prove
 that two capabilities or tokens are the same object.
@@ -135,9 +135,9 @@ The visited key includes both node and allowed set, so one alias does not certif
 a different abstract view. Recursive graphs need no depth cutoff.
 
 Concrete future capture additionally requires executable suspension, not merely
-a retained capability. `state_effects` derives two finite attachment-origin
-relations: values reachable from a component, and effects executable through it.
-The first remains the conservative fallback. The second uses
+a retained capability. `state_effects` derives finite attachment-origin relations
+for reachable values, possible returned values, and executable effects. Reachability remains the
+conservative fallback. Executable effects use
 `Analysis.suspensionSources` for current activations and saved return edges. A
 pure helper can return a capability without capturing its caller; an effectful
 helper can use an inner capability while carrying an unused outer capability
@@ -148,8 +148,17 @@ then reuses the relative value transfers and direct-call suspension summaries.
 Callee summary input ordinals are substituted through argument slots before
 becoming position sources. They are never interpreted as current function input
 slots: those inputs may already have been overwritten. A saved continuation
-starts at its return edge, with the not-yet-delivered value unknown. Ordinary
-activation admission has already required all live, available saved bindings.
+starts at its return edge, retaining the awaited value as a distinct source.
+The same position interpretation also derives return sources, which are composed
+through the validated saved child graph. A yielding helper therefore returns
+origins from its current live slots, even if its original inputs were overwritten
+or its caller discarded the arguments. Return and suspension dependencies use
+finite monotone unions over concrete attachment identities, including chains of
+saved calls. Transparent region/protection frames forward body results; a running
+cleanup retains its normal exit value. Handler returns and captured or opaque
+invocations retain the reachable-origin fallback. No new provenance is serialized.
+Ordinary activation admission has already required all live, available saved
+bindings.
 Missing demanded bindings reject instead of certifying an empty target set.
 
 Only reachable successor blocks enter the position fixed point. The initial
