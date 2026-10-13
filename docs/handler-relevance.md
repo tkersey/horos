@@ -79,6 +79,17 @@ effect; it does not mean no targets.
 | Multi-shot copy/clone | Copies preserve origin unions. Successor bindings are may-relations, so a branch cannot erase the original template or another branch's possible binding. Intrinsic clone/use and cleanup restrictions remain separate checks. |
 | Protection, disposal, failure and cancellation | Body and cleanup boundaries are distinct. Known cleanup closures use their captured origins; unrepresented resumed/disposal/handler contexts fall back conservatively. The analysis does not prune registered cleanup based on a presumed normal exit. |
 
+Function summaries also include effects from disposing owned values on failure,
+instruction faults or cancellation, including functions with an empty declared
+invocation row. A finite schema/effect relation follows owned containers and
+one-shot captures. Multi-shot templates and copied capabilities have no such
+disposal action; handled token effects remain inside their reinstated delimiter
+unless declared escaping. The relation conservatively seeds every function
+layout, and direct calls, compatible closures and handler clauses propagate it.
+Contextual capture, region and cleanup queries expand their invocation row from
+these same derived summaries. Concrete position queries still use actual state
+custody rather than assuming every slot in a function layout is currently owned.
+
 The step argument follows these transfers from the admitted inputs. Union joins
 preserve the invariant across branches and iteration; the finite fixed point
 therefore covers every number of repetitions represented by those transfers.
@@ -155,6 +166,11 @@ reachable origins because discarding them activates captured cleanup.
 Cleanup-return, disposal and unwind contexts include these latent disposals,
 including owned normal results and discarded values in enclosing exits. Their
 current child's effect interface alone cannot bound that later cleanup.
+A disposal marker links an unwind to its remaining work; it does not accept a
+normal return value. A shallow handler reinstated for disposal can therefore
+have a different answer type from its token. The frame forest rejects active
+execution, resumable captures and normal-exit destinations whose return path
+crosses a disposal marker, while allowing cleanup to resume its checked exit.
 All existing custody, captured-region, cleanup and resumption-use checks still
 run independently.
 
@@ -195,7 +211,11 @@ Kosmos's `test/v2/control_provenance.zig` and
 same-schema substitutions. They also round-trip authentic yielded checkpoints
 with effect-free helpers, yielded cleanup and nested same-descriptor handlers, and distinguish a
 local effectful dispatch from a retained outer capability. Original and restored
-execution must agree on the exact result. The independent Horos source oracle and Kosmos's
+execution must agree on the exact result. `test/v2/implicit_disposal.zig`
+checks failure, instruction faults and cancellation through direct calls, nested
+calls and closures, both with and without a declared effect row. Narrow caller
+capture bounds reject; valid bounds restore before and during cleanup, then
+produce the same terminal bytes as uninterrupted execution. The independent Horos source oracle and Kosmos's
 44-fixture source/native/WASM comparison retain deep, shallow, successor,
 injection, cleanup and local one-/multi-shot observations. The 42 historical
 BPI3 fixtures stay unchanged. These are falsification and preservation evidence

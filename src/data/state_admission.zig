@@ -535,7 +535,11 @@ fn ContextFor() type {
                     const signature = try contracts.computation(self.program, try self.slotType(source, source.terminator.protect.cleanup));
                     if (result_type != signature.result) return error.TypeMismatch;
                 },
-                .disposal_return => |disposal| if (result_type != (try contracts.resumption(self.program, disposal.schema)).answer) return error.TypeMismatch,
+                // Disposal reinstates the delimiter only to unwind it. In
+                // particular a shallow handler's answer need not match the
+                // disposed token's answer. normal_return prevents execution
+                // or resumption from returning through this marker.
+                .disposal_return => {},
                 else => return error.InvalidState,
             } else if (result_type != self.program.roots.result) return error.TypeMismatch;
         }

@@ -71,7 +71,7 @@ const Storage = struct {
     relative: ?*const Values = null,
     positions: std.ArrayList(PositionSources) = .empty,
 };
-const CallTargets = struct { role: Role = .callee, effect: p.Id, targets: []const Target, environmental: bool = false };
+const CallTargets = struct { role: Role = .callee, effect: p.Id, targets: ?[]const Target, environmental: bool = false };
 pub const SuspensionSources = struct { slots: []const p.Id = &.{}, conservative: bool = false };
 const PositionSources = struct { block: p.Id, position: usize, returned: bool, effects: []const SuspensionSources };
 
@@ -86,7 +86,7 @@ pub const Analysis = opaque {
             if (self.data().image.blocks[@intCast(boundary.block)].terminator.perform.effect == effect) return known;
         };
         for (self.data().calls[@intCast(boundary.block)]) |known| {
-            if (known.role == boundary.role and known.effect == effect) return known.targets;
+            if (known.role == boundary.role and known.effect == effect) if (known.targets) |targets_| return targets_;
         }
         return self.data().conservative[@intCast(effect)];
     }
@@ -96,10 +96,21 @@ pub const Analysis = opaque {
         if (boundary.role == .operation and self.data().operations[@intCast(boundary.block)] != null and self.data().image.blocks[@intCast(boundary.block)].terminator.perform.effect == effect)
             knowledge = .{ .conservative = false, .environmental = self.data().image.blocks[@intCast(boundary.block)].terminator.perform.capability == null };
         for (self.data().calls[@intCast(boundary.block)]) |known| {
-            if (known.role == boundary.role and known.effect == effect) knowledge = .{ .conservative = false, .environmental = known.environmental };
+            if (known.role == boundary.role and known.effect == effect and known.targets != null) knowledge = .{ .conservative = false, .environmental = known.environmental };
         }
         stored.* = .{ .image = self.data().image, .boundary = boundary, .effect = effect, .targets = self.targets(boundary, effect), .knowledge = knowledge };
         return @ptrCast(stored);
+    }
+    /// Declared rows describe ordinary invocation. Discarding owned values can
+    /// additionally execute captured cleanup, even in a failing pure helper.
+    pub fn effectRow(self: *const Analysis, boundary: Boundary, declared: []const p.Id) Error![]const p.Id {
+        var result: std.ArrayList(p.Id) = .empty;
+        for (self.data().calls[@intCast(boundary.block)]) |known| {
+            if (known.role != boundary.role or contracts.containsEffect(declared, known.effect)) continue;
+            if (result.items.len == 0) try result.appendSlice(self.data().allocator, declared);
+            try result.append(self.data().allocator, known.effect);
+        }
+        return if (result.items.len == 0) declared else result.items;
     }
     /// Sources are stable slots at this exact position, never callee input
     /// ordinals. A saved continuation starts after its awaited invocation;
@@ -126,14 +137,14 @@ pub const Analysis = opaque {
         return effects[@intCast(effect)];
     }
     pub fn capturesRegion(self: *const Analysis, boundary: Boundary, effects: []const p.Id, region: p.Id) Error!void {
-        for (effects) |effect| for (self.targets(boundary, effect)) |target| {
+        for (try self.effectRow(boundary, effects)) |effect| for (self.targets(boundary, effect)) |target| {
             if (!target.retains) continue;
             const signature = try contracts.resumption(self.data().image, target.resumption);
             if (std.mem.indexOfScalar(p.Id, signature.owned_regions, region) == null) return error.InvalidOwnership;
         };
     }
     pub fn capturesCleanup(self: *const Analysis, boundary: Boundary, effects: []const p.Id) Error!void {
-        for (effects) |effect| {
+        for (try self.effectRow(boundary, effects)) |effect| {
             // Intrinsic multi-shot prohibition is independent of relevance.
             if (self.data().image.effects[@intCast(effect)].control_use == .multi) return error.InvalidOwnership;
             for (self.targets(boundary, effect)) |target|
@@ -248,9 +259,13 @@ pub fn derive(allocator: std.mem.Allocator, image: ir.Program, imports: []const 
         for (image.blocks, 0..) |block, id| if (block.terminator == .call) {
             const call = block.terminator.call;
             var rows: std.ArrayList(CallTargets) = .empty;
-            for (image.functions[@intCast(call.function)].effects) |effect| {
+            for (image.effects, 0..) |_, effect| {
+                if (!contracts.containsEffect(image.functions[@intCast(call.function)].effects, effect) and relative.suspensions[@intCast(call.function)][effect] == empty) continue;
                 const actual = try origins.substitute(relative.suspensions[@intCast(call.function)][@intCast(effect)], call.arguments, flow.exits[id]);
-                if (origins.contains(actual, .unknown)) continue;
+                if (origins.contains(actual, .unknown)) {
+                    try rows.append(allocator, .{ .effect = effect, .targets = null });
+                    continue;
+                }
                 var selected: std.ArrayList(Target) = .empty;
                 for (stored.conservative[@intCast(effect)]) |target|
                     if (flow.receives(actual, target.handler)) try selected.append(allocator, target);
@@ -262,7 +277,11 @@ pub fn derive(allocator: std.mem.Allocator, image: ir.Program, imports: []const 
             var rows: std.ArrayList(CallTargets) = .empty;
             switch (block.terminator) {
                 .apply => |v| try closureTargets(stored, &flow, &relative, &rows, id, .callee, v.computation, v.arguments, 0, null),
-                .handle => |v| try closureTargets(stored, &flow, &relative, &rows, id, .body, v.body, v.arguments, image.handlers[@intCast(v.handler)].clauses.len, v.handler),
+                .handle => |v| {
+                    try closureTargets(stored, &flow, &relative, &rows, id, .body, v.body, v.arguments, image.handlers[@intCast(v.handler)].clauses.len, v.handler);
+                    try handlerTargets(stored, &relative, &rows, v.handler);
+                },
+                .resume_with => |v| try handlerTargets(stored, &relative, &rows, v.handler),
                 .with_region => |v| try closureTargets(stored, &flow, &relative, &rows, id, .body, v.body, v.arguments, 1, null),
                 .protect => |v| {
                     try closureTargets(stored, &flow, &relative, &rows, id, .body, v.body, v.arguments, @intFromBool(v.resource != null), null);
@@ -276,15 +295,33 @@ pub fn derive(allocator: std.mem.Allocator, image: ir.Program, imports: []const 
     return @ptrCast(stored);
 }
 
+fn handlerTargets(stored: *Storage, relative: *const Values, rows: *std.ArrayList(CallTargets), id: p.Id) Error!void {
+    const handler = stored.image.handlers[@intCast(id)];
+    for (stored.image.effects, 0..) |_, effect| {
+        if (contracts.containsEffect(handler.effects, effect)) continue;
+        var possible = relative.suspensions[@intCast(handler.return_function)][effect] != empty;
+        for (handler.clauses) |clause| possible = possible or relative.suspensions[@intCast(clause.function)][effect] != empty;
+        if (possible) try rows.append(stored.allocator, .{ .role = .handler, .effect = effect, .targets = null });
+    }
+}
+
 fn closureTargets(stored: *Storage, flow: *const Values, relative: *const Values, rows: *std.ArrayList(CallTargets), block: usize, role: Role, slot: p.Id, arguments: []const p.Id, supplied: usize, installed: ?p.Id) Error!void {
     const values = flow.exits[block];
     const origin_set = values.get(@intCast(slot));
     const origins = flow.origins;
-    if (origin_set == empty or origins.contains(origin_set, .unknown)) return;
     const image = stored.image;
     const schema = image.functions[@intCast(image.blocks[block].function)].layout.slots[@intCast(slot)];
     const signature = try contracts.computation(image, schema);
-    for (signature.effects) |effect| {
+    for (image.effects, 0..) |_, effect| {
+        var possible = contracts.containsEffect(signature.effects, effect);
+        for (image.constructors) |constructor| {
+            if (constructor.schema == schema and relative.suspensions[@intCast(constructor.function)][effect] != empty) possible = true;
+        }
+        if (!possible) continue;
+        if (origin_set == empty or origins.contains(origin_set, .unknown)) {
+            try rows.append(stored.allocator, .{ .role = role, .effect = effect, .targets = null });
+            continue;
+        }
         var actual: Set = empty;
         var found = false;
         for (image.constructors, 0..) |constructor, id| {
@@ -312,7 +349,11 @@ fn closureTargets(stored: *Storage, flow: *const Values, relative: *const Values
                 actual = try origins.unite(actual, source);
             }
         }
-        if (!found or origins.contains(actual, .unknown)) continue;
+        if (!found or origins.contains(actual, .unknown)) {
+            try rows.append(stored.allocator, .{ .role = role, .effect = effect, .targets = null });
+            continue;
+        }
+        if (actual == empty and !contracts.containsEffect(signature.effects, effect)) continue;
         var selected: std.ArrayList(Target) = .empty;
         for (stored.conservative[@intCast(effect)]) |target|
             if (flow.receives(actual, target.handler)) try selected.append(stored.allocator, target);
@@ -593,6 +634,57 @@ test "position suspension sources substitute callee inputs and preserve an unkno
     try std.testing.expectEqual(try origins.one(.unknown), (try relative.fromPosition(0, 0, true))[0]);
 }
 
+/// The schema projection of Kosmos's owned-value disposal traversal. Copied
+/// capabilities, cells and resources do not invoke user code when discarded;
+/// containers recurse into owned contents and one-shot captures run cleanup.
+const DisposalEffects = struct {
+    bits: []bool,
+    width: usize,
+
+    fn contains(self: DisposalEffects, schema: p.Id, effect: usize) bool {
+        return self.bits[@as(usize, @intCast(schema)) * self.width + effect];
+    }
+    fn any(self: DisposalEffects, schemas: []const p.Id, effect: usize) bool {
+        for (schemas) |schema| if (self.contains(schema, effect)) return true;
+        return false;
+    }
+    fn derive(allocator: std.mem.Allocator, image: ir.Program) Error!DisposalEffects {
+        const result: DisposalEffects = .{
+            .bits = try allocator.alloc(bool, std.math.mul(usize, image.schemas.len, image.effects.len) catch return error.Capacity),
+            .width = image.effects.len,
+        };
+        @memset(result.bits, false);
+        var changed = true;
+        while (changed) {
+            changed = false;
+            for (image.schemas, 0..) |schema, id| for (image.effects, 0..) |_, effect| {
+                const index = id * result.width + effect;
+                if (result.bits[index]) continue;
+                const present = switch (schema) {
+                    .product, .sum => |fields| result.any(fields, effect),
+                    .seq => |element| result.contains(element, effect),
+                    .vector => |v| result.contains(v.element, effect),
+                    .array => |v| result.contains(v.element, effect),
+                    .internal => |internal| switch (internal) {
+                        .computation => |v| result.any(v.capture_bound, effect),
+                        .suspension_package => |v| result.contains(v, effect),
+                        .resumption => |v| v.use != .multi and
+                            (!contracts.containsEffect(v.handled, effect) or contracts.containsEffect(v.escaping, effect)) and
+                            (contracts.containsEffect(v.effects, effect) or result.any(v.capture_bound, effect)),
+                        .capability, .cell, .region, .abstract_resource, .borrowed => false,
+                    },
+                    else => false,
+                };
+                if (present) {
+                    result.bits[index] = true;
+                    changed = true;
+                }
+            };
+        }
+        return result;
+    }
+};
+
 const Values = struct {
     allocator: std.mem.Allocator,
     origins: *Origins,
@@ -668,8 +760,18 @@ const Values = struct {
         for (image.constructors, 0..) |constructor, id|
             self.captures[id] = try sets(a, image.scopes.captures[@intCast(constructor.capture)].fields.len);
         if (relative) {
+            const disposal = try DisposalEffects.derive(a, image);
             for (image.functions, 0..) |function, id| {
                 self.suspensions[id] = try sets(a, image.effects.len);
+                // Cancellation can discard an owned slot at any execution
+                // position. This also covers authored failure and instruction
+                // faults without treating a normal terminator as a proof that
+                // captured cleanup cannot run. Position queries use concrete
+                // state custody separately and do not inherit this whole-layout
+                // approximation for their own activation.
+                for (function.layout.slots) |schema| for (image.effects, 0..) |_, effect| {
+                    if (disposal.contains(schema, effect)) self.suspensions[id][effect] = try origins.one(.unknown);
+                };
                 for (function.inputs, 0..) |_, index| try self.input(id, index, try origins.one(.{ .input = index }));
             }
             return self;
@@ -834,6 +936,25 @@ const Values = struct {
     fn transferBlock(self: *Values, id: usize, block_value: ir.Block) Error!void {
         return self.transferBlockFrom(id, block_value, self.entries[id]);
     }
+    fn implicitCallable(self: *Values, summary: []Set, schema: p.Id) Error!void {
+        const signature = try contracts.computation(self.image, schema);
+        for (self.image.constructors) |constructor| {
+            if (constructor.schema != schema) continue;
+            for (self.suspensions[@intCast(constructor.function)], 0..) |targets_, effect| {
+                if (targets_ != empty and !contracts.containsEffect(signature.effects, effect))
+                    try self.join(&summary[effect], try self.origins.one(.unknown));
+            }
+        }
+    }
+    fn implicitHandler(self: *Values, summary: []Set, id: p.Id) Error!void {
+        const handler = self.image.handlers[@intCast(id)];
+        for (self.image.effects, 0..) |_, effect| {
+            if (contracts.containsEffect(handler.effects, effect)) continue;
+            var possible = self.suspensions[@intCast(handler.return_function)][effect] != empty;
+            for (handler.clauses) |clause| possible = possible or self.suspensions[@intCast(clause.function)][effect] != empty;
+            if (possible) try self.join(&summary[effect], try self.origins.one(.unknown));
+        }
+    }
     fn transferBlockFrom(self: *Values, id: usize, block_value: ir.Block, entry_row: Row) Error!void {
         const values = &self.exits[id];
         // Re-evaluate this straight-line transfer from its monotone entry. Exit
@@ -878,7 +999,7 @@ const Values = struct {
                     } else try self.join(&summary[@intCast(v.effect)], try self.origins.one(.environmental));
                     for (self.image.effects[@intCast(v.effect)].use_site_effects) |effect| try self.join(&summary[@intCast(effect)], try self.origins.one(.unknown));
                 },
-                .call => |v| for (self.image.functions[@intCast(v.function)].effects) |effect| {
+                .call => |v| for (self.image.effects, 0..) |_, effect| {
                     const targets = try self.origins.substitute(self.suspensions[@intCast(v.function)][@intCast(effect)], v.arguments, values.*);
                     try self.join(&summary[@intCast(effect)], targets);
                 },
@@ -886,6 +1007,23 @@ const Values = struct {
                 else => for (self.image.functions[@intCast(block_value.function)].effects) |effect| {
                     try self.join(&summary[@intCast(effect)], try self.origins.one(.unknown));
                 },
+            }
+            const slots = self.image.functions[@intCast(block_value.function)].layout.slots;
+            switch (term) {
+                .apply => |v| try self.implicitCallable(summary, slots[@intCast(v.computation)]),
+                .handle => |v| {
+                    try self.implicitCallable(summary, slots[@intCast(v.body)]);
+                    try self.implicitHandler(summary, v.handler);
+                },
+                .resume_with => |v| try self.implicitHandler(summary, v.handler),
+                .with_region => |v| try self.implicitCallable(summary, slots[@intCast(v.body)]),
+                .protect => |v| {
+                    try self.implicitCallable(summary, slots[@intCast(v.body)]);
+                    try self.implicitCallable(summary, slots[@intCast(v.cleanup)]);
+                },
+                .resume_computation => |v| try self.implicitCallable(summary, slots[@intCast(v.computation)]),
+                .perform => |v| for (v.bodies) |slot| try self.implicitCallable(summary, slots[@intCast(slot)]),
+                else => {},
             }
         }
         switch (term) {

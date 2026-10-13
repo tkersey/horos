@@ -125,10 +125,11 @@ const Check = struct {
     fn checkHandler(self: *Check, slots: []const p.Id, operation: anytype) Error!void {
         const handler = self.image.handlers[@intCast(operation.handler)];
         const signature = try self.computation(slots, operation.body);
-        for (signature.effects) |effect| {
-            if (effect_scope.discharged(self.image, self.effects, handler, signature, effect))
+        const body_effects = try self.provenance.effectRow(.{ .block = self.boundary.block, .role = .body }, signature.effects);
+        for (body_effects) |effect| {
+            if (contracts.containsEffect(signature.effects, effect) and effect_scope.discharged(self.image, self.effects, handler, signature, effect))
                 continue;
-            try self.control(slots, &.{effect}, operation.next, .body);
+            try self.controlEffects(slots, &.{effect}, operation.next, .body);
             const selected = try self.provenance.select(.{ .block = self.boundary.block, .role = .body }, effect);
             for (operation.state) |slot| try self.capture(slots, selected, slot);
         }
@@ -163,6 +164,11 @@ const Check = struct {
     }
 
     fn control(self: *Check, slots: []const p.Id, effects: []const p.Id, next: ir.Edge, role: provenance.Role) Error!void {
+        const qualified = try self.provenance.effectRow(.{ .block = self.boundary.block, .role = role }, effects);
+        return self.controlEffects(slots, qualified, next, role);
+    }
+
+    fn controlEffects(self: *Check, slots: []const p.Id, effects: []const p.Id, next: ir.Edge, role: provenance.Role) Error!void {
         if (effects.len == 0) return;
         const root = try self.retained(next);
         for (effects) |effect| {
