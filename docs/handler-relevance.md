@@ -173,8 +173,12 @@ response values are first-order. Cancellation and failure also discard owned
 activation bindings. A separate finite disposal relation follows only owned
 fields of aggregates, computations and packages: discarding these containers
 does not invoke a copied capability or the computation itself. Resources have
-no implicit effectful finalizer. One-shot tokens conservatively retain their
-reachable origins because discarding them activates captured cleanup.
+no implicit effectful finalizer. One-shot tokens retain reachable origins only
+for effects in the same program-derived disposal relation used by caller admission.
+The relation follows nested owned cleanup and its producer-qualified delimiters;
+an unused copied capability alone cannot make a token execute that effect.
+For a possible disposal effect, concrete origins remain conservative recipients.
+Missing program facts retain the conservative fallback.
 Cleanup-return, disposal and unwind contexts include these latent disposals,
 including owned normal results and discarded values in enclosing exits. Their
 current child's effect interface alone cannot bound that later cleanup.

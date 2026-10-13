@@ -396,6 +396,10 @@ pub fn CheckFor(comptime Program: type, comptime State: type) type {
                 result.bits = try check.allocator.alloc(usize, self.bits.len);
                 @memset(result.bits, 0);
                 for (check.state.nodes, 0..) |record, id| if (record == .one_shot) {
+                    // Reachable origins bound recipients only after the owning
+                    // program establishes a possible disposal effect. Otherwise
+                    // a merely retained capability invents a future capture.
+                    if (check.control) |control| if (!control.disposalEffect(record.one_shot.schema, self.effect)) continue;
                     _ = try self.merge(check, result.row(id), .{ .id = id }, null);
                 };
                 var changed = true;

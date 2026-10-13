@@ -112,6 +112,14 @@ pub const Analysis = opaque {
         }
         return if (result.items.len == 0) declared else result.items;
     }
+    /// Qualify concrete disposal origins with the same program-derived effects
+    /// used for caller capture admission. A retained capability is not itself
+    /// executable cleanup. Callers supply an already validated schema/effect.
+    pub fn disposalEffect(self: *const Analysis, schema: p.Id, effect: p.Id) bool {
+        const relative = self.data().relative orelse return true;
+        const disposal = relative.disposal orelse return true;
+        return disposal.contains(schema, @intCast(effect));
+    }
     /// Sources are stable slots at this exact position, never callee input
     /// ordinals. A saved continuation starts after its awaited invocation;
     /// the returned value is unknown until its child actually returns.
