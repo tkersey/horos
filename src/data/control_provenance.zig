@@ -68,8 +68,12 @@ const Storage = struct {
     operations: []?[]const Target,
     calls: [][]const CallTargets,
     values: ?*const Values = null,
+    relative: ?*const Values = null,
+    positions: std.ArrayList(PositionSources) = .empty,
 };
 const CallTargets = struct { role: Role = .callee, effect: p.Id, targets: []const Target, environmental: bool = false };
+pub const SuspensionSources = struct { slots: []const p.Id = &.{}, conservative: bool = false };
+const PositionSources = struct { block: p.Id, position: usize, returned: bool, effects: []const SuspensionSources };
 
 pub const Analysis = opaque {
     fn data(self: *const Analysis) *const Storage {
@@ -96,6 +100,30 @@ pub const Analysis = opaque {
         }
         stored.* = .{ .image = self.data().image, .boundary = boundary, .effect = effect, .targets = self.targets(boundary, effect), .knowledge = knowledge };
         return @ptrCast(stored);
+    }
+    /// Sources are stable slots at this exact position, never callee input
+    /// ordinals. A saved continuation starts after its awaited invocation;
+    /// the returned value is unknown until its child actually returns.
+    pub fn suspensionSources(self: *const Analysis, block: p.Id, position: usize, returned: bool, effect: p.Id) Error!SuspensionSources {
+        const stored: *Storage = @ptrCast(@alignCast(@constCast(self)));
+        const relative = stored.relative orelse return .{ .conservative = true };
+        for (stored.positions.items) |query| if (query.block == block and query.position == position and query.returned == returned)
+            return query.effects[@intCast(effect)];
+        const summaries = try relative.fromPosition(block, position, returned);
+        const effects = try stored.allocator.alloc(SuspensionSources, summaries.len);
+        for (summaries, effects) |summary, *sources| {
+            sources.* = .{};
+            var slots: std.ArrayList(p.Id) = .empty;
+            var iterator = relative.origins.iterator(summary);
+            while (iterator.next()) |origin| switch (origin) {
+                .input => |slot| try slots.append(stored.allocator, slot),
+                .environmental => {},
+                else => sources.conservative = true,
+            };
+            sources.slots = try slots.toOwnedSlice(stored.allocator);
+        }
+        try stored.positions.append(stored.allocator, .{ .block = block, .position = position, .returned = returned, .effects = effects });
+        return effects[@intCast(effect)];
     }
     pub fn capturesRegion(self: *const Analysis, boundary: Boundary, effects: []const p.Id, region: p.Id) Error!void {
         for (effects) |effect| for (self.targets(boundary, effect)) |target| {
@@ -214,6 +242,9 @@ pub fn derive(allocator: std.mem.Allocator, image: ir.Program, imports: []const 
         };
         var relative = try Values.init(allocator, image, origins, true);
         try relative.solve();
+        const retained_relative = try allocator.create(Values);
+        retained_relative.* = relative;
+        stored.relative = retained_relative;
         for (image.blocks, 0..) |block, id| if (block.terminator == .call) {
             const call = block.terminator.call;
             var rows: std.ArrayList(CallTargets) = .empty;
@@ -313,7 +344,7 @@ const Origins = struct {
         const constructors = std.math.add(u64, resumptions, image.handlers.len) catch return error.Capacity;
         const inputs = std.math.add(u64, constructors, image.constructors.len) catch return error.Capacity;
         var count: usize = 0;
-        for (image.functions) |function| count = @max(count, function.inputs.len);
+        for (image.functions) |function| count = @max(count, function.layout.slots.len);
         const limit = std.math.add(u64, inputs, count) catch return error.Capacity;
         const self = try allocator.create(Origins);
         self.* = .{ .pool = .{ .allocator = allocator, .limit = limit }, .resumptions = resumptions, .constructors = constructors, .inputs = inputs };
@@ -505,6 +536,63 @@ test "control provenance row joins agree with dense unions and retain prior view
     }
 }
 
+test "position suspension sources distinguish a suffix from its full-block backedge" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const image: ir.Program = .{
+        .roots = .{ .entry = 0, .result = 0, .failure = 0 },
+        .schemas = &.{ .unit, .boolean, .{ .internal = .{ .capability = 0 } } },
+        .constants = &.{},
+        .effects = &.{.{ .identity = "position/source", .payload = 0, .result = 0 }},
+        .functions = &.{.{ .entry = 0, .inputs = &.{ 0, 1, 2, 3 }, .layout = .{ .slots = &.{ 2, 2, 1, 0 } }, .result = 0, .effects = &.{0} }},
+        .blocks = &.{
+            .{ .function = 0, .instructions = &.{.{ .opcode = .move, .destination = 0, .operands = &.{1} }}, .terminator = .{ .perform = .{ .effect = 0, .capability = 0, .payload = 3, .next = .{ .block = 1 } } } },
+            .{ .function = 0, .instructions = &.{}, .terminator = .{ .branch = .{ .condition = 2, .when_true = .{ .block = 0 }, .when_false = .{ .block = 2 } } } },
+            .{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 3 } },
+        },
+    };
+    const origins = try Origins.init(allocator, image);
+    var relative = try Values.init(allocator, image, origins, true);
+    try relative.solve();
+    const before = try relative.fromPosition(0, 0, false);
+    const after = try relative.fromPosition(0, 1, false);
+    const returned = try relative.fromPosition(0, 1, true);
+    const input0 = try origins.one(.{ .input = 0 });
+    const input1 = try origins.one(.{ .input = 1 });
+    try std.testing.expectEqual(input1, before[0]);
+    try std.testing.expectEqual(try origins.unite(input0, input1), after[0]);
+    try std.testing.expectEqual(input1, returned[0]);
+}
+
+test "position suspension sources substitute callee inputs and preserve an unknown delivery" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const image: ir.Program = .{
+        .roots = .{ .entry = 0, .result = 0, .failure = 0 },
+        .schemas = &.{ .unit, .{ .internal = .{ .capability = 0 } } },
+        .constants = &.{},
+        .effects = &.{.{ .identity = "position/delivery", .payload = 0, .result = 0 }},
+        .functions = &.{
+            .{ .entry = 0, .inputs = &.{ 0, 1, 2 }, .layout = .{ .slots = &.{ 1, 1, 0 } }, .result = 0, .effects = &.{0} },
+            .{ .entry = 3, .inputs = &.{ 1, 0, 2 }, .layout = .{ .slots = &.{ 1, 1, 0 } }, .result = 1, .effects = &.{0} },
+        },
+        .blocks = &.{
+            .{ .function = 0, .instructions = &.{}, .terminator = .{ .call = .{ .function = 1, .arguments = &.{ 1, 0, 2 }, .next = .{ .block = 1, .assignments = &.{.{ .destination = 0, .source = .returned }} } } } },
+            .{ .function = 0, .instructions = &.{}, .terminator = .{ .perform = .{ .effect = 0, .capability = 0, .payload = 2, .next = .{ .block = 2 } } } },
+            .{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 2 } },
+            .{ .function = 1, .instructions = &.{}, .terminator = .{ .perform = .{ .effect = 0, .capability = 0, .payload = 2, .next = .{ .block = 4 } } } },
+            .{ .function = 1, .instructions = &.{}, .terminator = .{ .return_value = 0 } },
+        },
+    };
+    const origins = try Origins.init(allocator, image);
+    var relative = try Values.init(allocator, image, origins, true);
+    try relative.solve();
+    try std.testing.expectEqual(try origins.one(.{ .input = 0 }), (try relative.fromPosition(0, 0, false))[0]);
+    try std.testing.expectEqual(try origins.one(.unknown), (try relative.fromPosition(0, 0, true))[0]);
+}
+
 const Values = struct {
     allocator: std.mem.Allocator,
     origins: *Origins,
@@ -516,7 +604,49 @@ const Values = struct {
     bindings: [][]bool,
     relative: bool,
     suspensions: [][]Set,
+    position_query: ?*PositionQuery = null,
     changed: bool = false,
+
+    const PositionQuery = struct { reachable: []bool, suspensions: []Set };
+
+    fn fromPosition(self: *const Values, start: p.Id, position: usize, returned: bool) Error![]const Set {
+        const code = self.image.blocks[@intCast(start)];
+        var reader = self.*;
+        reader.entries = try self.allocator.alloc(Row, self.image.blocks.len);
+        reader.exits = try self.allocator.alloc(Row, self.image.blocks.len);
+        for (self.image.blocks, reader.entries, reader.exits) |block, *entry_row, *exit_row| {
+            entry_row.* = .{ .len = self.image.functions[@intCast(block.function)].layout.slots.len };
+            exit_row.* = entry_row.*;
+        }
+        var query: PositionQuery = .{
+            .reachable = try self.allocator.alloc(bool, self.image.blocks.len),
+            .suspensions = try sets(self.allocator, self.image.effects.len),
+        };
+        @memset(query.reachable, false);
+        reader.position_query = &query;
+        var seed: Row = .{ .len = self.image.functions[@intCast(code.function)].layout.slots.len };
+        for (0..seed.len) |slot| try seed.set(self.allocator, slot, try self.origins.one(.{ .input = slot }));
+        if (returned) {
+            reader.exits[@intCast(start)] = seed;
+            switch (code.terminator) {
+                inline .call, .perform, .apply, .handle, .resume_value, .resume_with, .resume_computation, .dispose, .protect, .with_region => |v| try reader.edge(@intCast(start), v.next, try self.origins.one(.unknown), null),
+                else => return error.InvalidReference,
+            }
+        } else {
+            var suffix = code;
+            suffix.instructions = code.instructions[position..];
+            try reader.transferBlockFrom(@intCast(start), suffix, seed);
+        }
+        // The initial suffix is distinct from a later backedge to its block:
+        // a loop executes that block's full instruction sequence.
+        while (true) {
+            reader.changed = false;
+            for (self.image.blocks, 0..) |block, id| if (query.reachable[id])
+                try reader.transferBlock(id, block);
+            if (!reader.changed) break;
+        }
+        return query.suspensions;
+    }
 
     fn sets(a: std.mem.Allocator, count: usize) Error![]Set {
         const result = try a.alloc(Set, count);
@@ -647,6 +777,10 @@ const Values = struct {
         }
     }
     fn edge(self: *Values, id: usize, next: ir.Edge, returned: Set, unpack: ?ir.Terminator) Error!void {
+        if (self.position_query) |query| if (!query.reachable[@intCast(next.block)]) {
+            query.reachable[@intCast(next.block)] = true;
+            self.changed = true;
+        };
         const source = self.exits[id];
         var incoming = source;
         if (unpack) |term| switch (term) {
@@ -698,15 +832,19 @@ const Values = struct {
         try values.set(self.allocator, @intCast(instruction.destination), result);
     }
     fn transferBlock(self: *Values, id: usize, block_value: ir.Block) Error!void {
+        return self.transferBlockFrom(id, block_value, self.entries[id]);
+    }
+    fn transferBlockFrom(self: *Values, id: usize, block_value: ir.Block, entry_row: Row) Error!void {
         const values = &self.exits[id];
         // Re-evaluate this straight-line transfer from its monotone entry. Exit
         // rows are retained between rounds, but each instruction is a strong
         // assignment within this one activation view.
-        values.copyFrom(self.entries[id]);
+        values.copyFrom(entry_row);
         for (block_value.instructions) |operation| try self.transferInstruction(values, operation, true);
         const term = block_value.terminator;
         switch (term) {
-            .return_value => |slot| try self.join(&self.returns[@intCast(block_value.function)], values.get(@intCast(slot))),
+            .return_value => |slot| if (self.position_query == null)
+                try self.join(&self.returns[@intCast(block_value.function)], values.get(@intCast(slot))),
             .call => |v| if (!self.relative) {
                 for (v.arguments, 0..) |slot, index| try self.input(v.function, index, values.get(@intCast(slot)));
             },
@@ -732,7 +870,7 @@ const Values = struct {
         else
             try self.origins.one(.unknown);
         if (self.relative) {
-            const summary = self.suspensions[@intCast(block_value.function)];
+            const summary = if (self.position_query) |query| query.suspensions else self.suspensions[@intCast(block_value.function)];
             switch (term) {
                 .perform => |v| {
                     if (v.capability) |slot| {

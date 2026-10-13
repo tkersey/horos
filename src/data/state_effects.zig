@@ -22,6 +22,7 @@ pub fn CheckFor(comptime Program: type, comptime State: type) type {
         enter: []const usize,
         leave: []const usize,
         facts: effect_scope.Facts,
+        control: ?*const @import("control_provenance.zig").Analysis = null,
         origins: std.AutoHashMapUnmanaged(p.Id, Origins) = .empty,
 
         pub fn init(
@@ -140,10 +141,10 @@ pub fn CheckFor(comptime Program: type, comptime State: type) type {
             if (signature.mode == .deep) try contracts.subset(definition.effects, signature.effects);
         }
 
-        /// Existing capability values can select an enclosing attachment after
-        /// recovery. Validate the frames they may cross, using attachment
-        /// identity rather than equality of handler descriptors. Fresh future
-        /// installations cannot capture frames outside their own delimiter.
+        /// A possible executable suspension must also select the concrete
+        /// attachment before it can capture a saved frame. Merely retaining a
+        /// capability is not an operation on it. Fresh future installations
+        /// cannot capture frames outside their own delimiter.
         pub fn futureCaptures(self: *Self, context: *anyopaque, comptime visit: anytype) !void {
             for (self.state.nodes, 0..) |record, target_id| {
                 if (record != .attachment) continue;
@@ -156,6 +157,7 @@ pub fn CheckFor(comptime Program: type, comptime State: type) type {
                         try self.origins.put(self.allocator, clause.effect, origins);
                     }
                     const origins = self.origins.getPtr(clause.effect).?;
+                    const executed = try origins.executable(self);
                     const bit = origins.indices[target_id];
                     if (bit == Origins.absent) continue;
                     const scratch = try self.allocator.alloc(usize, origins.width);
@@ -166,7 +168,7 @@ pub fn CheckFor(comptime Program: type, comptime State: type) type {
                             else => continue,
                         }
                         @memset(scratch, 0);
-                        _ = try origins.child(self, frame_id, scratch, null);
+                        _ = try executed.child(self, frame_id, scratch, null);
                         if (Origins.contains(scratch, bit)) try visit(context, frame_id, clause.resumption);
                     }
                 }
@@ -205,6 +207,7 @@ pub fn CheckFor(comptime Program: type, comptime State: type) type {
             capabilities: std.ArrayList(g.NodeRef) = .empty,
             width: usize = 0,
             bits: []usize = &.{},
+            execution: ?[]usize = null,
             const word_bits = @bitSizeOf(usize);
             const absent = std.math.maxInt(usize);
 
@@ -360,6 +363,124 @@ pub fn CheckFor(comptime Program: type, comptime State: type) type {
                 return changed;
             }
 
+            fn suspension(self: Origins, check: *Self, id: usize, into: []usize) Error!void {
+                const record = check.state.nodes[id];
+                const frame = check.activations[id] orelse return error.InvalidState;
+                const block_id = if (record == .control) record.control.block else record.continuation.source_block;
+                const sources = if (check.control) |control|
+                    try control.suspensionSources(block_id, @intCast(frame.position), record == .continuation, self.effect)
+                else
+                    @import("control_provenance.zig").SuspensionSources{ .conservative = true };
+                if (sources.conservative) _ = try self.merge(check, into, .{ .id = id }, null);
+                for (sources.slots) |slot| {
+                    var found = false;
+                    for (frame.bindings) |binding| if (binding.slot == slot) {
+                        _ = try self.valueOrigins(check, into, binding.value);
+                        found = true;
+                        break;
+                    };
+                    if (!found) return error.InvalidState;
+                }
+            }
+
+            fn owned(self: Origins, check: *Self, into: []usize, value: g.Value) Error!bool {
+                if (value.body != .owned) return false;
+                return self.merge(check, into, value.body.owned.node, null);
+            }
+
+            /// Discarding a container traverses only its owned fields. It never
+            /// invokes a retained computation or a copied capability. A one-shot
+            /// token, however, activates its captured cleanup when discarded.
+            fn disposals(self: Origins, check: *Self) Error!Origins {
+                var result = self;
+                result.bits = try check.allocator.alloc(usize, self.bits.len);
+                @memset(result.bits, 0);
+                for (check.state.nodes, 0..) |record, id| if (record == .one_shot) {
+                    _ = try self.merge(check, result.row(id), .{ .id = id }, null);
+                };
+                var changed = true;
+                while (changed) {
+                    changed = false;
+                    for (check.state.nodes, 0..) |record, id| {
+                        const into = result.row(id);
+                        switch (record) {
+                            .aggregate => |v| for (v.fields) |value| {
+                                changed = try result.owned(check, into, value) or changed;
+                            },
+                            .computation => |v| {
+                                const environment = try check.node(v.environment);
+                                if (environment != .environment) return error.InvalidState;
+                                for (environment.environment.values) |value|
+                                    changed = try result.owned(check, into, value) or changed;
+                            },
+                            .package => |v| changed = try result.owned(check, into, v.continuation) or changed,
+                            .exit => |v| {
+                                if (v.reason == .normal) changed = try result.owned(check, into, v.reason.normal) or changed;
+                                for (v.discarded) |value| changed = try result.owned(check, into, value) or changed;
+                                if (v.outer) |outer| changed = try result.merge(check, into, outer, null) or changed;
+                            },
+                            else => {},
+                        }
+                    }
+                }
+                return result;
+            }
+
+            /// Value reachability is the conservative fallback; executable rows
+            /// instead compose current code, saved return edges and delimiters.
+            /// Both use the same finite set of concrete attachment identities.
+            fn executable(self: *Origins, check: *Self) Error!Origins {
+                if (self.execution) |bits| {
+                    var result = self.*;
+                    result.bits = bits;
+                    return result;
+                }
+                var result = self.*;
+                result.bits = try check.allocator.alloc(usize, self.bits.len);
+                @memset(result.bits, 0);
+                const disposal = try self.disposals(check);
+                for (check.state.nodes, 0..) |record, id| {
+                    const into = result.row(id);
+                    switch (record) {
+                        .control, .continuation => {
+                            try self.suspension(check, id, into);
+                            for (check.activations[id].?.bindings) |binding|
+                                _ = try disposal.owned(check, into, binding.value);
+                        },
+                        .handler => |handler_| if (contracts.containsEffect(check.program.handlers[@intCast(handler_.definition)].effects, self.effect)) {
+                            _ = try self.merge(check, into, .{ .id = id }, null);
+                        },
+                        .attachment, .region_scope, .injection, .pending => {},
+                        .protection => |scope| if (try check.scopeEffects(scope.source_block, true, self.effect)) {
+                            _ = try self.merge(check, into, scope.obligation.node, null);
+                        },
+                        .cleanup_return => |v| _ = try disposal.merge(check, into, v.exit, null),
+                        .disposal_return => |v| for (v.values) |value| {
+                            _ = try disposal.owned(check, into, value);
+                        },
+                        .unwind => |v| {
+                            for (v.values) |value| _ = try disposal.owned(check, into, value);
+                            if (check.state.roots.exit) |exit| _ = try disposal.merge(check, into, exit, null);
+                        },
+                        else => _ = try self.merge(check, into, .{ .id = id }, null),
+                    }
+                }
+                var changed = true;
+                while (changed) {
+                    changed = false;
+                    for (check.state.nodes, 0..) |record, id| {
+                        const into = result.row(id);
+                        switch (record) {
+                            .attachment => changed = try result.delimiter(check, id, into) or changed,
+                            .one_shot, .multi_template => |capture| changed = try result.merge(check, into, capture.delimiter, null) or changed,
+                            else => changed = try result.child(check, id, into, null) or changed,
+                        }
+                    }
+                }
+                self.execution = result.bits;
+                return result;
+            }
+
             fn solve(self: *Origins, check: *Self) Error!void {
                 if (self.width == 0) return;
                 var changed = true;
@@ -395,4 +516,44 @@ pub fn CheckFor(comptime Program: type, comptime State: type) type {
             }
         };
     };
+}
+
+test "latent disposal follows owned containers but never invokes copied capabilities" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const copied: g.Value = .{ .schema = 0, .body = .{ .reference = .{ .id = 0 } } };
+    const token: g.Value = .{ .schema = 0, .body = .{ .owned = .{ .node = .{ .id = 1 } } } };
+    const closure: g.Value = .{ .schema = 0, .body = .{ .owned = .{ .node = .{ .id = 3 } } } };
+    const nodes: []const g.Node = &.{
+        .{ .attachment = .{ .handler = .{ .id = 0 }, .outer = null, .return_to = null } },
+        .{ .one_shot = .{ .schema = 0, .capture = null, .delimiter = .{ .id = 0 }, .evidence = null } },
+        .{ .environment = .{ .values = &.{copied}, .tail = null } },
+        .{ .computation = .{ .constructor = 0, .environment = .{ .id = 2 } } },
+        .{ .aggregate = .{ .schema = 0, .tag = 0, .fields = &.{closure} } },
+        .{ .aggregate = .{ .schema = 0, .tag = 0, .fields = &.{token} } },
+        .{ .exit = .{ .reason = .{ .normal = closure } } },
+        .{ .exit = .{ .reason = .{ .normal = copied }, .discarded = &.{token} } },
+    };
+    const State = struct { nodes: []const g.Node };
+    const Check = CheckFor(@import("activation.zig").Program, State);
+    var check: Check = .{
+        .allocator = allocator,
+        .program = .{ .roots = .{ .entry = 0, .result = 0, .failure = 0 }, .schemas = &.{}, .constants = &.{}, .effects = &.{}, .functions = &.{}, .blocks = &.{} },
+        .state = .{ .nodes = nodes },
+        .captures = &.{},
+        .children = &.{},
+        .enter = &.{},
+        .leave = &.{},
+        .facts = .{ .ambient = &.{}, .dependencies = &.{}, .width = 0 },
+    };
+    // Both retained closures and tokens expose this origin as values; only
+    // tokens execute captured cleanup when disposal reaches them.
+    const bits = try allocator.alloc(usize, nodes.len);
+    @memset(bits, 1);
+    var origins: Check.Origins = .{ .effect = 0, .indices = &.{}, .width = 1, .bits = bits };
+    try origins.capabilities.append(allocator, .{ .id = 0 });
+    const disposal = try origins.disposals(&check);
+    for ([_]usize{ 0, 2, 3, 4, 6 }) |id| try std.testing.expectEqual(@as(usize, 0), disposal.row(id)[0]);
+    for ([_]usize{ 1, 5, 7 }) |id| try std.testing.expectEqual(@as(usize, 1), disposal.row(id)[0]);
 }

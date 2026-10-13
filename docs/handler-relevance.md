@@ -35,7 +35,8 @@ their outputs afresh; no fact is serialized into BPI3 or BMO1.
 An origin set contains members of six disjoint finite kinds: unknown,
 environmental suspension, handler descriptor, resumption delimiter descriptor,
 closure constructor, and formal input position. Their ranges are computed with
-checked arithmetic from the program's catalogs and maximum formal-input count.
+checked arithmetic from the program's catalogs and maximum slot count (which
+also bounds formal inputs and position-query sources).
 These descriptor IDs represent possibly many runtime objects; they never prove
 that two capabilities or tokens are the same object.
 
@@ -110,6 +111,60 @@ sets. Unknown values keep the ordinary concrete checks; they do not bypass them.
 The visited key includes both node and allowed set, so one alias does not certify
 a different abstract view. Recursive graphs need no depth cutoff.
 
+Concrete future capture additionally requires executable suspension, not merely
+a retained capability. `state_effects` derives two finite attachment-origin
+relations: values reachable from a component, and effects executable through it.
+The first remains the conservative fallback. The second uses
+`Analysis.suspensionSources` for current activations and saved return edges. A
+pure helper can return a capability without capturing its caller; an effectful
+helper can use an inner capability while carrying an unused outer capability
+with the very same handler descriptor.
+
+The position query seeds stable slots at the exact block and instruction position,
+then reuses the relative value transfers and direct-call suspension summaries.
+Callee summary input ordinals are substituted through argument slots before
+becoming position sources. They are never interpreted as current function input
+slots: those inputs may already have been overwritten. A saved continuation
+starts at its return edge, with the not-yet-delivered value unknown. Ordinary
+activation admission has already required all live, available saved bindings.
+Missing demanded bindings reject instead of certifying an empty target set.
+
+Only reachable successor blocks enter the position fixed point. The initial
+instruction suffix is separate from later backedges, which execute the full
+block. Strong instruction assignments and simultaneous edge substitution use
+the same transfer owner as program admission. Recursive callees use their full
+function summaries, while the position query accumulates a separate result.
+Unknown instructions, opaque/scoped calls and unrepresented contexts retain the
+conservative effect interface and reachable origins; they cannot produce a
+false empty set. Environmental operations select no attachment.
+
+For each frame, future capture examines its child execution, since returning
+consumes that frame before its own suffix runs. A continuation's executable row
+therefore combines child execution with its own later suffix for its ancestors.
+Attachments mask only origins inside the actual reinstated delimiter; handler
+effects remain conservatively represented. Protection also includes possible
+cleanup effects for enclosing frames. Regions and injected computations forward
+child execution. Dormant token children retain their use-site capabilities for
+possible injection; environmental pending children add none because their
+response values are first-order. Cancellation and failure also discard owned
+activation bindings. A separate finite disposal relation follows only owned
+fields of aggregates, computations and packages: discarding these containers
+does not invoke a copied capability or the computation itself. Resources have
+no implicit effectful finalizer. One-shot tokens conservatively retain their
+reachable origins because discarding them activates captured cleanup.
+Cleanup-return, disposal and unwind contexts include these latent disposals,
+including owned normal results and discarded values in enclosing exits. Their
+current child's effect interface alone cannot bound that later cleanup.
+All existing custody, captured-region, cleanup and resumption-use checks still
+run independently.
+
+Position results are cached only within the same immutable admitted program and
+admission lifetime, keyed by block, instruction position and saved/current role.
+Their domain is bounded by the program's slots and effects; executable rows are
+bounded by state nodes times concrete attachment count. The fixed points use
+monotone finite unions with no iteration cutoff. Allocation failure returns an
+error. Neither position facts nor attachment-origin rows are serialized.
+
 Open components use conservative relevance; imported implementations are not
 assumed local. All declarations still receive intrinsic validation. Closing a
 link derives fresh facts after resolution and relocation. For an unchanged
@@ -137,7 +192,10 @@ independently of the persistent representation.
 
 Kosmos's `test/v2/control_provenance.zig` and
 `test/v2/control_provenance_alias.zig` exercise authentic restore and forged
-same-schema substitutions. The independent Horos source oracle and Kosmos's
+same-schema substitutions. They also round-trip authentic yielded checkpoints
+with effect-free helpers, yielded cleanup and nested same-descriptor handlers, and distinguish a
+local effectful dispatch from a retained outer capability. Original and restored
+execution must agree on the exact result. The independent Horos source oracle and Kosmos's
 44-fixture source/native/WASM comparison retain deep, shallow, successor,
 injection, cleanup and local one-/multi-shot observations. The 42 historical
 BPI3 fixtures stay unchanged. These are falsification and preservation evidence

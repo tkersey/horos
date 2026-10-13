@@ -219,6 +219,7 @@ fn validateInternal(allocator: std.mem.Allocator, program: stable_ir.Program, st
         if (admitted) |owner| owner.effectFacts() else null,
     );
     context.effect_check.?.activations = activations;
+    context.effect_check.?.control = context.control;
     for (state.blobs) |blob| try a.value(temporary, program.schemas, context.facts, .{ .schema = blob.schema, .bytes = blob.bytes });
     var pending_count: usize = 0;
     for (state.nodes, 0..) |record, id| {
