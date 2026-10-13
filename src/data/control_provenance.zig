@@ -711,6 +711,46 @@ const DisposalEffects = struct {
         return false;
     }
     fn derive(allocator: std.mem.Allocator, image: ir.Program) Error!DisposalEffects {
+        // First overapproximate every nested disposal. Local discharge must be
+        // proved against that relation, never against its own masked result.
+        const unmasked = try solve(allocator, image, null);
+        const local = try allocator.alloc(bool, unmasked.bits.len);
+        @memset(local, true);
+        const produced = try allocator.alloc(bool, image.schemas.len);
+        @memset(produced, false);
+        const scope = try @import("effect_scope.zig").derive(allocator, image);
+        for (image.functions) |function| if (function.entry == @import("relocation.zig").missing)
+            @memset(local, false);
+        for (image.blocks) |block| switch (block.terminator) {
+            .handle => |handle| {
+                const handler = image.handlers[@intCast(handle.handler)];
+                const slots = image.functions[@intCast(block.function)].layout.slots;
+                const body = try contracts.computation(image, slots[@intCast(handle.body)]);
+                for (handler.clauses) |clause| {
+                    produced[@intCast(clause.resumption)] = true;
+                    for (image.effects, 0..) |_, effect| {
+                        var confined = @import("effect_scope.zig").discharged(image, scope, handler, body, effect);
+                        for (body.capture_bound) |schema| confined = confined and !unmasked.contains(schema, effect);
+                        for (body.parameters[handler.clauses.len..]) |schema| confined = confined and !unmasked.contains(schema, effect);
+                        for (handler.state) |schema| confined = confined and !scope.contains(schema, effect) and !unmasked.contains(schema, effect);
+                        local[@as(usize, @intCast(clause.resumption)) * unmasked.width + effect] =
+                            local[@as(usize, @intCast(clause.resumption)) * unmasked.width + effect] and confined;
+                    }
+                }
+            },
+            // A successor receives an existing capture, not a fresh body's
+            // correlated capability parameters.
+            .resume_with => |resume_| for (image.handlers[@intCast(resume_.handler)].clauses) |clause| {
+                for (image.effects, 0..) |_, effect| local[@as(usize, @intCast(clause.resumption)) * unmasked.width + effect] = false;
+            },
+            else => {},
+        };
+        for (produced, 0..) |known, schema| if (!known) {
+            for (image.effects, 0..) |_, effect| local[schema * unmasked.width + effect] = false;
+        };
+        return solve(allocator, image, local);
+    }
+    fn solve(allocator: std.mem.Allocator, image: ir.Program, local: ?[]const bool) Error!DisposalEffects {
         const result: DisposalEffects = .{
             .bits = try allocator.alloc(bool, std.math.mul(usize, image.schemas.len, image.effects.len) catch return error.Capacity),
             .width = image.effects.len,
@@ -736,8 +776,12 @@ const DisposalEffects = struct {
                             // A deep token lists same-family effects only when
                             // they can select outside its own delimiter. Shallow
                             // rows also list local effects, so require escaping.
+                            // A nested token retains its own recipient. Mask it
+                            // only when every producer proves confinement to the
+                            // fresh delimiter, including its owned inputs.
+                            const confined = if (local) |facts| facts[index] else false;
                             break :blk (contracts.containsEffect(v.effects, effect) and (v.mode == .deep or escapes)) or
-                                (escapes and result.any(v.capture_bound, effect));
+                                ((!confined or escapes) and result.any(v.capture_bound, effect));
                         },
                         .capability, .cell, .region, .abstract_resource, .borrowed => false,
                     },

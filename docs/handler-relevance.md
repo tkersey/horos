@@ -84,7 +84,13 @@ instruction faults or cancellation, including functions with an empty declared
 invocation row. A finite schema/effect relation follows owned containers and
 one-shot captures. Multi-shot templates and copied capabilities have no such
 disposal action. Deep tokens retain their declared outer effects, including
-same-family effects; shallow tokens mask handled effects unless marked escaping.
+same-family effects; shallow tokens mask ordinary handled effects unless marked
+escaping. Nested owned captures retain their own recipients. Their disposal
+effects are masked only when every producer of the token schema proves that
+all relevant access is confined to the fresh delimiter. This proof uses an
+unmasked disposal relation for body captures, supplied arguments and handler
+state; it cannot justify itself from the masked result. Imported implementations,
+unknown producers and successor rebinding keep conservative disposal effects.
 The relation conservatively seeds every function layout, and direct calls,
 compatible closures and handler clauses propagate it. Resume and explicit-disposal
 boundaries also include cleanup carried by captured owned values.
@@ -172,14 +178,15 @@ reachable origins because discarding them activates captured cleanup.
 Cleanup-return, disposal and unwind contexts include these latent disposals,
 including owned normal results and discarded values in enclosing exits. Their
 current child's effect interface alone cannot bound that later cleanup.
-A disposal marker links an unwind to its remaining work; it does not accept a
-normal return value. A shallow handler reinstated for disposal can therefore
-have a different answer type from its token. The frame forest rejects active
-execution, resumable captures and normal-exit destinations whose return path
-crosses a disposal marker. An explicit-disposal continuation is different:
-cleanup may invoke a handler clause that returns to it. Its edge binds no result,
-so that answer is ignored; it need not match the disposed token's answer type.
-The continuation after disposal can run, and cleanup can resume its checked exit.
+A disposal marker links an unwind to its remaining work. A cleanup handler may
+return to that marker while the exit remains live; its answer is discarded,
+including disposal of owned values. The frame forest distinguishes this path
+from an ordinary return. Active execution requires a retained exit, and a normal
+or abandonment exit that returns through a marker requires an outer exit to
+remain after it finishes. Resumable captures cannot depend on a caller's exit.
+An explicit-disposal continuation binds no result, so a cleanup clause's answer
+need not match the disposed token's answer type. Cleanup can resume its checked
+exit, and the continuation after disposal can run.
 All existing custody, captured-region, cleanup and resumption-use checks still
 run independently.
 
@@ -223,7 +230,7 @@ local effectful dispatch from a retained outer capability. Original and restored
 execution must agree on the exact result. `test/v2/implicit_disposal.zig`
 checks failure, instruction faults and cancellation through direct calls, nested
 calls and closures, both with and without a declared effect row. It also covers
-injection into captured state, deep same-family outer cleanup, explicit disposal,
+injection into captured state, nested deep and shallow same-family cleanup, explicit disposal,
 ordinary resume and successor resume. Narrow capture bounds reject; valid bounds
 restore before and during cleanup, then produce the same terminal bytes as
 uninterrupted execution. The independent Horos source oracle and Kosmos's

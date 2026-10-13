@@ -13,6 +13,16 @@ const state_effects = @import("state_effects.zig");
 const provenance = @import("control_provenance.zig");
 pub const Error = image.Error || @import("activation_ownership.zig").Error || error{ InvalidState, InvalidScope };
 
+const ReturnPath = enum {
+    normal,
+    disposal,
+    invalid,
+
+    fn accepts(self: ReturnPath, exit: ?g.NodeRef) bool {
+        return self == .normal or (self == .disposal and exit != null);
+    }
+};
+
 pub fn node(state: anytype, reference: g.NodeRef) Error!g.Node {
     if (reference.id >= state.nodes.len) return error.InvalidReference;
     return state.nodes[@intCast(reference.id)];
@@ -122,7 +132,7 @@ fn validateInternal(allocator: std.mem.Allocator, program: stable_ir.Program, st
         .loan_resources = try temporary.alloc(?g.NodeRef, state.nodes.len),
         .captured_delimiters = try temporary.alloc(?p.Id, state.nodes.len),
         .frame_children = try temporary.alloc(?g.NodeRef, state.nodes.len),
-        .normal_return = try temporary.alloc(bool, state.nodes.len),
+        .return_path = try temporary.alloc(ReturnPath, state.nodes.len),
         .enter = try temporary.alloc(usize, state.nodes.len),
         .leave = try temporary.alloc(usize, state.nodes.len),
     };
@@ -205,7 +215,7 @@ fn validateInternal(allocator: std.mem.Allocator, program: stable_ir.Program, st
         .parked => (try node(state, state.roots.pending.?)).pending.continuation,
         .unwinding, .completed, .failed, .cancelled => null,
     };
-    if (returning) |ref| if (!context.normal_return[@intCast(ref.id)])
+    if (returning) |ref| if (!context.return_path[@intCast(ref.id)].accepts(state.roots.exit))
         return error.InvalidState;
     try context.exits();
     context.effect_check = try Context.EffectCheck.init(
@@ -273,7 +283,7 @@ fn ContextFor() type {
         loan_resources: []?g.NodeRef,
         captured_delimiters: []?p.Id,
         frame_children: []?g.NodeRef,
-        normal_return: []bool,
+        return_path: []ReturnPath,
         effect_check: ?EffectCheck = null,
         enter: []usize,
         leave: []usize,
@@ -327,7 +337,7 @@ fn ContextFor() type {
             var pending: std.ArrayList(Task) = .empty;
             @memset(self.enter, std.math.maxInt(usize));
             @memset(self.leave, std.math.maxInt(usize));
-            @memset(self.normal_return, false);
+            @memset(self.return_path, .invalid);
             for (self.state.nodes, 0..) |record, id| if ((isFrame(record) or record == .region) and treeParent(record) == null)
                 try pending.append(self.allocator, .{ .id = id, .leaving = false });
             var clock: usize = 0;
@@ -341,9 +351,10 @@ fn ContextFor() type {
                 self.enter[task.id] = clock;
                 clock += 1;
                 const record = self.state.nodes[task.id];
-                self.normal_return[task.id] = switch (record) {
+                self.return_path[task.id] = switch (record) {
                     // Completing cleanup resumes an existing, independently checked exit.
-                    .cleanup_return => true,
+                    .cleanup_return => .normal,
+                    .disposal_return => .disposal,
                     // Protection creates a normal exit that must eventually return here.
                     .control,
                     .continuation,
@@ -352,11 +363,10 @@ fn ContextFor() type {
                     .injection,
                     .protection,
                     => if (frameParent(record)) |parent|
-                        self.normal_return[@intCast(parent.id)]
+                        self.return_path[@intCast(parent.id)]
                     else
-                        true,
-                    // A disposal marker continues an existing unwind; it has no answer.
-                    else => false,
+                        .normal,
+                    else => .invalid,
                 };
                 try pending.append(self.allocator, .{ .id = task.id, .leaving = true });
                 for (children[task.id].items) |id| try pending.append(self.allocator, .{ .id = id, .leaving = false });
@@ -539,7 +549,7 @@ fn ContextFor() type {
                     if (result_type != signature.result) return error.TypeMismatch;
                 },
                 // A nested disposal marker continues an unwind, not ordinary
-                // execution. normal_return checks the complete return path.
+                // execution. return_path requires the retained exit at that point.
                 .disposal_return => {},
                 else => return error.InvalidState,
             } else if (result_type != self.program.roots.result) return error.TypeMismatch;
@@ -627,13 +637,13 @@ fn ContextFor() type {
                             try self.value(value_item, value_item.schema);
                             const after = try node(self.state, exit.stop orelse return error.InvalidState);
                             if (after != .continuation or after.continuation.source_block >= self.program.blocks.len or self.program.blocks[@intCast(after.continuation.source_block)].terminator != .protect) return error.InvalidState;
-                            if (!self.normal_return[@intCast(exit.stop.?.id)]) return error.InvalidState;
+                            if (!self.return_path[@intCast(exit.stop.?.id)].accepts(exit.outer)) return error.InvalidState;
                             try self.checkParent(exit.stop, value_item.schema);
                         },
                         .abandoned => {
                             const after = try node(self.state, exit.stop orelse return error.InvalidState);
                             if (after != .continuation or after.continuation.source_block >= self.program.blocks.len or self.program.blocks[@intCast(after.continuation.source_block)].terminator != .dispose) return error.InvalidState;
-                            if (!self.normal_return[@intCast(exit.stop.?.id)]) return error.InvalidState;
+                            if (!self.return_path[@intCast(exit.stop.?.id)].accepts(exit.outer)) return error.InvalidState;
                         },
                         .failure => |failure| {
                             try self.value(failure, self.program.roots.failure);
@@ -1317,7 +1327,7 @@ fn ContextFor() type {
         fn capture(self: *Context, token: anytype) Error!void {
             const signature = try contracts.resumption(self.program, token.schema);
             if (token.capture == null) return error.InvalidState;
-            if (!self.normal_return[@intCast(token.capture.?.id)]) return error.InvalidState;
+            if (!self.return_path[@intCast(token.capture.?.id)].accepts(null)) return error.InvalidState;
             const saved = try node(self.state, token.capture.?);
             const delimiter = try node(self.state, token.delimiter);
             if (saved != .continuation or delimiter != .attachment or delimiter.attachment.phase != .suspended) return error.InvalidState;
