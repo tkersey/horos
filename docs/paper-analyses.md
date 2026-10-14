@@ -59,19 +59,25 @@ uses a finite block/state worklist. Direct calls use only their callee's summary
 at that call's continuation. Recursive calls do not receive invented successful
 returns; nonreturning prefixes still contribute violations. `may_nonreturn` is
 conservative and is never a termination proof.
+Every incoming block-state set is recorded before subsequent events, so a bad
+state remains a reachable prefix even if the monitor later leaves it.
 
 For the covered transfer fragment:
 
 - Instructions emit their projected event and retain declared failure and
   cancellation alternatives. Branches retain both program choices. Environmental
   replies and scheduling decisions remain identified as environmental choices.
+  A pending external operation retains cancellation before any successful reply.
 - Direct calls and known constructor applications compose finite relations.
   Constructors come from the existing provenance owner. A consumer's context
   transfer must interpret actual argument/capture relations; a spelling is never
   a validation or authorization contract.
 - Checked deep one-shot administrative clauses resume their actual token exactly
   once. Their other instructions and return clauses must be total and silent for
-  this projection. Writes, aliases or transfers of that token outside the checked
+  this projection, including cancellation at erased control positions. Executable
+  disposal makes this reduction unavailable. The retained resume event uses the
+  clause's parameter interpretation, through the same checked context transfer as
+  direct calls. Writes, aliases or transfers of that token outside the checked
   resume make this reduction unavailable.
 - General local control and multi-shot resumptions use an alphabet closure over
   all compatible captured suffixes, handlers, return clauses, injected bodies and
@@ -83,6 +89,15 @@ For the covered transfer fragment:
   with all exit kinds and possible nonreturn. It can emit zero, one or many events.
   Protection composes cleanup with body normal, failure and cancellation exits.
   Owned disposal is never treated as silent merely because the declared row is empty.
+
+The disposal query follows the runtime's owned aggregate, closure, package and
+one-shot capture traversal. Its finite schema fixed point is seeded by retained
+protection obligations and propagates through owned captured contents. Admission
+requires the obligation flag at protected capture edges. This query is distinct
+from the existing escaping-effect equations: cleanup may yield with no escaping
+effect. Obligation-free captures with no executable owned contents remain silent
+for disposal, retaining the cloned producer's precise bound. Unknown executable
+cleanup expands to the full monitor alphabet and can lose optional precision.
 
 These rules give an induction over finite concrete execution prefixes: each local
 step is represented, each matched call composes a represented relation, each
@@ -174,6 +189,7 @@ assertions, not just planned coverage.
 | IN-01–04 | `interactions_tests`: same-object validation order, wrong object, mutation/replacement/failure, swapped helper arguments, mutually recursive summaries and nonreturning bad prefixes. |
 | IN-05–08, IN-10–11 | Outer target owner tests; opaque import multiple-event closure; cleanup/injection baseline fixtures; cloned suffix without repeated producer; relinked body and changed property; potential-only verdicts. |
 | IN-09, IN-12 | Three consumers in existing roots; `service_interactions.mjs` independently includes source traces and rejects omitted yield edges and wrong reply labels; Kosmos applies the same membership check to actual native/WASM traces. |
+| IN-03, IN-07 | Regressions retain nonabsorbing bad states after branch/switch, pending-request cancellation, cancellation in administrative clauses/returns, clause parameter interpretation, and effect-free owned cleanup. |
 | WT-01–03, WT-07 | Source service observer checks derived rank and coverage; omitted dependency and nondecreasing rank reject; admitted arithmetic and slot-overwrite mutants lose the report. |
 | WT-04–05 | Actual exclusive-branch wait operations produce only a cycle candidate; effect-free recursion has no successful return and allows nonreturn. |
 | WT-06 | Service report retains unresolved external outcomes and explicit fairness premises; existing scheduler/FIFO and held-worker tests retain independent eligible work. No new scheduler claim is inferred. |
@@ -221,27 +237,27 @@ guarantees; background load and sub-millisecond timer noise remain limitations.
 
 | Fixture | Baseline compile ms | Candidate compile ms | Baseline admit ms | Candidate admit ms | Compile peak bytes baseline → candidate |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| recursive | 0.027 | 0.028 | 0.006 | 0.006 | 43478 → 43478 |
-| generator | 0.189 | 0.191 | 0.049 | 0.048 | 205970 → 206310 |
-| scoped-reader | 1.033 | 1.046 | 0.150 | 0.147 | 972624 → 972640 |
-| state-local | 0.263 | 0.293 | 0.048 | 0.047 | 219998 → 219974 |
-| state-shared | 0.242 | 0.238 | 0.040 | 0.041 | 226522 → 226610 |
-| choices-all | 0.057 | 0.057 | 0.016 | 0.016 | 70942 → 71022 |
-| recursive-choice | 1.245 | 1.235 | 0.240 | 0.237 | 968192 → 968232 |
-| install-8 | 0.119 | 0.118 | 0.032 | 0.032 | 115082 → 114962 |
-| install-64 | 1.236 | 1.243 | 0.355 | 0.358 | 1059342 → 1059302 |
-| install-128 | 2.711 | 2.693 | 0.791 | 0.785 | 2356236 → 2356116 |
+| recursive | 0.025 | 0.028 | 0.006 | 0.006 | 43478 → 43478 |
+| generator | 0.179 | 0.186 | 0.046 | 0.048 | 205970 → 206310 |
+| scoped-reader | 0.970 | 0.982 | 0.138 | 0.138 | 972624 → 972640 |
+| state-local | 0.237 | 0.251 | 0.042 | 0.042 | 219998 → 219974 |
+| state-shared | 0.222 | 0.221 | 0.038 | 0.038 | 226522 → 226610 |
+| choices-all | 0.054 | 0.056 | 0.015 | 0.015 | 70942 → 71022 |
+| recursive-choice | 1.136 | 1.157 | 0.223 | 0.231 | 968192 → 968232 |
+| install-8 | 0.113 | 0.115 | 0.031 | 0.031 | 115082 → 114962 |
+| install-64 | 1.182 | 1.173 | 0.341 | 0.333 | 1059342 → 1059302 |
+| install-128 | 2.544 | 2.562 | 0.745 | 0.743 | 2356236 → 2356116 |
 
 Retained compile/admission bytes are identical for every baseline/candidate pair.
-Ordinary compile median changes range from about −1.7% to +11.4% (state-local);
+Ordinary compile median changes range from about -0.8% to +10.3% (recursive);
 this small run does not establish a general speedup or zero overhead. Admission
-median changes range from −2.9% to +3.0%. No extra analysis runs on the ordinary
+median changes range from -2.2% to +6.9%. No extra analysis runs on the ordinary
 path. The storage extension can change arena growth boundaries. The aggregate
 check exposed an existing affine constructor that copied its arena before its last
 allocations; allocating those arrays before moving the arena fixes that leak.
 
-Private derivation medians (baseline → candidate) are 26.31 → 26.44 µs for
-generator, 45.17 → 45.46 µs for scoped-reader, and 563.73 → 567.15 µs for
+Private derivation medians (baseline → candidate) are 24.71 → 24.56 µs for
+generator, 41.92 → 41.98 µs for scoped-reader, and 535.08 → 541.29 µs for
 128 installations. Each performs one target derivation.
 
 Optional rows below include their shared target derivation; candidate rows include
@@ -250,14 +266,14 @@ Edges are graph edges for service, worklist visits for general monitors.
 
 | Fixture / operation | µs | Peak / retained bytes | Allocation calls | Target solves / queries | States / edges | Relations / widened sites | Explanation reasons |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| generator / explain | 47.38 | 106760 / 106760 | 8 | 1 / 3 | 0 / 0 | 0 / 0 | 40 |
-| scoped-reader / explain | 76.65 | 186204 / 186204 | 8 | 1 / 11 | 0 / 0 | 0 / 0 | 90 |
-| source-stateful-service / derive | 47.94 | 77044 / 77044 | 7 | 1 / 0 | 0 / 0 | 0 / 0 | 0 |
-| source-stateful-service / explain | 55.08 | 127132 / 127132 | 8 | 1 / 5 | 0 / 0 | 0 / 0 | 56 |
-| source-cloned / interactions | 28.73 | 30628 / 30628 | 6 | 1 / 1 | 15 / 171 | 51 / 3 | 0 |
-| source-stateful-service / service | 41.17 | 77044 / 77044 | 7 | 1 / 2 | 160 / 38 | 5 / 0 | 0 |
-| forwarding / candidate-validate | 25.73 | 24676 / 0 | 36 | 2 / 0 | 0 / 0 | 0 / 0 | 0 |
-| forwarding / candidate-observe | 40.73 | 32402 / 0 | 40 | 2 / 2 | 50 / 410 | 194 / 2 | 0 |
+| generator / explain | 31.29 | 106730 / 106730 | 8 | 1 / 3 | 0 / 0 | 0 / 0 | 40 |
+| scoped-reader / explain | 54.56 | 186270 / 186270 | 8 | 1 / 11 | 0 / 0 | 0 / 0 | 90 |
+| source-stateful-service / derive | 36.29 | 77014 / 77014 | 7 | 1 / 0 | 0 / 0 | 0 / 0 | 0 |
+| source-stateful-service / explain | 46.35 | 127102 / 127102 | 8 | 1 / 5 | 0 / 0 | 0 / 0 | 56 |
+| source-cloned / interactions | 22.85 | 43338 / 43338 | 7 | 1 / 1 | 15 / 171 | 51 / 3 | 0 |
+| source-stateful-service / service | 38.77 | 77014 / 77014 | 7 | 1 / 2 | 160 / 38 | 5 / 0 | 0 |
+| forwarding / candidate-validate | 23.75 | 24744 / 0 | 36 | 2 / 0 | 0 / 0 | 0 / 0 | 0 |
+| forwarding / candidate-observe | 38.60 | 32470 / 0 | 40 | 2 / 2 | 50 / 410 | 194 / 2 | 0 |
 
 Service adds six wait edges checked independently of its 38 phase edges. The
 cloned fixture reaches its fixed point in four iterations. Widened sites count

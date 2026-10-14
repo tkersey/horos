@@ -175,10 +175,14 @@ const Engine = struct {
         entry.* |= states;
         try self.pending.append(self.allocator, edge.block);
     }
-    fn call(self: *Engine, block: p.Id, callee: p.Id, context: usize, states: Mask) Error!Summary {
-        if (std.mem.indexOfScalar(p.Id, self.session.imports, callee) != null) return self.widened(block, states);
+    fn calleeContexts(self: Engine, block: p.Id, callee: p.Id, context: usize) Error!Mask {
         const contexts = if (self.monitor.parameters) |parameters| parameters(self.monitor.binding, self.image, block, callee, context) else bit(context);
         if (contexts == 0 or (self.monitor.contexts < 64 and contexts >> @intCast(self.monitor.contexts) != 0)) return error.InvalidMonitor;
+        return contexts;
+    }
+    fn call(self: *Engine, block: p.Id, callee: p.Id, context: usize, states: Mask) Error!Summary {
+        if (std.mem.indexOfScalar(p.Id, self.session.imports, callee) != null) return self.widened(block, states);
+        const contexts = try self.calleeContexts(block, callee, context);
         var result: Summary = .{ .may_nonreturn = true };
         for (0..self.monitor.contexts) |callee_context| if (contexts & bit(callee_context) != 0) {
             for (0..self.monitor.states) |state| if (states & bit(state) != 0) {
@@ -205,7 +209,7 @@ const Engine = struct {
         if (cached.*) |known| return known;
         var result = false;
         for (self.image.functions[@intCast(function_id)].layout.slots) |schema| {
-            if (try self.session.owner.mayDispose(schema)) {
+            if (try self.session.owner.mayRunDisposal(schema)) {
                 result = true;
                 break;
             }
@@ -240,6 +244,7 @@ const Engine = struct {
         return true;
     }
     fn silent(self: *Engine, function_id: p.Id, resumes: bool) Error!bool {
+        if (try self.disposable(function_id)) return false;
         var resume_count: usize = 0;
         const function_ = self.image.functions[@intCast(function_id)];
         if (resumes and function_.inputs.len != 2) return false;
@@ -249,6 +254,8 @@ const Engine = struct {
         var left = self.image.blocks.len + 1;
         while (left != 0) : (left -= 1) {
             const block = self.image.blocks[@intCast(block_id)];
+            // A numeric runtime quantum may stop at any erased control point.
+            for (0..self.monitor.contexts) |context| if (self.monitor.project(self.monitor.binding, self.image, .{ .block = block_id, .phase = .cancellation, .choice = .environment }, context) != 0) return false;
             for (block.instructions, 0..) |instruction, position| {
                 if (!@import("total_clause.zig").instruction(instruction)) return false;
                 if (token) |slot| if (instruction.destination == slot or std.mem.indexOfScalar(p.Id, instruction.operands, slot) != null) return false;
@@ -490,6 +497,9 @@ const Engine = struct {
             self.stats.control_states += 1;
             const block = self.image.blocks[@intCast(block_id)];
             var states = self.entries[@intCast(block_id)];
+            // Every edge arrival is itself a prefix, even when the next event
+            // leaves a nonabsorbing bad state.
+            out.prefixes |= states;
             // Cancellation at any control prefix; latent cleanup may run first.
             const cancelled = try self.abrupt(block_id, context, states, .cancellation);
             const latent_disposal = try self.disposable(block.function);
@@ -559,6 +569,9 @@ const Engine = struct {
                     var precise = !selection.knowledge().conservative and v.bodies.len == 0;
                     for (selection.targets()) |target| precise = precise and try self.administrative(target.handler);
                     if (precise) {
+                        const cancelled_pending = try self.abrupt(block_id, context, states, .cancellation);
+                        out.cancellation |= cancelled_pending;
+                        out.prefixes |= cancelled_pending;
                         const failed = try self.abrupt(block_id, context, states, .failure);
                         out.failure |= failed;
                         out.prefixes |= failed;
@@ -568,7 +581,10 @@ const Engine = struct {
                             for (selection.targets()) |target| {
                                 var cursor = self.image.functions[@intCast(target.function)].entry;
                                 while (self.image.blocks[@intCast(cursor)].terminator != .resume_value) cursor = self.image.blocks[@intCast(cursor)].terminator.jump.block;
-                                resumed_states |= try self.event(.{ .block = cursor, .phase = .resumed }, context, states);
+                                const contexts = try self.calleeContexts(block_id, target.function, context);
+                                for (0..self.monitor.contexts) |clause_context| if (contexts & bit(clause_context) != 0) {
+                                    resumed_states |= try self.event(.{ .block = cursor, .phase = .resumed }, clause_context, states);
+                                };
                             }
                             states = resumed_states;
                             out.prefixes |= states;

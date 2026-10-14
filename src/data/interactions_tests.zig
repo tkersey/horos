@@ -70,6 +70,142 @@ fn analyze(image: ir.Program, binding: *const Binding, expected: interaction.Sta
     try std.testing.expectEqual(result.summaries.ptr, repeated.summaries.ptr);
     try std.testing.expectEqual(@as(usize, 1), session.cached.items.len);
 }
+
+fn observedSummary(image: ir.Program, monitor: interaction.Monitor) !interaction.Summary {
+    return functionSummary(image, monitor, image.roots.entry);
+}
+fn functionSummary(image: ir.Program, monitor: interaction.Monitor, function: p.Id) !interaction.Summary {
+    var admitted = try @import("activation_ownership.zig").analyze(a, image);
+    defer admitted.deinit();
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const owner = try @import("control_provenance.zig").derive(arena.allocator(), image, &.{}, false);
+    var session: interaction.Session = .{ .allocator = a, .owner = owner };
+    defer session.deinit();
+    return (try session.analyze(monitor)).get(function, 0, monitor.entry);
+}
+
+test "branch and switch retain transient bad prefixes" {
+    const Projection = struct {
+        fn project(_: *const anyopaque, _: ir.Program, site: interaction.Site, _: usize) interaction.Mask {
+            return switch (site.phase) {
+                .branch => 1,
+                .returned, .cancellation => 2,
+                else => 0,
+            };
+        }
+    };
+    const binding: u8 = 0;
+    const monitor: interaction.Monitor = .{ .binding = &binding, .states = 2, .alphabet = 2, .bad = 2, .transitions = &.{ 1, 0, 1, 0 }, .project = Projection.project };
+    inline for (.{ false, true }) |variant| {
+        const image: ir.Program = .{
+            .roots = .{ .entry = 0, .result = 0, .failure = 0 },
+            .schemas = &.{ .unit, .boolean, .{ .sum = &.{ 0, 0 } } },
+            .constants = &.{.{ .schema = 0, .bytes = &.{} }},
+            .effects = &.{},
+            .functions = &.{.{ .entry = 0, .inputs = &.{ 0, 1 }, .layout = .{ .slots = &.{ if (variant) 2 else 1, 0 } }, .result = 0 }},
+            .blocks = &.{
+                .{ .function = 0, .instructions = &.{}, .terminator = if (variant) .{ .switch_variant = .{ .value = 0, .cases = &.{ .{ .block = 1 }, .{ .block = 1 } } } } else .{ .branch = .{ .condition = 0, .when_true = .{ .block = 1 }, .when_false = .{ .block = 1 } } } },
+                .{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 1 } },
+            },
+        };
+        const result = try observedSummary(image, monitor);
+        try std.testing.expectEqual(.potential, result.status(monitor));
+        try std.testing.expect(result.prefixes & 2 != 0);
+        try std.testing.expectEqual(@as(interaction.Mask, 1), result.normal);
+    }
+}
+
+test "pending external operation includes cancellation before reply" {
+    const Projection = struct {
+        fn project(_: *const anyopaque, _: ir.Program, site: interaction.Site, _: usize) interaction.Mask {
+            return switch (site.phase) {
+                .operation => if (site.block == 0) 1 else 0,
+                .reply => if (site.block == 0) 2 else 0,
+                .cancellation => 4,
+                else => 0,
+            };
+        }
+    };
+    const binding: u8 = 0;
+    const monitor: interaction.Monitor = .{ .binding = &binding, .states = 3, .alphabet = 3, .bad = 4, .transitions = &.{ 1, 0, 0, 1, 0, 2, 2, 2, 2 }, .project = Projection.project };
+    const result = try observedSummary(base, monitor);
+    try std.testing.expectEqual(.potential, result.status(monitor));
+    try std.testing.expect(result.cancellation & 4 != 0);
+    try std.testing.expect(result.normal & 1 != 0);
+}
+
+test "administrative clauses and returns preserve cancellation observations" {
+    const Projection = struct {
+        block: p.Id,
+        fn project(raw: *const anyopaque, _: ir.Program, site: interaction.Site, _: usize) interaction.Mask {
+            const self: *const @This() = @ptrCast(@alignCast(raw));
+            return if (site.phase == .cancellation and site.block == self.block) 1 else 0;
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const image = try @import("evidence_forwarding_tests.zig").fixture(arena.allocator());
+    // Both erased owners are independently interruptible at a numeric quantum.
+    for ([_]p.Id{ 4, 5 }) |block| {
+        const binding: Projection = .{ .block = block };
+        const monitor: interaction.Monitor = .{ .binding = &binding, .states = 2, .alphabet = 1, .bad = 2, .transitions = &.{ 1, 1 }, .project = Projection.project };
+        try std.testing.expectEqual(.potential, (try observedSummary(image, monitor)).status(monitor));
+    }
+}
+
+test "administrative resume uses the clause parameter interpretation" {
+    const Projection = struct {
+        fn project(_: *const anyopaque, _: ir.Program, site: interaction.Site, context: usize) interaction.Mask {
+            return if (site.phase == .resumed and context == 1) 1 else 0;
+        }
+        fn parameters(_: *const anyopaque, _: ir.Program, _: p.Id, callee: p.Id, context: usize) interaction.Mask {
+            return interaction.bit(if (callee == 3) 1 else context);
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const image = try @import("evidence_forwarding_tests.zig").fixture(arena.allocator());
+    const binding: u8 = 0;
+    const monitor: interaction.Monitor = .{ .binding = &binding, .states = 2, .alphabet = 1, .contexts = 2, .bad = 2, .transitions = &.{ 1, 1 }, .project = Projection.project, .parameters = Projection.parameters };
+    try std.testing.expectEqual(.potential, (try observedSummary(image, monitor)).status(monitor));
+}
+
+test "implicit disposal may yield without an escaping effect" {
+    const Projection = struct {
+        fn project(_: *const anyopaque, _: ir.Program, site: interaction.Site, _: usize) interaction.Mask {
+            return if (site.phase == .yield) 1 else 0;
+        }
+    };
+    // An admitted helper receives a generator answer retaining a protected
+    // continuation. Its failure discards that answer; a pure yielding cleanup
+    // is permitted even though neither the helper nor token has an effect row.
+    const image: ir.Program = .{
+        .roots = .{ .entry = 0, .result = 0, .failure = 0 },
+        .schemas = &.{
+            .unit,
+            .{ .internal = .{ .resumption = .{ .effect = 0, .input = 0, .answer = 4, .handled = &.{0}, .mode = .deep, .use = .linear, .obligations = true } } },
+            .{ .internal = .{ .suspension_package = 1 } },
+            .{ .product = &.{ 0, 2 } },
+            .{ .sum = &.{ 0, 3 } },
+        },
+        .constants = &.{.{ .schema = 0, .bytes = &.{} }},
+        .effects = &.{.{ .identity = "pure-cleanup-exchange", .payload = 0, .result = 0, .external = false }},
+        .functions = &.{
+            .{ .entry = 0, .inputs = &.{}, .layout = .{ .slots = &.{0} }, .result = 0 },
+            .{ .entry = 1, .inputs = &.{0}, .layout = .{ .slots = &.{ 4, 0 } }, .result = 0 },
+        },
+        .blocks = &.{
+            .{ .function = 0, .instructions = &.{.{ .destination = 0, .opcode = .constant }}, .terminator = .{ .return_value = 0 } },
+            .{ .function = 1, .instructions = &.{.{ .destination = 1, .opcode = .constant }}, .terminator = .{ .fail = 1 } },
+        },
+    };
+    const binding: u8 = 0;
+    const monitor: interaction.Monitor = .{ .binding = &binding, .states = 2, .alphabet = 1, .bad = 2, .transitions = &.{ 1, 1 }, .project = Projection.project };
+    const result = try functionSummary(image, monitor, 1);
+    try std.testing.expectEqual(.potential, result.status(monitor));
+    try std.testing.expect(result.widened and result.failure & 2 != 0);
+}
 test "interaction validation success precedes same object version write" {
     try analyze(base, &.{}, .established);
     var blocks = base.blocks[0..4].*;

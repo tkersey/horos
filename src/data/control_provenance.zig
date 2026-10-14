@@ -150,7 +150,7 @@ const Storage = struct {
     relative: ?*const Values = null,
     positions: std.ArrayList(PositionSources) = .empty,
     explanations: std.ArrayList(Explanation) = .empty,
-    disposal_query: ?DisposalEffects = null,
+    disposal_query: ?DisposalExecution = null,
     constructor_queries: std.ArrayList(ConstructorQuery) = .empty,
 };
 const ConstructorQuery = struct { block: p.Id, slot: p.Id, result: Analysis.Constructors };
@@ -257,14 +257,13 @@ pub const Analysis = opaque {
         const disposal = relative.disposal orelse return true;
         return disposal.contains(schema, @intCast(effect));
     }
-    pub fn mayDispose(self: *const Analysis, schema: p.Id) Error!bool {
+    /// Disposal can execute protected cleanup even when its escaping effect
+    /// row is empty. Use the owned-value traversal and admitted obligation bit,
+    /// not effect membership, for an arbitrary interaction projection.
+    pub fn mayRunDisposal(self: *const Analysis, schema: p.Id) Error!bool {
         const stored: *Storage = @ptrCast(@alignCast(@constCast(self)));
-        if (stored.disposal_query == null) stored.disposal_query = if (stored.relative) |relative|
-            relative.disposal orelse try DisposalEffects.derive(stored.allocator, stored.image)
-        else
-            try DisposalEffects.derive(stored.allocator, stored.image);
-        for (stored.image.effects, 0..) |_, effect| if (stored.disposal_query.?.contains(schema, effect)) return true;
-        return false;
+        if (stored.disposal_query == null) stored.disposal_query = try DisposalExecution.derive(stored.allocator, stored.image);
+        return stored.disposal_query.?.contains(schema);
     }
     /// Instantiate this immutable constructor's suspension summary with its
     /// concrete environment and supplied arguments. These are formal input
@@ -890,6 +889,47 @@ test "position suspension sources substitute callee inputs and preserve an await
 /// The schema projection of Kosmos's owned-value disposal traversal. Copied
 /// capabilities, cells and resources do not invoke user code when discarded;
 /// containers recurse into owned contents and one-shot captures run cleanup.
+const DisposalExecution = struct {
+    bits: []bool,
+    fn contains(self: DisposalExecution, schema: p.Id) bool {
+        return self.bits[@intCast(schema)];
+    }
+    fn any(self: DisposalExecution, schemas: []const p.Id) bool {
+        for (schemas) |schema| if (self.contains(schema)) return true;
+        return false;
+    }
+    fn derive(allocator: std.mem.Allocator, image: ir.Program) Error!DisposalExecution {
+        const result: DisposalExecution = .{ .bits = try allocator.alloc(bool, image.schemas.len) };
+        @memset(result.bits, false);
+        var changed = true;
+        while (changed) {
+            changed = false;
+            for (image.schemas, 0..) |schema, id| {
+                if (result.bits[id]) continue;
+                const present = switch (schema) {
+                    .product, .sum => |fields| result.any(fields),
+                    .seq => |element| result.contains(element),
+                    inline .vector, .array => |value| result.contains(value.element),
+                    .internal => |internal| switch (internal) {
+                        .computation => |value| result.any(value.capture_bound),
+                        .suspension_package => |token| result.contains(token),
+                        // Admission requires this bit whenever a capture retains
+                        // protection. Other owned captured values recurse even
+                        // without a directly retained protection frame.
+                        .resumption => |value| value.use != .multi and (value.obligations or result.any(value.capture_bound)),
+                        .capability, .cell, .region, .abstract_resource, .borrowed => false,
+                    },
+                    .unit, .boolean, .i8, .i16, .i32, .i64, .u8, .u16, .u32, .u64, .bytes, .text, .bounded_bytes, .bounded_text, .enumeration => false,
+                };
+                if (present) {
+                    result.bits[id] = true;
+                    changed = true;
+                }
+            }
+        }
+        return result;
+    }
+};
 const DisposalEffects = struct {
     bits: []bool,
     width: usize,
