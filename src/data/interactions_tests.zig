@@ -205,6 +205,22 @@ test "implicit disposal may yield without an escaping effect" {
     const result = try functionSummary(image, monitor, 1);
     try std.testing.expectEqual(.potential, result.status(monitor));
     try std.testing.expect(result.widened and result.failure & 2 != 0);
+    const Resetting = struct {
+        fn project(_: *const anyopaque, _: ir.Program, site: interaction.Site, _: usize) interaction.Mask {
+            return switch (site.phase) {
+                .yield => 1,
+                .instruction, .returned, .failure, .cancellation => 2,
+                else => 0,
+            };
+        }
+    };
+    // An exit may reset the monitor without erasing the cleanup's bad prefix.
+    const resetting: interaction.Monitor = .{ .binding = &binding, .states = 2, .alphabet = 2, .bad = 2, .transitions = &.{ 1, 0, 1, 0 }, .project = Resetting.project };
+    const transient = try functionSummary(image, resetting, 1);
+    try std.testing.expectEqual(.potential, transient.status(resetting));
+    try std.testing.expect(transient.prefixes & 2 != 0);
+    try std.testing.expectEqual(@as(interaction.Mask, 1), transient.failure);
+    try std.testing.expectEqual(@as(interaction.Mask, 1), transient.cancellation);
 }
 test "interaction validation success precedes same object version write" {
     try analyze(base, &.{}, .established);

@@ -217,10 +217,17 @@ const Engine = struct {
         cached.* = result;
         return result;
     }
-    fn abrupt(self: *Engine, block: p.Id, context: usize, states: Mask, phase: Phase) Error!Mask {
-        var result = states;
-        if (try self.disposable(self.image.blocks[@intCast(block)].function)) result = self.widened(block, result).prefixes;
-        return self.event(.{ .block = block, .phase = phase, .choice = .environment }, context, result);
+    fn abrupt(self: *Engine, block: p.Id, context: usize, states: Mask, phase: Phase) Error!Summary {
+        var result: Summary = .{ .normal = states, .prefixes = states };
+        if (try self.disposable(self.image.blocks[@intCast(block)].function)) result = self.widened(block, states);
+        const exits = try self.event(.{ .block = block, .phase = phase, .choice = .environment }, context, result.normal);
+        // Cleanup prefixes and post-event exits are different observations:
+        // a terminal event can leave a bad state reached during cleanup.
+        result.prefixes |= exits;
+        result.normal = 0;
+        result.failure = if (phase == .failure) exits else 0;
+        result.cancellation = if (phase == .cancellation) exits else 0;
+        return result;
     }
     /// Checked administrative deep clauses resume exactly once on every path.
     /// Their surrounding steps must be projection-silent and cannot suspend,
@@ -501,24 +508,19 @@ const Engine = struct {
             // leaves a nonabsorbing bad state.
             out.prefixes |= states;
             // Cancellation at any control prefix; latent cleanup may run first.
-            const cancelled = try self.abrupt(block_id, context, states, .cancellation);
+            _ = out.join(try self.abrupt(block_id, context, states, .cancellation));
             const latent_disposal = try self.disposable(block.function);
             out.widened = out.widened or latent_disposal;
             out.may_nonreturn = out.may_nonreturn or latent_disposal;
             if (latent_disposal) states = self.widened(block_id, states).normal;
-            out.cancellation |= cancelled;
-            out.prefixes |= cancelled;
+            out.prefixes |= states;
             for (block.instructions, 0..) |instruction, position| {
                 if (instruction.failures.len != 0) {
-                    const failed = try self.abrupt(block_id, context, states, .failure);
-                    out.failure |= failed;
-                    out.prefixes |= failed;
+                    _ = out.join(try self.abrupt(block_id, context, states, .failure));
                 }
                 states = try self.event(.{ .block = block_id, .phase = .instruction, .position = position }, context, states);
                 out.prefixes |= states;
-                const cancelled_after = try self.abrupt(block_id, context, states, .cancellation);
-                out.cancellation |= cancelled_after;
-                out.prefixes |= cancelled_after;
+                _ = out.join(try self.abrupt(block_id, context, states, .cancellation));
             }
             switch (block.terminator) {
                 .return_value => {
@@ -527,9 +529,7 @@ const Engine = struct {
                     out.prefixes |= returned;
                 },
                 .fail => {
-                    const failed = try self.abrupt(block_id, context, states, .failure);
-                    out.failure |= failed;
-                    out.prefixes |= failed;
+                    _ = out.join(try self.abrupt(block_id, context, states, .failure));
                 },
                 .jump => |edge| {
                     out.may_nonreturn = true;
@@ -569,12 +569,8 @@ const Engine = struct {
                     var precise = !selection.knowledge().conservative and v.bodies.len == 0;
                     for (selection.targets()) |target| precise = precise and try self.administrative(target.handler);
                     if (precise) {
-                        const cancelled_pending = try self.abrupt(block_id, context, states, .cancellation);
-                        out.cancellation |= cancelled_pending;
-                        out.prefixes |= cancelled_pending;
-                        const failed = try self.abrupt(block_id, context, states, .failure);
-                        out.failure |= failed;
-                        out.prefixes |= failed;
+                        _ = out.join(try self.abrupt(block_id, context, states, .cancellation));
+                        _ = out.join(try self.abrupt(block_id, context, states, .failure));
                         out.may_nonreturn = true;
                         if (selection.targets().len != 0) {
                             var resumed_states: Mask = 0;

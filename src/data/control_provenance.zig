@@ -211,6 +211,7 @@ pub const Analysis = opaque {
         }
         var builder: ExplanationBuilder = .{ .stored = self.data() };
         const root = try builder.selection(selection);
+        try builder.finish();
         const result: Explanation = .{ .boundary = selection.boundary(), .effect = selection.effect(), .knowledge = selection.knowledge(), .targets = selection.targets(), .reasons = builder.reasons.items, .root = root };
         const stored: *Storage = @ptrCast(@alignCast(@constCast(self)));
         try stored.explanations.append(stored.allocator, result);
@@ -1402,6 +1403,7 @@ const ExplanationBuilder = struct {
     stored: *const Storage,
     reasons: std.ArrayList(Explanation.Reason) = .empty,
     memo: std.AutoHashMapUnmanaged(Key, usize) = .empty,
+    pending: std.ArrayList(Key) = .empty,
     const Key = struct { kind: enum { slot, returned, capture, suspension }, relative: bool = false, a: usize, b: usize = 0, c: usize = 0 };
     const List = std.ArrayList(usize);
 
@@ -1429,6 +1431,16 @@ const ExplanationBuilder = struct {
         if (self.memo.get(key)) |existing| return existing;
         const id = try self.add(.{ .rule = .summary_dependency });
         try self.memo.put(self.stored.allocator, key, id);
+        try self.pending.append(self.stored.allocator, key);
+        return id;
+    }
+    fn finish(self: *ExplanationBuilder) Error!void {
+        // Intern before scheduling, so cycles share an id and graph depth never
+        // consumes native stack. Publish only after every placeholder is filled.
+        while (self.pending.pop()) |key| try self.expand(key);
+    }
+    fn expand(self: *ExplanationBuilder, key: Key) Error!void {
+        const id = self.memo.get(key).?;
         const flow = (if (key.relative) self.stored.relative else self.stored.values).?;
         const image = self.stored.image;
         var inputs: List = .empty;
@@ -1557,7 +1569,6 @@ const ExplanationBuilder = struct {
         }
         reason.inputs = inputs.items;
         self.reasons.items[id] = reason;
-        return id;
     }
 
     fn edge(self: *ExplanationBuilder, inputs: *List, key: Key, predecessor: usize, edge_: ir.Edge) Error!void {

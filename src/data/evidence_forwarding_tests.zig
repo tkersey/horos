@@ -401,6 +401,51 @@ test "capture explanation observer preserves rejection and owns copied failure p
     try std.testing.expect(!observer.retained.?.capture_constraint.?.satisfied);
 }
 
+test "explanation observers traverse large admitted blocks without native recursion" {
+    const own = @import("activation_ownership.zig");
+    const Observer = struct {
+        observed: usize = 0,
+        unavailable: bool = false,
+        invalid: bool = false,
+        fn capture(_: *anyopaque, _: p.Id, _: *const own.CaptureSite, _: p.Id) void {}
+        fn explain(context: *anyopaque, _: p.Id, _: *const own.CaptureSite, _: p.Id, value: ?own.CaptureExplanation) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            const explanation = value orelse {
+                self.unavailable = true;
+                return;
+            };
+            self.observed += 1;
+            self.invalid = self.invalid or explanation.root >= explanation.reasons.len;
+            for (explanation.reasons) |reason| for (reason.inputs) |input| {
+                self.invalid = self.invalid or input >= explanation.reasons.len;
+            };
+        }
+    };
+    // Both a long unchanged capability and a long chain of actual capability
+    // definitions must retain their finite explanation and ordinary admission.
+    inline for (.{ false, true }) |definitions| {
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var program = try fixture(allocator);
+        const blocks = try allocator.dupe(ir.Block, program.blocks);
+        const instructions = try allocator.alloc(ir.Instruction, if (definitions) 4096 else 10_000);
+        @memset(instructions, if (definitions)
+            .{ .destination = 0, .opcode = .move, .operands = &.{0} }
+        else
+            .{ .destination = 2, .opcode = .integer_bit_not, .operands = &.{2} });
+        blocks[8].instructions = instructions;
+        program.blocks = blocks;
+        var ordinary = try own.analyze(a, program);
+        ordinary.deinit();
+        var observer: Observer = .{};
+        var observed = try own.analyzeObserved(a, program, null, .{ .context = &observer, .capture = Observer.capture, .explanation = Observer.explain });
+        observed.deinit();
+        try std.testing.expect(observer.observed != 0);
+        try std.testing.expect(!observer.unavailable and !observer.invalid);
+    }
+}
+
 test "explanations name unwitnessed inputs and close recursive summaries with backreferences" {
     const provenance = @import("control_provenance.zig");
     var arena = std.heap.ArenaAllocator.init(a);
