@@ -586,3 +586,99 @@ test "optional capture explanations preserve images and retain mapped presentati
         if (comptime std.mem.eql(u8, name, "statefulService")) try testing.expect(observer.count != 0);
     }
 }
+
+test "service interaction observation checks actual construction and labeled replies" {
+    const Report = data.closed_compilation.ServiceObservation.Report;
+    const Observer = struct {
+        calls: usize = 0,
+        expected: @TypeOf(@as(Report, .{}).ordered),
+        failed: bool = false,
+        fn enter(_: *anyopaque, _: data.closed_compilation.Stage) void {}
+        fn receive(context: *anyopaque, report_: ?Report) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            const report = report_ orelse {
+                self.failed = true;
+                return;
+            };
+            if (report.ordered != self.expected or report.waits == null or report.waits.?.status != .scoped_acyclic) {
+                std.debug.print("service report: {any}\n", .{report.ordered});
+                self.failed = true;
+                return;
+            }
+            var incomplete = report.waits.?;
+            incomplete.edges = incomplete.edges[1..];
+            self.failed = self.failed or report.waitCoverage(incomplete);
+            var bad_ranks: [7]usize = @splat(0);
+            incomplete = report.waits.?;
+            incomplete.ranks = &bad_ranks;
+            self.failed = self.failed or report.ranksValid(incomplete);
+            self.failed = self.failed or !report.waitCoverage(report.waits.?) or !report.ranksValid(report.waits.?);
+            self.failed = self.failed or report.external_completion != .unresolved or report.scheduler_fairness != .explicit_runtime_premise or report.end_to_end != .conditional_on_finite_batch_fairness_external_completion_and_resources;
+            const event: Report.TraceEvent = if (self.expected == .established) .matching_reply else .mismatched_reply;
+            const trace = [_]Report.TraceEvent{ .command, .suspended, event, .command, .suspended, event, .command, .finalize };
+            self.failed = self.failed or !(report.contains(testing.allocator, &trace) catch false);
+            self.failed = self.failed or (report.contains(testing.allocator, &.{ .command, event }) catch true);
+            self.failed = self.failed or !(report.contains(testing.allocator, &.{ .command, .suspended, .finalize }) catch false);
+        }
+    };
+    inline for (.{ false, true }) |swapped| {
+        var builder = source.Builder.init(testing.allocator);
+        defer builder.deinit();
+        const module = try (if (swapped) source.examples.swappedServiceReplies else source.examples.statefulService)(&builder);
+        var observer: Observer = .{ .expected = if (swapped) .potential else .established };
+        var plain = try source.lower(testing.allocator, module);
+        defer plain.deinit();
+        var observed = try source.lowerObserved(testing.allocator, module, .{ .compilation_observer = .{ .context = &observer, .enter = Observer.enter, .service = .{ .contract = .{ .command = "example/service-command", .reply = "example/service-reply", .finalizer = "example/service-finalize" }, .receive = Observer.receive } } });
+        defer observed.deinit();
+        try testing.expectEqual(@as(usize, 1), observer.calls);
+        try testing.expect(!observer.failed);
+        try testing.expectEqual(try data.program_image.identity(testing.allocator, plain.program), try data.program_image.identity(testing.allocator, observed.program));
+    }
+}
+
+test "changed service code cannot retain prior interaction or wait conclusions" {
+    const Report = data.closed_compilation.ServiceObservation.Report;
+    const Observer = struct {
+        received: bool = false,
+        unresolved: bool = false,
+        fn enter(_: *anyopaque, _: data.closed_compilation.Stage) void {}
+        fn receive(raw: *anyopaque, value: ?Report) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.received = true;
+            if (value) |report| self.unresolved = report.ordered == .unresolved and report.waits == null and report.end_to_end == .no_claim;
+        }
+    };
+    var builder = source.Builder.init(testing.allocator);
+    defer builder.deinit();
+    var original = try source.lower(testing.allocator, try source.examples.statefulService(&builder));
+    defer original.deinit();
+    for ([_]bool{ false, true }) |overwrite| {
+        const blocks = try testing.allocator.dupe(ir.Block, original.program.blocks);
+        defer testing.allocator.free(blocks);
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        var changed = false;
+        for (blocks) |*block| for (block.instructions, 0..) |instruction, index| if (instruction.opcode == .integer_add) {
+            const operations = try arena.allocator().dupe(ir.Instruction, block.instructions);
+            if (overwrite) {
+                // Keep the same checked operations and final state, but overwrite
+                // the request id with the sum before constructing its reply.
+                const request_id = operations[0].destination;
+                operations[index].destination = request_id;
+                operations[index + 1].operands = try arena.allocator().dupe(p.Id, &.{ operations[index + 1].operands[0], request_id });
+            } else operations[index].opcode = .integer_sub;
+            block.instructions = operations;
+            changed = true;
+        };
+        try testing.expect(changed);
+        var candidate = original.program;
+        candidate.blocks = blocks;
+        var admitted = try data.activation_ownership.analyze(testing.allocator, candidate);
+        admitted.deinit();
+        var observer: Observer = .{};
+        var compiled = try data.closed_compilation.run(testing.allocator, candidate, .{ .observer = .{ .context = &observer, .enter = Observer.enter, .service = .{ .contract = .{ .command = "example/service-command", .reply = "example/service-reply", .finalizer = "example/service-finalize" }, .receive = Observer.receive } } });
+        defer compiled.deinit();
+        try testing.expect(observer.received and observer.unresolved);
+    }
+}

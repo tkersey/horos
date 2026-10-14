@@ -155,6 +155,11 @@ fn lowerBody(
 
 const CompilationObserver = struct {
     options: source.CompileOptions,
+    fn service(context: *anyopaque, report: ?data.closed_compilation.ServiceObservation.Report) void {
+        const self: *CompilationObserver = @ptrCast(@alignCast(context));
+        const observer = self.options.compilation_observer.?;
+        observer.service.?.receive(observer.context, report);
+    }
     fn enter(context: *anyopaque, stage: data.closed_compilation.Stage) void {
         const self: *CompilationObserver = @ptrCast(@alignCast(context));
         self.options.stage(if (stage == .p01) .coalescing else .semantic_optimization);
@@ -190,7 +195,7 @@ fn coalesce(allocator: std.mem.Allocator, program: ir.Program, compiler: *Compil
         .work_limit = options.semantic_work_limit,
         .round_limit = options.semantic_round_limit,
         .statistics = &statistics,
-        .observer = .{ .context = &observation, .enter = CompilationObserver.enter },
+        .observer = .{ .context = &observation, .enter = CompilationObserver.enter, .service = if (options.compilation_observer) |observer| if (observer.service) |service| .{ .contract = service.contract, .receive = CompilationObserver.service } else null else null },
         .coalescing = selected,
     }) catch |err| {
         if (options.diagnostic) |diagnostic| {

@@ -8,7 +8,8 @@ pub fn main(init: std.process.Init) !void {
     const example = try std.fmt.parseInt(usize, args.next() orelse return error.MissingExample, 10);
     const format = args.next() orelse return error.MissingFormat;
     const emit_source = std.mem.eql(u8, format, "json");
-    if (args.next() != null or (!emit_source and !std.mem.eql(u8, format, "bpi3")))
+    const emit_analysis = std.mem.eql(u8, format, "analysis");
+    if (args.next() != null or (!emit_source and !emit_analysis and !std.mem.eql(u8, format, "bpi3")))
         return error.InvalidArguments;
     var builder = horos.source.Builder.init(init.gpa);
     defer builder.deinit();
@@ -59,12 +60,20 @@ pub fn main(init: std.process.Init) !void {
         43 => horos.source.examples.localContinuation(&builder, true),
         44 => horos.source.examples.statefulService(&builder),
         45 => horos.source.examples.swappedServiceReplies(&builder),
+        46 => horos.source.examples.pairedServices(&builder),
         else => error.UnknownExample,
     };
     var buffer: [4096]u8 = undefined;
     var output = std.Io.File.stdout().writer(init.io, &buffer);
     if (emit_source) {
         try std.json.Stringify.value(module, .{ .emit_strings_as_arrays = true }, &output.interface);
+        try output.interface.writeByte('\n');
+    } else if (emit_analysis) {
+        var observation: ServiceAnalysis = .{ .allocator = init.gpa };
+        defer if (observation.json) |json| init.gpa.free(json);
+        var compiled = try horos.source.lowerObserved(init.gpa, module, .{ .compilation_observer = .{ .context = &observation, .enter = ServiceAnalysis.enter, .service = .{ .contract = .{ .command = "example/service-command", .reply = "example/service-reply", .finalizer = "example/service-finalize" }, .receive = ServiceAnalysis.receive } } });
+        defer compiled.deinit();
+        try output.interface.writeAll(observation.json orelse return error.UnavailableServiceAnalysis);
         try output.interface.writeByte('\n');
     } else {
         var compiled = try horos.program.compile(init.gpa, module);
@@ -299,5 +308,19 @@ const CleanupDisposal = struct {
         const resumed = try b.term(.{ .resume_value = .{ .resumption = token, .argument = try b.constant(void, {}) } });
         b.functions.items[@intCast(clause)].body = try b.bind(try b.variable(unit), try appendLog(b, log, message), try b.term(.{ .conditional = .{ .condition = condition, .when_true = disposed, .when_false = resumed } }));
         return b.module(fixture_entry, unit);
+    }
+};
+
+const ServiceAnalysis = struct {
+    allocator: std.mem.Allocator,
+    json: ?[]u8 = null,
+    fn enter(_: *anyopaque, _: horos.data.closed_compilation.Stage) void {}
+    fn receive(raw: *anyopaque, value: ?horos.data.closed_compilation.ServiceObservation.Report) void {
+        const self: *ServiceAnalysis = @ptrCast(@alignCast(raw));
+        const report = value orelse return;
+        const phases = report.phases orelse return;
+        const edges = report.externalEdges(self.allocator) catch return;
+        defer self.allocator.free(edges);
+        self.json = std.json.Stringify.valueAlloc(self.allocator, .{ .nodes = phases.nodes, .entry = phases.entry, .ordered = report.ordered, .waits = report.waits.?.status, .edges = edges }, .{}) catch null;
     }
 };

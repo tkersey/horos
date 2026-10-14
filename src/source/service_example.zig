@@ -6,16 +6,20 @@ const a = @import("../authoring.zig");
 const gen = @import("../library/generator.zig");
 
 pub fn build(b: *source.Builder) source.Error!source.Module {
-    return authored(b, false) catch |err| return a.sourceError(err);
+    return authored(b, false, false) catch |err| return a.sourceError(err);
 }
 
 /// Same state transitions, but IDs 1 and 2 receive each other's replies.
 /// This deliberately invalid contract remains a well-typed ordinary program.
 pub fn swappedReplies(b: *source.Builder) source.Error!source.Module {
-    return authored(b, true) catch |err| return a.sourceError(err);
+    return authored(b, true, false) catch |err| return a.sourceError(err);
 }
 
-fn authored(b: *source.Builder, comptime swap_replies: bool) a.Error!source.Module {
+pub fn twoInstances(b: *source.Builder) source.Error!source.Module {
+    return authored(b, false, true) catch |err| return a.sourceError(err);
+}
+
+fn authored(b: *source.Builder, comptime swap_replies: bool, comptime paired: bool) a.Error!source.Module {
     const c = try a.Context.init(b);
     const unit = try c.schema(void);
     const integer = try c.schema(u64);
@@ -121,6 +125,9 @@ fn authored(b: *source.Builder, comptime swap_replies: bool) a.Error!source.Modu
     const main = try c.function("entry", .{}, integer, &.{ receive, send, release });
     const entry = try c.body(main);
     const initial = try entry.handleWith(service.handler(), try entry.lambda(producer_fn, producer_type), .{});
-    try c.define(main, try entry.ret(try entry.call(drive_fn, .{ .answer = initial })));
+    const second = if (paired) try entry.handleWith(service.handler(), try entry.lambda(producer_fn, producer_type), .{}) else null;
+    const first_result = try entry.call(drive_fn, .{ .answer = initial });
+    const combined = if (paired) try entry.checkedAdd(first_result, try entry.call(drive_fn, .{ .answer = second }), try c.literalFailure(void, {})) else first_result;
+    try c.define(main, try entry.ret(combined));
     return c.module(main, unit);
 }

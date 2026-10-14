@@ -161,9 +161,12 @@ pub fn construct(allocator: std.mem.Allocator, original: ir.Program, options: Op
     return .{ .arena = arena, .program = program, .pairs = selected };
 }
 pub fn validate(allocator: std.mem.Allocator, original: ir.Program, candidate: ir.Program, pairs: []const Pair, limit: usize) Error!void {
-    var before = try own.analyze(allocator, original);
+    return validateObserved(allocator, original, candidate, pairs, limit, null);
+}
+fn validateObserved(allocator: std.mem.Allocator, original: ir.Program, candidate: ir.Program, pairs: []const Pair, limit: usize, observer: ?own.CaptureObserver) Error!void {
+    var before = try own.analyzeObserved(allocator, original, null, observer);
     defer before.deinit();
-    var after = try own.analyze(allocator, candidate);
+    var after = try own.analyzeObserved(allocator, candidate, null, observer);
     defer after.deinit();
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -238,4 +241,100 @@ pub fn run(allocator: std.mem.Allocator, original: ir.Program, statistics: ?*Sta
     stats.parameters_coalesced = candidate.pairs.len;
     stats.call_arguments_removed = removed.call_arguments_removed;
     return result;
+}
+
+/// Optional qualification on the actual candidate before dead-argument removal
+/// and P01 relocation. The existing record validator remains authoritative.
+/// Pair monitors retain site order; nominal targets are compared independently.
+/// Agreement is evidence only for this projection, never value equivalence.
+pub const InteractionObservation = struct {
+    status: enum { established, inconclusive } = .established,
+    monitors: usize = 0,
+    relations: usize = 0,
+    opaque_sites: usize = 0,
+    finite_states: usize = 0,
+    control_states: usize = 0,
+    iterations: usize = 0,
+};
+pub fn observeInteractions(allocator: std.mem.Allocator, original: ir.Program, candidate: ir.Program, pairs: []const Pair, limit: usize) (Error || @import("interactions.zig").Error)!InteractionObservation {
+    const interactions = @import("interactions.zig");
+    const provenance = @import("control_provenance.zig");
+    const ObserveError = Error || interactions.Error;
+    const Collector = struct {
+        allocator: std.mem.Allocator,
+        pass: usize = 0,
+        failure: ?ObserveError = null,
+        targets: std.ArrayList([]const provenance.Target) = .empty,
+        knowledge: std.ArrayList(provenance.Knowledge) = .empty,
+        roots: std.ArrayList(interactions.Summary) = .empty,
+        observation: InteractionObservation = .{},
+        fn capture(_: *anyopaque, _: p.Id, _: *const own.CaptureSite, _: p.Id) void {}
+        fn analyzed(raw: *anyopaque, owner: *const provenance.Analysis) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (self.failure != null) return;
+            self.collect(owner) catch |err| {
+                self.failure = err;
+            };
+            self.pass += 1;
+        }
+        fn collect(self: *@This(), owner: *const provenance.Analysis) ObserveError!void {
+            const program = owner.program();
+            var session: interactions.Session = .{ .allocator = self.allocator, .owner = owner };
+            defer session.deinit();
+            var sites: std.ArrayList(p.Id) = .empty;
+            for (program.blocks, 0..) |block, id| if (block.terminator == .perform) {
+                const selected = try owner.select(.{ .block = id, .role = .operation }, block.terminator.perform.effect);
+                const index = sites.items.len;
+                try sites.append(self.allocator, id);
+                if (self.pass == 0) {
+                    try self.targets.append(self.allocator, try self.allocator.dupe(provenance.Target, selected.targets()));
+                    try self.knowledge.append(self.allocator, selected.knowledge());
+                } else if (index >= self.targets.items.len or !equal([]const provenance.Target, self.targets.items[index], selected.targets()) or !std.meta.eql(self.knowledge.items[index], selected.knowledge())) {
+                    self.observation.status = .inconclusive;
+                }
+            };
+            if (self.pass != 0 and sites.items.len != self.targets.items.len) self.observation.status = .inconclusive;
+            const Binding = struct {
+                first: p.Id,
+                second: p.Id,
+                fn project(raw: *const anyopaque, _: ir.Program, site: interactions.Site, _: usize) interactions.Mask {
+                    const self_: *const @This() = @ptrCast(@alignCast(raw));
+                    if (site.phase != .operation) return 0;
+                    return if (site.block == self_.first) 1 else if (site.block == self_.second) 2 else 0;
+                }
+            };
+            var root_index: usize = 0;
+            for (sites.items, 0..) |first, index| for (sites.items[index + 1 ..]) |second| {
+                const binding = try self.allocator.create(Binding);
+                binding.* = .{ .first = first, .second = second };
+                const monitor: interactions.Monitor = .{ .binding = binding, .states = 5, .alphabet = 2, .bad = interactions.bit(4), .transitions = &.{ 1, 2, 1, 3, 4, 2, 4, 3, 4, 4 }, .project = Binding.project };
+                const result = try session.analyze(monitor);
+                if (self.pass == 0) self.observation.monitors += 1;
+                self.observation.relations += result.statistics.relations;
+                self.observation.opaque_sites += result.statistics.opaque_sites;
+                self.observation.finite_states += result.functions * monitor.contexts * monitor.states;
+                self.observation.control_states += result.statistics.control_states;
+                self.observation.iterations += result.statistics.iterations;
+                for (0..monitor.states) |state| {
+                    const root = result.get(program.roots.entry, 0, state);
+                    if (root.widened) self.observation.status = .inconclusive;
+                    if (self.pass == 0) {
+                        try self.roots.append(self.allocator, root);
+                    } else if (root_index >= self.roots.items.len or !std.meta.eql(root, self.roots.items[root_index])) {
+                        self.observation.status = .inconclusive;
+                    }
+                    root_index += 1;
+                }
+            };
+            if (self.pass != 0 and root_index != self.roots.items.len) self.observation.status = .inconclusive;
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var collector: Collector = .{ .allocator = arena.allocator() };
+    // Admission owns each analysis. Copy only observations needed after its
+    // callback; never retain an owner or rederive targets for the property.
+    try validateObserved(allocator, original, candidate, pairs, limit, .{ .context = &collector, .capture = Collector.capture, .analyzed = Collector.analyzed });
+    if (collector.failure) |err| return err;
+    return collector.observation;
 }

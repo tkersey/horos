@@ -24,6 +24,8 @@ pub const CaptureObserver = struct {
     capture: *const fn (*anyopaque, p.Id, *const CaptureSite, p.Id) void,
     /// Null presentation reports unavailable rendering, not unknown semantics.
     explanation: ?*const fn (*anyopaque, p.Id, *const CaptureSite, p.Id, ?CaptureExplanation) void = null,
+    /// Borrow the already checked immutable provenance owner until return.
+    analyzed: ?*const fn (*anyopaque, *const provenance.Analysis) void = null,
 };
 pub const CaptureSite = provenance.Selection;
 pub const CaptureExplanation = provenance.Explanation;
@@ -79,6 +81,7 @@ fn analyzeInternal(
         checker.boundary = .{ .block = id, .role = .callee };
         try checker.block(block);
     }
+    if (observer) |o| if (o.analyzed) |receive| receive(o.context, contextual.control);
     return facts;
 }
 

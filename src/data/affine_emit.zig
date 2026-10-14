@@ -256,5 +256,8 @@ pub fn constructTarget(allocator: std.mem.Allocator, original: ir.Program, targe
     program.constructors = constructors;
     program.scopes.captures = captures;
     program.constants = try literals.toOwnedSlice(a);
-    return .{ .arena = arena, .program = program, .constructor = constructor_id, .basis = try a.dupe(space.Row, plan.basis), .input_bias = try a.dupe(u64, plan.input_bias) };
+    const owned_basis = try a.dupe(space.Row, plan.basis);
+    const owned_bias = try a.dupe(u64, plan.input_bias);
+    // Complete allocations before copying the arena's owning list head.
+    return .{ .arena = arena, .program = program, .constructor = constructor_id, .basis = owned_basis, .input_bias = owned_bias };
 }

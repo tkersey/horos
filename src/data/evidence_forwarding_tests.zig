@@ -32,7 +32,7 @@ const base: ir.Program = .{
     .scopes = .{ .captures = &.{.{ .fields = &.{0}, .use = .reusable }} },
 };
 
-fn fixture(allocator: std.mem.Allocator) !ir.Program {
+pub fn fixture(allocator: std.mem.Allocator) !ir.Program {
     var result = base;
     const functions = try allocator.alloc(ir.Function, 5);
     @memcpy(functions[0..4], base.functions);
@@ -64,6 +64,9 @@ test "actual duplicate capability arguments remove forwarding, not operations" {
     defer candidate.deinit();
     try std.testing.expectEqual(@as(usize, 1), candidate.pairs.len);
     try forwarding.validate(a, original, candidate.program, candidate.pairs, 10_000_000);
+    const interactions = try forwarding.observeInteractions(a, original, candidate.program, candidate.pairs, 10_000_000);
+    try std.testing.expectEqual(.established, interactions.status);
+    try std.testing.expect(interactions.monitors != 0);
     try std.testing.expectEqual(@as(?p.Id, 0), candidate.program.blocks[9].terminator.perform.capability);
     var stats: forwarding.Statistics = .{};
     var result = try forwarding.run(a, original, &stats, .{});
@@ -431,4 +434,128 @@ test "explanations name unwitnessed inputs and close recursive summaries with ba
     try std.testing.expect(unknown.knowledge.conservative);
     try std.testing.expect(explanationHas(unknown, .unknown_input));
     try std.testing.expect(explanationHas(unknown, .conservative_expansion));
+}
+
+test "multi shot repeats captured suffix without replaying producer prefix" {
+    const interactions = @import("interactions.zig");
+    var image = base;
+    var schemas = base.schemas[0..6].*;
+    schemas[3].internal.computation.effects = &.{ 0, 1, 2 };
+    schemas[4].internal.resumption.use = .multi;
+    schemas[4].internal.resumption.effects = &.{ 1, 2 };
+    image.schemas = &schemas;
+    image.effects = &.{
+        .{ .identity = "multi", .payload = 0, .result = 0, .external = false, .control_use = .multi },
+        .{ .identity = "producer", .payload = 0, .result = 0 },
+        .{ .identity = "suffix", .payload = 0, .result = 0 },
+    };
+    var functions = base.functions[0..4].*;
+    functions[0].effects = &.{ 1, 2 };
+    functions[1].effects = &.{ 0, 1, 2 };
+    functions[3].effects = &.{ 1, 2 };
+    image.functions = &functions;
+    var handlers = base.handlers[0..1].*;
+    handlers[0].effects = &.{ 1, 2 };
+    image.handlers = &handlers;
+    var blocks: [10]ir.Block = undefined;
+    @memcpy(blocks[0..8], base.blocks);
+    blocks[2].terminator = .{ .perform = .{ .effect = 1, .payload = 0, .next = .{ .block = 8, .assignments = &.{.{ .destination = 2, .source = .returned }} } } };
+    blocks[8] = .{ .function = 1, .instructions = &.{}, .terminator = .{ .perform = .{ .effect = 0, .capability = 1, .payload = 2, .next = .{ .block = 9, .assignments = &.{.{ .destination = 2, .source = .returned }} } } } };
+    blocks[9] = .{ .function = 1, .instructions = &.{}, .terminator = .{ .perform = .{ .effect = 2, .payload = 2, .next = .{ .block = 3, .assignments = &.{.{ .destination = 2, .source = .returned }} } } } };
+    blocks[6].instructions = &.{};
+    blocks[6].terminator = .{ .resume_value = .{ .resumption = 1, .argument = 0, .next = .{ .block = 7, .assignments = &.{.{ .destination = 2, .source = .returned }} } } };
+    image.blocks = &blocks;
+    var admitted = try @import("activation_ownership.zig").analyze(a, image);
+    admitted.deinit();
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const owner = try @import("control_provenance.zig").derive(arena.allocator(), image, &.{}, false);
+    var session: interactions.Session = .{ .allocator = a, .owner = owner };
+    defer session.deinit();
+    const Projection = struct {
+        fn project(_: *const anyopaque, program: ir.Program, site: interactions.Site, _: usize) interactions.Mask {
+            if (site.phase != .operation) return 0;
+            return switch (program.blocks[@intCast(site.block)].terminator.perform.effect) {
+                1 => 1,
+                2 => 2,
+                else => 0,
+            };
+        }
+    };
+    const binding: u8 = 0;
+    const monitor: interactions.Monitor = .{ .binding = &binding, .states = 3, .alphabet = 2, .bad = interactions.bit(2), .transitions = &.{ 1, 0, 2, 1, 2, 2 }, .project = Projection.project };
+    const result = try session.analyze(monitor);
+    const root = result.get(image.roots.entry, 0, 0);
+    try std.testing.expect(root.widened);
+    try std.testing.expectEqual(.established, root.status(monitor));
+    try std.testing.expect(root.normal & interactions.bit(1) != 0);
+    // Two suffix occurrences remain represented without counting a new producer.
+    try std.testing.expectEqual(@as(u8, 1), monitor.transitions[monitor.transitions[1 * 2 + 1] * 2 + 1]);
+}
+
+test "cell provenance explains conservative expansion at the read" {
+    const provenance = @import("control_provenance.zig");
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var image = base;
+    const schemas = try allocator.alloc(p.Schema, base.schemas.len + 1);
+    @memcpy(schemas[0..base.schemas.len], base.schemas);
+    schemas[base.schemas.len] = .{ .internal = .{ .cell = .{ .element = 5, .region = 0 } } };
+    image.schemas = schemas;
+    image.scopes.region_count = 1;
+    const functions = try allocator.alloc(ir.Function, 5);
+    @memcpy(functions[0..4], base.functions);
+    functions[4] = .{ .entry = 8, .inputs = &.{ 0, 1 }, .layout = .{ .slots = &.{ 6, 0, 5, 0 } }, .result = 0, .effects = &.{0}, .regions = &.{0} };
+    image.functions = functions;
+    const blocks = try allocator.alloc(ir.Block, 10);
+    @memcpy(blocks[0..8], base.blocks);
+    blocks[8] = .{ .function = 4, .instructions = &.{.{ .destination = 2, .opcode = .cell_get, .operands = &.{0} }}, .terminator = .{ .perform = .{ .effect = 0, .capability = 2, .payload = 1, .next = .{ .block = 9, .assignments = &.{.{ .destination = 3, .source = .returned }} } } } };
+    blocks[9] = .{ .function = 4, .instructions = &.{}, .terminator = .{ .return_value = 3 } };
+    image.blocks = blocks;
+    var admitted = try @import("activation_ownership.zig").analyze(a, image);
+    admitted.deinit();
+    const owner = try provenance.deriveObserved(allocator, image, &.{}, false, true);
+    const explanation = try owner.explain(try owner.select(.{ .block = 8, .role = .operation }, 0));
+    try std.testing.expect(explanation.knowledge.conservative);
+    try std.testing.expect(explanation.targets.len != 0);
+    try std.testing.expect(explanationHas(explanation, .opaque_cell));
+    try std.testing.expect(explanationHas(explanation, .conservative_expansion));
+}
+
+test "implicit disposal outside a direct helper row has finite explanation" {
+    const provenance = @import("control_provenance.zig");
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var image = base;
+    const schemas = try allocator.dupe(p.Schema, base.schemas);
+    schemas[4].internal.resumption.effects = &.{1};
+    image.schemas = schemas;
+    image.constants = &.{.{ .schema = 1, .bytes = &.{} }};
+    image.effects = &.{ base.effects[0], .{ .identity = "cleanup", .payload = 0, .result = 0 } };
+    const handlers = try allocator.dupe(ir.Handler, base.handlers);
+    handlers[0].effects = &.{1};
+    image.handlers = handlers;
+    const functions = try allocator.alloc(ir.Function, 6);
+    @memcpy(functions[0..4], base.functions);
+    functions[0].effects = &.{1};
+    functions[3].effects = &.{1};
+    functions[4] = .{ .entry = 8, .inputs = &.{ 0, 1 }, .layout = .{ .slots = &.{ 4, 0, 0 } }, .result = 0 };
+    functions[5] = .{ .entry = 10, .inputs = &.{ 0, 1 }, .layout = .{ .slots = &.{ 4, 0, 1 } }, .result = 0 };
+    image.functions = functions;
+    const blocks = try allocator.alloc(ir.Block, 11);
+    @memcpy(blocks[0..8], base.blocks);
+    blocks[8] = .{ .function = 4, .instructions = &.{}, .terminator = .{ .call = .{ .function = 5, .arguments = &.{ 0, 1 }, .next = .{ .block = 9, .assignments = &.{.{ .destination = 2, .source = .returned }} } } } };
+    blocks[9] = .{ .function = 4, .instructions = &.{}, .terminator = .{ .return_value = 2 } };
+    blocks[10] = .{ .function = 5, .instructions = &.{.{ .destination = 2, .opcode = .constant, .immediate = 0 }}, .terminator = .{ .fail = 2 } };
+    image.blocks = blocks;
+    var admitted = try @import("activation_ownership.zig").analyze(a, image);
+    admitted.deinit();
+    const owner = try provenance.deriveObserved(allocator, image, &.{}, false, true);
+    const explanation = try owner.explain(try owner.select(.{ .block = 8, .role = .callee }, 1));
+    try std.testing.expect(image.functions[5].effects.len == 0);
+    try std.testing.expect(explanation.knowledge.environmental or explanation.knowledge.conservative);
+    try std.testing.expect(explanationHas(explanation, .owned_cleanup));
+    try std.testing.expect(explanation.reasons.len < 200);
 }

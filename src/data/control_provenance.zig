@@ -150,7 +150,10 @@ const Storage = struct {
     relative: ?*const Values = null,
     positions: std.ArrayList(PositionSources) = .empty,
     explanations: std.ArrayList(Explanation) = .empty,
+    disposal_query: ?DisposalEffects = null,
+    constructor_queries: std.ArrayList(ConstructorQuery) = .empty,
 };
+const ConstructorQuery = struct { block: p.Id, slot: p.Id, result: Analysis.Constructors };
 const CallTargets = struct { role: Role = .callee, effect: p.Id, targets: ?[]const Target, environmental: bool = false };
 pub const SuspensionSources = struct { slots: []const p.Id = &.{}, pending_return: bool = false, conservative: bool = false };
 pub const InvocationSources = struct { inputs: []const p.Id = &.{}, conservative: bool = false };
@@ -159,6 +162,44 @@ const PositionSources = struct { block: p.Id, position: usize, returned: bool, e
 pub const Analysis = opaque {
     fn data(self: *const Analysis) *const Storage {
         return @ptrCast(@alignCast(self));
+    }
+    /// Private analysis consumers share this exact immutable subject and solver.
+    pub fn program(self: *const Analysis) ir.Program {
+        return self.data().image;
+    }
+    pub const Constructors = struct { ids: []const p.Id, conservative: bool };
+    pub fn constructorsAt(self: *const Analysis, block: p.Id, slot: p.Id) Error!Constructors {
+        const stored: *Storage = @ptrCast(@alignCast(@constCast(self)));
+        for (stored.constructor_queries.items) |known| if (known.block == block and known.slot == slot) return known.result;
+        const result = try self.deriveConstructors(block, slot);
+        try stored.constructor_queries.append(stored.allocator, .{ .block = block, .slot = slot, .result = result });
+        return result;
+    }
+    fn deriveConstructors(self: *const Analysis, block: p.Id, slot: p.Id) Error!Constructors {
+        const stored = self.data();
+        const values = stored.values orelse {
+            // The full target solver is unnecessary for handler-free images.
+            // A final local constructor assignment is nevertheless exact.
+            const instructions = stored.image.blocks[@intCast(block)].instructions;
+            var position = instructions.len;
+            while (position != 0) {
+                position -= 1;
+                const instruction = instructions[position];
+                if (instruction.destination != slot) continue;
+                if (instruction.opcode != .computation) break;
+                return .{ .ids = try stored.allocator.dupe(p.Id, &.{instruction.immediate}), .conservative = false };
+            }
+            return .{ .ids = &.{}, .conservative = true };
+        };
+        const origins = values.exits[@intCast(block)].get(@intCast(slot));
+        var ids: std.ArrayList(p.Id) = .empty;
+        var conservative = origins == empty;
+        var iterator = values.origins.iterator(origins);
+        while (iterator.next()) |origin| switch (origin) {
+            .constructor => |id| try ids.append(stored.allocator, id),
+            else => conservative = true,
+        };
+        return .{ .ids = ids.items, .conservative = conservative };
     }
     /// Build a presentation from final fixed-point facts, never worklist history.
     /// The invocation arena owns it; use Explanation.copy to retain it.
@@ -215,6 +256,15 @@ pub const Analysis = opaque {
         const relative = self.data().relative orelse return true;
         const disposal = relative.disposal orelse return true;
         return disposal.contains(schema, @intCast(effect));
+    }
+    pub fn mayDispose(self: *const Analysis, schema: p.Id) Error!bool {
+        const stored: *Storage = @ptrCast(@alignCast(@constCast(self)));
+        if (stored.disposal_query == null) stored.disposal_query = if (stored.relative) |relative|
+            relative.disposal orelse try DisposalEffects.derive(stored.allocator, stored.image)
+        else
+            try DisposalEffects.derive(stored.allocator, stored.image);
+        for (stored.image.effects, 0..) |_, effect| if (stored.disposal_query.?.contains(schema, effect)) return true;
+        return false;
     }
     /// Instantiate this immutable constructor's suspension summary with its
     /// concrete environment and supplied arguments. These are formal input

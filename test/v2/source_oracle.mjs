@@ -610,7 +610,7 @@ export function execute(source, initial, responses = [], cancellations = []) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const sources = await Promise.all(process.argv.slice(2).map(async (path) => parseExactJson(await readFile(path))));
-  assert.equal(sources.length, 46);
+  assert.equal(sources.length, 47);
   // Independent expectations: labels are part of the observation, not just the
   // final counter. Commands are unbounded at runtime; these are finite witnesses.
   const word = value => Array.from({ length: 8 }, (_, i) => Number((BigInt(value) >> BigInt(8 * i)) & 255n));
@@ -633,6 +633,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   assert.deepEqual(execute(sources[44], [], [[1], []]), {
     kind: "Completed", value: word(0), trace: [requested("command"), requested("finalize", word(0))],
   });
+  const paired = execute(sources[46], [], [command(1, 1), [], [1], [], command(2, 1), [], [1], []]);
+  assert.deepEqual(paired, { kind: "Completed", value: word(2), trace: [
+    requested("command"), { kind: "Yielded" }, requested("reply", [...word(1), ...word(0)]), requested("command"), requested("finalize", word(1)),
+    requested("command"), { kind: "Yielded" }, requested("reply", [...word(2), ...word(0)]), requested("command"), requested("finalize", word(1)),
+  ] });
   const cancelledService = execute(sources[44], [], [command(1, 1), []], [{ at: 1, reason: "stop" }]);
   assert.equal(cancelledService.kind, "Cancelled");
   assert.deepEqual(cancelledService.cleanupFailures, []);
@@ -869,5 +874,5 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       ],
     });
   }
-  console.log("independent source oracle: 46 compiled source fixtures and cancellation/cleanup scenarios passed");
+  console.log("independent source oracle: 47 compiled source fixtures and cancellation/cleanup scenarios passed");
 }
