@@ -57,6 +57,8 @@ pub fn main(init: std.process.Init) !void {
         41 => horos.source.examples.productProjection(&builder),
         42 => horos.source.examples.localContinuation(&builder, false),
         43 => horos.source.examples.localContinuation(&builder, true),
+        44 => horos.source.examples.statefulService(&builder),
+        45 => horos.source.examples.swappedServiceReplies(&builder),
         else => error.UnknownExample,
     };
     var buffer: [4096]u8 = undefined;

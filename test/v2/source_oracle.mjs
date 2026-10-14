@@ -610,7 +610,36 @@ export function execute(source, initial, responses = [], cancellations = []) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const sources = await Promise.all(process.argv.slice(2).map(async (path) => parseExactJson(await readFile(path))));
-  assert.equal(sources.length, 44);
+  assert.equal(sources.length, 46);
+  // Independent expectations: labels are part of the observation, not just the
+  // final counter. Commands are unbounded at runtime; these are finite witnesses.
+  const word = value => Array.from({ length: 8 }, (_, i) => Number((BigInt(value) >> BigInt(8 * i)) & 255n));
+  const command = (id, delta) => [0, ...word(id), ...word(delta)];
+  const requested = (identity, payload = []) => ({ kind: "Requested", identity: `example/service-${identity}`, payload });
+  const serviceResponses = [command(1, 1), [], command(2, 1), [], [1], []];
+  const serviceTrace = [
+    requested("command"), { kind: "Yielded" }, requested("reply", [...word(1), ...word(0)]),
+    requested("command"), { kind: "Yielded" }, requested("reply", [...word(2), ...word(1)]),
+    requested("command"), requested("finalize", word(2)),
+  ];
+  const service = execute(sources[44], [], serviceResponses);
+  assert.deepEqual(service, { kind: "Completed", value: word(2), trace: serviceTrace });
+  const swapped = execute(sources[45], [], serviceResponses);
+  assert.equal(swapped.kind, "Completed");
+  assert.deepEqual(swapped.value, service.value);
+  assert.notDeepEqual(swapped.trace, service.trace);
+  assert.deepEqual(swapped.trace, serviceTrace.map(event => event.identity === "example/service-reply"
+    ? { ...event, payload: [event.payload[0] ^ 3, ...event.payload.slice(1)] } : event));
+  assert.deepEqual(execute(sources[44], [], [[1], []]), {
+    kind: "Completed", value: word(0), trace: [requested("command"), requested("finalize", word(0))],
+  });
+  const cancelledService = execute(sources[44], [], [command(1, 1), []], [{ at: 1, reason: "stop" }]);
+  assert.equal(cancelledService.kind, "Cancelled");
+  assert.deepEqual(cancelledService.cleanupFailures, []);
+  assert.deepEqual(cancelledService.trace, [requested("command"), { kind: "Yielded" }, requested("finalize", word(1))]);
+  const failedService = execute(sources[44], [], [command(1, 1), [], command(2, (1n << 64n) - 1n), []]);
+  assert.equal(failedService.kind, "Failed");
+  assert.deepEqual(failedService.trace, [...serviceTrace.slice(0, 4), requested("finalize", word(1))]);
   for (let index = 0; index < 20; index++) {
     const populated = index % 2 === 1, owned = index >= 12;
     const result = execute(sources[36], [index]);
@@ -840,5 +869,5 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       ],
     });
   }
-  console.log("independent source oracle: 44 compiled source fixtures and cancellation/cleanup scenarios passed");
+  console.log("independent source oracle: 46 compiled source fixtures and cancellation/cleanup scenarios passed");
 }

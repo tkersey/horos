@@ -239,7 +239,7 @@ pub fn build(b: *std.Build) void {
             }
         }
     }
-    inline for (.{ "local-one-shot", "local-multi-shot" }, 42..) |name, index| {
+    inline for (.{ "local-one-shot", "local-multi-shot", "stateful-service", "swapped-service-replies" }, 42..) |name, index| {
         for ([_][]const u8{ "json", "bpi3" }) |format| {
             const run = b.addRunArtifact(source_emitter);
             run.addArgs(&.{ b.fmt("{d}", .{index}), format });
