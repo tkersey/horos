@@ -136,6 +136,8 @@ src/data/induction_facts_tests.zig
 src/data/induction_reduction.zig
 src/data/induction_reduction_tests.zig
 src/data/input_demand_tests.zig
+src/data/interactions.zig
+src/data/interactions_tests.zig
 src/data/invocation.zig
 src/data/invocation_tests.zig
 src/data/leaf_inlining.zig
@@ -185,6 +187,7 @@ src/data/schema_partition.zig
 src/data/schema_partition_bench.zig
 src/data/sequence_fusion.zig
 src/data/sequence_fusion_tests.zig
+src/data/service_interactions.zig
 src/data/slot_access.zig
 src/data/slot_packing.zig
 src/data/slot_packing_tests.zig
@@ -203,6 +206,7 @@ src/data/total_clause.zig
 src/data/traits.zig
 src/data/unfold_fusion.zig
 src/data/unfold_fusion_tests.zig
+src/data/validator_coverage_tests.zig
 src/data/value_facts.zig
 src/data/wire.zig
 src/data/zig17_tests.zig
@@ -270,6 +274,7 @@ src/source/retained_scope_example.zig
 src/source/scalar_contract_example.zig
 src/source/scheduler_example.zig
 src/source/scoped_reader_example.zig
+src/source/service_example.zig
 src/source/shallow_resume_example.zig
 src/source/slot_order.zig
 src/source/state_choice_example.zig

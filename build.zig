@@ -239,18 +239,31 @@ pub fn build(b: *std.Build) void {
             }
         }
     }
-    inline for (.{ "local-one-shot", "local-multi-shot" }, 42..) |name, index| {
+    const interaction_traces = b.addSystemCommand(&.{"node"});
+    interaction_traces.addFileArg2(b.path("test/v2/service_interactions.mjs"), .{});
+    inline for (.{ "local-one-shot", "local-multi-shot", "stateful-service", "swapped-service-replies", "paired-services" }, 42..) |name, index| {
         for ([_][]const u8{ "json", "bpi3" }) |format| {
             const run = b.addRunArtifact(source_emitter);
             run.addArgs(&.{ b.fmt("{d}", .{index}), format });
             const file = run.captureStdOut(.{});
             source_fixtures.dependOn(&b.addInstallFileWithDir(file, .prefix, b.fmt("source-{s}.{s}", .{ name, format })).step);
-            if (std.mem.eql(u8, format, "json")) oracle.addFileArg2(file, .{});
+            if (std.mem.eql(u8, format, "json")) {
+                oracle.addFileArg2(file, .{});
+                if (index == 44 or index == 45) interaction_traces.addFileArg2(file, .{});
+            }
+        }
+        if (index == 44 or index == 45) {
+            const analysis = b.addRunArtifact(source_emitter);
+            analysis.addArgs(&.{ b.fmt("{d}", .{index}), "analysis" });
+            const file = analysis.captureStdOut(.{});
+            source_fixtures.dependOn(&b.addInstallFileWithDir(file, .prefix, b.fmt("source-{s}.analysis.json", .{name})).step);
+            interaction_traces.addFileArg2(file, .{});
         }
     }
     oracle.has_side_effects = true;
     const semantics = b.step("check-semantics", "Check higher-order source semantics without Kosmos");
     semantics.dependOn(&oracle.step);
+    semantics.dependOn(&interaction_traces.step);
     semantics.dependOn(portable_baseline);
     semantics.dependOn(&oracleScopeChecks(b, horos, optimize, authoring_cases).step);
     semantics.dependOn(&borrowReturnChecks(b, horos, optimize).step);

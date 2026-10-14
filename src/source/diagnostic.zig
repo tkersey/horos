@@ -33,6 +33,8 @@ pub const CaptureObserver = struct {
     context: *anyopaque,
     capture: *const fn (*anyopaque, *const data.activation_ownership.CaptureSite, p.Id) void,
     closure: *const fn (*anyopaque, p.Id, p.Id) void,
+    /// Borrowed presentation; copy it to retain it after compile returns.
+    explanation: ?*const fn (*anyopaque, *const data.activation_ownership.CaptureSite, p.Id, ?data.activation_ownership.CaptureExplanation) void = null,
 };
 pub const Options = struct {
     diagnostic: ?*Diagnostic = null,

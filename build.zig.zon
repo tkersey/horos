@@ -12,6 +12,7 @@
         "docs/typed-authoring.md",
         "docs/authoring-migration.md",
         "docs/handler-relevance.md",
+        "docs/paper-analyses.md",
         "docs/coalescing.md",
         "docs/bpi3-wire.md",
         "docs/pst3-wire.md",

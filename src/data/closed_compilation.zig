@@ -69,7 +69,16 @@ pub const Statistics = struct {
     profile_variants: usize = 0,
     profile_rewrites: usize = 0,
 };
-pub const Observer = struct { context: *anyopaque, enter: *const fn (*anyopaque, Stage) void };
+pub const ServiceObservation = struct {
+    pub const Report = @import("service_interactions.zig").Report;
+    contract: @import("service_interactions.zig").Contract,
+    receive: *const fn (*anyopaque, ?Report) void,
+};
+pub const Observer = struct {
+    context: *anyopaque,
+    enter: *const fn (*anyopaque, Stage) void,
+    service: ?ServiceObservation = null,
+};
 pub const ProfilePolicy = struct {
     record: profiles.Record,
     target: enum { call_patterns, loop_unswitch, tail_duplication } = .call_patterns,
@@ -446,6 +455,26 @@ fn possible(allocator: std.mem.Allocator, owned: *const p01.Owned, stage: Stage)
 }
 
 pub fn run(allocator: std.mem.Allocator, original: ir.Program, options: Options) Error!p01.Owned {
+    const result = try runInternal(allocator, original, options);
+    if (options.observer) |observer| if (observer.service) |service| {
+        // Optional presentation is derived only after final binding/relocation.
+        // Its allocation failure cannot change the already selected image.
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const scratch = arena.allocator();
+        const owner = @import("control_provenance.zig").derive(scratch, result.program, &.{}, false) catch {
+            service.receive(observer.context, null);
+            return result;
+        };
+        const report = @import("service_interactions.zig").observe(scratch, owner, service.contract) catch {
+            service.receive(observer.context, null);
+            return result;
+        };
+        service.receive(observer.context, report);
+    };
+    return result;
+}
+fn runInternal(allocator: std.mem.Allocator, original: ir.Program, options: Options) Error!p01.Owned {
     options.resetObservations();
     var stats: Statistics = .{};
     var stage: Stage = .p01;

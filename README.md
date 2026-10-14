@@ -112,6 +112,8 @@ contracts. Versioned facade aliases have been removed.
 
 [Handler relevance](docs/handler-relevance.md) describes capability-directed
 dispatch, the finite transfer argument and the conservative precision boundary.
+[Optional paper analyses](docs/paper-analyses.md) describes finite explanations,
+ordered interaction monitors, the stateful-service witness and scoped wait ranks.
 
 [Separately compiled BMO1 components](docs/bmo1-components.md) carry explicit
 interfaces and checked borrow contracts. The data-only `horos-link` tool
