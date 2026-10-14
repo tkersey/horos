@@ -85,7 +85,7 @@ pub const Session = struct {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const image = self.owner.program();
-        const count = std.math.mul(usize, image.functions.len, monitor.contexts * monitor.states) catch return error.Capacity;
+        const count = std.math.mul(usize, image.functions.len, 2 * monitor.contexts * monitor.states) catch return error.Capacity;
         const summaries = try self.allocator.alloc(Summary, count);
         errdefer self.allocator.free(summaries);
         @memset(summaries, .{});
@@ -106,10 +106,13 @@ pub const Session = struct {
         while (changed) {
             changed = false;
             engine.stats.iterations += 1;
-            for (image.functions, 0..) |_, function| for (0..monitor.contexts) |context| for (0..monitor.states) |state| {
-                const result = try engine.function(function, context, state);
-                changed = summaries[engine.index(function, context, state)].join(result) or changed;
-            };
+            inline for (.{ false, true }) |cleanup| {
+                engine.cleanup = cleanup;
+                for (image.functions, 0..) |_, function| for (0..monitor.contexts) |context| for (0..monitor.states) |state| {
+                    const result = try engine.function(function, context, state);
+                    changed = summaries[engine.index(function, context, state)].join(result) or changed;
+                };
+            }
         }
         for (summaries) |summary| engine.stats.relations += @popCount(summary.normal) + @popCount(summary.failure) + @popCount(summary.cancellation);
         for (engine.opaque_blocks) |widened| engine.stats.opaque_sites += @intFromBool(widened);
@@ -135,11 +138,14 @@ const Engine = struct {
     alphabets: []?Mask = &.{},
     disposals: []?bool = &.{},
     administratives: []?bool = &.{},
+    // Runtime cancellation records an exit but preserves work already executing
+    // under unwind. This is execution context, independent of consumer bindings.
+    cleanup: bool = false,
     fn operationSelection(self: Engine, block: p.Id) *const provenance.Selection {
         return self.selections[@intCast(block)].?;
     }
     fn index(self: Engine, function_id: usize, context: usize, state: usize) usize {
-        return (function_id * self.monitor.contexts + context) * self.monitor.states + state;
+        return ((@as(usize, @intFromBool(self.cleanup)) * self.image.functions.len + function_id) * self.monitor.contexts + context) * self.monitor.states + state;
     }
     fn event(self: Engine, site: Site, context: usize, states: Mask) Error!Mask {
         const projected = self.monitor.project(self.monitor.binding, self.image, site, context);
@@ -197,6 +203,25 @@ const Engine = struct {
         if (constructors.conservative) _ = result.join(self.widened(block, states));
         for (constructors.ids) |constructor| _ = result.join(try self.call(block, self.image.constructors[@intCast(constructor)].function, context, states));
         return result;
+    }
+    fn cleanupInvoke(self: *Engine, block: p.Id, slot: p.Id, context: usize, states: Mask) Error!Summary {
+        const previous = self.cleanup;
+        self.cleanup = true;
+        defer self.cleanup = previous;
+        return self.invoke(block, slot, context, states);
+    }
+    fn cancellation(self: *Engine, out: *Summary, block: p.Id, context: usize, incoming: Mask) Error!Mask {
+        var states = incoming;
+        while (true) {
+            const cancelled = try self.abrupt(block, context, states, .cancellation);
+            _ = out.join(cancelled);
+            if (!self.cleanup) return states;
+            // Repeated cancellation can be observed while cleanup keeps running.
+            // Close those observations before continuing the same instruction.
+            const continued = states | cancelled.cancellation;
+            if (continued == states) return states;
+            states = continued;
+        }
     }
     fn propagate(self: *Engine, out: *Summary, result: Summary, edge: ir.Edge) Error!void {
         var exceptional = result;
@@ -396,22 +421,41 @@ const Engine = struct {
         fn callers(self: *Slice, function_id: p.Id) Error!void {
             // Return to every compatible static caller is a widening bound,
             // not a claim that these cross-call paths are feasible witnesses.
-            for (self.engine.image.blocks) |candidate| switch (candidate.terminator) {
+            for (self.engine.image.blocks, 0..) |candidate, id| switch (candidate.terminator) {
                 .call => |v| if (v.function == function_id) {
                     try self.add(v.next.block);
                 },
                 .apply => |v| try self.add(v.next.block),
-                .handle => |v| try self.add(v.next.block),
+                .handle => |v| {
+                    try self.function_(self.engine.image.handlers[@intCast(v.handler)].return_function);
+                    try self.add(v.next.block);
+                },
                 .with_region => |v| try self.add(v.next.block),
-                .protect => |v| try self.add(v.next.block),
-                .resume_value => |v| try self.add(v.next.block),
-                .resume_with => |v| try self.add(v.next.block),
-                .resume_computation => |v| try self.add(v.next.block),
-                else => {},
+                .protect => |v| {
+                    try self.invoke_(id, v.cleanup);
+                    try self.add(v.next.block);
+                },
+                .dispose => |v| try self.add(v.next.block),
+                inline .resume_value, .resume_computation => |v| {
+                    try self.resumed(id, v.resumption);
+                    try self.add(v.next.block);
+                },
+                .resume_with => |v| {
+                    try self.resumed(id, v.resumption);
+                    const handler = self.engine.image.handlers[@intCast(v.handler)];
+                    try self.function_(handler.return_function);
+                    for (handler.clauses) |clause| try self.function_(clause.function);
+                    try self.add(v.next.block);
+                },
+                .return_value, .fail, .jump, .unpack_product, .branch, .switch_variant, .perform, .yield_value => {},
             };
         }
         fn block(self: *Slice, id: p.Id) Error!void {
             const value = self.engine.image.blocks[@intCast(id)];
+            // Cancellation/failure can unwind an ambient frame even if this
+            // suffix never returns. Include its return/unwind actions as a may
+            // bound, without replaying the caller's producer instructions/body.
+            try self.callers(value.function);
             if (try self.engine.disposable(value.function)) self.unbounded = true;
             for (value.instructions, 0..) |_, position| try self.addEvent(.{ .block = id, .phase = .instruction, .position = position });
             try self.addEvent(.{ .block = id, .phase = .failure, .choice = .environment });
@@ -419,7 +463,6 @@ const Engine = struct {
             switch (value.terminator) {
                 .return_value => {
                     try self.addEvent(.{ .block = id, .phase = .returned });
-                    try self.callers(value.function);
                 },
                 .fail => {},
                 .jump => |v| try self.add(v.block),
@@ -508,7 +551,7 @@ const Engine = struct {
             // leaves a nonabsorbing bad state.
             out.prefixes |= states;
             // Cancellation at any control prefix; latent cleanup may run first.
-            _ = out.join(try self.abrupt(block_id, context, states, .cancellation));
+            states = try self.cancellation(&out, block_id, context, states);
             const latent_disposal = try self.disposable(block.function);
             out.widened = out.widened or latent_disposal;
             out.may_nonreturn = out.may_nonreturn or latent_disposal;
@@ -520,7 +563,7 @@ const Engine = struct {
                 }
                 states = try self.event(.{ .block = block_id, .phase = .instruction, .position = position }, context, states);
                 out.prefixes |= states;
-                _ = out.join(try self.abrupt(block_id, context, states, .cancellation));
+                states = try self.cancellation(&out, block_id, context, states);
             }
             switch (block.terminator) {
                 .return_value => {
@@ -553,14 +596,11 @@ const Engine = struct {
                 .with_region => |v| try self.propagate(&out, try self.invoke(block_id, v.body, context, states), v.next),
                 .handle => |v| {
                     const body = try self.invoke(block_id, v.body, context, states);
-                    if (try self.administrative(v.handler)) {
-                        try self.propagate(&out, body, v.next);
-                    } else {
-                        // A general clause may abort directly to the delimiter;
-                        // an ordinary body return runs the handler return clause.
-                        try self.propagate(&out, body, v.next);
-                        try self.propagate(&out, try self.call(block_id, self.image.handlers[@intCast(v.handler)].return_function, context, body.normal), v.next);
-                    }
+                    // General clauses may abort to the delimiter. Ordinary
+                    // returns also enter the return function, whose silent steps
+                    // can still add cancellation exits.
+                    try self.propagate(&out, body, v.next);
+                    try self.propagate(&out, try self.call(block_id, self.image.handlers[@intCast(v.handler)].return_function, context, body.normal), v.next);
                 },
                 .perform => |v| {
                     const selection = self.operationSelection(block_id);
@@ -569,10 +609,13 @@ const Engine = struct {
                     var precise = !selection.knowledge().conservative and v.bodies.len == 0;
                     for (selection.targets()) |target| precise = precise and try self.administrative(target.handler);
                     if (precise) {
-                        _ = out.join(try self.abrupt(block_id, context, states, .cancellation));
+                        states = try self.cancellation(&out, block_id, context, states);
                         _ = out.join(try self.abrupt(block_id, context, states, .failure));
                         out.may_nonreturn = true;
                         if (selection.targets().len != 0) {
+                            // Every erased clause prefix is projection-silent,
+                            // including cancellation, but remains cancellable.
+                            out.cancellation |= states;
                             var resumed_states: Mask = 0;
                             for (selection.targets()) |target| {
                                 var cursor = self.image.functions[@intCast(target.function)].entry;
@@ -612,13 +655,13 @@ const Engine = struct {
                     out.prefixes |= body.prefixes;
                     out.widened = out.widened or body.widened;
                     out.may_nonreturn = out.may_nonreturn or body.may_nonreturn;
-                    const normal = try self.invoke(block_id, v.cleanup, context, body.normal);
+                    const normal = try self.cleanupInvoke(block_id, v.cleanup, context, body.normal);
                     try self.propagate(&out, normal, v.next);
-                    const failed = try self.invoke(block_id, v.cleanup, context, body.failure);
-                    out.failure |= failed.normal | failed.failure;
-                    out.cancellation |= failed.cancellation;
+                    const failed = try self.cleanupInvoke(block_id, v.cleanup, context, body.failure);
+                    // Cancellation is metadata when the primary exit failed.
+                    out.failure |= failed.normal | failed.failure | failed.cancellation;
                     out.prefixes |= failed.prefixes;
-                    const cancel = try self.invoke(block_id, v.cleanup, context, body.cancellation);
+                    const cancel = try self.cleanupInvoke(block_id, v.cleanup, context, body.cancellation);
                     out.cancellation |= cancel.normal | cancel.failure | cancel.cancellation;
                     out.prefixes |= cancel.prefixes;
                     out.widened = out.widened or failed.widened or cancel.widened;
@@ -633,6 +676,10 @@ const Engine = struct {
                 .dispose => |v| try self.propagate(&out, self.widened(block_id, states), v.next),
             }
         }
+        // A cancellation recorded during cleanup can become the eventual
+        // primary exit after its remaining normal/failing work. Retaining the
+        // ordinary exits as well is an explicit overapproximation.
+        if (self.cleanup) out.cancellation |= out.normal | out.failure;
         return out;
     }
 };

@@ -604,3 +604,49 @@ test "implicit disposal outside a direct helper row has finite explanation" {
     try std.testing.expect(explanationHas(explanation, .owned_cleanup));
     try std.testing.expect(explanation.reasons.len < 200);
 }
+
+test "fresh capability definitions share explanation prefix reconstruction" {
+    var input = std.heap.ArenaAllocator.init(a);
+    defer input.deinit();
+    const allocator = input.allocator();
+    const count = 1024;
+    var program = try fixture(allocator);
+    const functions = try allocator.dupe(ir.Function, program.functions);
+    const slots = try allocator.alloc(p.Id, 5 + count);
+    @memcpy(slots[0..5], functions[4].layout.slots);
+    @memset(slots[5..], 5);
+    functions[4].layout.slots = slots;
+    program.functions = functions;
+    const blocks = try allocator.dupe(ir.Block, program.blocks);
+    const instructions = try allocator.alloc(ir.Instruction, count);
+    for (instructions, 0..) |*instruction, i| instruction.* = .{
+        .destination = 5 + i,
+        .opcode = .move,
+        .operands = try allocator.dupe(p.Id, &.{if (i == 0) 0 else 4 + i}),
+    };
+    blocks[8].instructions = instructions;
+    blocks[8].terminator.perform.capability = 4 + count;
+    program.blocks = blocks;
+    var admitted = try @import("activation_ownership.zig").analyze(a, program);
+    admitted.deinit();
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const owner = try @import("control_provenance.zig").deriveObserved(arena.allocator(), program, &.{}, false, true);
+    const selected = try owner.select(.{ .block = 8, .role = .operation }, 0);
+    const explanation = try owner.explain(selected);
+    try std.testing.expect(!explanation.knowledge.conservative);
+    try std.testing.expect(explanation.reasons.len >= count);
+    var definitions: usize = 0;
+    for (explanation.reasons) |reason| {
+        for (reason.inputs) |reference| try std.testing.expect(reference < explanation.reasons.len);
+        if (reason.rule == .aggregate_union and reason.location.block == 8) {
+            definitions += 1;
+            try std.testing.expectEqual(@as(usize, 1), reason.origins.len);
+            try std.testing.expect(reason.origins[0] == .handler and reason.origins[0].handler == 0);
+        }
+    }
+    try std.testing.expectEqual(@as(usize, count), definitions);
+    // A loose fixture-only allocation guard distinguishes shared prefix work
+    // from the former ~175 MB replay. This does not cap admitted programs.
+    try std.testing.expect(arena.queryCapacity() < 32 * 1024 * 1024);
+}

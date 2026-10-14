@@ -21,7 +21,11 @@ references. Keys distinguish program position, slot, concrete/relative row,
 return, capture and suspension summary. Interning a key before visiting its
 inputs closes recursion with backreferences. An explicit work queue expands each
 interned fact once and fills all placeholders before publication; graph depth
-does not consume native call stack. Strong local assignments select the
+does not consume native call stack. After dependency discovery, slot requests are
+grouped by concrete/relative block and sorted by position. One forward replay of
+each required prefix fills its final origin memberships with the existing transfer
+function; individual facts no longer reconstruct and retain the same prefix again.
+Reason identities and contents are unchanged. Strong local assignments select the
 last definition; predecessor edges read the predecessor view simultaneously.
 Input seeds distinguish introduced uncertainty from uncertainty propagated
 around a cycle. Aggregate projection retains the owner's union approximation;
@@ -52,9 +56,11 @@ parameter interpretation and total monitor table. Symbols, monitor states and
 parameter contexts each have at most 64 elements; these are analysis domains,
 not limits on program size, recursion, requests or runtime lifetime.
 
-The table contains one summary for each function, context and incoming monitor
-state. Each summary is a tuple of normal, failure, cancellation and reachable
-prefix state sets, plus widening and possible-nonreturn flags. The transfer is
+The table contains one summary for each function, consumer context, incoming
+monitor state and execution mode (ordinary or running cleanup). Ordinary queries
+read the ordinary half. Calls inherit the execution mode, while every protection
+cleanup enters running-cleanup mode. Each summary is a tuple of normal, failure,
+cancellation and reachable prefix state sets, plus widening and possible-nonreturn flags. The transfer is
 monotone over this finite product lattice. Starting with empty exit relations
 and repeatedly joining transfers reaches a least fixed point. A function pass
 uses a finite block/state worklist. Direct calls use only their callee's summary
@@ -65,7 +71,13 @@ Every incoming block-state set is recorded before subsequent events, so a bad
 state remains a reachable prefix even if the monitor later leaves it.
 Abrupt transfers carry cleanup prefixes separately from post-failure or
 post-cancellation states. Normal disposal widening also records its closure before
-the next instruction. No absorbing-bad-state assumption is imposed on monitors.
+the next instruction. In running-cleanup mode, cancellation records an exit and
+closes its projected state transitions while retaining the current work, including
+a pending request and its subsequent reply. This context propagates through helpers
+and nested calls. Cleanup normal/failure states also remain possible cancellation
+exits, conservatively forgetting whether cancellation was recorded. A primary body
+failure remains failure after cleanup cancellation. No absorbing-bad-state
+assumption is imposed on monitors.
 
 For the covered transfer fragment:
 
@@ -83,11 +95,17 @@ For the covered transfer fragment:
   disposal makes this reduction unavailable. The retained resume event uses the
   clause's parameter interpretation, through the same checked context transfer as
   direct calls. Writes, aliases or transfers of that token outside the checked
-  resume make this reduction unavailable.
+  resume make this reduction unavailable. Silent clause prefixes still contribute
+  cancellation exits, and ordinary body returns compose the handler return
+  function even when its events are silent. A silent event does not erase an exit.
 - General local control and multi-shot resumptions use an alphabet closure over
   all compatible captured suffixes, handlers, return clauses, injected bodies and
-  continuations. The producer prefix is excluded only when this static reachability
-  bound excludes it. This bound deliberately loses path/call correlation; it is
+  continuations. Every visited function closes over possible caller return/unwind
+  actions: handler returns, protected cleanup, disposal continuations, injected
+  captured suffixes and successor handlers. This closure also applies to suffixes
+  that fail or are cancelled without returning. It never re-enters a caller body
+  or its producer instructions solely to traverse its continuation. The producer
+  prefix is excluded only when this static reachability bound excludes it. This bound deliberately loses path/call correlation; it is
   not a feasible witness. Unknown constructors, imports or latent disposal expand
   to the entire alphabet.
 - An opaque region denotes the reflexive/transitive closure of its alphabet,
@@ -194,7 +212,7 @@ assertions, not just planned coverage.
 | IN-01–04 | `interactions_tests`: same-object validation order, wrong object, mutation/replacement/failure, swapped helper arguments, mutually recursive summaries and nonreturning bad prefixes. |
 | IN-05–08, IN-10–11 | Outer target owner tests; opaque import multiple-event closure; cleanup/injection baseline fixtures; cloned suffix without repeated producer; relinked body and changed property; potential-only verdicts. |
 | IN-09, IN-12 | Three consumers in existing roots; `service_interactions.mjs` independently includes source traces and rejects omitted yield edges and wrong reply labels; Kosmos applies the same membership check to actual native/WASM traces. |
-| IN-03, IN-07 | Regressions retain nonabsorbing bad states after branch/switch and cleanup even when later exits reset them, pending-request cancellation, cancellation in administrative clauses/returns, clause parameter interpretation, and effect-free owned cleanup. |
+| IN-03, IN-07 | Regressions retain nonabsorbing bad states after branch/switch and cleanup even when later exits reset them, pending-request cancellation, cancellation in administrative clauses/returns, clause parameter interpretation, effect-free owned cleanup, cancellation followed by a cleanup reply/helper request, primary failure after cleanup cancellation, silent administrative cancellation exits, and nested handler-return order. |
 | WT-01–03, WT-07 | Source service observer checks derived rank and coverage; omitted dependency and nondecreasing rank reject; admitted arithmetic and slot-overwrite mutants lose the report. |
 | WT-04–05 | Actual exclusive-branch wait operations produce only a cycle candidate; effect-free recursion has no successful return and allows nonreturn. |
 | WT-06 | Service report retains unresolved external outcomes and explicit fairness premises; existing scheduler/FIFO and held-worker tests retain independent eligible work. No new scheduler claim is inferred. |
@@ -242,27 +260,27 @@ guarantees; background load and sub-millisecond timer noise remain limitations.
 
 | Fixture | Baseline compile ms | Candidate compile ms | Baseline admit ms | Candidate admit ms | Compile peak bytes baseline → candidate |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| recursive | 0.026 | 0.028 | 0.006 | 0.006 | 43478 → 43478 |
-| generator | 0.186 | 0.187 | 0.048 | 0.047 | 205970 → 206310 |
-| scoped-reader | 1.011 | 1.013 | 0.143 | 0.144 | 972624 → 972640 |
-| state-local | 0.248 | 0.246 | 0.043 | 0.044 | 219998 → 219974 |
-| state-shared | 0.224 | 0.228 | 0.038 | 0.040 | 226522 → 226610 |
-| choices-all | 0.054 | 0.056 | 0.015 | 0.016 | 70942 → 71022 |
-| recursive-choice | 1.172 | 1.190 | 0.232 | 0.233 | 968192 → 968232 |
-| install-8 | 0.116 | 0.120 | 0.032 | 0.032 | 115082 → 114962 |
-| install-64 | 1.204 | 1.207 | 0.345 | 0.347 | 1059342 → 1059302 |
-| install-128 | 2.615 | 2.650 | 0.769 | 0.779 | 2356236 → 2356116 |
+| recursive | 0.027 | 0.027 | 0.006 | 0.006 | 43478 → 43478 |
+| generator | 0.192 | 0.192 | 0.050 | 0.049 | 205970 → 206310 |
+| scoped-reader | 1.017 | 1.027 | 0.143 | 0.147 | 972624 → 972640 |
+| state-local | 0.255 | 0.260 | 0.044 | 0.044 | 219998 → 219974 |
+| state-shared | 0.232 | 0.232 | 0.039 | 0.040 | 226522 → 226610 |
+| choices-all | 0.055 | 0.056 | 0.015 | 0.016 | 70942 → 71022 |
+| recursive-choice | 1.180 | 1.195 | 0.231 | 0.232 | 968192 → 968232 |
+| install-8 | 0.118 | 0.119 | 0.032 | 0.032 | 115082 → 114962 |
+| install-64 | 1.207 | 1.210 | 0.343 | 0.345 | 1059342 → 1059302 |
+| install-128 | 2.626 | 2.654 | 0.767 | 0.776 | 2356236 → 2356116 |
 
 Retained compile/admission bytes are identical for every baseline/candidate pair.
-Ordinary compile median changes range from about -0.8% to +8.4% (recursive);
+Ordinary compile median changes range from about -0.2% to +2.7%;
 this small run does not establish a general speedup or zero overhead. Admission
-median changes range from -1.4% to +4.3%. No extra analysis runs on the ordinary
+median changes range from -2.1% to +2.7%. No extra analysis runs on the ordinary
 path. The storage extension can change arena growth boundaries. The aggregate
 check exposed an existing affine constructor that copied its arena before its last
 allocations; allocating those arrays before moving the arena fixes that leak.
 
-Private derivation medians (baseline → candidate) are 23.98 → 24.31 µs for
-generator, 40.71 → 41.79 µs for scoped-reader, and 543.19 → 556.38 µs for
+Private derivation medians (baseline → candidate) are 24.81 → 24.38 µs for
+generator, 41.90 → 42.29 µs for scoped-reader, and 551.58 → 556.98 µs for
 128 installations. Each performs one target derivation.
 
 Optional rows below include their shared target derivation; candidate rows include
@@ -271,14 +289,14 @@ Edges are graph edges for service, worklist visits for general monitors.
 
 | Fixture / operation | µs | Peak / retained bytes | Allocation calls | Target solves / queries | States / edges | Relations / widened sites | Explanation reasons |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| generator / explain | 32.15 | 106110 / 106110 | 8 | 1 / 3 | 0 / 0 | 0 / 0 | 40 |
-| scoped-reader / explain | 55.94 | 185370 / 185370 | 8 | 1 / 11 | 0 / 0 | 0 / 0 | 90 |
-| source-stateful-service / derive | 36.42 | 77014 / 77014 | 7 | 1 / 0 | 0 / 0 | 0 / 0 | 0 |
-| source-stateful-service / explain | 46.73 | 127102 / 127102 | 8 | 1 / 5 | 0 / 0 | 0 / 0 | 56 |
-| source-cloned / interactions | 23.27 | 43338 / 43338 | 7 | 1 / 1 | 15 / 171 | 51 / 3 | 0 |
-| source-stateful-service / service | 38.46 | 77014 / 77014 | 7 | 1 / 2 | 160 / 38 | 5 / 0 | 0 |
-| forwarding / candidate-validate | 23.58 | 24744 / 0 | 36 | 2 / 0 | 0 / 0 | 0 / 0 | 0 |
-| forwarding / candidate-observe | 39.48 | 32470 / 0 | 40 | 2 / 2 | 50 / 410 | 194 / 2 | 0 |
+| generator / explain | 35.62 | 106110 / 106110 | 8 | 1 / 3 | 0 / 0 | 0 / 0 | 40 |
+| scoped-reader / explain | 59.06 | 179930 / 179930 | 8 | 1 / 11 | 0 / 0 | 0 / 0 | 90 |
+| source-stateful-service / derive | 37.25 | 77014 / 77014 | 7 | 1 / 0 | 0 / 0 | 0 / 0 | 0 |
+| source-stateful-service / explain | 47.58 | 128446 / 128446 | 8 | 1 / 5 | 0 / 0 | 0 / 0 | 56 |
+| source-cloned / interactions | 33.23 | 45632 / 45632 | 7 | 1 / 1 | 30 / 342 | 102 / 3 | 0 |
+| source-stateful-service / service | 39.15 | 77014 / 77014 | 7 | 1 / 2 | 160 / 38 | 5 / 0 | 0 |
+| forwarding / candidate-validate | 24.60 | 24744 / 0 | 36 | 2 / 0 | 0 / 0 | 0 / 0 | 0 |
+| forwarding / candidate-observe | 56.25 | 34960 / 0 | 40 | 2 / 2 | 100 / 820 | 388 / 2 | 0 |
 
 Service adds six wait edges checked independently of its 38 phase edges. The
 cloned fixture reaches its fixed point in four iterations. Widened sites count
@@ -289,3 +307,28 @@ ordinary candidate validation; it previously duplicated those solves. The genera
 engine caches constructor, disposal, administrative-clause and suffix-alphabet
 queries within the same subject. Exact repeated query assertions retain the same
 result storage. There is no persisted cache or emitted runtime analysis data.
+
+
+### Explanation scaling discriminator
+
+The admitted fresh-capability-slot chain in `evidence_forwarding_tests` separates
+prefix reconstruction cost from graph recursion. At 128/256/512/1024 moves, the
+reason graphs have 136/264/520/1032 nodes. ReleaseSafe probes against predecessor
+`5520a19cb1130062163ca1994254e9a97009e030` and the batch-readback implementation
+used three alternating process batches with three observations per size (nine
+per variant). Serialized reason graphs were byte-identical at every size.
+
+| Fresh definitions | Retained bytes before → after | Explanation median µs before → after |
+| --- | ---: | ---: |
+| 128 | 2746900–2747984 → 393912–396216 | 1026.83 → 79.71 |
+| 256 | 9667192 → 1106384 | 4436.04 → 150.25 |
+| 512 | 51077464 → 1753900 | 20184.71 → 316.75 |
+| 1024 | 175063212 → 4478726 | 97326.25 → 682.79 |
+
+Retained bytes include the unchanged target derivation; explanation timing
+excludes it. The 1024-move timing ranges were 95.76–101.69 ms before and
+0.61–1.31 ms after. This is a synthetic allocation discriminator, not a general
+compiler speedup claim. The existing test retains the same-slot and long unrelated
+instruction cases; the fresh-slot test also checks every definition's actual
+handler origin and uses a loose 32 MiB fixture-only allocation guard. No runtime
+program quota or optional-result truncation was added.

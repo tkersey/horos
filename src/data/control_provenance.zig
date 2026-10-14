@@ -1438,6 +1438,43 @@ const ExplanationBuilder = struct {
         // Intern before scheduling, so cycles share an id and graph depth never
         // consumes native stack. Publish only after every placeholder is filled.
         while (self.pending.pop()) |key| try self.expand(key);
+        // Dependencies do not depend on presentation origins. Discover them
+        // first, then replay each required block prefix once in position order.
+        // This shares the equation owner's transfer without a second solver or
+        // a persistent position cache for every explanation node.
+        const Request = struct {
+            key: Key,
+            id: usize,
+            fn before(_: void, left: @This(), right: @This()) bool {
+                if (left.key.relative != right.key.relative) return !left.key.relative;
+                if (left.key.a != right.key.a) return left.key.a < right.key.a;
+                if (left.key.b != right.key.b) return left.key.b < right.key.b;
+                return left.key.c < right.key.c;
+            }
+        };
+        var requests: std.ArrayList(Request) = .empty;
+        defer requests.deinit(self.stored.allocator);
+        var iterator = self.memo.iterator();
+        while (iterator.next()) |entry| if (entry.key_ptr.kind == .slot) {
+            try requests.append(self.stored.allocator, .{ .key = entry.key_ptr.*, .id = entry.value_ptr.* });
+        };
+        std.mem.sort(Request, requests.items, {}, Request.before);
+        var first: usize = 0;
+        while (first < requests.items.len) {
+            const key = requests.items[first].key;
+            var reader = (if (key.relative) self.stored.relative else self.stored.values).?.*;
+            var row = reader.entries[key.a];
+            var position: usize = 0;
+            var end = first;
+            while (end < requests.items.len) : (end += 1) {
+                const request = requests.items[end];
+                if (request.key.relative != key.relative or request.key.a != key.a) break;
+                while (position < request.key.b) : (position += 1)
+                    try reader.transferInstruction(&row, self.stored.image.blocks[key.a].instructions[position], false);
+                self.reasons.items[request.id].origins = try self.members(row.get(request.key.c));
+            }
+            first = end;
+        }
     }
     fn expand(self: *ExplanationBuilder, key: Key) Error!void {
         const id = self.memo.get(key).?;
@@ -1448,8 +1485,6 @@ const ExplanationBuilder = struct {
         switch (key.kind) {
             .slot => {
                 const block = image.blocks[key.a];
-                const row = try flow.at(self.stored.allocator, key.a, key.b);
-                reason.origins = try self.members(row.get(key.c));
                 reason.location = .{ .function = block.function, .block = key.a, .position = key.b, .slot = key.c };
                 if (key.b > 0) {
                     const instruction = block.instructions[key.b - 1];

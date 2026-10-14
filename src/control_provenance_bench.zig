@@ -91,7 +91,7 @@ pub fn main(init: std.process.Init) !void {
                     defer session.deinit();
                     const result = try session.analyze(monitor);
                     if (result.summaries.ptr != (try session.analyze(monitor)).summaries.ptr) return error.RepeatedDerivation;
-                    states = program.functions.len * monitor.states;
+                    states = result.summaries.len;
                     edges = result.statistics.control_states;
                     relations = result.statistics.relations;
                     widenings = result.statistics.opaque_sites;

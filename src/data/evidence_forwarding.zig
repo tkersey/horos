@@ -312,7 +312,7 @@ pub fn observeInteractions(allocator: std.mem.Allocator, original: ir.Program, c
                 if (self.pass == 0) self.observation.monitors += 1;
                 self.observation.relations += result.statistics.relations;
                 self.observation.opaque_sites += result.statistics.opaque_sites;
-                self.observation.finite_states += result.functions * monitor.contexts * monitor.states;
+                self.observation.finite_states += result.summaries.len;
                 self.observation.control_states += result.statistics.control_states;
                 self.observation.iterations += result.statistics.iterations;
                 for (0..monitor.states) |state| {
