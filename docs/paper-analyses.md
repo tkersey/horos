@@ -40,6 +40,12 @@ erase a rejection. Required admission allocation failure remains an error. The
 `capture_constraint` names the retained slot/schema and its actual result; other
 borrow/region/type failures continue to use their existing diagnostics.
 
+Recording and rendering have different resource boundaries. Input-seed recording
+runs during provenance derivation, before convergence and the capture decision;
+allocation failure there can return `OutOfMemory`. The null-presentation fallback
+applies to rendering an already established result. Diagnostic equivalence assumes
+sufficient resources for the requested recording and intrinsic analysis.
+
 The compiler's existing observation options also accept `service`, selecting
 three nominal declarations and receiving a borrowed scoped report. Final binding
 and relocation precede this optional query. One final provenance owner supports
@@ -137,6 +143,28 @@ its overapproximations. An unrelated property can therefore be established despi
 an opaque region. Changed code, linking, monitor or interpretation requires a new
 owner/query. Same-session caching uses the complete immutable query binding;
 mutating borrowed bindings is outside the native caller contract.
+
+### Concrete meaning of event phases
+
+The projection maps the following concrete transitions to `Site`. These bindings
+identify the runtime prefixes covered by the inclusion argument above.
+
+| Phase | Concrete transition and position |
+| --- | --- |
+| `instruction` | Successful value completion at the original instruction position. `stable_session.executeInstruction` separates `.value` from `.failed`; a declared instruction failure emits `failure` instead of a successful completion. |
+| Local `operation` | Capability-directed clause entry. `stable_session.performEffect` enters the clause within the same control step. The next cancellable position is in that clause, not the originating perform block. |
+| Environmental `operation` / `reply` | Creation of the pending request / acceptance of its bound result. The pending record retains the perform's `source_block`, so cancellation while pending uses that origin. Admission requires external operations to have no body operands; their known empty local target set selects the precise transfer. |
+| `yield` | The yield boundary installs its successor block before returning `Yielded`. Cancellation while suspended therefore uses that successor's current control position; `resumeYield` only makes it active. |
+| `cancellation` | Cancellation of the current control or pending request, followed by the existing unwind/cleanup behavior. A numeric quantum can expose instruction and control boundaries, but cannot split atomic local dispatch. |
+| `failure` | A declared instruction failure, explicit failure, or failed environmental result. Allocation/admission/protocol errors are host errors, not authored failure events; a poisoned session cannot continue a program trace. |
+
+The precise administrative transfer conservatively permits extra origin abrupt
+events. Their presence does not establish that they occur concretely, and its
+language need not be a subset of a differently widened transfer. Comparing two
+abstractions alone cannot supply a missing concrete trace. The bounded general
+local transfer includes the entered clauses and their cancellation/failure sites.
+Kosmos's `interaction phases follow atomic dispatch and the installed yield successor`
+test checks the actual control positions and cancellation after both transitions.
 
 ## Three consumers
 

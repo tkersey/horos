@@ -11,6 +11,12 @@ pub fn bit(index: usize) Mask {
     return @as(Mask, 1) << @intCast(index);
 }
 pub const Choice = enum { program, environment, approximation };
+/// Concrete phases follow stable_session transitions, not instruction attempts.
+/// `instruction` is successful value completion; its declared failure is a
+/// separate outcome. Cancellation uses the current control block: local perform
+/// enters its clause atomically, and yield installs its successor before parking.
+/// Only an external pending request keeps the originating perform as its site.
+/// See docs/paper-analyses.md for the projection and physical-error boundary.
 pub const Phase = enum { instruction, operation, reply, branch, yield, resumed, returned, failure, cancellation, cleanup };
 pub const Site = struct {
     block: p.Id,
@@ -327,6 +333,9 @@ const Engine = struct {
         var slice = Slice{ .engine = self, .seen = try self.allocator.alloc(bool, self.image.blocks.len) };
         @memset(slice.seen, false);
         const operation = self.image.blocks[@intCast(origin)].terminator.perform;
+        // A local dispatch has no cancellable origin state after its operation
+        // event: cancellation then belongs to the entered clause. External
+        // requests (no bodies, known empty targets) use the precise transfer.
         try slice.add(operation.next.block);
         try slice.handlers(origin, operation.effect);
         try slice.addEvent(.{ .block = origin, .phase = .reply, .choice = .environment, .selection = self.operationSelection(origin) });
