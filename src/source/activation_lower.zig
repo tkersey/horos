@@ -232,7 +232,7 @@ fn checkTarget(allocator: std.mem.Allocator, compiler: *Compiler, program: ir.Pr
         diagnostic.variable = null;
         diagnostic.origins = .{};
     }
-    return data.activation_ownership.analyzeObserved(allocator, program, if (options.diagnostic) |diagnostic| &diagnostic.target else null, if (origins == null and compiler.capture_observer != null) .{ .context = compiler, .capture = Compiler.observeCapture } else null) catch |err|
+    return data.activation_ownership.analyzeObserved(allocator, program, if (options.diagnostic) |diagnostic| &diagnostic.target else null, if (origins == null and compiler.capture_observer != null) .{ .context = compiler, .capture = Compiler.observeCapture, .explanation = if (compiler.capture_observer.?.explanation != null) Compiler.observeExplanation else null } else null) catch |err|
         {
             if (options.diagnostic) |diagnostic| {
                 @import("diagnostic_origins.zig").translate(diagnostic, program, origins, compiler.facts.functions);
@@ -261,6 +261,24 @@ const Compiler = struct {
         const self: *Compiler = @ptrCast(@alignCast(pointer));
         if (self.slot_variables[@intCast(function)][@intCast(slot)]) |variable|
             self.capture_observer.?.capture(self.capture_observer.?.context, selected, variable);
+    }
+
+    fn observeExplanation(pointer: *anyopaque, function: p.Id, selected: *const data.activation_ownership.CaptureSite, slot: p.Id, explanation: ?data.activation_ownership.CaptureExplanation) void {
+        const self: *Compiler = @ptrCast(@alignCast(pointer));
+        const variable = self.slot_variables[@intCast(function)][@intCast(slot)] orelse return;
+        var mapped = explanation;
+        if (mapped) |*present| {
+            const reasons = self.allocator.dupe(data.activation_ownership.CaptureExplanation.Reason, present.reasons) catch {
+                self.capture_observer.?.explanation.?(self.capture_observer.?.context, selected, variable, null);
+                return;
+            };
+            for (reasons) |*reason| if (reason.location.function) |origin_function| {
+                if (reason.location.slot) |origin_slot|
+                    reason.location.source_variable = self.slot_variables[@intCast(origin_function)][@intCast(origin_slot)];
+            };
+            present.reasons = reasons;
+        }
+        self.capture_observer.?.explanation.?(self.capture_observer.?.context, selected, variable, mapped);
     }
 
     fn constructor(self: *Compiler, function: p.Id, schema: p.Id, value_id: p.Id) Error!p.Id {

@@ -11,6 +11,7 @@ pub const Boundary = struct { block: p.Id, role: Role };
 pub const Target = struct { handler: p.Id, clause: usize, effect: p.Id, function: p.Id, resumption: p.Id, retains: bool };
 pub const Context = struct { analysis: *const Analysis, block: p.Id };
 const SelectionData = struct {
+    owner: ?*const Analysis,
     image: ir.Program,
     boundary: Boundary,
     effect: p.Id,
@@ -19,9 +20,86 @@ const SelectionData = struct {
 };
 pub const Knowledge = struct { conservative: bool, environmental: bool = false };
 
+/// Presentation facts, never admission evidence. All references are indices in
+/// this finite graph; cycles describe summary dependencies, not dynamic runs.
+pub const Explanation = struct {
+    boundary: Boundary,
+    effect: p.Id,
+    knowledge: Knowledge,
+    targets: []const Target,
+    reasons: []const Reason,
+    root: usize,
+    capture_constraint: ?struct { slot: p.Id, schema: p.Id, satisfied: bool } = null,
+
+    pub const Rule = enum {
+        selection,
+        environmental,
+        fresh_installation,
+        direct_argument,
+        direct_return,
+        closure_capture,
+        closure_application,
+        aggregate_union,
+        aggregate_projection,
+        branch_join,
+        opaque_cell,
+        scoped_input,
+        successor_binding,
+        owned_cleanup,
+        unknown_input,
+        summary_dependency,
+        conservative_expansion,
+    };
+    pub const Location = struct { function: ?p.Id = null, block: ?p.Id = null, position: ?usize = null, slot: ?p.Id = null, source_variable: ?p.Id = null };
+    pub const Reason = struct {
+        rule: Rule,
+        location: Location = .{},
+        inputs: []const usize = &.{},
+        origins: []const Origin = &.{},
+        handler: ?p.Id = null,
+        /// This node describes a may-union or a loss of precision.
+        approximation: bool = false,
+    };
+
+    /// Copies presentation only: no slice or pointer into the compiler or input
+    /// program survives. Numeric locations retain their original meaning.
+    pub fn copy(self: Explanation, allocator: std.mem.Allocator) Error!Explanation {
+        var result = self;
+        result.targets = try allocator.dupe(Target, self.targets);
+        errdefer allocator.free(result.targets);
+        const reasons = try allocator.alloc(Reason, self.reasons.len);
+        var initialized: usize = 0;
+        errdefer {
+            for (reasons[0..initialized]) |reason| {
+                allocator.free(reason.inputs);
+                allocator.free(reason.origins);
+            }
+            allocator.free(reasons);
+        }
+        for (self.reasons, reasons) |reason, *destination| {
+            destination.* = reason;
+            destination.inputs = try allocator.dupe(usize, reason.inputs);
+            errdefer allocator.free(destination.inputs);
+            destination.origins = try allocator.dupe(Origin, reason.origins);
+            initialized += 1;
+        }
+        result.reasons = reasons;
+        return result;
+    }
+    pub fn deinit(self: Explanation, allocator: std.mem.Allocator) void {
+        for (self.reasons) |reason| {
+            allocator.free(reason.inputs);
+            allocator.free(reason.origins);
+        }
+        allocator.free(self.reasons);
+        allocator.free(self.targets);
+    }
+};
+
 /// Borrowed for the admission invocation. An observer retaining a selection
 /// must copy it through this owner; copying retains its original boundary and
 /// exact program, rather than reconstructing relevance from an effect number.
+/// A copied selection still borrows that immutable program for its lifetime.
 pub const Selection = opaque {
     fn data(self: *const Selection) *const SelectionData {
         return @ptrCast(@alignCast(self));
@@ -42,6 +120,7 @@ pub const Selection = opaque {
         const stored = try allocator.create(SelectionData);
         errdefer allocator.destroy(stored);
         stored.* = self.data().*;
+        stored.owner = null;
         stored.targets = try allocator.dupe(Target, stored.targets);
         return @ptrCast(stored);
     }
@@ -70,6 +149,7 @@ const Storage = struct {
     values: ?*const Values = null,
     relative: ?*const Values = null,
     positions: std.ArrayList(PositionSources) = .empty,
+    explanations: std.ArrayList(Explanation) = .empty,
 };
 const CallTargets = struct { role: Role = .callee, effect: p.Id, targets: ?[]const Target, environmental: bool = false };
 pub const SuspensionSources = struct { slots: []const p.Id = &.{}, pending_return: bool = false, conservative: bool = false };
@@ -79,6 +159,21 @@ const PositionSources = struct { block: p.Id, position: usize, returned: bool, e
 pub const Analysis = opaque {
     fn data(self: *const Analysis) *const Storage {
         return @ptrCast(@alignCast(self));
+    }
+    /// Build a presentation from final fixed-point facts, never worklist history.
+    /// The invocation arena owns it; use Explanation.copy to retain it.
+    pub fn explain(self: *const Analysis, selection: *const Selection) Error!Explanation {
+        if (selection.data().owner != self) return error.InvalidReference;
+        if (self.data().values) |values| if (values.seeds == null) return error.InvalidReference;
+        for (self.data().explanations.items) |known| {
+            if (std.meta.eql(known.boundary, selection.boundary()) and known.effect == selection.effect()) return known;
+        }
+        var builder: ExplanationBuilder = .{ .stored = self.data() };
+        const root = try builder.selection(selection);
+        const result: Explanation = .{ .boundary = selection.boundary(), .effect = selection.effect(), .knowledge = selection.knowledge(), .targets = selection.targets(), .reasons = builder.reasons.items, .root = root };
+        const stored: *Storage = @ptrCast(@alignCast(@constCast(self)));
+        try stored.explanations.append(stored.allocator, result);
+        return result;
     }
     /// Query only the immutable image used for derivation. No replacement image
     /// or caller-supplied weaker target map enters this API.
@@ -99,7 +194,7 @@ pub const Analysis = opaque {
         for (self.data().calls[@intCast(boundary.block)]) |known| {
             if (known.role == boundary.role and known.effect == effect and known.targets != null) knowledge = .{ .conservative = false, .environmental = known.environmental };
         }
-        stored.* = .{ .image = self.data().image, .boundary = boundary, .effect = effect, .targets = self.targets(boundary, effect), .knowledge = knowledge };
+        stored.* = .{ .owner = self, .image = self.data().image, .boundary = boundary, .effect = effect, .targets = self.targets(boundary, effect), .knowledge = knowledge };
         return @ptrCast(stored);
     }
     /// Declared rows describe ordinary invocation. Discarding owned values can
@@ -272,6 +367,10 @@ pub const Analysis = opaque {
 /// The invocation allocator owns all facts; callers keep the input immutable
 /// for their complete lifetime. Open components retain conservative uncertainty.
 pub fn derive(allocator: std.mem.Allocator, image: ir.Program, imports: []const p.Id, component: bool) Error!*const Analysis {
+    return deriveObserved(allocator, image, imports, component, false);
+}
+
+pub fn deriveObserved(allocator: std.mem.Allocator, image: ir.Program, imports: []const p.Id, component: bool, explanations: bool) Error!*const Analysis {
     const stored = try allocator.create(Storage);
     stored.* = .{ .allocator = allocator, .image = image, .conservative = try allocator.alloc([]const Target, image.effects.len), .operations = try allocator.alloc(?[]const Target, image.blocks.len), .calls = try allocator.alloc([]const CallTargets, image.blocks.len) };
     @memset(stored.operations, null);
@@ -290,6 +389,7 @@ pub fn derive(allocator: std.mem.Allocator, image: ir.Program, imports: []const 
     if (!component and imports.len == 0 and image.handlers.len != 0) {
         const origins = try Origins.init(allocator, image);
         var flow = try Values.init(allocator, image, origins, false);
+        if (explanations) flow.seeds = try allocator.dupe(Row, flow.entries);
         try flow.solve();
         const concrete = try allocator.create(Values);
         concrete.* = flow;
@@ -839,6 +939,9 @@ const DisposalEffects = struct {
 };
 
 const Values = struct {
+    /// Only requested diagnostics retain input seeds. These distinguish actual
+    /// unknown-input introduction from unknown propagated around a cycle.
+    seeds: ?[]Row = null,
     disposal: ?DisposalEffects = null,
     allocator: std.mem.Allocator,
     origins: *Origins,
@@ -975,8 +1078,13 @@ const Values = struct {
         // proof. Its inputs remain independently checkable under unknown values.
         for (self.image.functions, 0..) |function, id| {
             if (function.entry == @import("relocation.zig").missing) continue;
-            for (function.inputs, 0..) |slot, index|
-                if (self.entries[@intCast(function.entry)].get(@intCast(slot)) == empty) try self.input(id, index, try self.origins.one(.unknown));
+            for (function.inputs, 0..) |slot, index| {
+                if (self.entries[@intCast(function.entry)].get(@intCast(slot)) == empty) {
+                    const unknown = try self.origins.one(.unknown);
+                    try self.input(id, index, unknown);
+                    if (self.seeds) |seeds| try seeds[@intCast(function.entry)].set(self.allocator, @intCast(slot), unknown);
+                }
+            }
         }
         try self.converge();
         try self.deriveBindings();
@@ -1195,5 +1303,336 @@ const Values = struct {
             inline .call, .perform, .apply, .handle, .resume_value, .resume_with, .resume_computation, .dispose, .protect, .with_region => |v| try self.edge(id, v.next, returned, null),
             .return_value, .fail => {},
         }
+    }
+};
+
+// This is a readback of the existing equations. Memoization names static facts,
+// not paths, so recursive argument/return dependencies have finite backreferences.
+const ExplanationBuilder = struct {
+    stored: *const Storage,
+    reasons: std.ArrayList(Explanation.Reason) = .empty,
+    memo: std.AutoHashMapUnmanaged(Key, usize) = .empty,
+    const Key = struct { kind: enum { slot, returned, capture, suspension }, relative: bool = false, a: usize, b: usize = 0, c: usize = 0 };
+    const List = std.ArrayList(usize);
+
+    fn add(self: *ExplanationBuilder, reason: Explanation.Reason) Error!usize {
+        const id = self.reasons.items.len;
+        try self.reasons.append(self.stored.allocator, reason);
+        return id;
+    }
+    fn push(self: *ExplanationBuilder, list: *List, id: usize) Error!void {
+        if (std.mem.indexOfScalar(usize, list.items, id) == null) try list.append(self.stored.allocator, id);
+    }
+    fn leaf(self: *ExplanationBuilder, list: *List, rule: Explanation.Rule, location: Explanation.Location, approximation: bool) Error!void {
+        try self.push(list, try self.add(.{ .rule = rule, .location = location, .approximation = approximation }));
+    }
+    fn members(self: *ExplanationBuilder, set: Set) Error![]const Origin {
+        var result: std.ArrayList(Origin) = .empty;
+        var iterator = self.stored.values.?.origins.iterator(set);
+        while (iterator.next()) |origin| try result.append(self.stored.allocator, origin);
+        return result.items;
+    }
+    fn slot(self: *ExplanationBuilder, relative: bool, block: usize, position: usize, value: p.Id) Error!usize {
+        return self.fact(.{ .kind = .slot, .relative = relative, .a = block, .b = position, .c = @intCast(value) });
+    }
+    fn fact(self: *ExplanationBuilder, key: Key) Error!usize {
+        if (self.memo.get(key)) |existing| return existing;
+        const id = try self.add(.{ .rule = .summary_dependency });
+        try self.memo.put(self.stored.allocator, key, id);
+        const flow = (if (key.relative) self.stored.relative else self.stored.values).?;
+        const image = self.stored.image;
+        var inputs: List = .empty;
+        var reason: Explanation.Reason = .{ .rule = .summary_dependency };
+        switch (key.kind) {
+            .slot => {
+                const block = image.blocks[key.a];
+                const row = try flow.at(self.stored.allocator, key.a, key.b);
+                reason.origins = try self.members(row.get(key.c));
+                reason.location = .{ .function = block.function, .block = key.a, .position = key.b, .slot = key.c };
+                if (key.b > 0) {
+                    const instruction = block.instructions[key.b - 1];
+                    if (instruction.destination != key.c) {
+                        try self.push(&inputs, try self.slot(key.relative, key.a, key.b - 1, key.c));
+                    } else switch (instruction.opcode) {
+                        .computation => {
+                            reason.rule = .closure_capture;
+                            reason.approximation = key.relative;
+                            for (instruction.operands) |operand| try self.push(&inputs, try self.slot(key.relative, key.a, key.b - 1, operand));
+                        },
+                        .move, .product, .variant, .sequence, .sequence_append, .sequence_concat, .sequence_set, .resource_pack, .clone_resumption, .package => {
+                            reason.rule = .aggregate_union;
+                            for (instruction.operands) |operand| try self.push(&inputs, try self.slot(key.relative, key.a, key.b - 1, operand));
+                        },
+                        .field, .variant_payload, .sequence_get, .sequence_pop, .sequence_take, .sequence_pop_last, .resource_unpack, .unpack => {
+                            reason.rule = .aggregate_projection;
+                            reason.approximation = true; // The solver keeps the full aggregate union.
+                            for (instruction.operands) |operand| try self.push(&inputs, try self.slot(key.relative, key.a, key.b - 1, operand));
+                        },
+                        .select => {
+                            reason.rule = .branch_join;
+                            reason.approximation = true;
+                            for (instruction.operands[1..]) |operand| try self.push(&inputs, try self.slot(key.relative, key.a, key.b - 1, operand));
+                        },
+                        else => {
+                            reason.rule = .opaque_cell;
+                            reason.approximation = true;
+                        },
+                    }
+                } else {
+                    reason.rule = .branch_join;
+                    reason.approximation = true;
+                    if (key.relative and image.functions[@intCast(block.function)].entry == key.a) {
+                        if (std.mem.indexOfScalar(p.Id, image.functions[@intCast(block.function)].inputs, key.c) != null)
+                            try self.leaf(&inputs, .scoped_input, reason.location, false);
+                    } else if (flow.seeds) |seeds| {
+                        const seed = seeds[key.a].get(key.c);
+                        if (seed != empty) try self.push(&inputs, try self.add(.{ .rule = if (flow.origins.contains(seed, .unknown)) .unknown_input else .scoped_input, .location = reason.location, .origins = try self.members(seed), .approximation = flow.origins.contains(seed, .unknown) }));
+                    }
+                    for (image.blocks, 0..) |predecessor, predecessor_id| {
+                        if (predecessor.function == block.function) switch (predecessor.terminator) {
+                            .jump, .yield_value => |edge_| try self.edge(&inputs, key, predecessor_id, edge_),
+                            .branch => |v| {
+                                try self.edge(&inputs, key, predecessor_id, v.when_true);
+                                try self.edge(&inputs, key, predecessor_id, v.when_false);
+                            },
+                            .switch_variant => |v| for (v.cases) |edge_| {
+                                try self.edge(&inputs, key, predecessor_id, edge_);
+                            },
+                            inline .call, .perform, .apply, .handle, .resume_value, .resume_with, .resume_computation, .dispose, .protect, .with_region, .unpack_product => |v| try self.edge(&inputs, key, predecessor_id, v.next),
+                            .return_value, .fail => {},
+                        };
+                        if (!key.relative and image.functions[@intCast(block.function)].entry == key.a) {
+                            if (std.mem.indexOfScalar(p.Id, image.functions[@intCast(block.function)].inputs, key.c)) |index| {
+                                if (predecessor.terminator == .call and predecessor.terminator.call.function == block.function) {
+                                    const dependency = try self.slot(false, predecessor_id, predecessor.instructions.len, predecessor.terminator.call.arguments[index]);
+                                    try self.push(&inputs, try self.add(.{ .rule = .direct_argument, .location = .{ .function = predecessor.function, .block = predecessor_id }, .inputs = try self.stored.allocator.dupe(usize, &.{dependency}) }));
+                                }
+                                try self.bodyInput(&inputs, predecessor_id, block.function, index);
+                            }
+                        }
+                    }
+                }
+            },
+            .returned => {
+                reason.rule = .direct_return;
+                reason.location.function = key.a;
+                reason.origins = try self.members(flow.returns[key.a]);
+                for (image.blocks, 0..) |block, block_id| if (block.function == key.a and block.terminator == .return_value) {
+                    try self.push(&inputs, try self.slot(key.relative, block_id, block.instructions.len, block.terminator.return_value));
+                };
+            },
+            .capture => {
+                reason.rule = .closure_capture;
+                reason.location.function = image.constructors[key.a].function;
+                reason.origins = try self.members(flow.captures[key.a][key.b]);
+                for (image.blocks, 0..) |block, block_id| for (block.instructions, 0..) |instruction, position| {
+                    if (instruction.opcode == .computation and instruction.immediate == key.a)
+                        try self.push(&inputs, try self.slot(false, block_id, position, instruction.operands[key.b]));
+                };
+            },
+            .suspension => {
+                reason.location.function = key.a;
+                reason.origins = try self.members(flow.suspensions[key.a][key.b]);
+                for (image.functions[key.a].layout.slots, 0..) |schema, slot_id| if (flow.disposal.?.contains(schema, key.b)) {
+                    try self.leaf(&inputs, .owned_cleanup, .{ .function = key.a, .slot = slot_id }, true);
+                };
+                for (image.blocks, 0..) |block, block_id| {
+                    if (block.function != key.a) continue;
+                    const location: Explanation.Location = .{ .function = key.a, .block = block_id, .position = block.instructions.len };
+                    switch (block.terminator) {
+                        .perform => |v| {
+                            if (v.effect == key.b) {
+                                if (v.capability) |slot_id| try self.push(&inputs, try self.slot(true, block_id, block.instructions.len, slot_id)) else try self.leaf(&inputs, .environmental, location, false);
+                            }
+                            if (contracts.containsEffect(image.effects[@intCast(v.effect)].use_site_effects, key.b)) try self.leaf(&inputs, .scoped_input, location, true);
+                        },
+                        .call => |v| {
+                            if (flow.suspensions[@intCast(v.function)][key.b] != empty) {
+                                try self.push(&inputs, try self.fact(.{ .kind = .suspension, .relative = true, .a = @intCast(v.function), .b = key.b }));
+                                var iterator = flow.origins.iterator(flow.suspensions[@intCast(v.function)][key.b]);
+                                while (iterator.next()) |origin| if (origin == .input) {
+                                    try self.push(&inputs, try self.slot(true, block_id, block.instructions.len, v.arguments[origin.input]));
+                                };
+                            }
+                        },
+                        .return_value, .jump, .branch, .switch_variant, .unpack_product, .yield_value, .fail => {},
+                        else => if (contracts.containsEffect(image.functions[key.a].effects, key.b)) try self.leaf(&inputs, .scoped_input, location, true),
+                    }
+                    // Implicit disposal is intentionally wider than declared rows.
+                    // The equation owner has already included it in this final fact.
+                    if (flow.origins.contains(flow.suspensions[key.a][key.b], .unknown))
+                        try self.implicitSources(&inputs, block_id, key.b);
+                }
+            },
+        }
+        reason.inputs = inputs.items;
+        self.reasons.items[id] = reason;
+        return id;
+    }
+
+    fn edge(self: *ExplanationBuilder, inputs: *List, key: Key, predecessor: usize, edge_: ir.Edge) Error!void {
+        if (edge_.block != key.a) return;
+        const block = self.stored.image.blocks[predecessor];
+        var source: ir.Source = .{ .slot = key.c };
+        for (edge_.assignments) |assignment| if (assignment.destination == key.c) {
+            source = assignment.source;
+            break;
+        };
+        switch (source) {
+            .slot => |slot_id| {
+                const actual = if (block.terminator == .unpack_product and std.mem.indexOfScalar(p.Id, block.terminator.unpack_product.destinations, slot_id) != null) block.terminator.unpack_product.value else slot_id;
+                try self.push(inputs, try self.slot(key.relative, predecessor, block.instructions.len, actual));
+            },
+            .returned => {
+                if (block.terminator == .call) {
+                    const call = block.terminator.call;
+                    try self.push(inputs, try self.fact(.{ .kind = .returned, .relative = key.relative, .a = @intCast(call.function) }));
+                    if (key.relative) {
+                        var iterator = self.stored.relative.?.origins.iterator(self.stored.relative.?.returns[@intCast(call.function)]);
+                        while (iterator.next()) |origin| if (origin == .input) {
+                            try self.push(inputs, try self.slot(true, predecessor, block.instructions.len, call.arguments[origin.input]));
+                        };
+                    }
+                } else try self.leaf(inputs, .opaque_cell, .{ .function = block.function, .block = predecessor, .position = block.instructions.len }, true);
+            },
+        }
+    }
+
+    fn bodyInput(self: *ExplanationBuilder, inputs: *List, block_id: usize, function: p.Id, index: usize) Error!void {
+        const block = self.stored.image.blocks[block_id];
+        switch (block.terminator) {
+            .apply => |v| try self.boundInput(inputs, block_id, function, index, v.computation, v.arguments, 0, null),
+            .handle => |v| try self.boundInput(inputs, block_id, function, index, v.body, v.arguments, self.stored.image.handlers[@intCast(v.handler)].clauses.len, v.handler),
+            .with_region => |v| try self.boundInput(inputs, block_id, function, index, v.body, v.arguments, 1, null),
+            .protect => |v| {
+                try self.boundInput(inputs, block_id, function, index, v.body, v.arguments, @intFromBool(v.resource != null), null);
+                try self.boundInput(inputs, block_id, function, index, v.cleanup, &.{}, 1 + @as(usize, @intFromBool(v.resource != null)), null);
+            },
+            .resume_computation => |v| try self.boundInput(inputs, block_id, function, index, v.computation, &.{}, (try contracts.computation(self.stored.image, self.stored.image.functions[@intCast(block.function)].layout.slots[@intCast(v.computation)])).parameters.len, null),
+            .perform => |v| for (v.bodies) |body_slot| {
+                try self.boundInput(inputs, block_id, function, index, body_slot, &.{}, (try contracts.computation(self.stored.image, self.stored.image.functions[@intCast(block.function)].layout.slots[@intCast(body_slot)])).parameters.len, null);
+            },
+            else => {},
+        }
+    }
+    fn boundInput(self: *ExplanationBuilder, inputs: *List, block_id: usize, function: p.Id, index: usize, slot_id: p.Id, arguments: []const p.Id, supplied: usize, handler: ?p.Id) Error!void {
+        const flow = self.stored.values.?;
+        const image = self.stored.image;
+        const block = image.blocks[block_id];
+        const origins = flow.exits[block_id].get(@intCast(slot_id));
+        const schema = image.functions[@intCast(block.function)].layout.slots[@intCast(slot_id)];
+        for (image.constructors, 0..) |constructor, constructor_id| {
+            if (constructor.function != function or constructor.schema != schema) continue;
+            const unknown = flow.origins.contains(origins, .unknown);
+            if (!unknown and !flow.origins.contains(origins, .{ .constructor = constructor_id })) continue;
+            var dependencies: List = .empty;
+            try self.push(&dependencies, try self.slot(false, block_id, block.instructions.len, slot_id));
+            const captures = flow.captures[constructor_id].len;
+            var rule: Explanation.Rule = .closure_application;
+            if (index < captures) {
+                if (!unknown) try self.push(&dependencies, try self.fact(.{ .kind = .capture, .a = constructor_id, .b = index }));
+            } else if (index < captures + supplied) {
+                rule = if (handler != null) .fresh_installation else .scoped_input;
+            } else try self.push(&dependencies, try self.slot(false, block_id, block.instructions.len, arguments[index - captures - supplied]));
+            try self.push(inputs, try self.add(.{ .rule = rule, .location = .{ .function = block.function, .block = block_id }, .inputs = dependencies.items, .handler = handler, .approximation = unknown or (rule == .scoped_input) }));
+        }
+    }
+
+    fn implicitSources(self: *ExplanationBuilder, inputs: *List, block_id: usize, effect: usize) Error!void {
+        const block = self.stored.image.blocks[block_id];
+        switch (block.terminator) {
+            .apply => |v| try self.implicitClosure(inputs, block_id, v.computation, effect),
+            .handle => |v| {
+                try self.implicitClosure(inputs, block_id, v.body, effect);
+                try self.implicitHandler(inputs, block_id, v.handler, effect);
+            },
+            .with_region => |v| try self.implicitClosure(inputs, block_id, v.body, effect),
+            .protect => |v| {
+                try self.implicitClosure(inputs, block_id, v.body, effect);
+                try self.implicitClosure(inputs, block_id, v.cleanup, effect);
+            },
+            .resume_computation => |v| try self.implicitClosure(inputs, block_id, v.computation, effect),
+            .resume_with => |v| try self.implicitHandler(inputs, block_id, v.handler, effect),
+            .perform => |v| for (v.bodies) |slot_id| {
+                try self.implicitClosure(inputs, block_id, slot_id, effect);
+            },
+            else => {},
+        }
+    }
+    fn implicitClosure(self: *ExplanationBuilder, inputs: *List, block_id: usize, slot_id: p.Id, effect: usize) Error!void {
+        const image = self.stored.image;
+        const block = image.blocks[block_id];
+        const schema = image.functions[@intCast(block.function)].layout.slots[@intCast(slot_id)];
+        if (contracts.containsEffect((try contracts.computation(image, schema)).effects, effect)) return;
+        for (image.constructors) |constructor| {
+            if (constructor.schema != schema or self.stored.relative.?.suspensions[@intCast(constructor.function)][effect] == empty) continue;
+            const dependency = try self.fact(.{ .kind = .suspension, .relative = true, .a = @intCast(constructor.function), .b = effect });
+            try self.push(inputs, try self.add(.{ .rule = .owned_cleanup, .location = .{ .function = block.function, .block = block_id, .slot = slot_id }, .inputs = try self.stored.allocator.dupe(usize, &.{dependency}), .approximation = true }));
+        }
+    }
+    fn implicitHandler(self: *ExplanationBuilder, inputs: *List, block_id: usize, handler_id: p.Id, effect: usize) Error!void {
+        const handler = self.stored.image.handlers[@intCast(handler_id)];
+        if (contracts.containsEffect(handler.effects, effect)) return;
+        var dependencies: List = .empty;
+        if (self.stored.relative.?.suspensions[@intCast(handler.return_function)][effect] != empty)
+            try self.push(&dependencies, try self.fact(.{ .kind = .suspension, .relative = true, .a = @intCast(handler.return_function), .b = effect }));
+        for (handler.clauses) |clause| {
+            if (self.stored.relative.?.suspensions[@intCast(clause.function)][effect] != empty)
+                try self.push(&dependencies, try self.fact(.{ .kind = .suspension, .relative = true, .a = @intCast(clause.function), .b = effect }));
+        }
+        if (dependencies.items.len != 0) try self.push(inputs, try self.add(.{ .rule = .owned_cleanup, .location = .{ .function = self.stored.image.blocks[block_id].function, .block = block_id }, .inputs = dependencies.items, .handler = handler_id, .approximation = true }));
+    }
+
+    fn selection(self: *ExplanationBuilder, selected: *const Selection) Error!usize {
+        const boundary = selected.boundary();
+        const block_id: usize = @intCast(boundary.block);
+        const block = self.stored.image.blocks[block_id];
+        const location: Explanation.Location = .{ .function = block.function, .block = block_id, .position = block.instructions.len };
+        var inputs: List = .empty;
+        if (boundary.role == .operation and block.terminator == .perform and block.terminator.perform.capability == null) {
+            try self.leaf(&inputs, .environmental, location, false);
+        } else if (self.stored.values == null) {
+            try self.leaf(&inputs, .unknown_input, location, true);
+        } else if (boundary.role == .operation and block.terminator == .perform) {
+            if (block.terminator.perform.capability) |slot_id| try self.push(&inputs, try self.slot(false, block_id, block.instructions.len, slot_id)) else try self.leaf(&inputs, .environmental, location, false);
+        } else if (boundary.role == .callee and block.terminator == .call) {
+            const call = block.terminator.call;
+            try self.push(&inputs, try self.fact(.{ .kind = .suspension, .relative = true, .a = @intCast(call.function), .b = @intCast(selected.effect()) }));
+            var iterator = self.stored.relative.?.origins.iterator(self.stored.relative.?.suspensions[@intCast(call.function)][@intCast(selected.effect())]);
+            while (iterator.next()) |origin| if (origin == .input) {
+                try self.push(&inputs, try self.slot(false, block_id, block.instructions.len, call.arguments[origin.input]));
+            };
+        } else {
+            const slot_id: ?p.Id = switch (block.terminator) {
+                .apply => |v| v.computation,
+                inline .handle, .with_region => |v| v.body,
+                .protect => |v| if (boundary.role == .cleanup) v.cleanup else v.body,
+                .resume_computation => |v| if (boundary.role == .injected) v.computation else null,
+                else => null,
+            };
+            if (slot_id) |value| {
+                try self.push(&inputs, try self.slot(false, block_id, block.instructions.len, value));
+                const flow = self.stored.values.?;
+                const origins = flow.exits[block_id].get(@intCast(value));
+                for (self.stored.image.constructors, 0..) |constructor, id| {
+                    if (!flow.origins.contains(origins, .{ .constructor = id })) continue;
+                    try self.push(&inputs, try self.fact(.{ .kind = .suspension, .relative = true, .a = @intCast(constructor.function), .b = @intCast(selected.effect()) }));
+                    for (flow.captures[id], 0..) |_, index| try self.push(&inputs, try self.fact(.{ .kind = .capture, .a = id, .b = index }));
+                }
+            } else try self.leaf(&inputs, if (boundary.role == .cleanup or boundary.role == .resumed or boundary.role == .handler) .owned_cleanup else .scoped_input, location, true);
+        }
+        if (selected.knowledge().conservative) try self.leaf(&inputs, .conservative_expansion, location, true);
+        // Show the may-rebind edges that can contribute recipients. These are
+        // alternatives, never a claim that branches execute together.
+        if (self.stored.values) |flow| for (self.stored.image.blocks, 0..) |candidate, id| {
+            if (candidate.terminator != .resume_with) continue;
+            const operation = candidate.terminator.resume_with;
+            var relevant = false;
+            for (selected.targets()) |target| relevant = relevant or flow.bindings[@intCast(operation.handler)][@intCast(target.handler)];
+            if (!relevant) continue;
+            const source = try self.slot(false, id, candidate.instructions.len, operation.resumption);
+            try self.push(&inputs, try self.add(.{ .rule = .successor_binding, .location = .{ .function = candidate.function, .block = id }, .handler = operation.handler, .inputs = try self.stored.allocator.dupe(usize, &.{source}), .approximation = true }));
+        };
+        return self.add(.{ .rule = .selection, .location = location, .inputs = inputs.items, .approximation = selected.knowledge().conservative });
     }
 };

@@ -537,3 +537,52 @@ test "copy-binding fusion preserves repeated mutable reads across a write" {
     }
     try testing.expect(matched);
 }
+
+test "optional capture explanations preserve images and retain mapped presentation" {
+    const Own = data.activation_ownership;
+    const Observer = struct {
+        count: usize = 0,
+        mapped: bool = false,
+        unavailable: bool = false,
+        retained: ?Own.CaptureExplanation = null,
+        fn capture(_: *anyopaque, _: *const Own.CaptureSite, _: p.Id) void {}
+        fn closure(_: *anyopaque, _: p.Id, _: p.Id) void {}
+        fn explain(context: *anyopaque, _: *const Own.CaptureSite, _: p.Id, value: ?Own.CaptureExplanation) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            const present = value orelse {
+                self.unavailable = true;
+                return;
+            };
+            self.count += 1;
+            for (present.reasons) |reason| self.mapped = self.mapped or reason.location.source_variable != null;
+            if (self.retained) |old| old.deinit(testing.allocator);
+            self.retained = null;
+            self.retained = present.copy(testing.allocator) catch {
+                self.unavailable = true;
+                return;
+            };
+        }
+    };
+    inline for (.{ "deep", "generator", "recursive", "injection", "yieldingCleanup", "statefulService" }) |name| {
+        var observer: Observer = .{};
+        defer if (observer.retained) |retained| retained.deinit(testing.allocator);
+        {
+            var builder = source.Builder.init(testing.allocator);
+            defer builder.deinit();
+            const module = try @field(source.examples, name)(&builder);
+            var plain = try source.lowerObserved(testing.allocator, module, .{});
+            defer plain.deinit();
+            var observed = try source.lowerObserved(testing.allocator, module, .{ .captures = .{ .context = &observer, .capture = Observer.capture, .closure = Observer.closure, .explanation = Observer.explain } });
+            defer observed.deinit();
+            try testing.expectEqual(try data.program_image.identity(testing.allocator, plain.program), try data.program_image.identity(testing.allocator, observed.program));
+            if (observer.unavailable) std.debug.print("explanation unavailable for {s}\n", .{name});
+            try testing.expect(!observer.unavailable);
+        }
+        if (observer.retained) |retained| {
+            try testing.expect(observer.count != 0);
+            for (retained.reasons) |reason| for (reason.inputs) |input| try testing.expect(input < retained.reasons.len);
+        }
+        if (observer.count != 0) try testing.expect(observer.mapped);
+        if (comptime std.mem.eql(u8, name, "statefulService")) try testing.expect(observer.count != 0);
+    }
+}

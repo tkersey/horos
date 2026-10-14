@@ -211,7 +211,12 @@ test "qualified targets preserve explicit outer forwarding and runtime capabilit
     admitted = try @import("activation_ownership.zig").analyze(a, program);
     admitted.deinit();
     // Recompute after mutation; the old program-bound facts are never reused.
-    const joined = (try provenance.derive(allocator, program, &.{}, false)).targets(.{ .block = 8, .role = .operation }, 0);
+    const joined_control = try provenance.deriveObserved(allocator, program, &.{}, false, true);
+    const joined_selection = try joined_control.select(.{ .block = 8, .role = .operation }, 0);
+    const joined = joined_selection.targets();
+    const joined_explanation = try joined_control.explain(joined_selection);
+    try std.testing.expect(explanationHas(joined_explanation, .branch_join));
+    try std.testing.expectEqual(@as(usize, 2), joined_explanation.targets.len);
     try std.testing.expectEqual(@as(usize, 2), joined.len);
     try std.testing.expectEqual(@as(p.Id, 0), joined[0].handler);
     try std.testing.expectEqual(@as(p.Id, 1), joined[1].handler);
@@ -289,12 +294,16 @@ test "successor bindings retain original views without poisoning unrelated deep 
     blocks[0].terminator.handle.handler = 1;
     admitted = try @import("activation_ownership.zig").analyze(a, program);
     admitted.deinit();
-    const rebound = try provenance.derive(allocator, program, &.{}, false);
+    const rebound = try provenance.deriveObserved(allocator, program, &.{}, false, true);
     const views = try rebound.select(.{ .block = 2, .role = .operation }, 0);
     try std.testing.expect(!views.knowledge().conservative);
     try std.testing.expectEqual(@as(usize, 2), views.targets().len);
     try std.testing.expectEqual(@as(p.Id, 1), views.targets()[0].handler);
     try std.testing.expectEqual(@as(p.Id, 2), views.targets()[1].handler);
+    const explanation = try rebound.explain(views);
+    try std.testing.expect(explanationHas(explanation, .successor_binding));
+    try std.testing.expect(explanation.reasons.len < 200);
+    for (explanation.reasons) |reason| if (reason.rule == .successor_binding) try std.testing.expect(reason.approximation);
     // A successor with a narrower capture contract remains a possible recipient.
     // Neither the original broad handler nor the unused deep one can authorize it.
     handlers[2].clauses = &.{.{ .effect = 0, .function = 5, .resumption = 7 }};
@@ -303,4 +312,123 @@ test "successor bindings retain original views without poisoning unrelated deep 
     blocks[0].terminator.handle.handler = 0;
     admitted = try @import("activation_ownership.zig").analyze(a, program);
     admitted.deinit();
+}
+
+fn explanationHas(explanation: @import("control_provenance.zig").Explanation, rule: @import("control_provenance.zig").Explanation.Rule) bool {
+    for (explanation.reasons) |reason| if (reason.rule == rule) return true;
+    return false;
+}
+
+test "explanations retain final outer argument and capture facts with owned presentation" {
+    const provenance = @import("control_provenance.zig");
+    var retained: provenance.Explanation = undefined;
+    {
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var program = try nestedFixture(allocator);
+        program.handlers = try allocator.dupe(ir.Handler, &.{ program.handlers[0], program.handlers[0] });
+        const blocks = try allocator.dupe(ir.Block, program.blocks);
+        blocks[2].terminator.handle.handler = 1;
+        program.blocks = blocks;
+        const control = try provenance.deriveObserved(allocator, program, &.{}, false, true);
+        const selected = try control.select(.{ .block = 8, .role = .operation }, 0);
+        const explanation = try control.explain(selected);
+        try std.testing.expect(explanationHas(explanation, .fresh_installation));
+        try std.testing.expect(explanationHas(explanation, .direct_argument));
+        try std.testing.expect(explanationHas(explanation, .closure_capture));
+        try std.testing.expectEqual(@as(usize, 1), explanation.targets.len);
+        try std.testing.expectEqual(@as(p.Id, 0), explanation.targets[0].handler);
+        try std.testing.expect(!explanation.knowledge.conservative);
+        try std.testing.expect(explanation.reasons.len < 200);
+        for (explanation.reasons) |reason| for (reason.inputs) |input| try std.testing.expect(input < explanation.reasons.len);
+        retained = try explanation.copy(a);
+        const CopyProbe = struct {
+            fn run(allocator_: std.mem.Allocator, value: provenance.Explanation) !void {
+                const owned = try value.copy(allocator_);
+                owned.deinit(allocator_);
+            }
+        };
+        try std.testing.checkAllAllocationFailures(a, CopyProbe.run, .{explanation});
+        const open = try provenance.deriveObserved(allocator, program, &.{}, true, true);
+        const conservative = try open.explain(try open.select(.{ .block = 8, .role = .operation }, 0));
+        try std.testing.expect(conservative.knowledge.conservative);
+        try std.testing.expect(explanationHas(conservative, .unknown_input));
+        try std.testing.expect(explanationHas(conservative, .conservative_expansion));
+    }
+    defer retained.deinit(a);
+    try std.testing.expectEqual(@as(p.Id, 8), retained.boundary.block);
+    try std.testing.expect(explanationHas(retained, .fresh_installation));
+    for (retained.reasons) |reason| for (reason.inputs) |input| try std.testing.expect(input < retained.reasons.len);
+}
+
+test "capture explanation observer preserves rejection and owns copied failure presentation" {
+    const own = @import("activation_ownership.zig");
+    const Observer = struct {
+        retained: ?own.CaptureExplanation = null,
+        failed_copy: bool = false,
+        fn capture(_: *anyopaque, _: p.Id, _: *const own.CaptureSite, _: p.Id) void {}
+        fn explain(context: *anyopaque, _: p.Id, _: *const own.CaptureSite, _: p.Id, value: ?own.CaptureExplanation) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.retained) |old| old.deinit(a);
+            self.retained = if (value) |present| present.copy(a) catch result: {
+                self.failed_copy = true;
+                break :result null;
+            } else null;
+        }
+    };
+    var observer: Observer = .{};
+    defer if (observer.retained) |value| value.deinit(a);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var program = base;
+    const blocks = try arena.allocator().dupe(ir.Block, base.blocks);
+    blocks[3].instructions = &.{};
+    blocks[3].terminator = .{ .return_value = 0 };
+    program.blocks = blocks;
+    var admitted = try own.analyzeObserved(a, program, null, .{ .context = &observer, .capture = Observer.capture, .explanation = Observer.explain });
+    admitted.deinit();
+    try std.testing.expect(observer.retained != null and !observer.failed_copy);
+    const schemas = try arena.allocator().dupe(p.Schema, base.schemas);
+    schemas[4].internal.resumption.capture_bound = &.{5};
+    program.schemas = schemas;
+    try std.testing.expectError(error.InvalidOwnership, own.analyzeObserved(a, program, null, .{ .context = &observer, .capture = Observer.capture, .explanation = Observer.explain }));
+    try std.testing.expect(observer.retained != null and !observer.failed_copy);
+    try std.testing.expect(explanationHas(observer.retained.?, .fresh_installation));
+    try std.testing.expect(!observer.retained.?.capture_constraint.?.satisfied);
+}
+
+test "explanations name unwitnessed inputs and close recursive summaries with backreferences" {
+    const provenance = @import("control_provenance.zig");
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var program = try fixture(allocator);
+    const blocks = try allocator.alloc(ir.Block, 12);
+    @memcpy(blocks[0..11], program.blocks);
+    blocks[10].terminator = .{ .call = .{ .function = 4, .arguments = &.{ 0, 1, 4 }, .next = .{ .block = 11, .assignments = &.{.{ .destination = 4, .source = .returned }} } } };
+    blocks[11] = .{ .function = 4, .instructions = &.{}, .terminator = .{ .return_value = 4 } };
+    program.blocks = blocks;
+    var admitted = try @import("activation_ownership.zig").analyze(a, program);
+    admitted.deinit();
+    const control = try provenance.deriveObserved(allocator, program, &.{}, false, true);
+    const explanation = try control.explain(try control.select(.{ .block = 2, .role = .callee }, 0));
+    try std.testing.expect(explanationHas(explanation, .summary_dependency));
+    try std.testing.expect(!explanation.knowledge.conservative);
+    try std.testing.expect(explanation.reasons.len < 200);
+    var backreference = false;
+    for (explanation.reasons, 0..) |reason, index| for (reason.inputs) |input| {
+        backreference = backreference or input <= index;
+    };
+    try std.testing.expect(backreference);
+    // Remove the only binding of the helper; intrinsic unused declarations
+    // still receive unknown inputs instead of an empty-target proof.
+    blocks[2] = base.blocks[2];
+    admitted = try @import("activation_ownership.zig").analyze(a, program);
+    admitted.deinit();
+    const unbound = try provenance.deriveObserved(allocator, program, &.{}, false, true);
+    const unknown = try unbound.explain(try unbound.select(.{ .block = 8, .role = .operation }, 0));
+    try std.testing.expect(unknown.knowledge.conservative);
+    try std.testing.expect(explanationHas(unknown, .unknown_input));
+    try std.testing.expect(explanationHas(unknown, .conservative_expansion));
 }

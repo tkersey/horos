@@ -57,6 +57,18 @@ pub fn validateWithFacts(
     borrows: []const @import("borrow_contract.zig").Summary,
     diagnostic: ?*a.Diagnostic,
 ) Error!ContextualFacts {
+    return validateWithObservedFacts(scratch, image, imports, component, borrows, diagnostic, false);
+}
+
+pub fn validateWithObservedFacts(
+    scratch: std.mem.Allocator,
+    image: ir.Program,
+    imports: []const p.Id,
+    component: bool,
+    borrows: []const @import("borrow_contract.zig").Summary,
+    diagnostic: ?*a.Diagnostic,
+    explanations: bool,
+) Error!ContextualFacts {
     try structure.validateComponent(scratch, image, imports);
     const exportable = try catalogs(scratch, image, component);
     const uses = try contracts.validateDiagnosed(scratch, image, diagnostic);
@@ -80,7 +92,7 @@ pub fn validateWithFacts(
         try terminator(image, block, layout, effects, null);
     }
     try @import("region_admission.zig").validate(scratch, image);
-    const control = try provenance.derive(scratch, image, imports, component);
+    const control = try provenance.deriveObserved(scratch, image, imports, component, explanations);
     for (image.blocks, 0..) |block, block_id| {
         if (diagnostic) |d| d.* = .{ .phase = .block, .function = block.function, .block = block_id };
         try terminator(image, block, image.functions[@intCast(block.function)].layout.slots, effects, .{ .analysis = control, .block = block_id });

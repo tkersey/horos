@@ -22,8 +22,11 @@ pub fn analyze(allocator: std.mem.Allocator, image: ir.Program) Error!flow.Facts
 pub const CaptureObserver = struct {
     context: *anyopaque,
     capture: *const fn (*anyopaque, p.Id, *const CaptureSite, p.Id) void,
+    /// Null presentation reports unavailable rendering, not unknown semantics.
+    explanation: ?*const fn (*anyopaque, p.Id, *const CaptureSite, p.Id, ?CaptureExplanation) void = null,
 };
 pub const CaptureSite = provenance.Selection;
+pub const CaptureExplanation = provenance.Explanation;
 pub fn analyzeObserved(allocator: std.mem.Allocator, image: ir.Program, diagnostic: ?*@import("admission.zig").Diagnostic, observer: ?CaptureObserver) Error!flow.Facts {
     return analyzeInternal(allocator, image, &.{}, false, &.{}, diagnostic, observer);
 }
@@ -53,7 +56,7 @@ fn analyzeInternal(
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
-    const contextual = try types.validateWithFacts(scratch, image, imports, component, borrows, diagnostic);
+    const contextual = try types.validateWithObservedFacts(scratch, image, imports, component, borrows, diagnostic, if (observer) |o| o.explanation != null else false);
     var facts = try flow.analyzeComponent(allocator, image, imports);
     errdefer facts.deinit();
     var checker: Check = .{
@@ -189,8 +192,15 @@ const Check = struct {
             d.slot = slot;
             d.effect = selected.effect();
         }
-        if (self.observer) |observer| observer.capture(observer.context, self.function, selected, slot);
-        const schema = slots[@intCast(slot)];
-        if (!try selected.captureAllowed(self.uses, schema)) return error.InvalidOwnership;
+        const allowed = try selected.captureAllowed(self.uses, slots[@intCast(slot)]);
+        if (self.observer) |observer| {
+            observer.capture(observer.context, self.function, selected, slot);
+            if (observer.explanation) |explain| {
+                var presentation: ?CaptureExplanation = self.provenance.explain(selected) catch null;
+                if (presentation) |*value| value.capture_constraint = .{ .slot = slot, .schema = slots[@intCast(slot)], .satisfied = allowed };
+                explain(observer.context, self.function, selected, slot, presentation);
+            }
+        }
+        if (!allowed) return error.InvalidOwnership;
     }
 };
