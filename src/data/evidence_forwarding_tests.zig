@@ -163,4 +163,144 @@ test "two installations of one handler descriptor do not establish equal evidenc
     try std.testing.expect(candidate == null);
     try std.testing.expectEqual(program.blocks[0].terminator.handle.handler, program.blocks[2].terminator.handle.handler);
     try std.testing.expect(program.blocks[11].terminator.call.arguments[0] != program.blocks[11].terminator.call.arguments[1]);
+    const control = try @import("control_provenance.zig").derive(arena.allocator(), program, &.{}, false);
+    // The captured outer token survives discharge of the fresh inner formal,
+    // even though both installations use exactly the same handler descriptor.
+    const escaping = control.targets(.{ .block = 2, .role = .body }, 0);
+    try std.testing.expectEqual(@as(usize, 1), escaping.len);
+    try std.testing.expectEqual(@as(p.Id, 0), escaping[0].handler);
+}
+
+test "qualified targets preserve explicit outer forwarding and runtime capability unions" {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var program = try nestedFixture(allocator);
+    program.handlers = try allocator.dupe(ir.Handler, &.{ program.handlers[0], program.handlers[0] });
+    const blocks = try allocator.dupe(ir.Block, program.blocks);
+    blocks[2].terminator.handle.handler = 1;
+    program.blocks = blocks;
+    var admitted = try @import("activation_ownership.zig").analyze(a, program);
+    admitted.deinit();
+    const provenance = @import("control_provenance.zig");
+    const control = try provenance.derive(allocator, program, &.{}, false);
+    const outer = control.targets(.{ .block = 8, .role = .operation }, 0);
+    const inner = control.targets(.{ .block = 9, .role = .operation }, 0);
+    const escaped = control.targets(.{ .block = 2, .role = .body }, 0);
+    try std.testing.expectEqual(@as(usize, 1), outer.len);
+    try std.testing.expectEqual(@as(p.Id, 0), outer[0].handler);
+    try std.testing.expectEqual(@as(usize, 1), inner.len);
+    try std.testing.expectEqual(@as(p.Id, 1), inner[0].handler);
+    try std.testing.expectEqual(@as(usize, 1), escaped.len);
+    try std.testing.expectEqual(@as(p.Id, 0), escaped[0].handler);
+    const conservative = try provenance.derive(allocator, program, &.{}, true);
+    const open_site = try conservative.select(.{ .block = 8, .role = .operation }, 0);
+    try std.testing.expect(open_site.knowledge().conservative);
+    try std.testing.expectEqual(@as(usize, 2), open_site.targets().len);
+    try std.testing.expect(!(try control.select(.{ .block = 8, .role = .operation }, 0)).knowledge().conservative);
+
+    const functions = try allocator.dupe(ir.Function, program.functions);
+    functions[4].layout.slots = &.{ 5, 5, 0, 0, 0, 2, 5 };
+    program.functions = functions;
+    blocks[8].instructions = &.{
+        .{ .destination = 3, .opcode = .constant, .immediate = 0 },
+        .{ .destination = 5, .opcode = .less, .operands = &.{ 2, 3 } },
+        .{ .destination = 6, .opcode = .select, .operands = &.{ 5, 0, 1 } },
+    };
+    blocks[8].terminator.perform.capability = 6;
+    admitted = try @import("activation_ownership.zig").analyze(a, program);
+    admitted.deinit();
+    // Recompute after mutation; the old program-bound facts are never reused.
+    const joined = (try provenance.derive(allocator, program, &.{}, false)).targets(.{ .block = 8, .role = .operation }, 0);
+    try std.testing.expectEqual(@as(usize, 2), joined.len);
+    try std.testing.expectEqual(@as(p.Id, 0), joined[0].handler);
+    try std.testing.expectEqual(@as(p.Id, 1), joined[1].handler);
+    const handlers = try allocator.dupe(ir.Handler, &.{ program.handlers[0], program.handlers[1], program.handlers[0] });
+    handlers[2].return_function = program.functions.len;
+    program.handlers = handlers;
+    try std.testing.expectError(error.InvalidReference, @import("activation_ownership.zig").analyze(a, program));
+}
+
+test "conservative provenance preserves valid admission and rejects an unsafe retained capture" {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var program = base;
+    const blocks = try allocator.dupe(ir.Block, program.blocks);
+    // The original argument, not the operation's reply, remains live across
+    // this perform. Its u64 schema must be allowed by the selected resumption.
+    blocks[3].instructions = &.{};
+    blocks[3].terminator = .{ .return_value = 0 };
+    program.blocks = blocks;
+    const ownership = @import("activation_ownership.zig");
+    var precise = try ownership.analyze(a, program);
+    precise.deinit();
+    var conservative = try ownership.analyzeComponent(a, program, &.{}, &.{});
+    conservative.deinit();
+    const control = try @import("control_provenance.zig").derive(allocator, program, &.{}, true);
+    try std.testing.expect((try control.select(.{ .block = 2, .role = .operation }, 0)).knowledge().conservative);
+    const schemas = try allocator.dupe(p.Schema, program.schemas);
+    schemas[4].internal.resumption.capture_bound = &.{5};
+    program.schemas = schemas;
+    try std.testing.expectError(error.InvalidOwnership, ownership.analyze(a, program));
+    try std.testing.expectError(error.InvalidOwnership, ownership.analyzeComponent(a, program, &.{}, &.{}));
+}
+
+test "successor bindings retain original views without poisoning unrelated deep handlers" {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var program = base;
+    const schemas = try allocator.alloc(p.Schema, base.schemas.len + 2);
+    @memcpy(schemas[0..base.schemas.len], base.schemas);
+    schemas[6] = .{ .internal = .{ .resumption = .{ .effect = 0, .input = 0, .answer = 0, .effects = &.{0}, .handled = &.{0}, .capture_bound = &.{ 0, 5 }, .mode = .shallow, .use = .linear } } };
+    schemas[7] = schemas[6];
+    schemas[7].internal.resumption.capture_bound = &.{};
+    program.schemas = schemas;
+    const functions = try allocator.alloc(ir.Function, 6);
+    @memcpy(functions[0..4], base.functions);
+    functions[4] = .{ .entry = 8, .inputs = &.{ 0, 1 }, .layout = .{ .slots = &.{ 0, 6, 0 } }, .result = 0 };
+    functions[5] = .{ .entry = 10, .inputs = &.{ 0, 1 }, .layout = .{ .slots = &.{ 0, 6, 0 } }, .result = 0 };
+    program.functions = functions;
+    const blocks = try allocator.alloc(ir.Block, 12);
+    @memcpy(blocks[0..8], base.blocks);
+    blocks[8] = .{ .function = 4, .instructions = &.{}, .terminator = .{ .resume_with = .{ .resumption = 1, .argument = 0, .handler = 2, .state = &.{}, .next = .{ .block = 9, .assignments = &.{.{ .destination = 2, .source = .returned }} } } } };
+    blocks[9] = .{ .function = 4, .instructions = &.{}, .terminator = .{ .return_value = 2 } };
+    blocks[10] = .{ .function = 5, .instructions = &.{}, .terminator = .{ .resume_with = .{ .resumption = 1, .argument = 0, .handler = 1, .state = &.{}, .next = .{ .block = 11, .assignments = &.{.{ .destination = 2, .source = .returned }} } } } };
+    blocks[11] = .{ .function = 5, .instructions = &.{}, .terminator = .{ .return_value = 2 } };
+    blocks[3] = .{ .function = 1, .instructions = &.{}, .terminator = .{ .return_value = 0 } };
+    program.blocks = blocks;
+    const handlers = try allocator.dupe(ir.Handler, &.{
+        base.handlers[0],
+        .{ .mode = .shallow, .input = 0, .answer = 0, .return_function = 2, .clauses = &.{.{ .effect = 0, .function = 4, .resumption = 6 }} },
+        .{ .mode = .shallow, .input = 0, .answer = 0, .return_function = 2, .clauses = &.{.{ .effect = 0, .function = 5, .resumption = 6 }} },
+    });
+    program.handlers = handlers;
+    var admitted = try @import("activation_ownership.zig").analyze(a, program);
+    admitted.deinit();
+    const provenance = @import("control_provenance.zig");
+    const original = try provenance.derive(allocator, program, &.{}, false);
+    const isolated = try original.select(.{ .block = 2, .role = .operation }, 0);
+    try std.testing.expect(!isolated.knowledge().conservative);
+    try std.testing.expectEqual(@as(usize, 1), isolated.targets().len);
+    try std.testing.expectEqual(@as(p.Id, 0), isolated.targets()[0].handler);
+    // Installing the shallow handler instead joins both possible bindings; the
+    // original view is retained even through a cycle of successor declarations.
+    blocks[0].terminator.handle.handler = 1;
+    admitted = try @import("activation_ownership.zig").analyze(a, program);
+    admitted.deinit();
+    const rebound = try provenance.derive(allocator, program, &.{}, false);
+    const views = try rebound.select(.{ .block = 2, .role = .operation }, 0);
+    try std.testing.expect(!views.knowledge().conservative);
+    try std.testing.expectEqual(@as(usize, 2), views.targets().len);
+    try std.testing.expectEqual(@as(p.Id, 1), views.targets()[0].handler);
+    try std.testing.expectEqual(@as(p.Id, 2), views.targets()[1].handler);
+    // A successor with a narrower capture contract remains a possible recipient.
+    // Neither the original broad handler nor the unused deep one can authorize it.
+    handlers[2].clauses = &.{.{ .effect = 0, .function = 5, .resumption = 7 }};
+    functions[5].layout.slots = &.{ 0, 7, 0 };
+    try std.testing.expectError(error.InvalidOwnership, @import("activation_ownership.zig").analyze(a, program));
+    blocks[0].terminator.handle.handler = 0;
+    admitted = try @import("activation_ownership.zig").analyze(a, program);
+    admitted.deinit();
 }

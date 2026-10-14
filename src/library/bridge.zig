@@ -76,6 +76,7 @@ pub fn list(comptime family: Family, items: anytype) List(family, @TypeOf(items)
     return out;
 }
 pub fn CaptureLists(comptime T: type) type {
+    comptime @import("../authoring/option_contract.zig").check("capture bounds", T, &.{ "continuation", "body" });
     return struct {
         continuation: List(.schema, @FieldType(T, "continuation")),
         body: List(.schema, if (@hasField(T, "body")) @FieldType(T, "body") else @TypeOf(.{})),

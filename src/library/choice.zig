@@ -1,4 +1,5 @@
 //! Boolean choice keeps the original captured multi-shot continuation.
+const option_contract = @import("../authoring/option_contract.zig");
 const bridge = @import("bridge.zig");
 const a = bridge.a;
 const native = bridge.native;
@@ -21,9 +22,11 @@ pub fn family(c: *a.Context, identity: []const u8) a.Error!*const Family {
     return @ptrCast(try runtime.family(bridge.context(c), identity));
 }
 pub fn all(c: *a.Context, choice: *const Family, element: anytype, options: anytype) a.Error!Interpretation(bridge.schemaShape(@TypeOf(element))) {
+    comptime option_contract.check("Choice.all", @TypeOf(options), option_contract.choice);
     return interpret(c, choice, element, options, true);
 }
 pub fn first(c: *a.Context, choice: *const Family, element: anytype, options: anytype) a.Error!Interpretation(bridge.schemaShape(@TypeOf(element))) {
+    comptime option_contract.check("Choice.first", @TypeOf(options), option_contract.choice);
     return interpret(c, choice, element, options, false);
 }
 fn interpret(c: *a.Context, choice: *const Family, element: anytype, options: anytype, comptime every: bool) a.Error!Interpretation(bridge.schemaShape(@TypeOf(element))) {

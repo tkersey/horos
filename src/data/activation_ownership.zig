@@ -9,6 +9,7 @@ const types = @import("activation_types.zig");
 const contracts = @import("contracts.zig");
 const effect_scope = @import("effect_scope.zig");
 const sets = @import("analysis_sets.zig");
+const provenance = @import("control_provenance.zig");
 pub const Error = types.Error || flow.Error;
 
 /// All facts are derived inside this call from the same immutable input. A caller
@@ -20,8 +21,9 @@ pub fn analyze(allocator: std.mem.Allocator, image: ir.Program) Error!flow.Facts
 /// Observes the same retained slots checked below; supplies no admission facts.
 pub const CaptureObserver = struct {
     context: *anyopaque,
-    capture: *const fn (*anyopaque, p.Id, p.Id, p.Id) void,
+    capture: *const fn (*anyopaque, p.Id, *const CaptureSite, p.Id) void,
 };
+pub const CaptureSite = provenance.Selection;
 pub fn analyzeObserved(allocator: std.mem.Allocator, image: ir.Program, diagnostic: ?*@import("admission.zig").Diagnostic, observer: ?CaptureObserver) Error!flow.Facts {
     return analyzeInternal(allocator, image, &.{}, false, &.{}, diagnostic, observer);
 }
@@ -39,19 +41,6 @@ pub fn analyzeComponent(
     return analyzeInternal(allocator, image, imports, true, borrows, null, null);
 }
 
-/// Capture compatibility for an admitted image and its derived schema traits.
-/// This is a schema predicate, not program admission: analyze still derives the
-/// retained slots and traits independently from the complete immutable image.
-pub fn captureSchemaAllowed(image: ir.Program, uses: @import("traits.zig").Facts, effect: p.Id, schema: p.Id) Error!bool {
-    if (image.effects[@intCast(effect)].control_use == .multi and !uses.clone[@intCast(schema)]) return false;
-    for (image.handlers) |handler| for (handler.clauses) |clause| {
-        if (clause.effect != effect) continue;
-        const signature = try contracts.resumption(image, clause.resumption);
-        if (std.mem.indexOfScalar(p.Id, signature.capture_bound, schema) == null) return false;
-    };
-    return true;
-}
-
 fn analyzeInternal(
     allocator: std.mem.Allocator,
     image: ir.Program,
@@ -61,19 +50,20 @@ fn analyzeInternal(
     diagnostic: ?*@import("admission.zig").Diagnostic,
     observer: ?CaptureObserver,
 ) Error!flow.Facts {
-    if (component) try types.validateComponent(allocator, image, imports, borrows) else try types.validateDiagnosed(allocator, image, diagnostic);
-    var facts = try flow.analyzeComponent(allocator, image, imports);
-    errdefer facts.deinit();
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
+    const contextual = try types.validateWithFacts(scratch, image, imports, component, borrows, diagnostic);
+    var facts = try flow.analyzeComponent(allocator, image, imports);
+    errdefer facts.deinit();
     var checker: Check = .{
         .image = image,
         .observer = observer,
         .diagnostic = diagnostic,
         .facts = &facts,
-        .uses = try @import("traits.zig").derive(scratch, image.schemas),
-        .effects = try effect_scope.deriveComponent(scratch, image, imports),
+        .uses = contextual.uses,
+        .effects = contextual.effects,
+        .provenance = contextual.control,
     };
     for (image.blocks, 0..) |block, id| {
         if (facts.entries[id] == null) continue;
@@ -83,6 +73,7 @@ fn analyzeInternal(
             obligations = try facts.pool.remove(obligations, block.terminator.return_value);
             if (obligations != sets.empty) return error.InvalidOwnership;
         }
+        checker.boundary = .{ .block = id, .role = .callee };
         try checker.block(block);
     }
     return facts;
@@ -96,6 +87,8 @@ const Check = struct {
     facts: *flow.Facts,
     uses: @import("traits.zig").Facts,
     effects: effect_scope.Facts,
+    provenance: *const provenance.Analysis,
+    boundary: provenance.Boundary = undefined,
 
     fn computation(self: Check, slots: []const p.Id, slot: p.Id) Error!p.ComputationType {
         return contracts.computation(self.image, slots[@intCast(slot)]);
@@ -109,22 +102,27 @@ const Check = struct {
         self.function = code.function;
         const slots = self.image.functions[@intCast(code.function)].layout.slots;
         switch (code.terminator) {
-            .call => |call| try self.control(slots, self.image.functions[@intCast(call.function)].effects, call.next),
+            .call => |call| try self.control(slots, self.image.functions[@intCast(call.function)].effects, call.next, .callee),
             .perform => |perform| {
-                try self.control(slots, &.{perform.effect}, perform.next);
+                try self.control(slots, &.{perform.effect}, perform.next, .operation);
                 const effect = self.image.effects[@intCast(perform.effect)];
-                try self.control(slots, effect.use_site_effects, perform.next);
+                try self.control(slots, effect.use_site_effects, perform.next, .injected);
             },
-            .apply => |apply| try self.control(slots, (try self.computation(slots, apply.computation)).effects, apply.next),
+            .apply => |apply| try self.control(slots, (try self.computation(slots, apply.computation)).effects, apply.next, .callee),
             .handle => |handle| try self.checkHandler(slots, handle),
-            inline .resume_value, .resume_computation => |operation| try self.control(slots, (try self.resumption(slots, operation.resumption)).effects, operation.next),
-            .resume_with => |operation| try self.resumeWith(slots, operation),
-            .with_region => |region| try self.control(slots, (try self.computation(slots, region.body)).effects, region.next),
-            .protect => |protect| {
-                try self.control(slots, (try self.computation(slots, protect.body)).effects, protect.next);
-                try self.control(slots, (try self.computation(slots, protect.cleanup)).effects, protect.next);
+            .resume_value => |operation| try self.control(slots, (try self.resumption(slots, operation.resumption)).effects, operation.next, .resumed),
+            .resume_computation => |operation| {
+                const token = try self.resumption(slots, operation.resumption);
+                try self.control(slots, token.effects, operation.next, .resumed);
+                try self.provenance.capturesInjected(.{ .block = self.boundary.block, .role = .injected }, token, self.uses);
             },
-            .dispose => |dispose| try self.control(slots, (try self.resumption(slots, dispose.owned)).effects, dispose.next),
+            .resume_with => |operation| try self.resumeWith(slots, operation),
+            .with_region => |region| try self.control(slots, (try self.computation(slots, region.body)).effects, region.next, .body),
+            .protect => |protect| {
+                try self.control(slots, (try self.computation(slots, protect.body)).effects, protect.next, .body);
+                try self.control(slots, (try self.computation(slots, protect.cleanup)).effects, protect.next, .cleanup);
+            },
+            .dispose => |dispose| try self.control(slots, (try self.resumption(slots, dispose.owned)).effects, dispose.next, .resumed),
             else => {},
         }
     }
@@ -132,26 +130,30 @@ const Check = struct {
     fn checkHandler(self: *Check, slots: []const p.Id, operation: anytype) Error!void {
         const handler = self.image.handlers[@intCast(operation.handler)];
         const signature = try self.computation(slots, operation.body);
-        for (signature.effects) |effect| {
-            if (effect_scope.discharged(self.image, self.effects, handler, signature, effect))
+        const body_effects = try self.provenance.effectRow(.{ .block = self.boundary.block, .role = .body }, signature.effects);
+        for (body_effects) |effect| {
+            if (contracts.containsEffect(signature.effects, effect) and effect_scope.discharged(self.image, self.effects, handler, signature, effect))
                 continue;
-            try self.control(slots, &.{effect}, operation.next);
-            for (operation.state) |slot| try self.capture(slots, effect, slot);
+            try self.controlEffects(slots, &.{effect}, operation.next, .body);
+            const selected = try self.provenance.select(.{ .block = self.boundary.block, .role = .body }, effect);
+            for (operation.state) |slot| try self.capture(slots, selected, slot);
         }
-        try self.control(slots, handler.effects, operation.next);
+        try self.control(slots, handler.effects, operation.next, .handler);
     }
 
     fn resumeWith(self: *Check, slots: []const p.Id, operation: anytype) Error!void {
         const signature = try self.resumption(slots, operation.resumption);
         const successor = self.image.handlers[@intCast(operation.handler)];
-        for (signature.effects) |effect| {
+        const effects = try self.provenance.effectRow(.{ .block = self.boundary.block, .role = .resumed }, signature.effects);
+        for (effects) |effect| {
             const escapes = !contracts.containsEffect(signature.handled, effect) or
                 contracts.containsEffect(signature.escaping, effect);
-            if (!escapes) continue;
-            try self.control(slots, &.{effect}, operation.next);
-            for (operation.state) |slot| try self.capture(slots, effect, slot);
+            if (contracts.containsEffect(signature.effects, effect) and !escapes) continue;
+            try self.controlEffects(slots, &.{effect}, operation.next, .resumed);
+            const selected = try self.provenance.select(.{ .block = self.boundary.block, .role = .resumed }, effect);
+            for (operation.state) |slot| try self.capture(slots, selected, slot);
         }
-        try self.control(slots, successor.effects, operation.next);
+        try self.control(slots, successor.effects, operation.next, .handler);
     }
 
     fn retained(self: *Check, next: ir.Edge) Error!sets.Root {
@@ -167,22 +169,28 @@ const Check = struct {
         return result;
     }
 
-    fn control(self: *Check, slots: []const p.Id, effects: []const p.Id, next: ir.Edge) Error!void {
+    fn control(self: *Check, slots: []const p.Id, effects: []const p.Id, next: ir.Edge, role: provenance.Role) Error!void {
+        const qualified = try self.provenance.effectRow(.{ .block = self.boundary.block, .role = role }, effects);
+        return self.controlEffects(slots, qualified, next, role);
+    }
+
+    fn controlEffects(self: *Check, slots: []const p.Id, effects: []const p.Id, next: ir.Edge, role: provenance.Role) Error!void {
         if (effects.len == 0) return;
         const root = try self.retained(next);
         for (effects) |effect| {
+            const selected = try self.provenance.select(.{ .block = self.boundary.block, .role = role }, effect);
             var live = self.facts.pool.iterator(root);
-            while (live.next()) |slot| try self.capture(slots, effect, slot);
+            while (live.next()) |slot| try self.capture(slots, selected, slot);
         }
     }
 
-    fn capture(self: Check, slots: []const p.Id, effect: p.Id, slot: p.Id) Error!void {
+    fn capture(self: Check, slots: []const p.Id, selected: *const CaptureSite, slot: p.Id) Error!void {
         if (self.diagnostic) |d| {
             d.slot = slot;
-            d.effect = effect;
+            d.effect = selected.effect();
         }
-        if (self.observer) |observer| observer.capture(observer.context, self.function, effect, slot);
+        if (self.observer) |observer| observer.capture(observer.context, self.function, selected, slot);
         const schema = slots[@intCast(slot)];
-        if (!try captureSchemaAllowed(self.image, self.uses, effect, schema)) return error.InvalidOwnership;
+        if (!try selected.captureAllowed(self.uses, schema)) return error.InvalidOwnership;
     }
 };

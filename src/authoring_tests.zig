@@ -1040,6 +1040,14 @@ test "review functionFor retains its full declared callable interface" {
 }
 
 fn namedContinuation(allocator: std.mem.Allocator, matching: bool, retained: bool, snapshot: bool) !void {
+    return namedContinuationCatalog(allocator, matching, retained, snapshot, false);
+}
+
+fn namedContinuationCatalog(allocator: std.mem.Allocator, matching: bool, retained: bool, snapshot: bool, unused_narrow: bool) !void {
+    return namedContinuationRoute(allocator, matching, retained, snapshot, unused_narrow, false);
+}
+
+fn namedContinuationRoute(allocator: std.mem.Allocator, matching: bool, retained: bool, snapshot: bool, unused_narrow: bool, direct_helper: bool) !void {
     var raw = source.Builder.init(allocator);
     defer raw.deinit();
     const c = try a.Context.init(&raw);
@@ -1061,6 +1069,20 @@ fn namedContinuation(allocator: std.mem.Allocator, matching: bool, retained: boo
     const cf = try c.clauseFunction(h);
     const clause = try c.body(cf);
     try c.define(cf, try clause.ret(try clause.resumeValue(try clause.parameter("resumption"), try clause.constant(u64, 42))));
+    if (unused_narrow) {
+        const unused = try c.handler(op, integer, integer, .{
+            .mode = .deep,
+            .use = .linear,
+            .residual = &.{},
+            .captures = &.{integer},
+        });
+        const unused_return = try c.returnFunction(unused);
+        const unused_returns = try c.body(unused_return);
+        try c.define(unused_return, try unused_returns.ret(try unused_returns.parameter("result")));
+        const unused_clause = try c.clauseFunction(unused);
+        const unused_body = try c.body(unused_clause);
+        try c.define(unused_clause, try unused_body.ret(try unused_body.resumeValue(try unused_body.parameter("resumption"), try unused_body.constant(u64, 42))));
+    }
     const entry = try c.function("entry", .{ .record = left }, integer, &.{});
     const body = try c.body(entry);
     const record = try body.parameter("record");
@@ -1068,7 +1090,14 @@ fn namedContinuation(allocator: std.mem.Allocator, matching: bool, retained: boo
     const work_fn = try c.functionFor("work", shape);
     const work = try body.closureBody(work_fn);
     const before = if (retained) null else try work.field(record, "left");
-    _ = try work.performLocal(op, try work.parameter("capability"), try work.constant(void, {}));
+    if (direct_helper) {
+        const helper = try c.function("forward", .{ .capability = try c.capability(op) }, integer, &.{op});
+        const forward = try c.body(helper);
+        try c.define(helper, try forward.ret(try forward.performLocal(op, try forward.parameter("capability"), try forward.constant(void, {}))));
+        _ = try work.call(helper, .{ .capability = try work.parameter("capability") });
+    } else {
+        _ = try work.performLocal(op, try work.parameter("capability"), try work.constant(void, {}));
+    }
     const result = before orelse try work.field(record, "left");
     try c.define(work_fn, try work.ret(result));
     try c.define(entry, try body.ret(try body.handleWith(h, try body.lambda(work_fn, shape), .{})));
@@ -1085,6 +1114,60 @@ test "canonical coalescing preserves named captures using authoritative liveness
         try namedContinuation(testing.allocator, true, true, snapshot);
         try namedContinuation(testing.allocator, false, false, snapshot);
     }
+}
+
+test "a valid unused same-effect handler does not narrow fresh local capture admission" {
+    for ([_]bool{ false, true }) |snapshot| {
+        try namedContinuationCatalog(testing.allocator, true, true, snapshot, true);
+        // A permissive sibling never authorizes the actually selected handler.
+        try testing.expectError(error.SchemaMismatch, namedContinuationCatalog(testing.allocator, false, true, snapshot, true));
+    }
+}
+
+test "direct helper suspension summaries retain the actual capability recipient" {
+    for ([_]bool{ false, true }) |snapshot| {
+        try namedContinuationRoute(testing.allocator, true, true, snapshot, true, true);
+        try testing.expectError(error.SchemaMismatch, namedContinuationRoute(testing.allocator, false, true, snapshot, true, true));
+    }
+}
+
+test "two installations instantiate one shared helper with separate capture obligations" {
+    var raw = source.Builder.init(testing.allocator);
+    defer raw.deinit();
+    const c = try a.Context.init(&raw);
+    const unit = try c.schema(void);
+    const integer = try c.schema(u64);
+    const op = try c.local("shared-helper", unit, integer, .linear);
+    const cap = try c.capability(op);
+    const helper = try c.function("shared-forward", .{ .capability = cap }, integer, &.{op});
+    const forward = try c.body(helper);
+    try c.define(helper, try forward.ret(try forward.performLocal(op, try forward.parameter("capability"), try forward.constant(void, {}))));
+    const broad = try c.handler(op, integer, integer, .{ .mode = .deep, .use = .linear, .captures = &.{integer}, .body_captures = &.{integer} });
+    const narrow = try c.handler(op, integer, integer, .{ .mode = .deep, .use = .linear, .captures = &.{} });
+    inline for (.{ broad, narrow }) |handler| {
+        const returned = try c.returnFunction(handler);
+        const returns = try c.body(returned);
+        try c.define(returned, try returns.ret(try returns.parameter("result")));
+        const clause_fn = try c.clauseFunction(handler);
+        const clause = try c.body(clause_fn);
+        try c.define(clause_fn, try clause.ret(try clause.resumeValue(try clause.parameter("resumption"), try clause.constant(u64, 7))));
+    }
+    const entry = try c.function("entry", .{ .seed = integer }, integer, &.{});
+    const body = try c.body(entry);
+    const seed = try body.parameter("seed");
+    const broad_shape = try c.handledSchema(broad);
+    const broad_fn = try c.functionFor("broad-body", broad_shape);
+    const broad_work = try body.closureBody(broad_fn);
+    _ = try broad_work.call(helper, .{ .capability = try broad_work.parameter("capability") });
+    try c.define(broad_fn, try broad_work.ret(seed));
+    _ = try body.handleWith(broad, try body.lambda(broad_fn, broad_shape), .{});
+    const narrow_shape = try c.handledSchema(narrow);
+    const narrow_fn = try c.functionFor("narrow-body", narrow_shape);
+    const narrow_work = try body.closureBody(narrow_fn);
+    try c.define(narrow_fn, try narrow_work.ret(try narrow_work.call(helper, .{ .capability = try narrow_work.parameter("capability") })));
+    try c.define(entry, try body.ret(try body.handleWith(narrow, try body.lambda(narrow_fn, narrow_shape), .{})));
+    var compiled = try c.compileWithOptions(testing.allocator, entry, unit, .{});
+    defer compiled.deinit();
 }
 
 test "review named capture observation reclaims scratch and tolerates allocation failure" {

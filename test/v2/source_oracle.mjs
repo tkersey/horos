@@ -610,7 +610,7 @@ export function execute(source, initial, responses = [], cancellations = []) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const sources = await Promise.all(process.argv.slice(2).map(async (path) => parseExactJson(await readFile(path))));
-  assert.equal(sources.length, 42);
+  assert.equal(sources.length, 44);
   for (let index = 0; index < 20; index++) {
     const populated = index % 2 === 1, owned = index >= 12;
     const result = execute(sources[36], [index]);
@@ -832,5 +832,13 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     value: [...scalar(3), 3, ...[3, 7, 99].flatMap(scalar)] });
   assert.deepEqual(execute(sources[41], [0]), { trace: [], kind: "Completed", value: scalar(8) });
   assert.deepEqual(execute(sources[41], [1]), { trace: [], kind: "Failed", value: scalar(77), cleanupFailures: [] });
-  console.log("independent source oracle: 42 compiled source fixtures and cancellation/cleanup scenarios passed");
+  for (const [index, result, branches] of [[42, 15, [15]], [43, 32, [15, 17]]]) {
+    assert.deepEqual(execute(sources[index], [], [scalar(10), ...branches.map(() => [])]), {
+      kind: "Completed", value: scalar(result), trace: [
+        { kind: "Requested", identity: "local/producer", payload: [] },
+        ...branches.flatMap(value => [{ kind: "Yielded" }, { kind: "Requested", identity: "local/branch", payload: scalar(value) }]),
+      ],
+    });
+  }
+  console.log("independent source oracle: 44 compiled source fixtures and cancellation/cleanup scenarios passed");
 }

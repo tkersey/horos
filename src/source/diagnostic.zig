@@ -31,7 +31,7 @@ pub const Observer = struct {
 /// A source variable retained at an effect boundary, derived by target liveness.
 pub const CaptureObserver = struct {
     context: *anyopaque,
-    capture: *const fn (*anyopaque, p.Id, p.Id) void,
+    capture: *const fn (*anyopaque, *const data.activation_ownership.CaptureSite, p.Id) void,
     closure: *const fn (*anyopaque, p.Id, p.Id) void,
 };
 pub const Options = struct {

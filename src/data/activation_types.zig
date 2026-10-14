@@ -9,6 +9,7 @@ const a = @import("admission.zig");
 const contracts = @import("contracts.zig");
 const structure = @import("activation_structure.zig");
 const effect_scope = @import("effect_scope.zig");
+const provenance = @import("control_provenance.zig");
 pub const Error = a.Error || structure.Error;
 
 pub fn validate(allocator: std.mem.Allocator, image: ir.Program) Error!void {
@@ -35,10 +36,28 @@ fn validateInternal(
     borrows: []const @import("borrow_contract.zig").Summary,
     diagnostic: ?*a.Diagnostic,
 ) Error!void {
-    try structure.validateComponent(allocator, image, imports);
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    const scratch = arena.allocator();
+    _ = try validateWithFacts(arena.allocator(), image, imports, component, borrows, diagnostic);
+}
+
+pub const ContextualFacts = struct {
+    uses: @import("traits.zig").Facts,
+    effects: effect_scope.Facts,
+    control: *const provenance.Analysis,
+};
+
+/// Admission-internal entrypoint. The invocation arena owns the returned facts;
+/// all consumers share this one derivation against the immutable input image.
+pub fn validateWithFacts(
+    scratch: std.mem.Allocator,
+    image: ir.Program,
+    imports: []const p.Id,
+    component: bool,
+    borrows: []const @import("borrow_contract.zig").Summary,
+    diagnostic: ?*a.Diagnostic,
+) Error!ContextualFacts {
+    try structure.validateComponent(scratch, image, imports);
     const exportable = try catalogs(scratch, image, component);
     const uses = try contracts.validateDiagnosed(scratch, image, diagnostic);
     const effects = try effect_scope.deriveComponent(scratch, image, imports);
@@ -58,23 +77,30 @@ fn validateInternal(
             try a.validateInstruction(image, block.function, operation, layout, uses);
             try instructionUses(image, operation, layout, uses);
         }
-        try terminator(image, block, layout, effects);
+        try terminator(image, block, layout, effects, null);
     }
     try @import("region_admission.zig").validate(scratch, image);
+    const control = try provenance.derive(scratch, image, imports, component);
+    for (image.blocks, 0..) |block, block_id| {
+        if (diagnostic) |d| d.* = .{ .phase = .block, .function = block.function, .block = block_id };
+        try terminator(image, block, image.functions[@intCast(block.function)].layout.slots, effects, .{ .analysis = control, .block = block_id });
+    }
     if (component) {
-        var solver = try @import("borrow_flow.zig").contracted(
+        var solver = try @import("borrow_flow.zig").contractedWithControl(
             scratch,
             image,
             imports,
             exportable,
             borrows,
+            control,
         );
         for (borrows) |summary| {
             if (image.functions[@intCast(summary.function)].entry == @import("relocation.zig").missing)
                 continue;
             try @import("borrow_contract.zig").check(&solver, summary);
         }
-    } else try @import("borrow_flow.zig").validate(scratch, image, exportable, diagnostic);
+    } else try @import("borrow_flow.zig").validateWithControl(scratch, image, exportable, diagnostic, control);
+    return .{ .uses = uses, .effects = effects, .control = control };
 }
 
 /// Exportability remains valid for the immutable image throughout this call.
@@ -126,7 +152,7 @@ fn instructionUses(image: ir.Program, operation: anytype, slots: []const p.Id, u
     }
 }
 
-fn terminator(image: ir.Program, block: ir.Block, slots: []const p.Id, effects: effect_scope.Facts) Error!void {
+fn terminator(image: ir.Program, block: ir.Block, slots: []const p.Id, effects: effect_scope.Facts, control: ?provenance.Context) Error!void {
     const function = image.functions[@intCast(block.function)];
     switch (block.terminator) {
         .call => |call| {
@@ -155,7 +181,7 @@ fn terminator(image: ir.Program, block: ir.Block, slots: []const p.Id, effects: 
         .with_region,
         .protect,
         .dispose,
-        => try contracts.terminator(image, block, slots, effects),
+        => try contracts.terminator(image, block, slots, effects, control),
 
         else => {}, // Shape admission checks ordinary values and control edges.
     }

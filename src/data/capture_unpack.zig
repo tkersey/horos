@@ -70,7 +70,7 @@ const RepresentationRetention = struct {
     constructor: usize,
     retained: bool = false,
 
-    fn observe(context: *anyopaque, function: p.Id, _: p.Id, slot: p.Id) void {
+    fn observe(context: *anyopaque, function: p.Id, _: *const own.CaptureSite, slot: p.Id) void {
         const self: *@This() = @ptrCast(@alignCast(context));
         if (self.retained or self.constructor >= self.program.constructors.len) return;
         const ctor = self.program.constructors[self.constructor];

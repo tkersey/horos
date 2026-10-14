@@ -2,10 +2,13 @@ build.zig
 examples/authoring_client.zig
 examples/one_effect.zig
 examples/structured_branch.zig
+src/admission_bench.zig
+src/admission_bench_fixtures.zig
 src/allocation_testing.zig
 src/authoring.zig
 src/authoring/cache_key.zig
 src/authoring/checked_tests.zig
+src/authoring/option_contract.zig
 src/authoring/runtime.zig
 src/authoring_cases.zig
 src/authoring_tests.zig
@@ -22,6 +25,7 @@ src/coalescing_recursive_cases.zig
 src/coalescing_state_cases.zig
 src/coalescing_tests.zig
 src/coalescing_tree_cases.zig
+src/control_provenance_bench.zig
 src/data/action_laws.zig
 src/data/activation.zig
 src/data/activation_borrow_tests.zig
@@ -110,6 +114,7 @@ src/data/contification_escape_tests.zig
 src/data/contification_recursive_tests.zig
 src/data/contification_tests.zig
 src/data/contracts.zig
+src/data/control_provenance.zig
 src/data/dead_arguments.zig
 src/data/dead_computation.zig
 src/data/diagnostic.zig
@@ -141,6 +146,7 @@ src/data/loop_motion_tests.zig
 src/data/loop_regions.zig
 src/data/loop_unswitch.zig
 src/data/loop_unswitch_tests.zig
+src/data/native_decode_tests.zig
 src/data/native_shape.zig
 src/data/native_shape_tests.zig
 src/data/opcode_contract.zig

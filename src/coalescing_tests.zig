@@ -141,7 +141,7 @@ test "coalescing retains each original closure observation through constructor c
             self.variables[self.count] = variable;
             self.count += 1;
         }
-        fn capture(_: *anyopaque, _: Id, _: Id) void {
+        fn capture(_: *anyopaque, _: *const data.activation_ownership.CaptureSite, _: Id) void {
             @panic("effect-free fixture cannot retain a continuation capture");
         }
     };

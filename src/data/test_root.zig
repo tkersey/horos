@@ -1,5 +1,6 @@
 //! Separate pure-data test entry point; never imported by the production module.
 test {
+    _ = @import("native_decode_tests.zig");
     _ = @import("reference_roles_tests.zig");
     _ = @import("reference_roles.zig");
     _ = @import("opcode_contract_tests.zig");

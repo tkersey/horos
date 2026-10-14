@@ -4,6 +4,32 @@ const s = @import("process_state.zig");
 const codec = @import("state_image.zig");
 const testing = std.testing;
 
+test "canonical state serialization shares bytes with digest-only and combined output" {
+    const protocol = @import("invocation.zig");
+    const bytes = try codec.emit(testing.allocator, fixture);
+    defer testing.allocator.free(bytes);
+    const expected = protocol.stateDigest(bytes);
+    var digest_only = protocol.stateDigestHasher();
+    const streamed = try codec.serialize(testing.allocator, fixture, .none, &digest_only);
+    try testing.expect(streamed.bytes == null);
+    try testing.expectEqual(bytes.len, streamed.length);
+    try testing.expectEqualSlices(u8, &expected, &digest_only.finalResult());
+    var combined = protocol.stateDigestHasher();
+    const emitted = try codec.serialize(testing.allocator, fixture, .{ .allocate = testing.allocator }, &combined);
+    defer testing.allocator.free(emitted.bytes.?);
+    try testing.expectEqualSlices(u8, bytes, emitted.bytes.?);
+    try testing.expectEqualSlices(u8, &expected, &combined.finalResult());
+    var buffer: [1024]u8 = undefined;
+    var buffered = protocol.stateDigestHasher();
+    const written = try codec.serialize(testing.allocator, fixture, .{ .buffer = &buffer }, &buffered);
+    try testing.expectEqualSlices(u8, bytes, written.bytes.?);
+    try testing.expectEqualSlices(u8, &expected, &buffered.finalResult());
+    var failed = protocol.stateDigestHasher();
+    const before = failed;
+    try testing.expectError(error.Capacity, codec.serialize(testing.allocator, fixture, .{ .buffer = buffer[0..1] }, &failed));
+    try testing.expectEqualDeep(before, failed);
+}
+
 test "PST3 rejects an encoded unreachable node instead of dropping it" {
     const state: s.State = .{ .program_identity = @splat(0), .status = .active, .roots = .{}, .nodes = &.{.{ .record = .{ .environment = .{ .values = &.{}, .tail = null } } }} };
     const record = @import("record.zig");

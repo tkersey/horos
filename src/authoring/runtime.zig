@@ -1372,17 +1372,19 @@ pub const Context = opaque {
         for (bound) |allowed| if (try self.compatible(allowed, actual)) return;
         return self.reject(error.SchemaMismatch, "capture", "retained named value is outside its declared capture allowance");
     }
-    fn observeCapture(pointer: *anyopaque, effect: p.Id, variable: p.Id) void {
+    fn observeCapture(pointer: *anyopaque, selected: *const @import("horos_data").activation_ownership.CaptureSite, variable: p.Id) void {
         const self: *Context = @ptrCast(@alignCast(pointer));
         if (contextData(self).capture_failure != null) return;
-        for (contextData(self).handlers.items) |handler_handle| {
-            const h = data(HandlerData, handler_handle);
-            for (h.clauses) |clause| {
-                if (data(OperationData, clause.operation).id != effect) continue;
+        for (selected.targets()) |target| {
+            for (contextData(self).handlers.items) |handler_handle| {
+                const h = data(HandlerData, handler_handle);
+                if (h.id != target.handler) continue;
+                const clause = h.clauses[target.clause];
                 self.checkCapture(data(SchemaData, clause.resumption).captures, variable) catch |err| {
                     contextData(self).capture_failure = err;
                     return;
                 };
+                break;
             }
         }
     }

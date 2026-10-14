@@ -74,7 +74,8 @@ N=0, then a counted Schema catalog with the [declared schema fields](bpi3-wire.m
 using ordinary counted ID lists, not BPI3's compressed vectors. They retain the
 existing external value grammar and canonical type equivalence, with no outer
 frame. Internal handles cannot cross this boundary. Descriptor decoding has a
-configurable physical record-storage budget, default 64 MiB.
+caller-selected physical record-storage budget through `schema.decodeLimited`;
+canonical native decoding follows the allocator and representable sizes.
 
 ERS3 is `(request_identity:Hash, value:B)`. Identity already binds the resume
 schema, so no second schema hash is needed. Value is checked under that descriptor.
@@ -97,8 +98,9 @@ and payload. A host with an already obtained typed result may explicitly encode
 it against the successor challenge. The runtime does not repeat the operation,
 silently rebind old bytes, or claim global exactly-once execution.
 
-`decode` owns input before trusting contents, with a configurable 64 MiB default
-input budget. Returned slices belong to that owner. `encode` validates, sizes,
+`decode` owns input before trusting contents, using the caller's allocator and
+representable sizes by default. Explicit finite envelope limits remain available.
+Returned slices belong to that owner. `encode` validates, sizes,
 and checks capacity/overlap before writing. Failure releases partial owners.
 Fresh Kosmos invocation owns input, executes privately and publishes no successor
 on operational failure. Failed output allocation/capacity leaves the command reusable.

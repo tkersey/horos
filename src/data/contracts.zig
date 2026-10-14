@@ -139,14 +139,6 @@ pub fn containsEffect(row_: []const p.Id, effect: p.Id) bool {
     return std.mem.indexOfScalar(p.Id, row_, effect) != null;
 }
 
-fn capturedRegion(image: anytype, effects: []const p.Id, region: p.Id) a.Error!void {
-    for (effects) |effect| for (image.handlers) |handler| for (handler.clauses) |clause| {
-        if (clause.effect != effect or !retainsResumption(clause)) continue;
-        const signature = try resumption(image, clause.resumption);
-        if (std.mem.indexOfScalar(p.Id, signature.owned_regions, region) == null) return error.InvalidOwnership;
-    };
-}
-
 pub fn validate(allocator: std.mem.Allocator, image: anytype) a.Error!traits.Facts {
     return validateDiagnosed(allocator, image, null);
 }
@@ -289,7 +281,9 @@ fn validateConstructor(image: anytype, constructor: p.Constructor, diagnostic: ?
     }
 }
 
-pub fn terminator(image: anytype, block: anytype, slots: []const p.Id, effect_facts: effect_scope.Facts) a.Error!void {
+/// Null context checks intrinsic shape/type laws before provenance derivation.
+/// Full activation admission always follows with a qualified contextual pass.
+pub fn terminator(image: anytype, block: anytype, slots: []const p.Id, effect_facts: effect_scope.Facts, context: ?@import("control_provenance.zig").Context) a.Error!void {
     const function = image.functions[@intCast(block.function)];
     switch (block.terminator) {
         .protect => |protection| {
@@ -306,7 +300,7 @@ pub fn terminator(image: anytype, block: anytype, slots: []const p.Id, effect_fa
                 const borrowed = image.schemas[@intCast(body.parameters[0])];
                 if (borrowed != .internal or borrowed.internal != .borrowed or borrowed.internal.borrowed.value != resource or borrowed.internal.borrowed.region != region) return error.TypeMismatch;
                 for (body.regions) |needed| if (needed != region) try subset(&.{needed}, function.regions);
-                try capturedRegion(image, body.effects, region);
+                if (context) |control| try control.analysis.capturesRegion(.{ .block = control.block, .role = .body }, body.effects, region);
             } else {
                 if (protection.loan_region != null) return error.InvalidOwnership;
                 try subset(body.regions, function.regions);
@@ -317,13 +311,9 @@ pub fn terminator(image: anytype, block: anytype, slots: []const p.Id, effect_fa
             try subset(cleanup.regions, function.regions);
             // These rows describe only effects escaping the computation. A handler
             // installed wholly inside the body can still use multi-shot control.
-            for (body.effects) |effect| {
-                if (image.effects[@intCast(effect)].control_use == .multi) return error.InvalidOwnership;
-                for (image.handlers) |handler| for (handler.clauses) |clause| if (clause.effect == effect and !(try resumption(image, clause.resumption)).obligations) return error.InvalidOwnership;
-            }
-            for (cleanup.effects) |effect| {
-                if (image.effects[@intCast(effect)].control_use == .multi) return error.InvalidOwnership;
-                for (image.handlers) |handler| for (handler.clauses) |clause| if (clause.effect == effect and !(try resumption(image, clause.resumption)).obligations) return error.InvalidOwnership;
+            if (context) |control| {
+                try control.analysis.capturesCleanup(.{ .block = control.block, .role = .body }, body.effects);
+                try control.analysis.capturesCleanup(.{ .block = control.block, .role = .cleanup }, cleanup.effects);
             }
             try a.edge(image, block.function, slots, protection.next, body.result);
         },
@@ -403,7 +393,7 @@ pub fn terminator(image: anytype, block: anytype, slots: []const p.Id, effect_fa
             try subset(body.effects, function.effects);
             // The region frame is captured even when no live slot refers to it.
             // Effects handled inside the body have already left its escaping row.
-            try capturedRegion(image, body.effects, scope.region);
+            if (context) |control| try control.analysis.capturesRegion(.{ .block = control.block, .role = .body }, body.effects, scope.region);
             try a.edge(image, block.function, slots, scope.next, body.result);
         },
         else => return error.UnsupportedInstruction,

@@ -110,6 +110,9 @@ constructs only that module; it does not build authoring, oracle or formal targe
 Current formats are [BPI3](docs/bpi3-wire.md), PST3 and the ABI 3 interaction
 contracts. Versioned facade aliases have been removed.
 
+[Handler relevance](docs/handler-relevance.md) describes capability-directed
+dispatch, the finite transfer argument and the conservative precision boundary.
+
 [Separately compiled BMO1 components](docs/bmo1-components.md) carry explicit
 interfaces and checked borrow contracts. The data-only `horos-link` tool
 resolves instance bindings and emits an independently admitted closed BPI3 image,

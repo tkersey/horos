@@ -7,7 +7,8 @@ const record = @import("record.zig");
 const order = @import("graph_order.zig");
 pub const Error = order.Error;
 pub const Owned = order.Owned(s.State);
-pub const Limits = struct { max_decoded_bytes: usize = 64 << 20 };
+/// Native defaults follow the allocator; finite budgets are caller policy.
+pub const Limits = struct { max_decoded_bytes: usize = std.math.maxInt(usize) };
 pub const magic = "ABL_PST3";
 
 /// Structural checks only. Types, scopes, custody and code positions require
@@ -71,15 +72,38 @@ fn write(state: s.State, size: usize, writer: *wire.Writer) Error!void {
     try record.write(s.State, state, writer);
 }
 
-/// Normalization owns every input byte before output can change, so overlap is safe.
-pub fn encode(allocator: std.mem.Allocator, state: s.State, output: []u8) Error![]const u8 {
+pub const Destination = union(enum) {
+    none,
+    buffer: []u8,
+    allocate: std.mem.Allocator,
+};
+pub const Serialization = struct {
+    /// Present only for buffer/allocate. Ownership follows the destination.
+    bytes: ?[]u8,
+    length: usize,
+};
+
+/// One canonical PST3 emission, optionally materialized and/or hashed. The
+/// codec adds no hash domain. Normalization owns inputs before output may
+/// overlap them; capacity/allocation failures precede emission to either sink.
+pub fn serialize(allocator: std.mem.Allocator, state: s.State, destination: Destination, hasher: ?*std.crypto.hash.sha2.Sha256) Error!Serialization {
     var normalized = try canonicalize(allocator, state);
     defer normalized.deinit();
     const size = try length(normalized.state);
-    if (size > output.len) return error.Capacity;
-    var writer: wire.Writer = .{ .output = output[0..size] };
+    const output: ?[]u8 = switch (destination) {
+        .none => null,
+        .buffer => |buffer| if (buffer.len >= size) buffer[0..size] else return error.Capacity,
+        .allocate => |output_allocator| try output_allocator.alloc(u8, size),
+    };
+    errdefer if (destination == .allocate) destination.allocate.free(output.?);
+    var writer: wire.Writer = .{ .output = output, .hasher = hasher };
     try write(normalized.state, size, &writer);
-    return output[0..size];
+    std.debug.assert(writer.position == size);
+    return .{ .bytes = output, .length = size };
+}
+
+pub fn encode(allocator: std.mem.Allocator, state: s.State, output: []u8) Error![]const u8 {
+    return (try serialize(allocator, state, .{ .buffer = output }, null)).bytes.?;
 }
 
 pub fn emit(allocator: std.mem.Allocator, state: s.State) Error![]u8 {
@@ -87,14 +111,7 @@ pub fn emit(allocator: std.mem.Allocator, state: s.State) Error![]u8 {
 }
 
 pub fn emitWith(allocator: std.mem.Allocator, state: s.State, output_allocator: std.mem.Allocator) Error![]u8 {
-    var normalized = try canonicalize(allocator, state);
-    defer normalized.deinit();
-    const size = try length(normalized.state);
-    const output = try output_allocator.alloc(u8, size);
-    errdefer output_allocator.free(output);
-    var writer: wire.Writer = .{ .output = output };
-    try write(normalized.state, size, &writer);
-    return output;
+    return (try serialize(allocator, state, .{ .allocate = output_allocator }, null)).bytes.?;
 }
 
 pub fn decodeGraph(allocator: std.mem.Allocator, input: []const u8) Error!Owned {

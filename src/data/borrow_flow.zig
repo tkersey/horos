@@ -9,6 +9,7 @@ const a = @import("admission.zig");
 const contracts = @import("contracts.zig");
 const activation = @import("activation.zig");
 const inputs = @import("function_inputs.zig");
+const provenance = @import("control_provenance.zig");
 
 pub const Step = union(enum) {
     field: p.Id,
@@ -78,6 +79,7 @@ fn FlowFor(comptime open: bool) type {
         const Self = @This();
         allocator: std.mem.Allocator,
         program: Program,
+        control: *const provenance.Analysis,
         exportable: []const bool,
         incoming: []std.ArrayList(Incoming),
         outgoing: []std.ArrayList(p.Id),
@@ -144,7 +146,11 @@ fn FlowFor(comptime open: bool) type {
         }
 
         pub fn init(allocator: std.mem.Allocator, program: Program, exportable: []const bool) a.Error!Self {
-            var self: Self = .{ .allocator = allocator, .program = program, .exportable = exportable, .incoming = try allocator.alloc(std.ArrayList(Incoming), program.blocks.len), .outgoing = try allocator.alloc(std.ArrayList(p.Id), program.blocks.len) };
+            return initWithControl(allocator, program, exportable, try provenance.derive(allocator, program, &.{}, open));
+        }
+
+        pub fn initWithControl(allocator: std.mem.Allocator, program: Program, exportable: []const bool, control: *const provenance.Analysis) a.Error!Self {
+            var self: Self = .{ .allocator = allocator, .program = program, .control = control, .exportable = exportable, .incoming = try allocator.alloc(std.ArrayList(Incoming), program.blocks.len), .outgoing = try allocator.alloc(std.ArrayList(p.Id), program.blocks.len) };
             @memset(self.incoming, .empty);
             @memset(self.outgoing, .empty);
             for (program.blocks, 0..) |block, id| switch (block.terminator) {
@@ -625,14 +631,13 @@ fn FlowFor(comptime open: bool) type {
                     },
                     .perform => |v| if (v.capability) |capability| {
                         var captures = false;
-                        for (self.program.handlers) |handler| for (handler.clauses) |clause| if (clause.effect == v.effect and @import("contracts.zig").retainsResumption(clause)) {
-                            captures = true;
-                        };
+                        const targets = self.control.targets(.{ .block = id, .role = .operation }, v.effect);
+                        for (targets) |target| captures = captures or target.retains;
                         if (captures) {
                             try self.relation(index, id, v.payload, capability, .clause);
                             for (v.bodies) |slot| try self.relation(index, id, slot, capability, .clause);
                         }
-                        for (self.program.handlers, 0..) |handler, handler_id| for (handler.clauses) |clause| if (clause.effect == v.effect) try self.transferRequirements(index, .{ .block = id, .function = clause.function, .arguments = &.{}, .handler = handler_id, .operation = v });
+                        for (targets) |target| try self.transferRequirements(index, .{ .block = id, .function = target.function, .arguments = &.{}, .handler = target.handler, .operation = v });
                     },
                     .resume_value => |v| try self.relation(index, id, v.argument, v.resumption, .capture),
                     .resume_with => |v| {
@@ -953,10 +958,10 @@ fn FlowFor(comptime open: bool) type {
                     for (sources) |source| try self.returnInput(pending, block, source);
                 },
                 .perform => |v| if (v.capability != null) {
-                    for (self.program.handlers, 0..) |handler, handler_id| for (handler.clauses) |clause| if (clause.effect == v.effect) {
-                        const index = try self.writeQuery(self.entry(clause.function), schema, path);
-                        try self.transferSources(pending, .{ .block = block, .function = clause.function, .arguments = &.{}, .handler = handler_id, .operation = v }, index);
-                    };
+                    for (self.control.targets(.{ .block = block, .role = .operation }, v.effect)) |target| {
+                        const index = try self.writeQuery(self.entry(target.function), schema, path);
+                        try self.transferSources(pending, .{ .block = block, .function = target.function, .arguments = &.{}, .handler = target.handler, .operation = v }, index);
+                    }
                 },
                 .resume_value => |v| {
                     try self.push(pending, block, v.resumption, 0);
@@ -1046,7 +1051,11 @@ fn FlowFor(comptime open: bool) type {
 }
 
 pub fn validate(allocator: std.mem.Allocator, program: activation.Program, exportable: []const bool, diagnostic: ?*a.Diagnostic) a.Error!void {
-    var flow = try FlowFor(false).init(allocator, program, exportable);
+    return validateWithControl(allocator, program, exportable, diagnostic, try provenance.derive(allocator, program, &.{}, false));
+}
+
+pub fn validateWithControl(allocator: std.mem.Allocator, program: activation.Program, exportable: []const bool, diagnostic: ?*a.Diagnostic, control: *const provenance.Analysis) a.Error!void {
+    var flow = try FlowFor(false).initWithControl(allocator, program, exportable, control);
     flow.diagnostic = diagnostic;
     for (program.functions) |function| _ = try flow.requirementsQuery(function.entry);
     try flow.settle();
@@ -1062,7 +1071,18 @@ pub fn contracted(
     exportable: []const bool,
     summaries: []const @import("borrow_contract.zig").Summary,
 ) a.Error!ComponentFlow {
-    var flow = try ComponentFlow.init(allocator, program, exportable);
+    return contractedWithControl(allocator, program, imports, exportable, summaries, try provenance.derive(allocator, program, imports, true));
+}
+
+pub fn contractedWithControl(
+    allocator: std.mem.Allocator,
+    program: activation.Program,
+    imports: []const p.Id,
+    exportable: []const bool,
+    summaries: []const @import("borrow_contract.zig").Summary,
+    control: *const provenance.Analysis,
+) a.Error!ComponentFlow {
+    var flow = try ComponentFlow.initWithControl(allocator, program, exportable, control);
     flow.import_summaries = summaries;
     var previous: ?p.Id = null;
     for (summaries) |summary| {

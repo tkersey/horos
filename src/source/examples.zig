@@ -257,3 +257,50 @@ pub const clausePayload = @import("clause_payload_example.zig").build;
 pub const clauseAbort = @import("clause_abort_example.zig").build;
 pub const installations = @import("economy_examples.zig").installations;
 pub const blobCapture = @import("economy_examples.zig").blobCapture;
+
+/// Local capture precision with an unrelated narrow declaration. The producer
+/// runs before capture; repeated deep resumes replay only the captured suffix.
+pub fn localContinuation(b: *source.Builder, multi: bool) Error!source.Module {
+    const unit = try b.scalar(void);
+    const integer = try b.scalar(u64);
+    const fault = try b.constant(void, {});
+    const produce = try b.effect(.{ .identity = "local/producer", .payload = unit, .result = integer });
+    const observe = try b.effect(.{ .identity = "local/branch", .payload = integer, .result = unit });
+    const ask = try b.effect(.{ .identity = "local/ask", .payload = unit, .result = integer, .external = false, .control_use = if (multi) .multi else .linear });
+    const cap = try b.schema(.{ .internal = .{ .capability = ask } });
+    const token = try b.schema(.{ .internal = .{ .resumption = .{ .effect = ask, .input = integer, .answer = integer, .effects = &.{observe}, .handled = &.{ask}, .capture_bound = &.{integer}, .mode = .deep, .use = if (multi) .multi else .linear } } });
+    const narrow = try b.schema(.{ .internal = .{ .resumption = .{ .effect = ask, .input = integer, .answer = integer, .effects = &.{observe}, .handled = &.{ask}, .mode = .deep, .use = if (multi) .multi else .linear } } });
+    const computation = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{cap}, .result = integer, .effects = &.{ observe, ask }, .capture_bound = &.{integer} } } });
+    const main = try b.declare(&.{}, integer, &.{ produce, observe }, &.{});
+    const body = try b.declare(&.{cap}, integer, &.{ observe, ask }, &.{});
+    const returns = try b.declare(&.{integer}, integer, &.{}, &.{});
+    const clause = try b.declare(&.{ unit, token }, integer, &.{observe}, &.{});
+    const unused = try b.declare(&.{ unit, narrow }, integer, &.{observe}, &.{});
+    const produced = try b.variable(integer);
+    const answer = try b.variable(integer);
+    const total = try b.variable(integer);
+    const ignored = try b.variable(unit);
+    const perform = try b.term(.{ .perform = .{ .effect = ask, .capability = try b.reference(b.parameter(body, 0)), .payload = fault } });
+    const sum = try binary(b, .integer_add, integer, try b.reference(produced), try b.reference(answer), fault);
+    const observed = try b.term(.{ .perform = .{ .effect = observe, .payload = try b.reference(total) } });
+    const suffix = try b.bind(total, try b.pure(sum), try b.bind(ignored, observed, try b.pure(try b.reference(total))));
+    try b.define(body, try b.bind(answer, perform, try b.term(.{ .yield_then = suffix })));
+    try b.define(returns, try b.pure(try b.reference(b.parameter(returns, 0))));
+    const first = try b.variable(integer);
+    const resume_first = try b.term(.{ .resume_value = .{ .resumption = try b.reference(b.parameter(clause, 1)), .argument = try b.constant(u64, 5) } });
+    const tail = if (multi) blk: {
+        const second = try b.variable(integer);
+        const resume_second = try b.term(.{ .resume_value = .{ .resumption = try b.reference(b.parameter(clause, 1)), .argument = try b.constant(u64, 7) } });
+        break :blk try b.bind(second, resume_second, try b.pure(try binary(b, .integer_add, integer, try b.reference(first), try b.reference(second), fault)));
+    } else try b.pure(try b.reference(first));
+    try b.define(clause, try b.bind(first, resume_first, tail));
+    // An unused linear token still has to be consumed by its declaration.
+    const unused_resume = try b.term(.{ .resume_value = .{ .resumption = try b.reference(b.parameter(unused, 1)), .argument = try b.constant(u64, 0) } });
+    try b.define(unused, unused_resume);
+    const handler = try b.handler(.{ .mode = .deep, .input = integer, .answer = integer, .effects = &.{observe}, .return_function = returns, .clauses = &.{.{ .effect = ask, .function = clause, .resumption = token }} });
+    _ = try b.handler(.{ .mode = .deep, .input = integer, .answer = integer, .effects = &.{observe}, .return_function = returns, .clauses = &.{.{ .effect = ask, .function = unused, .resumption = narrow }} });
+    const produced_once = try b.term(.{ .perform = .{ .effect = produce, .payload = fault } });
+    const handled = try b.term(.{ .handle = .{ .handler = handler, .body = try b.lambda(body, computation) } });
+    try b.define(main, try b.bind(produced, produced_once, handled));
+    return b.module(main, unit);
+}

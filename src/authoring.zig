@@ -1,6 +1,7 @@
 //! Checked authoring with normalized structural interfaces and shared runtime ownership.
 const std = @import("std");
 const runtime = @import("authoring/runtime.zig");
+const option_contract = @import("authoring/option_contract.zig");
 const source = @import("source.zig");
 const data = @import("horos_data");
 const native = data.schema.native;
@@ -730,6 +731,7 @@ pub const Context = opaque {
         return rawContext(self).defineAlternatives(erased(.declaration, declaration), fields.slice());
     }
     pub fn defineCallable(self: *Context, declaration: anytype, params: anytype, returns: anytype, allowed: anytype, options: anytype) Error!void {
+        comptime option_contract.check("defineCallable", @TypeOf(options), option_contract.callable);
         comptime declarationCompatible(declarationShape(index(.declaration, @TypeOf(declaration)), .callable), Internal(.{ .callable = Signature(namedShape(.schema, @TypeOf(params)), index(.schema, @TypeOf(returns))) }), "defineCallable");
         const fields = packSchemas(params);
         const effects = handles(.operation, allowed);
@@ -777,6 +779,7 @@ pub const Context = opaque {
         return @ptrCast(try rawContext(self).borrowed(erased(.schema, representation), region_handle));
     }
     pub fn callable(self: *Context, params: anytype, returns: anytype, allowed: anytype, options: anytype) Error!*const Schema(Internal(.{ .callable = Signature(namedShape(.schema, @TypeOf(params)), index(.schema, @TypeOf(returns))) })) {
+        comptime option_contract.check("callable", @TypeOf(options), option_contract.callable);
         const fields = packSchemas(params);
         const effects = handles(.operation, allowed);
         const captures = handles(.schema, option(options, "captures", .{}));
@@ -788,6 +791,7 @@ pub const Context = opaque {
         }));
     }
     pub fn regionBodySchema(self: *Context, region_handle: *const Region, params: anytype, returns: anytype, allowed: anytype, options: anytype) Error!*const Schema(Internal(.{ .callable = Signature(joinFields(native.Fields(&.{"region"}, &.{Internal(.region)}), namedShape(.schema, @TypeOf(params))), index(.schema, @TypeOf(returns))) })) {
+        comptime option_contract.check("regionBodySchema", @TypeOf(options), option_contract.callable);
         const fields = packSchemas(params);
         const effects = handles(.operation, allowed);
         const captures = handles(.schema, option(options, "captures", .{}));
@@ -812,9 +816,11 @@ pub const Context = opaque {
         return rawContext(self).resourceAuthority(erased(.schema, schema_handle), ins.slice(), outs.slice());
     }
     pub fn handler(self: *Context, operation: anytype, input: anytype, answer: anytype, options: anytype) Error!HandlerResult(namedShape(.operation, @TypeOf(.{ .capability = operation })), index(.schema, @TypeOf(input)), index(.schema, @TypeOf(answer)), @TypeOf(options)) {
+        comptime option_contract.check("handler", @TypeOf(options), option_contract.handler);
         return self.handlerSet(.{ .capability = operation }, input, answer, options);
     }
     pub fn handlerSet(self: *Context, operations: anytype, input: anytype, answer: anytype, options: anytype) Error!HandlerResult(namedShape(.operation, @TypeOf(operations)), index(.schema, @TypeOf(input)), index(.schema, @TypeOf(answer)), @TypeOf(options)) {
+        comptime option_contract.check("handlerSet", @TypeOf(options), option_contract.handler);
         const ops = packNamed(.operation, operations);
         const residual = handles(.operation, option(options, "residual", .{}));
         const escaping = handles(.operation, option(options, "escaping", .{}));
@@ -848,6 +854,7 @@ pub const Context = opaque {
         return returnedHandler(namedShape(.operation, @TypeOf(operations)), index(.schema, @TypeOf(input)), index(.schema, @TypeOf(answer)), options, raw);
     }
     pub fn responder(self: *Context, operation: anytype, answer: anytype, responder_function: anytype, options: anytype) Error!HandlerResult(namedShape(.operation, @TypeOf(.{ .capability = operation })), index(.schema, @TypeOf(answer)), index(.schema, @TypeOf(answer)), @TypeOf(options)) {
+        comptime option_contract.check("responder", @TypeOf(options), option_contract.handler);
         comptime {
             const Op = index(.operation, @TypeOf(operation));
             const F = index(.function, @TypeOf(responder_function));
@@ -1123,11 +1130,13 @@ pub fn Body(comptime Parameters: type) type {
             return @ptrCast(try self.raw().sequenceTake(erased(.value, sequence), erased(.value, length)));
         }
         pub fn append(self: *Self, sequence: anytype, element: anytype, options: anytype) Error!*const Value(index(.value, @TypeOf(sequence))) {
+            comptime option_contract.check("append", @TypeOf(options), &.{"capacity"});
             const S = index(.value, @TypeOf(sequence));
             comptime compatible(sequenceElement(S, "append"), index(.value, @TypeOf(element)), "append element");
             return @ptrCast(try self.raw().appendChecked(erased(.value, sequence), erased(.value, element), capacityFailure(S, options, "append")));
         }
         pub fn concat(self: *Self, left: anytype, right: anytype, options: anytype) Error!*const Value(index(.value, @TypeOf(left))) {
+            comptime option_contract.check("concat", @TypeOf(options), &.{"capacity"});
             const S = index(.value, @TypeOf(left));
             comptime compatible(S, index(.value, @TypeOf(right)), "concat operands");
             return @ptrCast(try self.raw().concatChecked(erased(.value, left), erased(.value, right), capacityFailure(S, options, "concat")));
@@ -1150,6 +1159,7 @@ pub fn Body(comptime Parameters: type) type {
             return @ptrCast(try self.raw().update(erased(.value, value), args.slice()));
         }
         pub fn convertInteger(self: *Self, target: anytype, value: anytype, options: anytype) Error!*const Value(index(.schema, @TypeOf(target))) {
+            comptime option_contract.check("convertInteger", @TypeOf(options), &.{"overflow"});
             const Target = index(.schema, @TypeOf(target));
             const From = index(.value, @TypeOf(value));
             comptime {
@@ -1193,6 +1203,7 @@ pub fn Body(comptime Parameters: type) type {
             return @ptrCast(try self.raw().blobConcat(erased(.schema, target), erased(.value, left), erased(.value, right), erased(.failure_literal, failure)));
         }
         pub fn blobSlice(self: *Self, target: anytype, value: anytype, start: anytype, length: anytype, options: anytype) Error!*const Value(index(.schema, @TypeOf(target))) {
+            comptime option_contract.check("blobSlice", @TypeOf(options), &.{ "capacity", "invalid_utf8" });
             const S = index(.schema, @TypeOf(target));
             comptime {
                 compatibleBlob(S, index(.value, @TypeOf(value)), "blobSlice value");
@@ -1232,6 +1243,7 @@ pub fn Body(comptime Parameters: type) type {
             return @ptrCast(try self.raw().yieldNow());
         }
         pub fn checked(self: *Self, operation: Arithmetic, left: anytype, right: anytype, failures: anytype) Error!*const Value(index(.value, @TypeOf(left))) {
+            comptime option_contract.check("checked", @TypeOf(failures), &.{ "overflow", "division_by_zero" });
             comptime requireInteger(index(.value, @TypeOf(left)), "checked arithmetic");
             comptime compatible(index(.value, @TypeOf(left)), index(.value, @TypeOf(right)), "checked arithmetic operands");
             return @ptrCast(try self.raw().checked(operation, erased(.value, left), erased(.value, right), .{

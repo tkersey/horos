@@ -10,7 +10,18 @@ const contracts = @import("contracts.zig");
 const traits = @import("traits.zig");
 const borrows = @import("borrow_flow.zig");
 const state_effects = @import("state_effects.zig");
+const provenance = @import("control_provenance.zig");
 pub const Error = image.Error || @import("activation_ownership.zig").Error || error{ InvalidState, InvalidScope };
+
+const ReturnPath = enum {
+    normal,
+    disposal,
+    invalid,
+
+    fn accepts(self: ReturnPath, exit: ?g.NodeRef) bool {
+        return self == .normal or (self == .disposal and exit != null);
+    }
+};
 
 pub fn node(state: anytype, reference: g.NodeRef) Error!g.Node {
     if (reference.id >= state.nodes.len) return error.InvalidReference;
@@ -108,6 +119,7 @@ fn validateInternal(allocator: std.mem.Allocator, program: stable_ir.Program, st
     var context: Context = .{
         .allocator = temporary,
         .program = program,
+        .control = try provenance.derive(temporary, program, &.{}, false),
         .state = state,
         .activations = activations,
         .flow = flow,
@@ -120,7 +132,7 @@ fn validateInternal(allocator: std.mem.Allocator, program: stable_ir.Program, st
         .loan_resources = try temporary.alloc(?g.NodeRef, state.nodes.len),
         .captured_delimiters = try temporary.alloc(?p.Id, state.nodes.len),
         .frame_children = try temporary.alloc(?g.NodeRef, state.nodes.len),
-        .normal_return = try temporary.alloc(bool, state.nodes.len),
+        .return_path = try temporary.alloc(ReturnPath, state.nodes.len),
         .enter = try temporary.alloc(usize, state.nodes.len),
         .leave = try temporary.alloc(usize, state.nodes.len),
     };
@@ -203,7 +215,7 @@ fn validateInternal(allocator: std.mem.Allocator, program: stable_ir.Program, st
         .parked => (try node(state, state.roots.pending.?)).pending.continuation,
         .unwinding, .completed, .failed, .cancelled => null,
     };
-    if (returning) |ref| if (!context.normal_return[@intCast(ref.id)])
+    if (returning) |ref| if (!context.return_path[@intCast(ref.id)].accepts(state.roots.exit))
         return error.InvalidState;
     try context.exits();
     context.effect_check = try Context.EffectCheck.init(
@@ -217,6 +229,7 @@ fn validateInternal(allocator: std.mem.Allocator, program: stable_ir.Program, st
         if (admitted) |owner| owner.effectFacts() else null,
     );
     context.effect_check.?.activations = activations;
+    context.effect_check.?.control = context.control;
     for (state.blobs) |blob| try a.value(temporary, program.schemas, context.facts, .{ .schema = blob.schema, .bytes = blob.bytes });
     var pending_count: usize = 0;
     for (state.nodes, 0..) |record, id| {
@@ -244,6 +257,8 @@ fn validateInternal(allocator: std.mem.Allocator, program: stable_ir.Program, st
         },
         else => if (owned != 0) return error.InvalidOwnership,
     };
+    try context.control.validateState(temporary, state.nodes, activations);
+    try context.effect_check.?.futureCaptures(&context, Context.visitFutureCapture);
 }
 
 fn ContextFor() type {
@@ -255,6 +270,7 @@ fn ContextFor() type {
         const BorrowFlow = borrows.StableFlow;
         allocator: std.mem.Allocator,
         program: Program,
+        control: *const provenance.Analysis,
         state: StateView,
         activations: []const ?ps.Activation,
         flow: ?*@import("activation_flow.zig").View,
@@ -267,7 +283,7 @@ fn ContextFor() type {
         loan_resources: []?g.NodeRef,
         captured_delimiters: []?p.Id,
         frame_children: []?g.NodeRef,
-        normal_return: []bool,
+        return_path: []ReturnPath,
         effect_check: ?EffectCheck = null,
         enter: []usize,
         leave: []usize,
@@ -321,7 +337,7 @@ fn ContextFor() type {
             var pending: std.ArrayList(Task) = .empty;
             @memset(self.enter, std.math.maxInt(usize));
             @memset(self.leave, std.math.maxInt(usize));
-            @memset(self.normal_return, false);
+            @memset(self.return_path, .invalid);
             for (self.state.nodes, 0..) |record, id| if ((isFrame(record) or record == .region) and treeParent(record) == null)
                 try pending.append(self.allocator, .{ .id = id, .leaving = false });
             var clock: usize = 0;
@@ -335,9 +351,10 @@ fn ContextFor() type {
                 self.enter[task.id] = clock;
                 clock += 1;
                 const record = self.state.nodes[task.id];
-                self.normal_return[task.id] = switch (record) {
+                self.return_path[task.id] = switch (record) {
                     // Completing cleanup resumes an existing, independently checked exit.
-                    .cleanup_return => true,
+                    .cleanup_return => .normal,
+                    .disposal_return => .disposal,
                     // Protection creates a normal exit that must eventually return here.
                     .control,
                     .continuation,
@@ -346,11 +363,10 @@ fn ContextFor() type {
                     .injection,
                     .protection,
                     => if (frameParent(record)) |parent|
-                        self.normal_return[@intCast(parent.id)]
+                        self.return_path[@intCast(parent.id)]
                     else
-                        true,
-                    // A disposal marker continues an existing unwind; it has no answer.
-                    else => false,
+                        .normal,
+                    else => .invalid,
                 };
                 try pending.append(self.allocator, .{ .id = task.id, .leaving = true });
                 for (children[task.id].items) |id| try pending.append(self.allocator, .{ .id = id, .leaving = false });
@@ -451,7 +467,6 @@ fn ContextFor() type {
                 .resume_computation => |resuming| (try contracts.resumption(self.program, try self.slotType(source, resuming.resumption))).answer,
                 .with_region => |scope| (try contracts.computation(self.program, try self.slotType(source, scope.body))).result,
                 .protect => |protection| (try contracts.computation(self.program, try self.slotType(source, protection.body))).result,
-                .dispose => |disposal| (try contracts.resumption(self.program, try self.slotType(source, disposal.owned))).answer,
                 else => error.InvalidState,
             };
         }
@@ -504,7 +519,11 @@ fn ContextFor() type {
             if (reference) |ref| switch (try node(self.state, ref)) {
                 .continuation => |saved| {
                     if (saved.source_block >= self.program.blocks.len) return error.InvalidReference;
-                    if (result_type != try self.expectedResult(self.program.blocks[@intCast(saved.source_block)])) return error.TypeMismatch;
+                    const source = self.program.blocks[@intCast(saved.source_block)];
+                    // Cleanup can invoke a handler clause that returns to the
+                    // disposal continuation. Its edge binds no result, so the
+                    // clause's answer is ignored rather than token-answer typed.
+                    if (source.terminator != .dispose and result_type != try self.expectedResult(source)) return error.TypeMismatch;
                 },
                 .attachment => |attachment| {
                     const activation = (try node(self.state, attachment.handler)).handler;
@@ -529,7 +548,9 @@ fn ContextFor() type {
                     const signature = try contracts.computation(self.program, try self.slotType(source, source.terminator.protect.cleanup));
                     if (result_type != signature.result) return error.TypeMismatch;
                 },
-                .disposal_return => |disposal| if (result_type != (try contracts.resumption(self.program, disposal.schema)).answer) return error.TypeMismatch,
+                // A nested disposal marker continues an unwind, not ordinary
+                // execution. return_path requires the retained exit at that point.
+                .disposal_return => {},
                 else => return error.InvalidState,
             } else if (result_type != self.program.roots.result) return error.TypeMismatch;
         }
@@ -616,13 +637,13 @@ fn ContextFor() type {
                             try self.value(value_item, value_item.schema);
                             const after = try node(self.state, exit.stop orelse return error.InvalidState);
                             if (after != .continuation or after.continuation.source_block >= self.program.blocks.len or self.program.blocks[@intCast(after.continuation.source_block)].terminator != .protect) return error.InvalidState;
-                            if (!self.normal_return[@intCast(exit.stop.?.id)]) return error.InvalidState;
+                            if (!self.return_path[@intCast(exit.stop.?.id)].accepts(exit.outer)) return error.InvalidState;
                             try self.checkParent(exit.stop, value_item.schema);
                         },
                         .abandoned => {
                             const after = try node(self.state, exit.stop orelse return error.InvalidState);
                             if (after != .continuation or after.continuation.source_block >= self.program.blocks.len or self.program.blocks[@intCast(after.continuation.source_block)].terminator != .dispose) return error.InvalidState;
-                            if (!self.normal_return[@intCast(exit.stop.?.id)]) return error.InvalidState;
+                            if (!self.return_path[@intCast(exit.stop.?.id)].accepts(exit.outer)) return error.InvalidState;
                         },
                         .failure => |failure| {
                             try self.value(failure, self.program.roots.failure);
@@ -1138,7 +1159,7 @@ fn ContextFor() type {
         }
 
         fn futureScopes(self: *Context, contexts: []UseScope, region_frames: []const ?g.NodeRef) Error!void {
-            var flow = try BorrowFlow.init(self.allocator, self.program, self.facts.exportable);
+            var flow = try BorrowFlow.initWithControl(self.allocator, self.program, self.facts.exportable, self.control);
             const children = try self.allocator.alloc(?g.NodeRef, self.state.nodes.len);
             @memset(children, null);
             for (self.state.nodes, 0..) |record, id| {
@@ -1306,7 +1327,7 @@ fn ContextFor() type {
         fn capture(self: *Context, token: anytype) Error!void {
             const signature = try contracts.resumption(self.program, token.schema);
             if (token.capture == null) return error.InvalidState;
-            if (!self.normal_return[@intCast(token.capture.?.id)]) return error.InvalidState;
+            if (!self.return_path[@intCast(token.capture.?.id)].accepts(null)) return error.InvalidState;
             const saved = try node(self.state, token.capture.?);
             const delimiter = try node(self.state, token.delimiter);
             if (saved != .continuation or delimiter != .attachment or delimiter.attachment.phase != .suspended) return error.InvalidState;
@@ -1330,31 +1351,40 @@ fn ContextFor() type {
             while (cursor) |ref| {
                 if (ref.id == token.delimiter.id) return;
                 const frame = try node(self.state, ref);
-                switch (frame) {
-                    .continuation => {
-                        for (self.activations[@intCast(ref.id)].?.bindings) |binding| try self.capturedValue(signature, binding.value);
-                    },
-                    .attachment => |attachment| {
-                        const handler = (try node(self.state, attachment.handler)).handler;
-                        for (handler.state) |item| try self.capturedValue(signature, item);
-                    },
-                    .disposal_return => |disposal| {
-                        for (disposal.values) |item| try self.capturedValue(signature, item);
-                    },
-                    else => {},
-                }
-                if (frame == .region_scope) {
-                    const region_node = (try node(self.state, frame.region_scope.region)).region;
-                    if (std.mem.indexOfScalar(p.Id, signature.owned_regions, region_node.descriptor) == null) return error.InvalidOwnership;
-                }
-                if ((frame == .protection or frame == .cleanup_return) and (!signature.obligations or signature.use == .multi)) return error.InvalidOwnership;
-                if (frame == .protection) if (frame.protection.loan) |loan| {
-                    const descriptor = (try node(self.state, loan)).region.descriptor;
-                    if (std.mem.indexOfScalar(p.Id, signature.owned_regions, descriptor) == null) return error.InvalidOwnership;
-                };
+                try self.captureFrame(signature, @intCast(ref.id));
                 cursor = frameParent(frame);
             }
             return error.InvalidScope;
+        }
+
+        fn visitFutureCapture(pointer: *anyopaque, frame_id: usize, schema: p.Id) Error!void {
+            const self: *Context = @ptrCast(@alignCast(pointer));
+            try self.captureFrame(try contracts.resumption(self.program, schema), frame_id);
+        }
+        fn captureFrame(self: *Context, signature: p.ResumptionType, frame_id: usize) Error!void {
+            const frame = self.state.nodes[frame_id];
+            switch (frame) {
+                .continuation => {
+                    for (self.activations[frame_id].?.bindings) |binding| try self.capturedValue(signature, binding.value);
+                },
+                .attachment => |attachment| {
+                    const handler = (try node(self.state, attachment.handler)).handler;
+                    for (handler.state) |item| try self.capturedValue(signature, item);
+                },
+                .disposal_return => |disposal| {
+                    for (disposal.values) |item| try self.capturedValue(signature, item);
+                },
+                else => {},
+            }
+            if (frame == .region_scope) {
+                const region_node = (try node(self.state, frame.region_scope.region)).region;
+                if (std.mem.indexOfScalar(p.Id, signature.owned_regions, region_node.descriptor) == null) return error.InvalidOwnership;
+            }
+            if ((frame == .protection or frame == .cleanup_return) and (!signature.obligations or signature.use == .multi)) return error.InvalidOwnership;
+            if (frame == .protection) if (frame.protection.loan) |loan| {
+                const descriptor = (try node(self.state, loan)).region.descriptor;
+                if (std.mem.indexOfScalar(p.Id, signature.owned_regions, descriptor) == null) return error.InvalidOwnership;
+            };
         }
 
         fn capturedValue(_: Context, signature: p.ResumptionType, item: g.Value) Error!void {

@@ -1,4 +1,5 @@
 //! Search exposes a finite recursive step and keeps DFS/BFS as runtime policy.
+const option_contract = @import("../authoring/option_contract.zig");
 const bridge = @import("bridge.zig");
 const a = bridge.a;
 const native = bridge.native;
@@ -45,6 +46,7 @@ pub fn family(c: *a.Context, identity: []const u8) a.Error!*const Family {
     return @ptrCast(try runtime.family(bridge.context(c), identity));
 }
 pub fn interpret(c: *a.Context, family_handle: *const Family, element: anytype, options: anytype) a.Error!Search(bridge.schemaShape(@TypeOf(element))) {
+    comptime option_contract.check("Search.interpret", @TypeOf(options), &.{ "captures", "residual", "owned_regions", "borrowed_regions", "order" });
     const captures = bridge.captures(options.captures);
     const residual = bridge.list(.operation, bridge.option(options, "residual", .{}));
     const owned = bridge.list(.region, bridge.option(options, "owned_regions", .{}));

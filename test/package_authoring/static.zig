@@ -15,7 +15,56 @@ pub fn main(init: std.process.Init) !void {
     const f = try c.function("caller", .{}, integer, .{});
     const b = try c.body(f);
     const value = try b.constant(u64, 1);
-    if (comptime selected("nested")) {
+    if (comptime selected("option_handler")) {
+        const operation = try c.local("option", integer, integer, .linear);
+        _ = try c.handler(operation, integer, integer, .{ .mode = .deep, .use = .linear, .return_effect = .{} });
+    } else if (comptime selected("option_handler_set")) {
+        const operation = try c.local("option", integer, integer, .linear);
+        _ = try c.handlerSet(.{ .capability = operation }, integer, integer, .{ .mode = .deep, .use = .linear, .return_effect = .{} });
+    } else if (comptime selected("option_responder")) {
+        const operation = try c.local("option", integer, integer, .linear);
+        const response = try c.function("reply", .{ .payload = integer }, integer, .{});
+        _ = try c.responder(operation, integer, response, .{ .mode = .deep, .use = .linear, .return_effect = .{} });
+    } else if (comptime selected("option_callable")) {
+        _ = try c.callable(.{}, integer, .{}, .{ .use = .reusable, .capture = .{} });
+    } else if (comptime selected("option_define_callable")) {
+        const schema = try c.callable(.{}, integer, .{}, .{ .use = .reusable });
+        const slot = try c.declareSchema(.callable, a.ShapeOf(@TypeOf(schema)));
+        try c.defineCallable(slot, .{}, integer, .{}, .{ .use = .reusable, .capture = .{} });
+    } else if (comptime selected("option_region_body")) {
+        _ = try c.regionBodySchema(try c.region(), .{}, integer, .{}, .{ .use = .reusable, .capture = .{} });
+    } else if (comptime selected("option_append")) {
+        const sequence = try b.sequenceValue(try c.sequence(integer), .{});
+        _ = try b.append(sequence, value, .{ .capcity = null });
+    } else if (comptime selected("option_concat")) {
+        const sequence = try b.sequenceValue(try c.sequence(integer), .{});
+        _ = try b.concat(sequence, sequence, .{ .capcity = null });
+    } else if (comptime selected("option_convert")) {
+        _ = try b.convertInteger(integer, value, .{ .overflw = null });
+    } else if (comptime selected("option_blob")) {
+        const bytes = try c.schema(native.Bytes(null));
+        const blob = try a.interop.encodedLiteral(c, bytes, &.{0});
+        _ = try b.blobSlice(bytes, blob, value, value, .{ .capacity = try c.literalFailure(void, {}), .capcity = null });
+    } else if (comptime selected("option_arithmetic")) {
+        _ = try b.checked(.add, value, value, .{ .overflow = try c.literalFailure(void, {}), .division_by_zerro = null });
+    } else if (comptime selected("option_choice_all")) {
+        const choice = try horos.library.choice.family(c, "options");
+        _ = try horos.library.choice.all(c, choice, integer, .{ .captures = .{ .continuation = .{} }, .capture = .{} });
+    } else if (comptime selected("option_choice_first")) {
+        const choice = try horos.library.choice.family(c, "options");
+        _ = try horos.library.choice.first(c, choice, integer, .{ .captures = .{ .continuation = .{} }, .capture = .{} });
+    } else if (comptime selected("option_search")) {
+        const search = try horos.library.search.family(c, "options");
+        _ = try horos.library.search.interpret(c, search, integer, .{ .captures = .{ .continuation = .{} }, .order = .depth_first, .capture = .{} });
+    } else if (comptime selected("option_generator")) {
+        _ = try horos.library.generator.create(c, "options", integer, integer, integer, .{ .captures = .{ .continuation = .{} }, .capture = .{} });
+    } else if (comptime selected("option_nested_capture")) {
+        const choice = try horos.library.choice.family(c, "options");
+        _ = try horos.library.choice.all(c, choice, integer, .{ .captures = .{ .continuation = .{}, .bodi = .{} } });
+    } else if (comptime selected("option_named_record")) {
+        const sequence = try b.sequenceValue(try c.sequence(integer), .{});
+        _ = try b.append(sequence, value, .{null});
+    } else if (comptime selected("nested")) {
         const expected = try c.schema(struct { count: u64 });
         const actual = try c.schema(struct { count: bool });
         const target = try c.function("target", .{ .input = expected }, integer, .{});

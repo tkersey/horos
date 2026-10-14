@@ -156,6 +156,31 @@ regions explicitly. `return_effects` and `clause_effects` may narrow their arms;
 omission retains the residual allowance. `obligations = true` permits a local
 resumption to retain protected cleanup, subject to independent admission.
 
+Continuation checks share a program-derived relevance analysis. A known local
+capability selects its receiving handler; an unrelated same-operation declaration
+does not narrow that capture allowance. Direct helper calls instantiate suspension
+summaries from their actual arguments, and known closure boundaries include their
+captured values. A fresh installation discharges only its supplied capability
+parameters, preserving captured outer capabilities even when both installations
+use the same handler descriptor. Named diagnostics, borrow requirements, region
+and cleanup checks, and optimizer capture checks use this same owner.
+
+Unknown flows and open components retain the conservative clause union. Mutable
+cell reads and unrepresented saved resumption contexts currently fall back to
+that union. Successor rebinding follows token provenance: it joins the original
+handler with every possible successor, including transitive successors. It never
+rewrites an installation or multi-shot template globally. Unknown token origins
+retain all possible original handlers; unrelated known origins stay separate.
+All declarations still undergo structural and intrinsic validation, including
+unused handlers. These
+facts are transient; transformations and final linking derive them again.
+
+Checkpoint admission also qualifies concrete activation and closure bindings
+against these facts. It checks possible future captures against actual runtime
+attachment identity: two installations of one handler descriptor are distinct
+delimiters. A restored binding cannot redirect a locally discharged operation
+through an outer delimiter whose intervening frames violate its capture contract.
+
 `returnFunction`, `clauseFunctionFor` and `handledSchema` derive typed interfaces.
 Deep resumptions return the handler answer; shallow resumptions return the handled
 body's input. `resumeWith` supplies the successor for shallow work. A statically
