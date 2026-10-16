@@ -13,10 +13,31 @@ const Error = source.Error || data.activation_flow.Error || data.activation_type
 const scope = @import("binding_scope.zig");
 const none = scope.empty;
 
+/// A binding can have several locations after source control duplication.
+/// Presence here does not assert liveness at every cut; inspect the admitted
+/// activation binding at the selected final function and slot.
+pub const RecoveryBinding = struct {
+    source_function: p.Id,
+    variable: p.Id,
+    source_schema: p.Id,
+    function: p.Id,
+    slot: p.Id,
+    schema: p.Id,
+};
+pub const RecoveryEvidence = struct {
+    input: ir.Program,
+    correspondence: data.coalescing.Correspondence,
+};
+
 pub const Construction = struct {
     arena: std.heap.ArenaAllocator,
     program: ir.Program,
     flow: data.activation_flow.Facts,
+    recovery: []const RecoveryBinding = &.{},
+    /// Independently checked parameter locations. These do not promise that a
+    /// parameter remains live at every instruction in its function.
+    parameters: []const RecoveryBinding = &.{},
+    recovery_evidence: ?RecoveryEvidence = null,
 
     pub fn encode(self: *const Construction, allocator: std.mem.Allocator, output: []u8) data.program_image.Error![]const u8 {
         return data.program_image.encode(allocator, self.program, output);
@@ -66,6 +87,7 @@ fn lowerInternal(
     options: source.CompileOptions,
 ) Error!Construction {
     options.resetObservations();
+    if (component and options.recovery) return error.InvalidSource;
     return lowerBody(allocator, input, imports, component, borrows, options) catch |err| {
         if (options.diagnostic) |diagnostic| diagnostic.code = err;
         return err;
@@ -97,6 +119,7 @@ fn lowerBody(
         .slot_variables = if (options.captures != null) try a.alloc([]const ?p.Id, owned.functions.len) else &.{},
         .cacheable = try @import("value_cache.zig").derive(a, owned, traits),
         .uses = traits,
+        .recovery_enabled = options.recovery,
     };
     try compiler.constants.appendSlice(a, owned.constants);
     const functions = try a.alloc(ir.Function, owned.functions.len);
@@ -135,7 +158,7 @@ fn lowerBody(
     options.stage(.direct_optimization);
     const threaded = try @import("thread_jumps.zig").optimize(a, program);
     const selected = try data.tail_clauses.optimize(a, threaded, traits);
-    const ordered = try @import("slot_order.zig").optimize(a, selected);
+    const ordered = try @import("slot_order.zig").optimizeObserved(a, selected, if (options.recovery) .{ .context = &compiler, .receive = Compiler.reorderBindings } else null);
     if (!component) return coalesce(allocator, ordered, &compiler, options);
     if (options.semantic_statistics) |stats| stats.outcome = .deferred_open_component;
     if (options.coalescing.statistics) |stats| stats.* = .{
@@ -155,6 +178,23 @@ fn lowerBody(
 
 const CompilationObserver = struct {
     options: source.CompileOptions,
+    compiler: *Compiler,
+    fn correspondence(context: *anyopaque, trace: *const data.coalescing.OriginsTrace) data.coalescing.Error!void {
+        const self: *CompilationObserver = @ptrCast(@alignCast(context));
+        self.compiler.correspondence = try data.coalescing.Correspondence.copy(self.compiler.allocator, trace);
+        for (self.compiler.recovery_bindings.items) |binding| {
+            const function = trace.resolve(.function, binding.function) orelse continue;
+            const schema = trace.resolve(.schema, binding.schema) orelse return error.InvalidCorrespondence;
+            const local = trace.locals[@intCast(binding.function)];
+            if (binding.slot >= local.slots.len) return error.InvalidCorrespondence;
+            var final = binding;
+            final.function = function;
+            final.schema = schema;
+            final.slot = local.slots[@intCast(binding.slot)];
+            try self.compiler.final_bindings.append(self.compiler.allocator, final);
+        }
+        if (self.options.coalescing.correspondence) |observer| try observer.receive(observer.context, trace);
+    }
     fn service(context: *anyopaque, report: ?data.closed_compilation.ServiceObservation.Report) void {
         const self: *CompilationObserver = @ptrCast(@alignCast(context));
         const observer = self.options.compilation_observer.?;
@@ -167,13 +207,14 @@ const CompilationObserver = struct {
     }
 };
 fn coalesce(allocator: std.mem.Allocator, program: ir.Program, compiler: *Compiler, options: source.CompileOptions) Error!Construction {
-    var observation: CompilationObserver = .{ .options = options };
+    var observation: CompilationObserver = .{ .options = options, .compiler = compiler };
     var statistics: data.closed_compilation.Statistics = .{};
     defer if (options.semantic_statistics) |out| {
         out.* = statistics;
     };
     var detail: data.coalescing.Diagnostic = .{};
     var selected = options.coalescing;
+    if (options.recovery) selected.correspondence = .{ .context = &observation, .receive = CompilationObserver.correspondence };
     if (options.diagnostic) |diagnostic| {
         diagnostic.target = .{};
         diagnostic.function = null;
@@ -186,7 +227,7 @@ fn coalesce(allocator: std.mem.Allocator, program: ir.Program, compiler: *Compil
             out.* = detail;
         };
     }
-    const result = data.closed_compilation.run(allocator, program, .{
+    var result = data.closed_compilation.run(allocator, program, .{
         .contract = options.contract,
         .objective = options.objective,
         .image_growth_bytes = options.image_growth_bytes,
@@ -222,9 +263,40 @@ fn coalesce(allocator: std.mem.Allocator, program: ir.Program, compiler: *Compil
         }
         return err;
     };
+    errdefer result.deinit();
+    const recovery = try result.arena.allocator().dupe(RecoveryBinding, compiler.final_bindings.items);
+    for (recovery) |binding| {
+        if (binding.function >= result.program.functions.len) return error.InvalidSource;
+        const slots = result.program.functions[@intCast(binding.function)].layout.slots;
+        if (binding.slot >= slots.len or slots[@intCast(binding.slot)] != binding.schema) return error.InvalidSource;
+    }
+    var parameters: std.ArrayList(RecoveryBinding) = .empty;
+    const evidence: ?RecoveryEvidence = if (options.recovery) try source.own(RecoveryEvidence, result.arena.allocator(), .{
+        .input = program,
+        .correspondence = compiler.correspondence orelse return error.InvalidCorrespondence,
+    }) else null;
+    if (evidence) |proof| {
+        for (compiler.source.functions, 0..) |function, index| {
+            const target = proof.correspondence.maps[@backingInt(data.relocation.Kind.function)][index];
+            if (target == data.relocation.missing) continue;
+            if (compiler.facts.functions[index].items.len != 0) return error.InvalidCorrespondence;
+            const emitted = result.program.functions[@intCast(target)];
+            if (function.parameters.len != emitted.inputs.len) return error.InvalidCorrespondence;
+            for (function.parameters, emitted.inputs) |variable, slot| try parameters.append(result.arena.allocator(), .{
+                .source_function = index,
+                .variable = variable,
+                .source_schema = compiler.source.variables[@intCast(variable)],
+                .function = target,
+                .slot = slot,
+                .schema = emitted.layout.slots[@intCast(slot)],
+            });
+        }
+    }
+    const constructed: Construction = .{ .arena = result.arena, .program = result.program, .flow = result.flow, .recovery = recovery, .parameters = parameters.items, .recovery_evidence = evidence };
+    if (options.recovery) try @import("recovery.zig").validate(allocator, compiler.source, &constructed);
     options.stage(.complete);
     if (options.diagnostic) |diagnostic| diagnostic.* = .{ .phase = .complete };
-    return .{ .arena = result.arena, .program = result.program, .flow = result.flow };
+    return constructed;
 }
 
 fn checkTarget(allocator: std.mem.Allocator, compiler: *Compiler, program: ir.Program, imports: []const p.Id, component: bool, borrows: []const data.borrow_contract.Summary, origins: ?[]const p.Id, options: source.CompileOptions) Error!data.activation_flow.Facts {
@@ -253,7 +325,10 @@ const Compiler = struct {
     facts: check.Facts,
     capture_observer: ?@import("diagnostic.zig").CaptureObserver,
     slot_variables: [][]const ?p.Id,
-
+    recovery_enabled: bool = false,
+    recovery_bindings: std.ArrayList(RecoveryBinding) = .empty,
+    final_bindings: std.ArrayList(RecoveryBinding) = .empty,
+    correspondence: ?data.coalescing.Correspondence = null,
     cacheable: []const bool,
     uses: data.traits.Facts,
     constants: std.ArrayList(p.Literal) = .empty,
@@ -261,6 +336,18 @@ const Compiler = struct {
     captures: std.ArrayList(p.Capture) = .empty,
     constructors: std.ArrayList(p.Constructor) = .empty,
     constructor_ids: std.AutoHashMapUnmanaged(ConstructorKey, p.Id) = .empty,
+
+    fn rememberBinding(self: *Compiler, function: p.Id, variable: p.Id, slot: p.Id) Error!void {
+        if (!self.recovery_enabled) return;
+        const schema = self.source.variables[@intCast(variable)];
+        try self.recovery_bindings.append(self.allocator, .{ .source_function = function, .variable = variable, .source_schema = schema, .function = function, .slot = slot, .schema = schema });
+    }
+    fn reorderBindings(context: *anyopaque, maps: []const ?[]const p.Id) std.mem.Allocator.Error!void {
+        const self: *Compiler = @ptrCast(@alignCast(context));
+        for (self.recovery_bindings.items) |*binding| if (maps[@intCast(binding.function)]) |slots| {
+            binding.slot = slots[@intCast(binding.slot)];
+        };
+    }
 
     fn observeCapture(pointer: *anyopaque, function: p.Id, selected: *const data.activation_ownership.CaptureSite, slot: p.Id) void {
         const self: *Compiler = @ptrCast(@alignCast(pointer));
@@ -390,6 +477,7 @@ const Function = struct {
 
     fn bind(self: *Function, parent: p.Id, name: p.Id) Error!p.Id {
         const destination = try self.slot(self.compiler.source.variables[@intCast(name)]);
+        try self.compiler.rememberBinding(self.id, name, destination);
         if (self.compiler.capture_observer != null) self.slot_variables.items[@intCast(destination)] = name;
         return self.bindings.bind(parent, name, destination);
     }
@@ -492,6 +580,7 @@ const Function = struct {
                 return .{ .jump = try self.edge(.{ .block = rest, .destination = try self.resolve(environment, binding.variable) }, .{ .slot = value }) };
             }
             if (self.compiler.capture_observer != null) self.slot_variables.items[@intCast(value)] = binding.variable;
+            try self.compiler.rememberBinding(self.id, binding.variable, value);
             current.environment = try self.bindings.bind(current.environment, binding.variable, value);
             current.term = binding.next;
             block.environment = current.environment;

@@ -55,12 +55,24 @@ test "coalescing work limit after an intermediate selection returns original bas
     );
     const baseline = try bytes(original.program);
     defer testing.allocator.free(baseline);
+    const Capture = struct {
+        maps: @import("relocation.zig").Maps,
+        called: bool = false,
+        fn receive(context: *anyopaque, trace: *const pass.OriginsTrace) pass.Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.called) return error.InvalidCorrespondence;
+            for (self.maps, trace.maps) |expected, actual| if (!std.mem.eql(@import("program.zig").Id, expected, actual)) return error.InvalidCorrespondence;
+            for (trace.locals) |local| for (local.slots, 0..) |slot, i| if (slot != i) return error.InvalidCorrespondence;
+            self.called = true;
+        }
+    };
     for ([_]u64{ 0, stats.first_selected_work }) |limit| {
         var limited_stats: pass.Statistics = .{};
+        var capture: Capture = .{ .maps = original.maps.? };
         var limited = try pass.run(
             testing.allocator,
             fixture,
-            .{ .work_limit = limit, .statistics = &limited_stats },
+            .{ .work_limit = limit, .statistics = &limited_stats, .correspondence = .{ .context = &capture, .receive = Capture.receive } },
         );
         defer limited.deinit();
         try testing.expectEqual(pass.Outcome.work_limit, limited_stats.outcome);
@@ -68,6 +80,7 @@ test "coalescing work limit after an intermediate selection returns original bas
         const actual = try bytes(limited.program);
         defer testing.allocator.free(actual);
         try testing.expectEqualSlices(u8, baseline, actual);
+        try testing.expect(capture.called);
     }
 }
 

@@ -78,3 +78,5 @@ test {
     _ = scalar;
     _ = schema;
 }
+
+pub const record = @import("record.zig");

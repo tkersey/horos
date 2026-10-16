@@ -10,6 +10,9 @@ const discovery = @import("coalescing_discovery.zig");
 const candidate = @import("coalescing_candidate.zig");
 const origins = @import("coalescing_origins.zig");
 pub const Diagnostic = origins.Diagnostic;
+pub const OriginsTrace = origins.Trace;
+pub const Correspondence = @import("coalescing_correspondence.zig").Correspondence;
+pub const validateCorrespondence = @import("coalescing_correspondence.zig").validate;
 pub const Outcome = enum {
     not_run,
     deferred_open_component,
@@ -73,6 +76,12 @@ pub const Options = struct {
     diagnostic: ?*Diagnostic = null,
     /// Deterministic discovery-work units; unlimited unless a caller selects a bound.
     work_limit: u64 = std.math.maxInt(u64),
+    /// Borrowed final provenance from independently checked selected rounds.
+    /// No provisional candidate is reported. Copy needed fields in the callback.
+    correspondence: ?struct {
+        context: *anyopaque,
+        receive: *const fn (*anyopaque, *const origins.Trace) Error!void,
+    } = null,
 
     pub fn resetObservations(self: Options) void {
         if (self.statistics) |stats| stats.* = .{ .rounds = stats.rounds };
@@ -119,7 +128,7 @@ fn runInternal(allocator: std.mem.Allocator, original: ir.Program, options: Opti
     var baseline_arena = std.heap.ArenaAllocator.init(allocator);
     errdefer baseline_arena.deinit();
     const baseline = try r.ownReachable(baseline_arena.allocator(), scratch.allocator(), original);
-    var trace: ?origins.Trace = if (options.diagnostic != null)
+    var trace: ?origins.Trace = if (options.diagnostic != null or options.correspondence != null)
         try origins.Trace.init(allocator, original, baseline)
     else
         null;
@@ -143,6 +152,13 @@ fn runInternal(allocator: std.mem.Allocator, original: ir.Program, options: Opti
     }
     const selected = attempt(allocator, baseline.program, &stats, if (trace) |*t| t else null, options.diagnostic) catch |err| switch (err) {
         error.WorkLimit => blk: {
+            // The attempt may have selected earlier rounds before exhausting
+            // its allowance. Returning the baseline also restores its mapping.
+            if (trace) |*t| {
+                t.deinit();
+                trace = null;
+                trace = try origins.Trace.init(allocator, original, baseline);
+            }
             stats.outcome = .work_limit;
             stats.selected = counts;
             stats.extraction_rounds = 0;
@@ -152,10 +168,16 @@ fn runInternal(allocator: std.mem.Allocator, original: ir.Program, options: Opti
         else => return err,
     };
     if (selected) |result| {
+        errdefer {
+            var rejected = result;
+            rejected.deinit();
+        }
+        if (options.correspondence) |observer| try observer.receive(observer.context, &trace.?);
         flow.deinit();
         baseline_arena.deinit();
         return result;
     }
+    if (options.correspondence) |observer| try observer.receive(observer.context, &trace.?);
     return .{ .arena = baseline_arena, .program = baseline.program, .flow = flow };
 }
 
