@@ -83,3 +83,58 @@ test "source recovery retains binding aliases through checked function coalescin
     admitted.deinit();
     try std.testing.expectError(error.InvalidCorrespondence, source.recovery.validate(a, b.module(entry, unit), &forged));
 }
+
+test "source recovery derives formal parameters after captured inputs" {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const module = try source.examples.branchingTail(&b);
+    var ordinary = try source.lower(a, module);
+    defer ordinary.deinit();
+    var tail_selected = false;
+    for (ordinary.program.handlers) |handler| for (handler.clauses) |clause| {
+        tail_selected = tail_selected or clause.strategy == .tail;
+    };
+    try std.testing.expect(tail_selected);
+    var compiled = try source.lowerObserved(a, module, .{ .recovery = true });
+    defer compiled.deinit();
+    try source.recovery.validate(a, module, &compiled);
+    // The body captures the main function's boolean before its own capability
+    // parameter. Its formal parameter is not the first lowered input.
+    var found = false;
+    for (compiled.parameters) |binding| if (binding.source_function == 1) {
+        found = true;
+        try std.testing.expectEqual(module.functions[1].parameters[0], binding.variable);
+        const target = compiled.program.functions[@intCast(binding.function)];
+        try std.testing.expectEqual(@as(usize, 2), target.inputs.len);
+        try std.testing.expectEqual(target.inputs[1], binding.slot);
+    };
+    try std.testing.expect(found);
+}
+
+test "source recovery rejects a same-typed source parameter permutation" {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const unit = try b.scalar(void);
+    const word = try b.scalar(u64);
+    const pair = try b.schema(.{ .product = &.{ word, word } });
+    const f = try b.declare(&.{ word, word }, pair, &.{}, &.{});
+    try b.define(f, try b.pure(try b.primitive(pair, .product, &.{ try b.reference(b.parameter(f, 0)), try b.reference(b.parameter(f, 1)) }, 0)));
+    const module = b.module(f, unit);
+    var compiled = try source.lowerObserved(a, module, .{ .recovery = true });
+    defer compiled.deinit();
+    const functions = try a.dupe(source.ast.Function, module.functions);
+    defer a.free(functions);
+    const reversed = [_]u64{ b.parameter(f, 1), b.parameter(f, 0) };
+    functions[@intCast(f)].parameters = &reversed;
+    var substituted = module;
+    substituted.functions = functions;
+    var admitted = try source.lower(a, substituted);
+    defer admitted.deinit();
+    const parameters = try a.dupe(source.RecoveryBinding, compiled.parameters);
+    defer a.free(parameters);
+    try std.testing.expectEqual(@as(usize, 2), parameters.len);
+    for (parameters, reversed) |*binding, variable| binding.variable = variable;
+    var forged = compiled;
+    forged.parameters = parameters;
+    try std.testing.expectError(error.InvalidCorrespondence, source.recovery.validate(a, substituted, &forged));
+}

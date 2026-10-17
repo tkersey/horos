@@ -8,6 +8,128 @@ fn known(value: u64, storage: *[8]u8, schema: p.Id) pe.Knowledge {
     std.mem.writeInt(u64, storage, value, .little);
     return .{ .known = .{ .schema = schema, .bytes = storage } };
 }
+test "specialization renaming preserves lexical shadowing and rejects capture" {
+    const a = std.testing.allocator;
+    for ([_]bool{ false, true }) |shadows_source| {
+        var b = source.Builder.init(a);
+        defer b.deinit();
+        const unit = try b.scalar(void);
+        const word = try b.scalar(u64);
+        const f = try b.declare(&.{word}, word, &.{}, &.{});
+        const x = b.parameter(f, 0);
+        const y = if (shadows_source) x else try b.variable(word);
+        try b.define(f, try b.bind(y, try b.pure(try b.constant(u64, 42)), try b.pure(try b.reference(x))));
+        const module = b.module(f, unit);
+        const request: pe.Request = .{ .context = context, .function = f, .arguments = &.{.dynamic} };
+        var result = try pe.specialize(a, module, request);
+        defer result.deinit();
+        const residual = result.module().functions[@intCast(result.entry)];
+        result.builder.terms.items[@intCast(residual.body.?)].bind.variable = residual.parameters[0];
+        // Both candidates are legal source. Only the first changes which
+        // source binding the final reference denotes.
+        var admitted = try source.lower(a, result.module());
+        defer admitted.deinit();
+        if (shadows_source) {
+            try pe.validate(a, module, request, &result);
+        } else try std.testing.expectError(error.InvalidSpecialization, pe.validate(a, module, request, &result));
+    }
+}
+
+test "specialization rejects capture through unpack and both sum branch forms" {
+    const a = std.testing.allocator;
+    for (0..3) |kind| {
+        var b = source.Builder.init(a);
+        defer b.deinit();
+        const unit = try b.scalar(void);
+        const word = try b.scalar(u64);
+        const shape = try b.schema(if (kind == 0) .{ .product = &.{word} } else .{ .sum = &.{ word, word } });
+        const f = try b.declare(&.{ word, shape }, word, &.{}, &.{});
+        const x = b.parameter(f, 0);
+        const input = try b.reference(b.parameter(f, 1));
+        const y = try b.variable(word);
+        const finish = try b.pure(try b.reference(x));
+        try b.define(f, try b.term(if (kind == 0)
+            .{ .unpack_product = .{ .value = input, .variables = &.{y}, .body = finish } }
+        else
+            .{ .match_sum = .{ .value = input, .cases = &.{ .{ .variable = y, .body = finish }, .{ .variable = try b.variable(word), .body = finish } } } }));
+        const module = b.module(f, unit);
+        const arguments = [_]pe.Knowledge{ .dynamic, if (kind == 2) .{ .known = .{ .schema = shape, .bytes = &.{ 0, 42, 0, 0, 0, 0, 0, 0, 0 } } } else .dynamic };
+        const request: pe.Request = .{ .context = context, .function = f, .arguments = &arguments };
+        var result = try pe.specialize(a, module, request);
+        defer result.deinit();
+        const residual = result.module().functions[@intCast(result.entry)];
+        const term = &result.builder.terms.items[@intCast(residual.body.?)];
+        switch (kind) {
+            0 => @constCast(term.unpack_product.variables)[0] = residual.parameters[0],
+            1 => @constCast(term.match_sum.cases)[0].variable = residual.parameters[0],
+            else => term.bind.variable = residual.parameters[0],
+        }
+        var admitted = try source.lower(a, result.module());
+        defer admitted.deinit();
+        try std.testing.expectError(error.InvalidSpecialization, pe.validate(a, module, request, &result));
+    }
+}
+
+test "specialization preserves ordered dynamic parameter identity" {
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const unit = try b.scalar(void);
+    const word = try b.scalar(u64);
+    const f = try b.declare(&.{ word, word }, word, &.{}, &.{});
+    try b.define(f, try b.pure(try b.reference(b.parameter(f, 0))));
+    const module = b.module(f, unit);
+    const request: pe.Request = .{ .context = context, .function = f, .arguments = &.{ .dynamic, .dynamic } };
+    var result = try pe.specialize(a, module, request);
+    defer result.deinit();
+    const parameters = @constCast(result.builder.functions.items[@intCast(result.entry)].parameters);
+    std.mem.swap(p.Id, &parameters[0], &parameters[1]);
+    var admitted = try source.lower(a, result.module());
+    defer admitted.deinit();
+    try std.testing.expectError(error.InvalidSpecialization, pe.validate(a, module, request, &result));
+    std.mem.swap(p.Id, &parameters[0], &parameters[1]);
+    parameters[1] = parameters[0];
+    // Duplicate formals are already rejected by ordinary source admission.
+    try std.testing.expectError(error.InvalidSource, pe.validate(a, module, request, &result));
+}
+
+test "non-exportable aggregate constructors remain residual" {
+    const a = std.testing.allocator;
+    for (0..3) |kind| {
+        var b = source.Builder.init(a);
+        defer b.deinit();
+        const unit = try b.scalar(void);
+        const word = try b.scalar(u64);
+        const closure = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{}, .result = unit } } });
+        const aggregate = try b.schema(switch (kind) {
+            0 => .{ .sum = &.{ unit, closure } },
+            1 => .{ .seq = closure },
+            else => .{ .array = .{ .element = closure, .length = 0 } },
+        });
+        const f = try b.declare(&.{}, word, &.{}, &.{});
+        const value = if (kind == 0)
+            try b.primitive(aggregate, .variant, &.{try b.constant(void, {})}, 0)
+        else
+            try b.primitive(aggregate, .sequence, &.{}, 0);
+        try b.define(f, try b.pure(try b.primitive(word, if (kind == 0) .variant_tag else .sequence_length, &.{value}, 0)));
+        const module = b.module(f, unit);
+        var original = try source.lower(a, module);
+        defer original.deinit();
+        const request: pe.Request = .{ .context = context, .function = f, .arguments = &.{} };
+        var result = try pe.specialize(a, module, request);
+        defer result.deinit();
+        var seen = false;
+        for (result.value_proofs.items) |proof| if (proof.before == value) {
+            seen = true;
+            try std.testing.expect(!proof.folded);
+            try std.testing.expectEqual(.primitive, std.meta.activeTag(result.module().values[@intCast(proof.after)].expression));
+        };
+        try std.testing.expect(seen);
+        var residual = try source.lower(a, result.module());
+        defer residual.deinit();
+    }
+}
+
 test "source specialization reserves recursive keys and retains dynamic arithmetic" {
     const a = std.testing.allocator;
     var b = source.Builder.init(a);

@@ -86,8 +86,11 @@ fn encoded(a: std.mem.Allocator, schema: p.Id, prefix: ?u64, fields: []const Kno
 pub fn primitive(a: std.mem.Allocator, m: ast.Module, facts: data.admission.SchemaFacts, value: ast.Value, operands: []const Knowledge, left: *u64) Error!Knowledge {
     const op = value.expression.primitive;
     const schema = value.schema;
+    // Knowledge reifies into ordinary source literals. Keep its entire
+    // codomain exportable, including empty containers and a public arm of a
+    // mixed sum. Their runtime expressions remain legal residual operations.
+    if (!facts.exportable[@intCast(schema)]) return .dynamic;
     if (op.opcode == .product) {
-        if (!facts.exportable[@intCast(schema)]) return .dynamic;
         const full = try encoded(a, schema, null, operands, left);
         if (full == .known) return full;
         return .{ .product = .{ .schema = schema, .fields = try a.dupe(Knowledge, operands) } };

@@ -16,9 +16,21 @@ fn require(ok: bool) Error!void {
     if (!ok) return error.InvalidSpecialization;
 }
 fn extend(a: std.mem.Allocator, env: Env, item: Binding) Error!Env {
-    const result = try a.alloc(Binding, env.len + 1);
-    @memcpy(result[0..env.len], env);
-    result[env.len] = item;
+    // An environment is a capture-avoiding renaming of the current source
+    // scope. Shadowing retires the old source binding; every other binding
+    // must keep a distinct target variable. All binder forms extend here.
+    var retained: usize = 0;
+    for (env) |binding| if (binding.before != item.before) {
+        try require(binding.after != item.after);
+        retained += 1;
+    };
+    const result = try a.alloc(Binding, retained + 1);
+    var cursor: usize = 0;
+    for (env) |binding| if (binding.before != item.before) {
+        result[cursor] = binding;
+        cursor += 1;
+    };
+    result[retained] = item;
     return result;
 }
 fn lookup(env: Env, id: p.Id) Error!Binding {

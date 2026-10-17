@@ -23,9 +23,25 @@ pub const RecoveryBinding = struct {
     function: p.Id,
     slot: p.Id,
     schema: p.Id,
+
+    /// Transport an actual lowering origin through a checked correspondence.
+    /// This operation does not certify the correspondence or the source origin.
+    pub fn relocated(self: RecoveryBinding, map: data.coalescing.Correspondence) error{InvalidCorrespondence}!?RecoveryBinding {
+        const functions = map.maps[@backingInt(data.relocation.Kind.function)];
+        const schemas = map.maps[@backingInt(data.relocation.Kind.schema)];
+        if (self.function >= functions.len or self.function >= map.locals.len or self.schema >= schemas.len) return error.InvalidCorrespondence;
+        const function = functions[@intCast(self.function)];
+        if (function == data.relocation.missing) return null;
+        const slots = map.locals[@intCast(self.function)].slots;
+        if (self.slot >= slots.len or schemas[@intCast(self.schema)] == data.relocation.missing) return error.InvalidCorrespondence;
+        var result = self;
+        result.function = function;
+        result.schema = schemas[@intCast(self.schema)];
+        result.slot = slots[@intCast(self.slot)];
+        return result;
+    }
 };
 pub const RecoveryEvidence = struct {
-    input: ir.Program,
     correspondence: data.coalescing.Correspondence,
 };
 
@@ -88,10 +104,16 @@ fn lowerInternal(
 ) Error!Construction {
     options.resetObservations();
     if (component and options.recovery) return error.InvalidSource;
-    return lowerBody(allocator, input, imports, component, borrows, options) catch |err| {
+    return lowerBody(allocator, input, imports, component, borrows, options, false) catch |err| {
         if (options.diagnostic) |diagnostic| diagnostic.code = err;
         return err;
     };
+}
+
+/// Reconstruct the canonical input to recovery-preserving coalescing. The
+/// frontend remains trusted; no submitted intermediate program is accepted.
+pub fn lowerRecoveryInput(allocator: std.mem.Allocator, input: ast.Module) Error!Construction {
+    return lowerBody(allocator, input, &.{}, false, &.{}, .{ .recovery = true }, true);
 }
 fn lowerBody(
     allocator: std.mem.Allocator,
@@ -100,6 +122,7 @@ fn lowerBody(
     component: bool,
     borrows: []const data.borrow_contract.Summary,
     options: source.CompileOptions,
+    recovery_input: bool,
 ) Error!Construction {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -157,23 +180,30 @@ fn lowerBody(
     original_facts.deinit();
     options.stage(.direct_optimization);
     const threaded = try @import("thread_jumps.zig").optimize(a, program);
-    const selected = try data.tail_clauses.optimize(a, threaded, traits);
+    // Tail-clause conversion adds functions and erases a resumption input. It
+    // has no source-binding transport yet. Recovery keeps the general clauses;
+    // source specialization and checked structural coalescing remain enabled.
+    const selected = if (options.recovery) threaded else try data.tail_clauses.optimize(a, threaded, traits);
     const ordered = try @import("slot_order.zig").optimizeObserved(a, selected, if (options.recovery) .{ .context = &compiler, .receive = Compiler.reorderBindings } else null);
-    if (!component) return coalesce(allocator, ordered, &compiler, options);
-    if (options.semantic_statistics) |stats| stats.outcome = .deferred_open_component;
-    if (options.coalescing.statistics) |stats| stats.* = .{
-        .rounds = stats.rounds,
-        .outcome = .deferred_open_component,
-    };
+    if (!component and !recovery_input) return coalesce(allocator, ordered, &compiler, options);
+    if (component) {
+        if (options.semantic_statistics) |stats| stats.outcome = .deferred_open_component;
+        if (options.coalescing.statistics) |stats| stats.* = .{
+            .rounds = stats.rounds,
+            .outcome = .deferred_open_component,
+        };
+    }
     var output = std.heap.ArenaAllocator.init(allocator);
     errdefer output.deinit();
     options.stage(.source_copy);
     const result = try source.own(ir.Program, output.allocator(), ordered);
     options.stage(.target_check);
-    const flow = try checkTarget(allocator, &compiler, result, imports, true, borrows, null, options);
+    const recovery = try output.allocator().dupe(RecoveryBinding, compiler.recovery_bindings.items);
+    const parameters = try output.allocator().dupe(RecoveryBinding, compiler.parameter_bindings.items);
+    const flow = try checkTarget(allocator, &compiler, result, imports, component, borrows, null, options);
     options.stage(.complete);
     if (options.diagnostic) |diagnostic| diagnostic.* = .{ .phase = .complete };
-    return .{ .arena = output, .program = result, .flow = flow };
+    return .{ .arena = output, .program = result, .flow = flow, .recovery = recovery, .parameters = parameters };
 }
 
 const CompilationObserver = struct {
@@ -183,15 +213,8 @@ const CompilationObserver = struct {
         const self: *CompilationObserver = @ptrCast(@alignCast(context));
         self.compiler.correspondence = try data.coalescing.Correspondence.copy(self.compiler.allocator, trace);
         for (self.compiler.recovery_bindings.items) |binding| {
-            const function = trace.resolve(.function, binding.function) orelse continue;
-            const schema = trace.resolve(.schema, binding.schema) orelse return error.InvalidCorrespondence;
-            const local = trace.locals[@intCast(binding.function)];
-            if (binding.slot >= local.slots.len) return error.InvalidCorrespondence;
-            var final = binding;
-            final.function = function;
-            final.schema = schema;
-            final.slot = local.slots[@intCast(binding.slot)];
-            try self.compiler.final_bindings.append(self.compiler.allocator, final);
+            if (try binding.relocated(self.compiler.correspondence.?)) |final|
+                try self.compiler.final_bindings.append(self.compiler.allocator, final);
         }
         if (self.options.coalescing.correspondence) |observer| try observer.receive(observer.context, trace);
     }
@@ -272,28 +295,15 @@ fn coalesce(allocator: std.mem.Allocator, program: ir.Program, compiler: *Compil
     }
     var parameters: std.ArrayList(RecoveryBinding) = .empty;
     const evidence: ?RecoveryEvidence = if (options.recovery) try source.own(RecoveryEvidence, result.arena.allocator(), .{
-        .input = program,
         .correspondence = compiler.correspondence orelse return error.InvalidCorrespondence,
     }) else null;
     if (evidence) |proof| {
-        for (compiler.source.functions, 0..) |function, index| {
-            const target = proof.correspondence.maps[@backingInt(data.relocation.Kind.function)][index];
-            if (target == data.relocation.missing) continue;
-            if (compiler.facts.functions[index].items.len != 0) return error.InvalidCorrespondence;
-            const emitted = result.program.functions[@intCast(target)];
-            if (function.parameters.len != emitted.inputs.len) return error.InvalidCorrespondence;
-            for (function.parameters, emitted.inputs) |variable, slot| try parameters.append(result.arena.allocator(), .{
-                .source_function = index,
-                .variable = variable,
-                .source_schema = compiler.source.variables[@intCast(variable)],
-                .function = target,
-                .slot = slot,
-                .schema = emitted.layout.slots[@intCast(slot)],
-            });
-        }
+        try data.coalescing.validateCorrespondence(allocator, program, result.program, proof.correspondence);
+        for (compiler.parameter_bindings.items) |binding|
+            if (try binding.relocated(proof.correspondence)) |final|
+                try parameters.append(result.arena.allocator(), final);
     }
     const constructed: Construction = .{ .arena = result.arena, .program = result.program, .flow = result.flow, .recovery = recovery, .parameters = parameters.items, .recovery_evidence = evidence };
-    if (options.recovery) try @import("recovery.zig").validate(allocator, compiler.source, &constructed);
     options.stage(.complete);
     if (options.diagnostic) |diagnostic| diagnostic.* = .{ .phase = .complete };
     return constructed;
@@ -327,6 +337,7 @@ const Compiler = struct {
     slot_variables: [][]const ?p.Id,
     recovery_enabled: bool = false,
     recovery_bindings: std.ArrayList(RecoveryBinding) = .empty,
+    parameter_bindings: std.ArrayList(RecoveryBinding) = .empty,
     final_bindings: std.ArrayList(RecoveryBinding) = .empty,
     correspondence: ?data.coalescing.Correspondence = null,
     cacheable: []const bool,
@@ -339,14 +350,18 @@ const Compiler = struct {
 
     fn rememberBinding(self: *Compiler, function: p.Id, variable: p.Id, slot: p.Id) Error!void {
         if (!self.recovery_enabled) return;
+        try self.recovery_bindings.append(self.allocator, self.bindingOrigin(function, variable, slot));
+    }
+    fn bindingOrigin(self: *const Compiler, function: p.Id, variable: p.Id, slot: p.Id) RecoveryBinding {
         const schema = self.source.variables[@intCast(variable)];
-        try self.recovery_bindings.append(self.allocator, .{ .source_function = function, .variable = variable, .source_schema = schema, .function = function, .slot = slot, .schema = schema });
+        return .{ .source_function = function, .variable = variable, .source_schema = schema, .function = function, .slot = slot, .schema = schema };
     }
     fn reorderBindings(context: *anyopaque, maps: []const ?[]const p.Id) std.mem.Allocator.Error!void {
         const self: *Compiler = @ptrCast(@alignCast(context));
-        for (self.recovery_bindings.items) |*binding| if (maps[@intCast(binding.function)]) |slots| {
-            binding.slot = slots[@intCast(binding.slot)];
-        };
+        inline for (.{ "recovery_bindings", "parameter_bindings" }) |field|
+            for (@field(self, field).items) |*binding| if (maps[@intCast(binding.function)]) |slots| {
+                binding.slot = slots[@intCast(binding.slot)];
+            };
     }
 
     fn observeCapture(pointer: *anyopaque, function: p.Id, selected: *const data.activation_ownership.CaptureSite, slot: p.Id) void {
@@ -453,6 +468,8 @@ const Function = struct {
         for (definition.parameters, 0..) |name, index| {
             environment = try self.bind(environment, name);
             inputs[free.len + index] = try self.resolve(environment, name);
+            if (compiler.recovery_enabled)
+                try compiler.parameter_bindings.append(compiler.allocator, compiler.bindingOrigin(self.id, name, inputs[free.len + index]));
         }
         const entry = if (definition.body) |body| try self.schedule(body, environment, null, 0) else data.relocation.missing;
         while (self.tasks.pop()) |task| try self.emit(task);
