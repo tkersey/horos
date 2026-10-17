@@ -155,6 +155,16 @@ const Engine = struct {
         // Changing static recursion becomes an ordinary call to the original
         // function. This bounds compiler search without limiting guest recursion.
         if (count >= self.out.request.policy.keys_per_function or self.captures[@intCast(id)].items.len != 0) return null;
+        // Resource permissions name function identities. Keep their owners
+        // generic rather than cloning code without its nominal authority.
+        for (self.out.original.resources) |resource| {
+            for ([_][]const p.Id{ resource.introducers, resource.eliminators }) |authorities| {
+                for (authorities) |function_id| {
+                    try self.spend(0);
+                    if (function_id == id) return null;
+                }
+            }
+        }
         const original = self.out.original.functions[@intCast(id)];
         if (original.body == null or !try self.supported(original.body.?, 0)) return null;
         var parameters: std.ArrayList(p.Id) = .empty;

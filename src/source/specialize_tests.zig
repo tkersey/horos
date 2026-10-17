@@ -9,6 +9,88 @@ fn known(value: u64, storage: *[8]u8, schema: p.Id) pe.Knowledge {
     return .{ .known = .{ .schema = schema, .bytes = storage } };
 }
 
+test "specialization retains nominal resource authority in generic callees" {
+    const a = std.testing.allocator;
+    inline for (.{ "abortCustody", "resourceScalar", "resourcePair" }) |name| {
+        var b = source.Builder.init(a);
+        defer b.deinit();
+        const original = try @field(source.examples, name)(&b);
+        const resource = original.resources[0];
+        const entry = if (comptime std.mem.eql(u8, name, "abortCustody")) original.entry else blk: {
+            // Exercise the authorized effectful helpers through an ordinary
+            // first-order caller, independently of the example's protection.
+            const acquire = resource.introducers[0];
+            const release = resource.eliminators[resource.eliminators.len - 1];
+            const effects = try std.mem.concat(b.allocator(), p.Id, &.{ b.functions.items[@intCast(acquire)].effects, b.functions.items[@intCast(release)].effects });
+            const function = try b.declare(&.{}, b.functions.items[@intCast(release)].result, effects, &.{});
+            const owned = try b.variable(b.functions.items[@intCast(acquire)].result);
+            const acquired = try b.term(.{ .call = .{ .function = acquire, .arguments = &.{} } });
+            const released = try b.term(.{ .call = .{ .function = release, .arguments = &.{try b.reference(owned)} } });
+            try b.define(function, try b.bind(owned, acquired, released));
+            break :blk function;
+        };
+        const module = b.module(entry, original.failure);
+        var admitted = try source.lower(a, module);
+        defer admitted.deinit();
+        const arguments = try b.allocator().alloc(pe.Knowledge, module.functions[@intCast(entry)].parameters.len);
+        @memset(arguments, .dynamic);
+        const request: pe.Request = .{ .context = context, .function = entry, .arguments = arguments };
+        var result = try pe.specialize(a, module, request);
+        defer result.deinit();
+        try pe.validate(a, module, request, &result);
+        var lowered = try source.lower(a, result.module());
+        defer lowered.deinit();
+        try std.testing.expect(@import("horos_data").record.equal([]const p.Resource, module.resources, result.module().resources));
+        try std.testing.expect(@import("horos_data").record.equal([]const source.ast.Function, module.functions, result.module().functions[0..module.functions.len]));
+        for ([_][]const p.Id{ resource.introducers, resource.eliminators }) |authorities| for (authorities) |function| {
+            for (result.functions.items) |proof| try std.testing.expect(proof.before != function);
+            const inputs = try b.allocator().alloc(pe.Knowledge, module.functions[@intCast(function)].parameters.len);
+            @memset(inputs, .dynamic);
+            try std.testing.expectError(error.UnsupportedSpecialization, pe.specialize(a, module, .{ .context = context, .function = function, .arguments = inputs }));
+        };
+        // Ordinary admission permits an explicit extra permission. The
+        // independent translation checker must reject granting it to a clone.
+        const extra = try std.mem.concat(result.builder.allocator(), p.Id, &.{ resource.introducers, &.{result.entry} });
+        result.builder.resources.items[0].introducers = extra;
+        var forged = try source.lower(a, result.module());
+        defer forged.deinit();
+        try std.testing.expectError(error.InvalidSpecialization, pe.validate(a, module, request, &result));
+    }
+}
+
+fn specializeExample(build: *const fn (*source.Builder) source.Error!source.Module) !bool {
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const module = try build(&b);
+    var original = try source.lower(a, module);
+    defer original.deinit();
+    const arguments = try b.allocator().alloc(pe.Knowledge, module.functions[@intCast(module.entry)].parameters.len);
+    @memset(arguments, .dynamic);
+    var result = pe.specialize(a, module, .{ .context = context, .function = module.entry, .arguments = arguments }) catch |err| switch (err) {
+        error.UnsupportedSpecialization, error.SpecializationLimit => return false,
+        else => return err,
+    };
+    defer result.deinit();
+    var residual = try source.lower(a, result.module());
+    defer residual.deinit();
+    return true;
+}
+
+test "specialization admits or precisely declines existing public examples" {
+    var attempted: usize = 0;
+    var specialized: usize = 0;
+    inline for (comptime std.meta.declarations(source.examples)) |name| {
+        const build = @field(source.examples, name);
+        if (comptime @TypeOf(build) == fn (*source.Builder) source.Error!source.Module) {
+            attempted += 1;
+            specialized += @intFromBool(try specializeExample(build));
+        }
+    }
+    try std.testing.expect(attempted > 0);
+    try std.testing.expect(specialized > 0);
+}
+
 test "specialization keeps captured calls inside their closed generic function" {
     const a = std.testing.allocator;
     for (0..4) |kind| for ([_]bool{ false, true }) |static_input| {
