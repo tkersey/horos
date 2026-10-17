@@ -289,7 +289,8 @@ pub fn own(comptime T: type, allocator: std.mem.Allocator, value_item: T) std.me
         },
         .optional => |optional| if (value_item) |present| try own(optional.child, allocator, present) else null,
         .array => |array| blk: {
-            var output: T = undefined;
+            // Preserve the complete array, including any sentinel outside len.
+            var output = value_item;
             for (&output, value_item) |*to, from| to.* = try own(array.child, allocator, from);
             break :blk output;
         },

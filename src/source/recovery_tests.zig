@@ -4,6 +4,29 @@ const source = @import("../source.zig");
 const data = @import("horos_data");
 const a = std.testing.allocator;
 
+test "source ownership preserves sentinel array storage" {
+    var output = std.heap.ArenaAllocator.init(a);
+    defer output.deinit();
+    const copied = try source.own([3:99]u8, output.allocator(), .{ 1, 2, 3 });
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3, 99 }, std.mem.asBytes(&copied));
+    const empty = try source.own([0:171]u8, output.allocator(), .{});
+    try std.testing.expectEqualSlices(u8, &.{171}, std.mem.asBytes(&empty));
+    const nested = try source.own([2][0:171]u8, output.allocator(), .{ .{}, .{} });
+    try std.testing.expectEqualSlices(u8, &.{ 171, 171 }, std.mem.asBytes(&nested));
+}
+
+test "source specialization cache preserves sentinel array results" {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const selected = try b.specialization([3:99]u8, "sentinel-array-result", .{});
+    const first = try selected.finish(&b, .{ 1, 2, 3 });
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3, 99 }, std.mem.asBytes(&first));
+    const cached = try b.specialization([3:99]u8, "sentinel-array-result", .{});
+    try std.testing.expect(cached.cached != null);
+    const second = try cached.finish(&b, .{ 4, 5, 6 });
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3, 99 }, std.mem.asBytes(&second));
+}
+
 test "source recovery evidence owns arrays of relocation slices" {
     var input = std.heap.ArenaAllocator.init(a);
     var output = std.heap.ArenaAllocator.init(a);
