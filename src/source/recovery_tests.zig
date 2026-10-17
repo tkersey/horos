@@ -4,6 +4,34 @@ const source = @import("../source.zig");
 const data = @import("horos_data");
 const a = std.testing.allocator;
 
+test "source recovery bounds target domains before allocation" {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const unit = try b.scalar(void);
+    const word = try b.scalar(u64);
+    const entry = try b.declare(&.{word}, word, &.{}, &.{});
+    try b.define(entry, try b.pure(try b.reference(b.parameter(entry, 0))));
+    var module = b.module(entry, unit);
+    // Unused nominal names are valid source input, not stored region records.
+    module.region_count = std.math.maxInt(u64);
+    var compiled = try source.lowerObserved(a, module, .{ .recovery = true });
+    defer compiled.deinit();
+    try std.testing.expectEqual(@as(u64, 0), compiled.program.scopes.region_count);
+    var buffer: [1024 * 1024]u8 = undefined;
+    var bounded = std.heap.FixedBufferAllocator.init(&buffer);
+    try source.recovery.validate(bounded.allocator(), module, &compiled);
+    for ([_]u64{ 1 << 30, std.math.maxInt(u64) }) |count| {
+        var forged = compiled;
+        forged.program.scopes.region_count = count;
+        var admitted = try data.activation_ownership.analyze(a, forged.program);
+        admitted.deinit();
+        bounded.reset();
+        try std.testing.expectError(error.InvalidCorrespondence, source.recovery.parameters(bounded.allocator(), module, forged.program, forged.recovery_evidence.?));
+        bounded.reset();
+        try std.testing.expectError(error.InvalidCorrespondence, source.recovery.validate(bounded.allocator(), module, &forged));
+    }
+}
+
 test "source ownership preserves sentinel array storage" {
     var output = std.heap.ArenaAllocator.init(a);
     defer output.deinit();

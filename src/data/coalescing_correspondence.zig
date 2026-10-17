@@ -43,6 +43,10 @@ pub fn validate(a: std.mem.Allocator, original: ir.Program, candidate: ir.Progra
     const projection = live.maps orelse return error.InvalidCorrespondence;
     const counts = try r.sizes(live.program);
     const targets = try r.sizes(candidate);
+    // A quotient cannot contain more classes than its reachable source.
+    // Establish this before allocating indexes by a submitted target domain;
+    // in particular, a nominal region bound is not a stored-record count.
+    for (counts, targets) |count, target| try require(target <= count);
     var final: r.Maps = undefined;
     var representatives: r.Maps = undefined;
     for (projection, map.maps, 0..) |projected, submitted, kind| {
