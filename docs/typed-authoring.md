@@ -139,7 +139,11 @@ schemas. Diagnostic labels do not affect portable program identities.
 ## Specialization and source recovery
 
 `source.specialize` propagates immutable exportable facts and retains unsupported
-operations as residual source. Its independent translation checker relates
+operations as residual source. Closed functions whose direct calls need lexical
+captures remain whole generic callees, preserving their original binding and
+ownership scopes. Requesting such a function as the specialization root returns
+`UnsupportedSpecialization`; the original module remains usable. Capture analysis
+includes transitive calls. Its independent translation checker relates
 lexically active source and residual binders by a partial injection: introducing
 a source shadow retires that source binding, while another live source binding
 cannot share its residual variable. Parameters, ordinary binds, product unpacking

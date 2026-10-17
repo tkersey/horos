@@ -120,7 +120,11 @@ const Engine = struct {
         try self.spend(depth);
         const t = self.out.original.terms[@intCast(id)];
         return switch (t) {
-            .value, .call, .perform, .fail => true,
+            .value, .perform, .fail => true,
+            // Generic callees keep their original lexical variable IDs.
+            // Preserve the complete closed caller when a call needs that
+            // environment, instead of renaming away its captured bindings.
+            .call => |v| self.captures[@intCast(v.function)].items.len == 0,
             .bind => |v| try self.supported(v.value, depth + 1) and try self.supported(v.next, depth + 1),
             .conditional => |v| try self.supported(v.when_true, depth + 1) and try self.supported(v.when_false, depth + 1),
             .yield_then => |v| self.supported(v, depth + 1),

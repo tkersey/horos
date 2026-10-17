@@ -8,6 +8,64 @@ fn known(value: u64, storage: *[8]u8, schema: p.Id) pe.Knowledge {
     std.mem.writeInt(u64, storage, value, .little);
     return .{ .known = .{ .schema = schema, .bytes = storage } };
 }
+
+test "specialization keeps captured calls inside their closed generic function" {
+    const a = std.testing.allocator;
+    for (0..4) |kind| for ([_]bool{ false, true }) |static_input| {
+        var b = source.Builder.init(a);
+        defer b.deinit();
+        const unit = try b.scalar(void);
+        const word = try b.scalar(u64);
+        const entry = try b.declare(&.{word}, word, &.{}, &.{});
+        const outer = try b.declare(&.{word}, word, &.{}, &.{});
+        const captured = if (kind == 1) try b.variable(word) else b.parameter(outer, 0);
+        const inner = try b.declare(&.{}, word, &.{}, &.{});
+        try b.define(inner, try b.pure(try b.reference(captured)));
+        const callee = if (kind == 2) blk: {
+            const indirect = try b.declare(&.{}, word, &.{}, &.{});
+            try b.define(indirect, try b.term(.{ .call = .{ .function = inner, .arguments = &.{} } }));
+            break :blk indirect;
+        } else inner;
+        const call = try b.term(.{ .call = .{ .function = callee, .arguments = &.{} } });
+        try b.define(outer, if (kind == 1 or kind == 3)
+            try b.bind(captured, try b.pure(try b.constant(u64, 42)), call)
+        else
+            call);
+        try b.define(entry, try b.term(.{ .call = .{ .function = outer, .arguments = &.{try b.reference(b.parameter(entry, 0))} } }));
+        const module = b.module(entry, unit);
+        var admitted = try source.lower(a, module);
+        defer admitted.deinit();
+        var bytes: [8]u8 = undefined;
+        const arguments = [_]pe.Knowledge{if (static_input) known(41, &bytes, word) else .dynamic};
+
+        // This root needs its original lexical scope. Decline it before
+        // constructing a residual with fresh binders and dangling captures.
+        try std.testing.expectError(error.UnsupportedSpecialization, pe.specialize(a, module, .{ .context = context, .function = outer, .arguments = &arguments }));
+
+        // Its closed caller can still specialize: the complete original
+        // callee retains its parameter/local/shadowed/transitive captures.
+        const request: pe.Request = .{ .context = context, .function = entry, .arguments = &arguments };
+        var result = try pe.specialize(a, module, request);
+        defer result.deinit();
+        try std.testing.expectEqual(@as(usize, 1), result.functions.items.len);
+        const residual = result.module();
+        try std.testing.expect(@import("horos_data").record.equal([]const source.ast.Function, module.functions, residual.functions[0..module.functions.len]));
+        const function = residual.functions[@intCast(result.entry)];
+        try std.testing.expectEqual(@as(usize, if (static_input) 0 else 1), function.parameters.len);
+        const retained_call = residual.terms[@intCast(function.body.?)].call;
+        try std.testing.expectEqual(outer, retained_call.function);
+        try std.testing.expectEqual(@as(usize, 1), retained_call.arguments.len);
+        try pe.validate(a, module, request, &result);
+        var lowered = try source.lower(a, residual);
+        defer lowered.deinit();
+
+        // The independent scope checker must still reject the old broken
+        // boundary: calling the captured function from the renamed caller.
+        result.builder.terms.items[@intCast(function.body.?)] = .{ .call = .{ .function = callee, .arguments = &.{} } };
+        try std.testing.expectError(error.UnboundVariable, pe.validate(a, module, request, &result));
+    };
+}
+
 test "specialization renaming preserves lexical shadowing and rejects capture" {
     const a = std.testing.allocator;
     for ([_]bool{ false, true }) |shadows_source| {
