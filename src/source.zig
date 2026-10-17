@@ -10,6 +10,8 @@ pub const ast = @import("source/ast.zig");
 pub const Id = p.Id;
 pub const Module = ast.Module;
 pub const Compiled = @import("source/activation_lower.zig").Construction;
+pub const RecoveryBinding = @import("source/activation_lower.zig").RecoveryBinding;
+pub const recovery = @import("source/recovery.zig");
 pub const examples = @import("source/examples.zig");
 pub const lower = @import("source/activation_lower.zig").lower;
 /// Direct stable-slot construction with BPI3 encoding and pure admission.
@@ -286,6 +288,12 @@ pub fn own(comptime T: type, allocator: std.mem.Allocator, value_item: T) std.me
             unreachable;
         },
         .optional => |optional| if (value_item) |present| try own(optional.child, allocator, present) else null,
+        .array => |array| blk: {
+            // Preserve the complete array, including any sentinel outside len.
+            var output = value_item;
+            for (&output, value_item) |*to, from| to.* = try own(array.child, allocator, from);
+            break :blk output;
+        },
         else => value_item,
     };
 }
@@ -351,3 +359,5 @@ test "raw literal edits remain visible to subsequent lookup and existing source 
     const index = builder.values.items[@intCast(found)].expression.literal;
     try std.testing.expectEqual(@as(u8, 3), builder.constants.items[@intCast(index)].bytes[0]);
 }
+
+pub const specialize = @import("source/specialize.zig");

@@ -40,6 +40,9 @@ pub const Options = struct {
     diagnostic: ?*Diagnostic = null,
     observer: ?Observer = null,
     captures: ?CaptureObserver = null,
+    /// Retain source binding -> final function/slot/schema correspondences.
+    /// Supported with structural compilation; unsupported compositions fail.
+    recovery: bool = false,
     coalescing: data.coalescing.Options = .{},
     /// Structural preserves cross-build logical work; semantic preserves the
     /// declared external contract. Neither contract can disable P01.

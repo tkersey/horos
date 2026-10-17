@@ -337,6 +337,11 @@ test "coalescing origin composition retains sparse nominal regions without dense
     defer result.deinit();
     try trace.advance(result.correspondence);
     try testing.expectEqual(@as(?p.Id, 0), trace.resolve(.region, large));
+    const correspondence = @import("coalescing_correspondence.zig");
+    const submitted = try correspondence.Correspondence.copy(a, &trace);
+    var buffer: [1024 * 1024]u8 = undefined;
+    var bounded = std.heap.FixedBufferAllocator.init(&buffer);
+    try correspondence.validate(bounded.allocator(), original, result.program, submitted);
     var stale = result.correspondence;
     stale.final[@backingInt(r.Kind.region)] = &.{};
     try testing.expectError(error.InvalidCorrespondence, trace.advance(stale));

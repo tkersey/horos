@@ -84,6 +84,7 @@ src/data/closed_compilation_tests.zig
 src/data/coalescing.zig
 src/data/coalescing_candidate.zig
 src/data/coalescing_candidate_tests.zig
+src/data/coalescing_correspondence.zig
 src/data/coalescing_discovery.zig
 src/data/coalescing_graph.zig
 src/data/coalescing_graph_tests.zig
@@ -265,6 +266,8 @@ src/source/ownership_example.zig
 src/source/projection_example.zig
 src/source/projection_tests.zig
 src/source/queens_example.zig
+src/source/recovery.zig
+src/source/recovery_tests.zig
 src/source/reentrant_example.zig
 src/source/reference_roles.zig
 src/source/reference_roles_rejections.zig
@@ -277,7 +280,11 @@ src/source/scoped_reader_example.zig
 src/source/service_example.zig
 src/source/shallow_resume_example.zig
 src/source/slot_order.zig
+src/source/specialize.zig
+src/source/specialize_tests.zig
+src/source/specialize_validate.zig
 src/source/state_choice_example.zig
+src/source/static_value.zig
 src/source/successor_state_example.zig
 src/source/tests.zig
 src/source/thread_jumps.zig

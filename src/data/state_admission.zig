@@ -1159,6 +1159,10 @@ fn ContextFor() type {
         }
 
         fn futureScopes(self: *Context, contexts: []UseScope, region_frames: []const ?g.NodeRef) Error!void {
+            // Exportable-only schemas cannot carry scoped values. Their borrow
+            // constraints have the empty fixed point, including across calls.
+            // Surrounding admission still checks records, ownership and holder DAGs.
+            if (std.mem.allEqual(bool, self.facts.exportable, true)) return;
             var flow = try BorrowFlow.initWithControl(self.allocator, self.program, self.facts.exportable, self.control);
             const children = try self.allocator.alloc(?g.NodeRef, self.state.nodes.len);
             @memset(children, null);

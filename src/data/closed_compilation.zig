@@ -476,6 +476,9 @@ pub fn run(allocator: std.mem.Allocator, original: ir.Program, options: Options)
 }
 fn runInternal(allocator: std.mem.Allocator, original: ir.Program, options: Options) Error!p01.Owned {
     options.resetObservations();
+    // Semantic passes need their own composed recovery correspondence. Until
+    // they provide it, never publish a P01-only map for a rewritten program.
+    if (options.coalescing.correspondence != null and options.contract != .structural) return error.InvalidCorrespondence;
     var stats: Statistics = .{};
     var stage: Stage = .p01;
     defer if (options.statistics) |out| {
