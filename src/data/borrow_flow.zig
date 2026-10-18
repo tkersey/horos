@@ -707,7 +707,6 @@ fn FlowFor(comptime open: bool) type {
                     try pending.append(allocator, target);
                 }
             }
-            // Facts retain the former whole-program scan order.
             const blocks = try pending.toOwnedSlice(allocator);
             std.mem.sort(p.Id, blocks, {}, std.sort.asc(p.Id));
             return .{ .membership = visited, .blocks = blocks };
