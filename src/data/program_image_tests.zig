@@ -59,6 +59,17 @@ test "immutable admitted images share facts without accepting mutable lookalikes
     lookalike.roots.entry = 999;
     try testing.expectError(error.InvalidReference, @import("state_admission.zig").validateStable(testing.allocator, lookalike, state));
     try @import("state_admission.zig").validateAdmitted(testing.allocator, admitted, state);
+    // Public-only values have no borrow scopes, but still require the exact
+    // live frame and typed bindings at the admitted instruction position.
+    try testing.expect(std.mem.allEqual(bool, admitted.schemaFacts().exportable, true));
+    var nodes = state.nodes[0..1].*;
+    var invalid = state;
+    invalid.nodes = &nodes;
+    nodes[0].activation.?.bindings = &.{};
+    try testing.expectError(error.InvalidState, @import("state_admission.zig").validateAdmitted(testing.allocator, admitted, invalid));
+    nodes[0] = state.nodes[0];
+    nodes[0].activation.?.position = 0;
+    try testing.expectError(error.InvalidState, @import("state_admission.zig").validateAdmitted(testing.allocator, admitted, invalid));
 }
 
 fn admittedFailure(allocator: std.mem.Allocator) !void {

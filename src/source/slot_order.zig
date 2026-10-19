@@ -8,6 +8,15 @@ const Error = std.mem.Allocator.Error;
 
 /// Uses the compilation arena; the transient result borrows input catalogues.
 pub fn optimize(a: std.mem.Allocator, input: ir.Program) Error!ir.Program {
+    return optimizeObserved(a, input, null);
+}
+
+pub const Observer = struct {
+    context: *anyopaque,
+    receive: *const fn (*anyopaque, []const ?[]const Id) Error!void,
+};
+
+pub fn optimizeObserved(a: std.mem.Allocator, input: ir.Program, observer: ?Observer) Error!ir.Program {
     const visited = try a.alloc(bool, input.blocks.len);
     defer a.free(visited);
     @memset(visited, false);
@@ -65,6 +74,12 @@ pub fn optimize(a: std.mem.Allocator, input: ir.Program) Error!ir.Program {
     var result = input;
     result.functions = functions;
     result.blocks = blocks;
+    if (observer) |sink| {
+        const borrowed = try a.alloc(?[]const Id, maps.len);
+        defer a.free(borrowed);
+        for (maps, borrowed) |map, *to| to.* = map;
+        try sink.receive(sink.context, borrowed);
+    }
     return result;
 }
 

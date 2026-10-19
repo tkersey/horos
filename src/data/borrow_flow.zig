@@ -390,7 +390,7 @@ fn FlowFor(comptime open: bool) type {
             for (self.incoming[@intCast(start)].items) |incoming| if (live[@intCast(incoming.block)]) return true;
             return false;
         }
-        fn futureInstruction(self: Self, start: p.Id, position: ?usize, block: usize, ordinal: usize, live: []const bool) bool {
+        fn futureInstruction(self: Self, start: p.Id, position: ?usize, block: p.Id, ordinal: usize, live: []const bool) bool {
             return position == null or block != start or ordinal >= position.? or self.reenters(start, live);
         }
 
@@ -609,8 +609,10 @@ fn FlowFor(comptime open: bool) type {
             }
             var arena = std.heap.ArenaAllocator.init(self.allocator);
             defer arena.deinit();
-            const live = try self.reachable(self.requirements.items[index].start, arena.allocator());
-            for (self.program.blocks, 0..) |block, id| if (live[id]) {
+            const reach = try self.reachable(self.requirements.items[index].start, arena.allocator());
+            const live = reach.membership;
+            for (reach.blocks) |id| {
+                const block = self.program.blocks[@intCast(id)];
                 for (block.instructions, 0..) |op, position| if (self.futureInstruction(self.requirements.items[index].start, self.requirements.items[index].position, id, position, live)) switch (op.opcode) {
                     .cell_new, .cell_set => try self.relationAt(index, id, op.operands[1], op.operands[0], .region, position),
                     else => {},
@@ -651,7 +653,7 @@ fn FlowFor(comptime open: bool) type {
                     },
                     else => {},
                 }
-            };
+            }
         }
 
         fn push(self: *Self, pending: *std.ArrayList(Trace), block: p.Id, slot: p.Id, path: usize) a.Error!void {
@@ -687,21 +689,27 @@ fn FlowFor(comptime open: bool) type {
             }
         }
 
-        fn reachable(self: Self, start: p.Id, allocator: std.mem.Allocator) a.Error![]bool {
+        const Reachable = struct { membership: []const bool, blocks: []const p.Id };
+
+        fn reachable(self: Self, start: p.Id, allocator: std.mem.Allocator) a.Error!Reachable {
             const visited = try allocator.alloc(bool, self.program.blocks.len);
             @memset(visited, false);
             visited[@intCast(start)] = true;
             var pending: std.ArrayList(p.Id) = .empty;
             defer pending.deinit(allocator);
             try pending.append(allocator, start);
-            while (pending.pop()) |from| {
+            var next: usize = 0;
+            while (next < pending.items.len) : (next += 1) {
+                const from = pending.items[next];
                 for (self.outgoing[@intCast(from)].items) |target| {
                     if (visited[@intCast(target)]) continue;
                     visited[@intCast(target)] = true;
                     try pending.append(allocator, target);
                 }
             }
-            return visited;
+            const blocks = try pending.toOwnedSlice(allocator);
+            std.mem.sort(p.Id, blocks, {}, std.sort.asc(p.Id));
+            return .{ .membership = visited, .blocks = blocks };
         }
 
         fn solve(self: *Self, query_index: usize) a.Error!void {
@@ -722,20 +730,25 @@ fn FlowFor(comptime open: bool) type {
             var arena = std.heap.ArenaAllocator.init(self.allocator);
             defer arena.deinit();
             const allocator = arena.allocator();
-            const live = try self.reachable(query_start, allocator);
+            const reach = try self.reachable(query_start, allocator);
+            const live = reach.membership;
             var pending: std.ArrayList(Trace) = .empty;
             defer pending.deinit(self.allocator);
             var visited: std.AutoHashMapUnmanaged(Trace, void) = .empty;
             if (query_target) |target| {
                 if (live[@intCast(target.block)]) try self.pushTrace(&pending, target);
             } else if (query_writes) |schema| {
-                for (self.program.blocks, 0..) |block, id| if (live[id]) {
+                for (reach.blocks) |id| {
+                    const block = self.program.blocks[@intCast(id)];
                     for (block.instructions, 0..) |op, position|
                         if (self.futureInstruction(query_start, self.queries.items[query_index].position, id, position, live) and op.opcode == .cell_set and self.slotType(id, op.operands[0]) == schema)
                             try self.pushAt(&pending, id, op.operands[1], query_path, position);
                     try self.calledWrites(&pending, id, schema, query_path);
-                };
-            } else for (self.program.blocks, 0..) |block, id| if (live[id] and block.terminator == .return_value) try self.push(&pending, id, block.terminator.return_value, query_path);
+                }
+            } else for (reach.blocks) |id| {
+                const block = self.program.blocks[@intCast(id)];
+                if (block.terminator == .return_value) try self.push(&pending, id, block.terminator.return_value, query_path);
+            }
             while (pending.pop()) |trace| {
                 if ((try visited.getOrPut(allocator, trace)).found_existing) continue;
                 if (trace.body_result) {
@@ -1126,4 +1139,34 @@ fn validateScopes(flow: anytype) a.Error!void {
             }
         }
     }
+}
+
+fn sparseReachabilityAttempt(allocator: std.mem.Allocator) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const memory = arena.allocator();
+    const program: activation.Program = .{
+        .roots = .{ .entry = 0, .result = 0, .failure = 0 },
+        .schemas = &.{.unit},
+        .constants = &.{},
+        .effects = &.{},
+        .functions = &.{.{ .entry = 0, .inputs = &.{}, .layout = .{ .slots = &.{0} }, .result = 0 }},
+        .blocks = &.{
+            .{ .function = 0, .instructions = &.{}, .terminator = .{ .branch = .{ .condition = 0, .when_true = .{ .block = 4 }, .when_false = .{ .block = 2 } } } },
+            .{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 0 } },
+            .{ .function = 0, .instructions = &.{}, .terminator = .{ .jump = .{ .block = 4 } } },
+            .{ .function = 0, .instructions = &.{}, .terminator = .{ .jump = .{ .block = 1 } } },
+            .{ .function = 0, .instructions = &.{}, .terminator = .{ .jump = .{ .block = 0 } } },
+        },
+    };
+    var flow = try StableFlow.initWithControl(memory, program, &.{true}, undefined);
+    for ([_]p.Id{ 0, 1, 2, 3, 4 }, [_][]const p.Id{ &.{ 0, 2, 4 }, &.{1}, &.{ 0, 2, 4 }, &.{ 1, 3 }, &.{ 0, 2, 4 } }) |start, expected| {
+        const reach = try flow.reachable(start, memory);
+        try std.testing.expectEqualSlices(p.Id, expected, reach.blocks);
+        for (reach.membership, 0..) |member, id| try std.testing.expectEqual(std.mem.indexOfScalar(p.Id, expected, id) != null, member);
+    }
+}
+
+test "borrow reachability lists exactly its members in block order through cycles and allocation failure" {
+    try @import("allocation_testing.zig").check(std.testing.allocator, sparseReachabilityAttempt, .{});
 }

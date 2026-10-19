@@ -136,6 +136,35 @@ and discard it; general transactional recovery is not promised. `lastDiagnostic`
 `render` and `renderAlloc` retain the failed relationship and expected/actual
 schemas. Diagnostic labels do not affect portable program identities.
 
+## Specialization and source recovery
+
+`source.specialize` propagates immutable exportable facts within its covered
+first-order fragment. Unsupported callees can remain intact as generic functions.
+Resource introducers and eliminators retain their original function identities
+and permission records; requesting one as the root returns
+`UnsupportedSpecialization`. Closed functions whose direct calls need lexical
+captures remain whole generic callees, preserving their original binding and
+ownership scopes. Requesting such a function as the specialization root returns
+`UnsupportedSpecialization`; the original module remains usable. Capture analysis
+includes transitive calls. Captured lambdas are outside the covered fragment;
+encountering one during specialization leaves the request unselected and the
+original module usable. Its independent translation checker relates
+lexically active source and residual binders by a partial injection: introducing
+a source shadow retires that source binding, while another live source binding
+cannot share its residual variable. Parameters, ordinary binds, product unpacking
+and sum branches all use that environment construction.
+
+`source.lowerObserved(..., .{ .recovery = true })` records formal-parameter
+origins when their input slots are created, after any captured inputs. Slot
+ordering and checked structural coalescing transport those origins.
+`source.recovery.parameters` reconstructs the trusted frontend input from the
+supplied source, independently checks the finite correspondence against the
+actual candidate program, and returns its verified formal bindings.
+`source.recovery.validate` additionally compares those bindings with a compiled
+result. The evidence carries no alternative lowering input. Recovery lowering
+retains general handler clauses because direct tail conversion does not yet
+provide an origin transport; ordinary lowering keeps that optimization.
+
 ## Operations and interpretations
 
 `external`, `local` and `scoped` retain payload, reply and named body contracts.
