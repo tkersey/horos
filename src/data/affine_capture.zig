@@ -31,22 +31,43 @@ fn observe(seed: *space.Space, value: ?extract.Expression, budget: *space.Budget
 }
 
 /// Original admission precedes discovery for either private interface form.
-pub fn analyze(allocator: std.mem.Allocator, program: ir.Program, constructor_id: usize, work_limit: u64) Error!?Plan {
+pub fn analyze(
+    allocator: std.mem.Allocator,
+    program: ir.Program,
+    constructor_id: usize,
+    work_limit: u64,
+) Error!?Plan {
     return analyzeTarget(allocator, program, .{ .capture = constructor_id }, work_limit);
 }
-pub fn analyzeTarget(allocator: std.mem.Allocator, program: ir.Program, target: Target, work_limit: u64) Error!?Plan {
+pub fn analyzeTarget(
+    allocator: std.mem.Allocator,
+    program: ir.Program,
+    target: Target,
+    work_limit: u64,
+) Error!?Plan {
     var flow = try ownership.analyze(allocator, program);
     defer flow.deinit();
     const constructor_id = target.constructor();
     if (constructor_id) |id| {
-        if (id >= program.constructors.len or !privacy.privateWorker(program, id) or !privacy.privateConstructions(program, id)) return null;
+        if (id >= program.constructors.len or !privacy.privateWorker(
+            program,
+            id,
+        ) or !privacy.privateConstructions(program, id)) return null;
         const capture = program.scopes.captures[@intCast(program.constructors[id].capture)];
-        if (capture.owned_regions.len != 0 or capture.borrowed_regions.len != 0 or capture.use != .reusable) return null;
+        if (capture.owned_regions.len != 0 or
+            capture.borrowed_regions.len != 0 or
+            capture.use != .reusable)
+            return null;
     } else if (!privacy.privateDirectWorker(program, target.parameters.worker)) return null;
     const worker_id = target.worker(program);
     const worker = program.functions[@intCast(worker_id)];
     const n = target.dimension(program);
-    if (n == 0 or n > space.max_dimension or n > worker.inputs.len or worker.effects.len != 0 or worker.regions.len != 0) return null;
+    if (n == 0 or
+        n > space.max_dimension or
+        n > worker.inputs.len or
+        worker.effects.len != 0 or
+        worker.regions.len != 0)
+        return null;
     const schema = worker.layout.slots[@intCast(worker.inputs[0])];
     if (extract.unsignedWidth(program.schemas[@intCast(schema)]) == null) return null;
     for (worker.inputs[0..n]) |slot| if (worker.layout.slots[@intCast(slot)] != schema) return null;
@@ -100,14 +121,31 @@ pub fn analyzeTarget(allocator: std.mem.Allocator, program: ir.Program, target: 
         @memset(values, null);
         for (worker.inputs, 0..) |slot, index| {
             defined[@intCast(slot)] = true;
-            if (index < n) values[@intCast(slot)] = .{ .state = space.coordinate(index) } else if (worker.layout.slots[@intCast(slot)] == schema) values[@intCast(slot)] = .{ .input = space.coordinate(index - n) };
+            if (index < n) values[
+                @intCast(slot)
+            ] = .{ .state = space.coordinate(index) } else if (worker.layout.slots[
+                @intCast(slot)
+            ] == schema) values[
+                @intCast(slot)
+            ] = .{ .input = space.coordinate(index - n) };
         }
         for (block.instructions) |op| {
             try budget.charge();
             if (std.mem.indexOfScalar(p.Id, worker.inputs, op.destination) != null) return null;
             for (op.operands) |slot| if (!defined[@intCast(slot)]) return null;
-            const expression = try extract.instruction(program, worker, op, values, schema, &budget);
-            if (expression == null) for (op.operands) |slot| try observe(&seed, values[@intCast(slot)], &budget);
+            const expression = try extract.instruction(
+                program,
+                worker,
+                op,
+                values,
+                schema,
+                &budget,
+            );
+            if (expression == null) for (op.operands) |slot| try observe(
+                &seed,
+                values[@intCast(slot)],
+                &budget,
+            );
             values[@intCast(op.destination)] = expression;
             defined[@intCast(op.destination)] = true;
         }
@@ -133,17 +171,31 @@ pub fn analyzeTarget(allocator: std.mem.Allocator, program: ir.Program, target: 
             for (edge.assignments) |assignment| switch (assignment.source) {
                 .slot => |slot| {
                     if (!defined[@intCast(slot)]) return null;
-                    if (std.mem.indexOfScalar(p.Id, worker.inputs[0..n], assignment.destination) == null)
+                    if (std.mem.indexOfScalar(
+                        p.Id,
+                        worker.inputs[0..n],
+                        assignment.destination,
+                    ) == null)
                         try observe(&seed, values[@intCast(slot)], &budget);
                 },
                 .returned => {},
             };
             var captures_changed = false;
-            for (edge.assignments) |assignment| if (std.mem.indexOfScalar(p.Id, worker.inputs[0..n], assignment.destination) != null) {
+            for (edge.assignments) |assignment| if (std.mem.indexOfScalar(
+                p.Id,
+                worker.inputs[0..n],
+                assignment.destination,
+            ) != null) {
                 captures_changed = true;
             };
             if (!captures_changed) continue;
-            const state = (try edge_state.state(a, worker.inputs[0..n], values, edge, &budget)) orelse return null;
+            const state = (try edge_state.state(
+                a,
+                worker.inputs[0..n],
+                values,
+                edge,
+                &budget,
+            )) orelse return null;
             const matrix = try a.alloc(space.Row, n);
             for (state, matrix) |value, *row| row.* = value.state;
             try rows.append(a, matrix);
@@ -162,13 +214,26 @@ pub fn analyzeTarget(allocator: std.mem.Allocator, program: ir.Program, target: 
             .call => |call| {
                 for (call.arguments) |slot| if (!defined[@intCast(slot)]) return null;
                 if (call.function == worker_id) {
-                    const state = (try extract.interface(a, values, call.arguments[0..n], &budget)) orelse return null;
+                    const state = (try extract.interface(
+                        a,
+                        values,
+                        call.arguments[0..n],
+                        &budget,
+                    )) orelse return null;
                     const matrix = try a.alloc(space.Row, n);
                     for (state, matrix) |value, *row| row.* = value.state;
                     try rows.append(a, matrix);
                     try transitions.append(a, .{ .block = block_id, .values = state });
-                    for (call.arguments[n..]) |slot| try observe(&seed, values[@intCast(slot)], &budget);
-                } else for (call.arguments) |slot| try observe(&seed, values[@intCast(slot)], &budget);
+                    for (call.arguments[n..]) |slot| try observe(
+                        &seed,
+                        values[@intCast(slot)],
+                        &budget,
+                    );
+                } else for (call.arguments) |slot| try observe(
+                    &seed,
+                    values[@intCast(slot)],
+                    &budget,
+                );
             },
             else => return null,
         }
@@ -192,9 +257,22 @@ pub fn analyzeTarget(allocator: std.mem.Allocator, program: ir.Program, target: 
     for (program.blocks) |block| {
         if (block.function != worker_id) continue;
         for (worker.inputs[n..], input_bias) |slot, *bias| {
-            if (@import("slot_access.zig").terminator(block.terminator, slot).writes != 0) bias.* = 0;
+            if (@import("slot_access.zig").terminator(
+                block.terminator,
+                slot,
+            ).writes != 0) bias.* = 0;
         }
     }
     keep = true;
-    return .{ .arena = arena, .constructor = constructor_id, .worker = worker_id, .schema = schema, .dimension = n, .basis = basis, .input_bias = input_bias, .observations = observations, .transitions = owned_transitions };
+    return .{
+        .arena = arena,
+        .constructor = constructor_id,
+        .worker = worker_id,
+        .schema = schema,
+        .dimension = n,
+        .basis = basis,
+        .input_bias = input_bias,
+        .observations = observations,
+        .transitions = owned_transitions,
+    };
 }

@@ -21,7 +21,10 @@ fn charge(comptime T: type, value: T, budget: ?*Budget) Error!void {
     if (budget == null) return;
     try take(budget, 1);
     switch (@typeInfo(T)) {
-        .@"struct" => |info| inline for (info.field_names, info.field_types) |field_name, FieldType| try charge(FieldType, @field(value, field_name), budget),
+        .@"struct" => |info| inline for (
+            info.field_names,
+            info.field_types,
+        ) |field_name, FieldType| try charge(FieldType, @field(value, field_name), budget),
         .@"union" => switch (value) {
             inline else => |payload| try charge(@TypeOf(payload), payload, budget),
         },
@@ -33,10 +36,19 @@ fn charge(comptime T: type, value: T, budget: ?*Budget) Error!void {
     }
 }
 pub fn possible(program: ir.Program) bool {
-    for (program.handlers) |handler| for (handler.clauses) |clause| if (eligible(program, handler, clause)) return true;
+    for (program.handlers) |handler| for (handler.clauses) |clause| if (eligible(
+        program,
+        handler,
+        clause,
+    )) return true;
     return false;
 }
-pub fn run(a: std.mem.Allocator, original: ir.Program, statistics: ?*Statistics, options: Options) ValidationError!p01.Owned {
+pub fn run(
+    a: std.mem.Allocator,
+    original: ir.Program,
+    statistics: ?*Statistics,
+    options: Options,
+) ValidationError!p01.Owned {
     var stats: Statistics = .{};
     defer if (statistics) |out| {
         out.* = stats;
@@ -64,32 +76,60 @@ pub fn run(a: std.mem.Allocator, original: ir.Program, statistics: ?*Statistics,
         },
         else => return err,
     };
-    for (original.handlers, candidate.handlers) |old, new| for (old.clauses, new.clauses) |old_clause, new_clause| {
-        stats.clauses_selected += @intFromBool(old_clause.strategy == .general and new_clause.strategy == .tail);
+    for (
+        original.handlers,
+        candidate.handlers,
+    ) |old, new| for (
+        old.clauses,
+        new.clauses,
+    ) |old_clause, new_clause| {
+        stats.clauses_selected += @intFromBool(
+            old_clause.strategy == .general and new_clause.strategy == .tail,
+        );
     };
     return p01.run(a, candidate, options.coalescing);
 }
 
 /// Check the actual appended code and changed clause bindings. Construction's
 /// memo, block numbering and forward alias facts are not certificates.
-pub fn validate(a: std.mem.Allocator, original: ir.Program, candidate: ir.Program) ValidationError!void {
+pub fn validate(
+    a: std.mem.Allocator,
+    original: ir.Program,
+    candidate: ir.Program,
+) ValidationError!void {
     return validateBudgeted(a, original, candidate, null);
 }
-fn validateBudgeted(a: std.mem.Allocator, original: ir.Program, candidate: ir.Program, budget: ?*Budget) ValidationError!void {
+fn validateBudgeted(
+    a: std.mem.Allocator,
+    original: ir.Program,
+    candidate: ir.Program,
+    budget: ?*Budget,
+) ValidationError!void {
     var before = try @import("activation_ownership.zig").analyze(a, original);
     defer before.deinit();
     var after = try @import("activation_ownership.zig").analyze(a, candidate);
     defer after.deinit();
     try charge(ir.Program, original, budget);
     try charge(ir.Program, candidate, budget);
-    if (candidate.functions.len < original.functions.len or candidate.blocks.len < original.blocks.len or candidate.handlers.len != original.handlers.len) return error.InvalidTailClause;
+    if (candidate.functions.len < original.functions.len or
+        candidate.blocks.len < original.blocks.len or
+        candidate.handlers.len != original.handlers.len)
+        return error.InvalidTailClause;
     var unchanged = candidate;
     unchanged.functions = original.functions;
     unchanged.blocks = original.blocks;
     unchanged.handlers = original.handlers;
     if (!equal(ir.Program, original, unchanged) or
-        !equal([]const ir.Function, original.functions, candidate.functions[0..original.functions.len]) or
-        !equal([]const ir.Block, original.blocks, candidate.blocks[0..original.blocks.len])) return error.InvalidTailClause;
+        !equal(
+            []const ir.Function,
+            original.functions,
+            candidate.functions[0..original.functions.len],
+        ) or
+        !equal(
+            []const ir.Block,
+            original.blocks,
+            candidate.blocks[0..original.blocks.len],
+        )) return error.InvalidTailClause;
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const scratch = arena.allocator();
@@ -100,18 +140,30 @@ fn validateBudgeted(a: std.mem.Allocator, original: ir.Program, candidate: ir.Pr
     for (original.handlers, candidate.handlers, 0..) |old, new, handler_id| {
         var metadata = new;
         metadata.clauses = old.clauses;
-        if (!equal(ir.Handler, old, metadata) or old.clauses.len != new.clauses.len) return error.InvalidTailClause;
+        if (!equal(
+            ir.Handler,
+            old,
+            metadata,
+        ) or old.clauses.len != new.clauses.len) return error.InvalidTailClause;
         for (old.clauses, new.clauses, 0..) |old_clause, new_clause, clause_id| {
             if (equal(ir.Clause, old_clause, new_clause)) continue;
             var clause_metadata = new_clause;
             clause_metadata.function = old_clause.function;
             clause_metadata.strategy = old_clause.strategy;
             if (!equal(ir.Clause, old_clause, clause_metadata) or new_clause.strategy != .tail or
-                !eligible(original, old, old_clause) or new_clause.function < original.functions.len or
+                !eligible(
+                    original,
+                    old,
+                    old_clause,
+                ) or new_clause.function < original.functions.len or
                 new_clause.function >= candidate.functions.len) return error.InvalidTailClause;
             const index: usize = @intCast(new_clause.function - original.functions.len);
             if (origins[index]) |prior| {
-                if (!equal(ir.Clause, original.handlers[prior.handler].clauses[prior.clause], old_clause)) return error.InvalidTailClause;
+                if (!equal(
+                    ir.Clause,
+                    original.handlers[prior.handler].clauses[prior.clause],
+                    old_clause,
+                )) return error.InvalidTailClause;
             } else origins[index] = .{ .handler = handler_id, .clause = clause_id };
         }
     }
@@ -130,17 +182,38 @@ fn validateBudgeted(a: std.mem.Allocator, original: ir.Program, candidate: ir.Pr
         metadata.layout = old.layout;
         metadata.result = old.result;
         metadata.effects = old.effects;
-        if (!equal(ir.Function, old, metadata) or new.result != original.effects[@intCast(clause.effect)].result or
-            new.effects.len != 0 or !equal([]const p.Id, new.inputs, old.inputs[0 .. old.inputs.len - 1]) or
+        if (!equal(
+            ir.Function,
+            old,
+            metadata,
+        ) or new.result != original.effects[@intCast(clause.effect)].result or
+            new.effects.len != 0 or !equal(
+            []const p.Id,
+            new.inputs,
+            old.inputs[0 .. old.inputs.len - 1],
+        ) or
             new.layout.slots.len != old.layout.slots.len) return error.InvalidTailClause;
         for (old.layout.slots, new.layout.slots, 0..) |old_schema, new_schema, slot| {
-            if (new_schema != (if (slot == token) original.effects[@intCast(clause.effect)].payload else old_schema)) return error.InvalidTailClause;
+            if (new_schema != (if (slot == token) original.effects[
+                @intCast(clause.effect)
+            ].payload else old_schema)) return error.InvalidTailClause;
             if (slot != token and !uses.copy[@intCast(old_schema)]) return error.InvalidTailClause;
         }
-        var walk: Correspondence = .{ .allocator = scratch, .original = original, .candidate = candidate, .seen = seen, .old_function = clause.function, .new_function = id, .token = token, .budget = budget };
+        var walk: Correspondence = .{
+            .allocator = scratch,
+            .original = original,
+            .candidate = candidate,
+            .seen = seen,
+            .old_function = clause.function,
+            .new_function = id,
+            .token = token,
+            .budget = budget,
+        };
         try walk.push(old.entry, new.entry);
         var cursor: usize = 0;
-        while (cursor < walk.pending.items.len) : (cursor += 1) try walk.block(walk.pending.items[cursor]);
+        while (cursor < walk.pending.items.len) : (cursor += 1) try walk.block(
+            walk.pending.items[cursor],
+        );
     }
     for (seen) |covered| if (!covered) return error.InvalidTailClause;
 }
@@ -159,7 +232,10 @@ const Correspondence = struct {
     pending: std.ArrayList(Pair) = .empty,
 
     fn push(self: *Correspondence, old: p.Id, new: p.Id) ValidationError!void {
-        if (old >= self.original.blocks.len or new < self.original.blocks.len or new >= self.candidate.blocks.len) return error.InvalidTailClause;
+        if (old >= self.original.blocks.len or
+            new < self.original.blocks.len or
+            new >= self.candidate.blocks.len)
+            return error.InvalidTailClause;
         if (self.mapping.get(old)) |prior| {
             if (prior != new) return error.InvalidTailClause;
             return;
@@ -171,8 +247,16 @@ const Correspondence = struct {
         try self.pending.append(self.allocator, .{ .original = old, .candidate = new });
     }
     fn checkEdge(self: *Correspondence, old: ir.Edge, new: ir.Edge) ValidationError!void {
-        if (!equal([]const ir.Assignment, old.assignments, new.assignments)) return error.InvalidTailClause;
-        for (old.assignments) |assignment| if (assignment.destination == self.token or assignment.source != .slot or assignment.source.slot == self.token) return error.InvalidTailClause;
+        if (!equal(
+            []const ir.Assignment,
+            old.assignments,
+            new.assignments,
+        )) return error.InvalidTailClause;
+        for (old.assignments) |assignment|
+            if (assignment.destination == self.token or
+                assignment.source != .slot or
+                assignment.source.slot == self.token)
+                return error.InvalidTailClause;
         try self.push(old.block, new.block);
     }
     fn block(self: *Correspondence, pair: Pair) ValidationError!void {
@@ -182,9 +266,15 @@ const Correspondence = struct {
         var metadata = new;
         metadata.function = old.function;
         metadata.terminator = old.terminator;
-        if (old.function != self.old_function or new.function != self.new_function or !equal(ir.Block, old, metadata)) return error.InvalidTailClause;
+        if (old.function != self.old_function or new.function != self.new_function or !equal(
+            ir.Block,
+            old,
+            metadata,
+        )) return error.InvalidTailClause;
         for (old.instructions) |op| {
-            if (!total.instruction(op) or op.destination == self.token) return error.InvalidTailClause;
+            if (!total.instruction(
+                op,
+            ) or op.destination == self.token) return error.InvalidTailClause;
             for (op.operands) |slot| if (slot == self.token) return error.InvalidTailClause;
         }
         switch (old.terminator) {
@@ -193,29 +283,64 @@ const Correspondence = struct {
                 try self.checkEdge(edge, new.terminator.jump);
             },
             .branch => |branch| {
-                if (new.terminator != .branch or branch.condition == self.token or new.terminator.branch.condition != branch.condition) return error.InvalidTailClause;
+                if (new.terminator != .branch or
+                    branch.condition == self.token or
+                    new.terminator.branch.condition != branch.condition)
+                    return error.InvalidTailClause;
                 try self.checkEdge(branch.when_true, new.terminator.branch.when_true);
                 try self.checkEdge(branch.when_false, new.terminator.branch.when_false);
             },
             .switch_variant => |branch| {
-                if (new.terminator != .switch_variant or branch.value == self.token or new.terminator.switch_variant.value != branch.value or new.terminator.switch_variant.cases.len != branch.cases.len) return error.InvalidTailClause;
-                for (branch.cases, new.terminator.switch_variant.cases) |old_edge, new_edge| try self.checkEdge(old_edge, new_edge);
+                if (new.terminator != .switch_variant or
+                    branch.value == self.token or
+                    new.terminator.switch_variant.value != branch.value or
+                    new.terminator.switch_variant.cases.len != branch.cases.len)
+                    return error.InvalidTailClause;
+                for (
+                    branch.cases,
+                    new.terminator.switch_variant.cases,
+                ) |old_edge, new_edge| try self.checkEdge(old_edge, new_edge);
             },
             .unpack_product => |unpack| {
-                if (new.terminator != .unpack_product or unpack.value == self.token or new.terminator.unpack_product.value != unpack.value or !equal([]const p.Id, unpack.destinations, new.terminator.unpack_product.destinations)) return error.InvalidTailClause;
-                for (unpack.destinations) |slot| if (slot == self.token) return error.InvalidTailClause;
+                if (new.terminator != .unpack_product or
+                    unpack.value == self.token or
+                    new.terminator.unpack_product.value != unpack.value or
+                    !equal(
+                        []const p.Id,
+                        unpack.destinations,
+                        new.terminator.unpack_product.destinations,
+                    ))
+                    return error.InvalidTailClause;
+                for (unpack.destinations) |slot|
+                    if (slot == self.token)
+                        return error.InvalidTailClause;
                 try self.checkEdge(unpack.next, new.terminator.unpack_product.next);
             },
             .resume_value => |resumption| {
-                if (resumption.resumption != self.token or resumption.argument == self.token or new.terminator != .return_value or new.terminator.return_value != resumption.argument or
-                    !try certifyAdministrativeResult(self.allocator, self.original, old.function, old.custody, resumption.next, self.budget)) return error.InvalidTailClause;
+                if (resumption.resumption != self.token or
+                    resumption.argument == self.token or
+                    new.terminator != .return_value or
+                    new.terminator.return_value != resumption.argument or
+                    !try certifyAdministrativeResult(
+                        self.allocator,
+                        self.original,
+                        old.function,
+                        old.custody,
+                        resumption.next,
+                        self.budget,
+                    ))
+                    return error.InvalidTailClause;
             },
             else => return error.InvalidTailClause,
         }
     }
 };
 
-pub fn optimize(a: std.mem.Allocator, input: ir.Program, uses: traits.Facts) std.mem.Allocator.Error!ir.Program {
+pub fn optimize(
+    a: std.mem.Allocator,
+    input: ir.Program,
+    uses: traits.Facts,
+) std.mem.Allocator.Error!ir.Program {
     return transform(a, input, uses, false, null) catch |err| switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         error.TailClauseWorkLimit => unreachable, // No budget on the existing source path.
@@ -224,7 +349,13 @@ pub fn optimize(a: std.mem.Allocator, input: ir.Program, uses: traits.Facts) std
 
 // Both callers share construction. The semantic caller must independently
 // validate the returned raw candidate before acquiring a checked owner.
-fn transform(a: std.mem.Allocator, input: ir.Program, uses: traits.Facts, administrative: bool, budget: ?*Budget) Error!ir.Program {
+fn transform(
+    a: std.mem.Allocator,
+    input: ir.Program,
+    uses: traits.Facts,
+    administrative: bool,
+    budget: ?*Budget,
+) Error!ir.Program {
     try charge(ir.Program, input, budget);
     var functions: std.ArrayList(ir.Function) = .empty;
     var blocks: std.ArrayList(ir.Block) = .empty;
@@ -238,7 +369,16 @@ fn transform(a: std.mem.Allocator, input: ir.Program, uses: traits.Facts, admini
         for (clauses) |*clause| {
             if (!eligible(input, handler.*, clause.*)) continue;
             const lookup = try memo.getOrPut(a, clause.function);
-            if (!lookup.found_existing) lookup.value_ptr.* = try specialize(a, input, clause.*, uses, &functions, &blocks, administrative, budget);
+            if (!lookup.found_existing) lookup.value_ptr.* = try specialize(
+                a,
+                input,
+                clause.*,
+                uses,
+                &functions,
+                &blocks,
+                administrative,
+                budget,
+            );
             if (lookup.value_ptr.*) |id| {
                 clause.function = id;
                 clause.strategy = .tail;
@@ -264,7 +404,11 @@ fn eligible(image: ir.Program, handler: ir.Handler, clause: ir.Clause) bool {
         function.inputs.len != handler.state.len + 2 or
         function.result != handler.answer or
         image.effects[@intCast(clause.effect)].bodies.len != 0) return false;
-    for (function.effects) |effect| if (std.mem.indexOfScalar(p.Id, handler.effects, effect) == null)
+    for (function.effects) |effect| if (std.mem.indexOfScalar(
+        p.Id,
+        handler.effects,
+        effect,
+    ) == null)
         return false;
     for (handler.state, function.inputs[0..handler.state.len]) |schema_id, slot|
         if (function.layout.slots[@intCast(slot)] != schema_id) return false;
@@ -301,7 +445,17 @@ fn specialize(
             if (!total.instruction(operation) or operation.destination == token) return null;
             for (operation.operands) |slot| if (slot == token) return null;
         }
-        if (!try discover(a, image, block, token, &ids, &mapping, blocks.items.len, administrative, budget)) return null;
+        if (!try discover(
+            a,
+            image,
+            block,
+            token,
+            &ids,
+            &mapping,
+            blocks.items.len,
+            administrative,
+            budget,
+        )) return null;
     }
     const function_id = functions.items.len;
     const block_start = blocks.items.len;
@@ -392,7 +546,14 @@ fn discover(
             break :blk try follow(a, ids, mapping, v.next, token, base);
         },
         .resume_value => |v| v.resumption == token and v.argument != token and
-            (if (administrative) try administrativeResult(a, image, block.function, block.custody, v.next, budget) else returnsResult(image, block.function, v.next)),
+            (if (administrative) try administrativeResult(
+                a,
+                image,
+                block.function,
+                block.custody,
+                v.next,
+                budget,
+            ) else returnsResult(image, block.function, v.next)),
         else => false,
     };
 }
@@ -408,7 +569,14 @@ fn returnsResult(image: ir.Program, function: p.Id, edge: ir.Edge) bool {
 // Discovery follows the identity of the resumed answer forward. Slot numbers
 // are storage locations: moves overwrite their previous facts and each edge
 // reads one simultaneous predecessor view.
-fn administrativeResult(a: std.mem.Allocator, image: ir.Program, function: p.Id, custody: p.Id, first: ir.Edge, budget: ?*Budget) Error!bool {
+fn administrativeResult(
+    a: std.mem.Allocator,
+    image: ir.Program,
+    function: p.Id,
+    custody: p.Id,
+    first: ir.Edge,
+    budget: ?*Budget,
+) Error!bool {
     const count = image.functions[@intCast(function)].layout.slots.len;
     try take(budget, count);
     try take(budget, count);
@@ -441,7 +609,11 @@ fn administrativeResult(a: std.mem.Allocator, image: ir.Program, function: p.Id,
                 @memcpy(previous, aliases);
                 for (edge.assignments) |assignment| {
                     if (assignment.source != .slot) return false;
-                    aliases[@intCast(assignment.destination)] = previous[@intCast(assignment.source.slot)];
+                    aliases[
+                        @intCast(assignment.destination)
+                    ] = previous[
+                        @intCast(assignment.source.slot)
+                    ];
                 }
                 id = edge.block;
             },
@@ -453,7 +625,14 @@ fn administrativeResult(a: std.mem.Allocator, image: ir.Program, function: p.Id,
 // Certification uses a different direction: trace the final return backward
 // through actual writes and parallel transfers until it reaches `.returned`
 // on the original resumption edge. No discovery alias table is consumed.
-fn certifyAdministrativeResult(a: std.mem.Allocator, image: ir.Program, function: p.Id, custody: p.Id, first: ir.Edge, budget: ?*Budget) Error!bool {
+fn certifyAdministrativeResult(
+    a: std.mem.Allocator,
+    image: ir.Program,
+    function: p.Id,
+    custody: p.Id,
+    first: ir.Edge,
+    budget: ?*Budget,
+) Error!bool {
     try take(budget, image.blocks.len);
     const seen = try a.alloc(bool, image.blocks.len);
     defer a.free(seen);
@@ -493,7 +672,9 @@ fn certifyAdministrativeResult(a: std.mem.Allocator, image: ir.Program, function
             const op = block.instructions[op_index];
             if (op.destination == wanted) wanted = op.operands[0];
         }
-        const incoming = if (cursor == 0) first else image.blocks[@intCast(chain.items[cursor - 1])].terminator.jump;
+        const incoming = if (cursor == 0) first else image.blocks[
+            @intCast(chain.items[cursor - 1])
+        ].terminator.jump;
         for (incoming.assignments) |assignment| if (assignment.destination == wanted) {
             switch (assignment.source) {
                 .returned => return cursor == 0,
@@ -512,13 +693,29 @@ test "independent administrative-return proofs preserve parallel writes and reje
         .{ .destination = 3, .source = .{ .slot = 1 } },
     } };
     var blocks = [_]ir.Block{
-        .{ .function = 0, .instructions = &.{}, .terminator = .{ .call = .{ .function = 1, .arguments = &.{0}, .next = incoming } } },
-        .{ .function = 0, .instructions = &.{.{ .destination = 0, .opcode = .move, .operands = &.{2} }}, .terminator = .{ .jump = .{ .block = 2, .assignments = &.{
+        .{
+            .function = 0,
+            .instructions = &.{},
+            .terminator = .{ .call = .{ .function = 1, .arguments = &.{0}, .next = incoming } },
+        },
+        .{ .function = 0, .instructions = &.{.{
+            .destination = 0,
+            .opcode = .move,
+            .operands = &.{2},
+        }}, .terminator = .{ .jump = .{ .block = 2, .assignments = &.{
             .{ .destination = 2, .source = .{ .slot = 0 } },
             .{ .destination = 0, .source = .{ .slot = 3 } },
         } } } },
         .{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 2 } },
-        .{ .function = 1, .instructions = &.{.{ .destination = 1, .opcode = .integer_bit_not, .operands = &.{0} }}, .terminator = .{ .return_value = 1 } },
+        .{
+            .function = 1,
+            .instructions = &.{.{
+                .destination = 1,
+                .opcode = .integer_bit_not,
+                .operands = &.{0},
+            }},
+            .terminator = .{ .return_value = 1 },
+        },
     };
     const image: ir.Program = .{
         .roots = .{ .entry = 0, .result = 0, .failure = 1 },
@@ -526,7 +723,12 @@ test "independent administrative-return proofs preserve parallel writes and reje
         .constants = &.{},
         .effects = &.{},
         .functions = &.{
-            .{ .entry = 0, .inputs = &.{ 0, 1 }, .layout = .{ .slots = &.{ 0, 0, 0, 0 } }, .result = 0 },
+            .{
+                .entry = 0,
+                .inputs = &.{ 0, 1 },
+                .layout = .{ .slots = &.{ 0, 0, 0, 0 } },
+                .result = 0,
+            },
             .{ .entry = 3, .inputs = &.{0}, .layout = .{ .slots = &.{ 0, 0 } }, .result = 0 },
         },
         .blocks = &blocks,
@@ -543,7 +745,11 @@ test "independent administrative-return proofs preserve parallel writes and reje
     try std.testing.expect(!try administrativeResult(a, image, 0, 0, incoming, null));
     try std.testing.expect(!try certifyAdministrativeResult(a, image, 0, 0, incoming, null));
     blocks[2].terminator = .{ .return_value = 2 };
-    blocks[1].instructions = &.{.{ .destination = 0, .opcode = .integer_bit_not, .operands = &.{2} }};
+    blocks[1].instructions = &.{.{
+        .destination = 0,
+        .opcode = .integer_bit_not,
+        .operands = &.{2},
+    }};
     checked = try @import("activation_ownership.zig").analyze(a, image);
     checked.deinit();
     try std.testing.expect(!try administrativeResult(a, image, 0, 0, incoming, null));
@@ -569,14 +775,22 @@ fn remap(
 ) Error!ir.Terminator {
     return switch (value) {
         .jump => |v| .{ .jump = remapEdge(v, mapping) },
-        .branch => |v| .{ .branch = .{ .condition = v.condition, .when_true = remapEdge(v.when_true, mapping), .when_false = remapEdge(v.when_false, mapping) } },
+        .branch => |v| .{ .branch = .{
+            .condition = v.condition,
+            .when_true = remapEdge(v.when_true, mapping),
+            .when_false = remapEdge(v.when_false, mapping),
+        } },
         .resume_value => |v| .{ .return_value = v.argument },
         .switch_variant => |v| blk: {
             const cases = try a.alloc(ir.Edge, v.cases.len);
             for (cases, v.cases) |*target, original| target.* = remapEdge(original, mapping);
             break :blk .{ .switch_variant = .{ .value = v.value, .cases = cases } };
         },
-        .unpack_product => |v| .{ .unpack_product = .{ .value = v.value, .destinations = v.destinations, .next = remapEdge(v.next, mapping) } },
+        .unpack_product => |v| .{ .unpack_product = .{
+            .value = v.value,
+            .destinations = v.destinations,
+            .next = remapEdge(v.next, mapping),
+        } },
         // discover rejects every other terminator before any copying starts.
         else => unreachable,
     };
@@ -587,28 +801,127 @@ test "a general resumption with an administrative join becomes a checked tail cl
     const original: ir.Program = .{
         .roots = .{ .entry = 0, .result = 0, .failure = 1 },
         .schemas = &.{
-            .u64,                                                                                                                 .unit,                                                                                                                                                       .boolean,
-            .{ .internal = .{ .computation = .{ .parameters = &.{5}, .result = 0, .effects = &.{0}, .capture_bound = &.{0} } } }, .{ .internal = .{ .resumption = .{ .effect = 0, .input = 0, .answer = 0, .handled = &.{0}, .capture_bound = &.{ 0, 5 }, .mode = .deep, .use = .linear } } }, .{ .internal = .{ .capability = 0 } },
+            .u64,                                  .unit, .boolean,
+            .{ .internal = .{ .computation = .{
+                .parameters = &.{5},
+                .result = 0,
+                .effects = &.{0},
+                .capture_bound = &.{0},
+            } } },
+            .{ .internal = .{ .resumption = .{
+                .effect = 0,
+                .input = 0,
+                .answer = 0,
+                .handled = &.{0},
+                .capture_bound = &.{ 0, 5 },
+                .mode = .deep,
+                .use = .linear,
+            } } },
+            .{ .internal = .{ .capability = 0 } },
         },
         .constants = &.{},
-        .effects = &.{.{ .identity = "test.tail.admin", .payload = 0, .result = 0, .external = false }},
+        .effects = &.{.{
+            .identity = "test.tail.admin",
+            .payload = 0,
+            .result = 0,
+            .external = false,
+        }},
         .functions = &.{
             .{ .entry = 0, .inputs = &.{0}, .layout = .{ .slots = &.{ 0, 3, 0 } }, .result = 0 },
-            .{ .entry = 2, .inputs = &.{ 0, 1 }, .layout = .{ .slots = &.{ 0, 5, 0, 0 } }, .result = 0, .effects = &.{0} },
+            .{
+                .entry = 2,
+                .inputs = &.{ 0, 1 },
+                .layout = .{ .slots = &.{ 0, 5, 0, 0 } },
+                .result = 0,
+                .effects = &.{0},
+            },
             .{ .entry = 4, .inputs = &.{0}, .layout = .{ .slots = &.{0} }, .result = 0 },
-            .{ .entry = 5, .inputs = &.{ 0, 1 }, .layout = .{ .slots = &.{ 0, 4, 0, 0 } }, .result = 0 },
+            .{
+                .entry = 5,
+                .inputs = &.{ 0, 1 },
+                .layout = .{ .slots = &.{ 0, 4, 0, 0 } },
+                .result = 0,
+            },
         },
         .blocks = &.{
-            .{ .function = 0, .instructions = &.{.{ .destination = 1, .opcode = .computation, .operands = &.{0}, .immediate = 0 }}, .terminator = .{ .handle = .{ .handler = 0, .body = 1, .arguments = &.{}, .state = &.{}, .next = .{ .block = 1, .assignments = &.{.{ .destination = 2, .source = .returned }} } } } },
+            .{
+                .function = 0,
+                .instructions = &.{.{
+                    .destination = 1,
+                    .opcode = .computation,
+                    .operands = &.{0},
+                    .immediate = 0,
+                }},
+                .terminator = .{ .handle = .{
+                    .handler = 0,
+                    .body = 1,
+                    .arguments = &.{},
+                    .state = &.{},
+                    .next = .{
+                        .block = 1,
+                        .assignments = &.{.{ .destination = 2, .source = .returned }},
+                    },
+                } },
+            },
             .{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 2 } },
-            .{ .function = 1, .instructions = &.{}, .terminator = .{ .perform = .{ .effect = 0, .capability = 1, .payload = 0, .next = .{ .block = 3, .assignments = &.{.{ .destination = 2, .source = .returned }} } } } },
-            .{ .function = 1, .instructions = &.{.{ .destination = 3, .opcode = .integer_bit_not, .operands = &.{2} }}, .terminator = .{ .return_value = 3 } },
+            .{
+                .function = 1,
+                .instructions = &.{},
+                .terminator = .{ .perform = .{
+                    .effect = 0,
+                    .capability = 1,
+                    .payload = 0,
+                    .next = .{
+                        .block = 3,
+                        .assignments = &.{.{ .destination = 2, .source = .returned }},
+                    },
+                } },
+            },
+            .{
+                .function = 1,
+                .instructions = &.{.{
+                    .destination = 3,
+                    .opcode = .integer_bit_not,
+                    .operands = &.{2},
+                }},
+                .terminator = .{ .return_value = 3 },
+            },
             .{ .function = 2, .instructions = &.{}, .terminator = .{ .return_value = 0 } },
-            .{ .function = 3, .instructions = &.{}, .terminator = .{ .resume_value = .{ .resumption = 1, .argument = 0, .next = .{ .block = 6, .assignments = &.{ .{ .destination = 2, .source = .returned }, .{ .destination = 3, .source = .{ .slot = 0 } } } } } } },
-            .{ .function = 3, .instructions = &.{.{ .destination = 0, .opcode = .move, .operands = &.{2} }}, .terminator = .{ .jump = .{ .block = 7, .assignments = &.{ .{ .destination = 2, .source = .{ .slot = 0 } }, .{ .destination = 0, .source = .{ .slot = 3 } } } } } },
+            .{
+                .function = 3,
+                .instructions = &.{},
+                .terminator = .{ .resume_value = .{
+                    .resumption = 1,
+                    .argument = 0,
+                    .next = .{
+                        .block = 6,
+                        .assignments = &.{
+                            .{ .destination = 2, .source = .returned },
+                            .{ .destination = 3, .source = .{ .slot = 0 } },
+                        },
+                    },
+                } },
+            },
+            .{
+                .function = 3,
+                .instructions = &.{.{ .destination = 0, .opcode = .move, .operands = &.{2} }},
+                .terminator = .{ .jump = .{
+                    .block = 7,
+                    .assignments = &.{
+                        .{ .destination = 2, .source = .{ .slot = 0 } },
+                        .{ .destination = 0, .source = .{ .slot = 3 } },
+                    },
+                } },
+            },
             .{ .function = 3, .instructions = &.{}, .terminator = .{ .return_value = 2 } },
         },
-        .handlers = &.{.{ .mode = .deep, .input = 0, .answer = 0, .return_function = 2, .clauses = &.{.{ .effect = 0, .function = 3, .resumption = 4 }} }},
+        .handlers = &.{.{
+            .mode = .deep,
+            .input = 0,
+            .answer = 0,
+            .return_function = 2,
+            .clauses = &.{.{ .effect = 0, .function = 3, .resumption = 4 }},
+        }},
         .constructors = &.{.{ .function = 1, .capture = 0, .schema = 3 }},
         .scopes = .{ .captures = &.{.{ .fields = &.{0}, .use = .reusable }} },
     };
@@ -637,9 +950,15 @@ test "a general resumption with an administrative join becomes a checked tail cl
     try std.testing.expect(limited.program.handlers[0].clauses[0].strategy == .general);
     var invalid = original;
     invalid.roots.entry = 999;
-    try std.testing.expectError(error.InvalidReference, run(a, invalid, null, .{ .work_limit = 0 }));
+    try std.testing.expectError(
+        error.InvalidReference,
+        run(a, invalid, null, .{ .work_limit = 0 }),
+    );
     const structural = try optimize(scratch, original, uses);
-    try std.testing.expectEqual(ir.Clause{ .effect = 0, .function = 3, .resumption = 4 }, structural.handlers[0].clauses[0]);
+    try std.testing.expectEqual(
+        ir.Clause{ .effect = 0, .function = 3, .resumption = 4 },
+        structural.handlers[0].clauses[0],
+    );
     const candidate = try transform(scratch, original, uses, true, null);
     try std.testing.expect(candidate.handlers[0].clauses[0].strategy == .tail);
     try std.testing.expectEqual(original.functions.len + 1, candidate.functions.len);
@@ -652,7 +971,10 @@ test "a general resumption with an administrative join becomes a checked tail cl
     defer late_limit.deinit();
     try std.testing.expect(stats.work_limit);
     const image_codec = @import("program_image.zig");
-    try std.testing.expectEqual(try image_codec.identity(a, limited.program), try image_codec.identity(a, late_limit.program));
+    try std.testing.expectEqual(
+        try image_codec.identity(a, limited.program),
+        try image_codec.identity(a, late_limit.program),
+    );
     var changed_answer = original;
     const changed_blocks = try scratch.dupe(ir.Block, original.blocks);
     changed_blocks[7].terminator = .{ .return_value = 0 };
@@ -672,7 +994,12 @@ test "a general resumption with an administrative join becomes a checked tail cl
     const shallow_handlers = try scratch.dupe(ir.Handler, original.handlers);
     shallow_handlers[0].mode = .shallow;
     const shallow_blocks = try scratch.dupe(ir.Block, original.blocks);
-    shallow_blocks[5].terminator = .{ .resume_with = .{ .resumption = 1, .argument = 0, .handler = 0, .next = original.blocks[5].terminator.resume_value.next } };
+    shallow_blocks[5].terminator = .{ .resume_with = .{
+        .resumption = 1,
+        .argument = 0,
+        .handler = 0,
+        .next = original.blocks[5].terminator.resume_value.next,
+    } };
     shallow.schemas = shallow_schemas;
     shallow.handlers = shallow_handlers;
     shallow.blocks = shallow_blocks;
@@ -697,12 +1024,19 @@ test "a general resumption with an administrative join becomes a checked tail cl
     const effect_blocks = try scratch.alloc(ir.Block, original.blocks.len + 1);
     @memcpy(effect_blocks[0..original.blocks.len], original.blocks);
     effect_blocks[8] = original.blocks[5];
-    effect_blocks[5].terminator = .{ .perform = .{ .effect = 1, .payload = 0, .next = .{ .block = 8 } } };
+    effect_blocks[5].terminator = .{ .perform = .{
+        .effect = 1,
+        .payload = 0,
+        .next = .{ .block = 8 },
+    } };
     effectful.functions = functions;
     effectful.schemas = effect_schemas;
     effectful.handlers = effect_handlers;
     effectful.blocks = effect_blocks;
-    effectful.effects = &.{ original.effects[0], .{ .identity = "test.before-resumption", .payload = 0, .result = 0 } };
+    effectful.effects = &.{
+        original.effects[0],
+        .{ .identity = "test.before-resumption", .payload = 0, .result = 0 },
+    };
     admitted = @import("activation_ownership.zig").analyze(a, effectful) catch |err| {
         std.debug.print("effectful admission: {any}\n", .{err});
         return err;
@@ -717,7 +1051,11 @@ test "a general resumption with an administrative join becomes a checked tail cl
     try std.testing.expect(candidate.blocks[@intCast(selected.entry)].terminator == .return_value);
     var mutant = candidate;
     const blocks = try scratch.dupe(ir.Block, candidate.blocks);
-    blocks[@intCast(selected.entry)].instructions = &.{.{ .destination = 2, .opcode = .integer_bit_not, .operands = &.{0} }};
+    blocks[@intCast(selected.entry)].instructions = &.{.{
+        .destination = 2,
+        .opcode = .integer_bit_not,
+        .operands = &.{0},
+    }};
     blocks[@intCast(selected.entry)].terminator = .{ .return_value = 2 };
     mutant.blocks = blocks;
     admitted = try @import("activation_ownership.zig").analyze(a, mutant);

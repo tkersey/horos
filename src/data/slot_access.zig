@@ -8,7 +8,12 @@ const Counter = struct {
     pub const VisitError = error{};
     slot: p.Id,
     result: Access = .{},
-    pub fn reference(self: *Counter, comptime role: roles.Role, comptime cardinality: roles.Cardinality, value: anytype) VisitError!void {
+    pub fn reference(
+        self: *Counter,
+        comptime role: roles.Role,
+        comptime cardinality: roles.Cardinality,
+        value: anytype,
+    ) VisitError!void {
         if (comptime cardinality == .list) {
             for (value) |item| try self.reference(role, .one, item);
         } else if (comptime cardinality == .optional) {

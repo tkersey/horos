@@ -12,7 +12,10 @@ pub fn build(b: *source.Builder) source.Error!source.Module {
     const entry = try b.declare(&.{boolean}, integer, &.{}, &.{});
     const region = b.region();
     const region_type = try b.schema(.{ .internal = .{ .region = region } });
-    const cell = try b.schema(.{ .internal = .{ .cell = .{ .element = integer, .region = region } } });
+    const cell = try b.schema(.{ .internal = .{ .cell = .{
+        .element = integer,
+        .region = region,
+    } } });
     const inside = try b.declare(&.{region_type}, integer, &.{}, &.{region});
     const allocated = try b.variable(cell);
     const reference = try b.reference(allocated);
@@ -27,16 +30,33 @@ pub fn build(b: *source.Builder) source.Error!source.Module {
         .operands = &.{ first, read },
         .failures = &.{.{ .kind = .arithmetic_overflow, .value = failure }},
     } } });
-    const initial = try b.primitive(cell, .cell_new, &.{ try b.reference(b.parameter(inside, 0)), try b.constant(u64, 1) }, 0);
+    const initial = try b.primitive(
+        cell,
+        .cell_new,
+        &.{ try b.reference(b.parameter(inside, 0)), try b.constant(u64, 1) },
+        0,
+    );
     try b.define(inside, try b.bind(allocated, try b.pure(initial), try b.pure(total)));
-    const body_type = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{region_type}, .result = integer, .regions = &.{region} } } });
-    const mutable = try b.term(.{ .with_region = .{ .region = region, .body = try b.lambda(inside, body_type) } });
+    const body_type = try b.schema(.{ .internal = .{ .computation = .{
+        .parameters = &.{region_type},
+        .result = integer,
+        .regions = &.{region},
+    } } });
+    const mutable = try b.term(.{ .with_region = .{
+        .region = region,
+        .body = try b.lambda(inside, body_type),
+    } });
     const overflow = try b.value(.{ .schema = integer, .expression = .{ .primitive = .{
         .opcode = .integer_add,
         .operands = &.{ try b.constant(u64, ~@as(u64, 0)), try b.constant(u64, 1) },
         .failures = &.{.{ .kind = .arithmetic_overflow, .value = failure }},
     } } });
-    const failing_product = try b.primitive(pair, .product, &.{ try b.constant(u64, 42), overflow }, 0);
+    const failing_product = try b.primitive(
+        pair,
+        .product,
+        &.{ try b.constant(u64, 42), overflow },
+        0,
+    );
     const selected = try b.primitive(integer, .field, &.{failing_product}, 0);
     try b.define(entry, try b.term(.{ .conditional = .{
         .condition = try b.reference(b.parameter(entry, 0)),

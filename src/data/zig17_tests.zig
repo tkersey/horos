@@ -19,7 +19,11 @@ test "Z17 empty records tuples optional values and arrays retain declaration-ord
         tuple: struct { u3, ?u16 },
         @"wire bytes": [2]u8,
     };
-    const value: Product = .{ .empty = .{}, .tuple = .{ 5, 300 }, .@"wire bytes" = .{ 0x80, 0xff } };
+    const value: Product = .{
+        .empty = .{},
+        .tuple = .{ 5, 300 },
+        .@"wire bytes" = .{ 0x80, 0xff },
+    };
     var bytes: [32]u8 = undefined;
     var writer = wire.Writer{ .output = &bytes };
     try record.write(Product, value, &writer);
@@ -42,11 +46,20 @@ test "Z17 union declaration order is independent of explicit wire tag values" {
     try record.write(Value, .{ .earlier = 9 }, &writer);
     try std.testing.expectEqualSlices(u8, &.{ 3, 9 }, bytes[0..writer.position]);
     var reader = wire.Reader{ .input = &.{ 3, 9 } };
-    try std.testing.expectEqual(@as(u16, 9), (try record.read(Value, &reader, std.testing.allocator)).earlier);
+    try std.testing.expectEqual(
+        @as(u16, 9),
+        (try record.read(Value, &reader, std.testing.allocator)).earlier,
+    );
     var wrong = wire.Reader{ .input = &.{7} };
-    try std.testing.expectError(error.InvalidTag, record.read(Value, &wrong, std.testing.allocator));
+    try std.testing.expectError(
+        error.InvalidTag,
+        record.read(Value, &wrong, std.testing.allocator),
+    );
     var truncated = wire.Reader{ .input = &.{3} };
-    try std.testing.expectError(error.Truncated, record.read(Value, &truncated, std.testing.allocator));
+    try std.testing.expectError(
+        error.Truncated,
+        record.read(Value, &truncated, std.testing.allocator),
+    );
 }
 
 test "Z17 structural equality traverses distinct slices and preserves numeric float equality" {

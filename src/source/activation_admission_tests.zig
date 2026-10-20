@@ -129,11 +129,17 @@ test "stable admission preserves ordinary-discard rejection and failure custody"
         var builder = source.Builder.init(testing.allocator);
         defer builder.deinit();
         const entry = try edges.scenario(&builder, index, false);
-        try testing.expectError(error.InvalidOwnership, lower(testing.allocator, builder.module(entry, try builder.scalar(u64))));
+        try testing.expectError(
+            error.InvalidOwnership,
+            lower(testing.allocator, builder.module(entry, try builder.scalar(u64))),
+        );
         var failing = source.Builder.init(testing.allocator);
         defer failing.deinit();
         const failed = try edges.scenario(&failing, index, true);
-        var compiled = try lower(testing.allocator, failing.module(failed, try failing.scalar(u64)));
+        var compiled = try lower(
+            testing.allocator,
+            failing.module(failed, try failing.scalar(u64)),
+        );
         defer compiled.deinit();
         try testing.expect(compiled.program.blocks.len != 0);
     }
@@ -146,7 +152,10 @@ test "stable admission uses declared input destinations for real function calls"
     const unit = try builder.scalar(void);
     const main = try builder.declare(&.{ integer, integer }, integer, &.{}, &.{});
     const helper = try builder.declare(&.{ integer, integer }, integer, &.{}, &.{});
-    try builder.define(helper, try builder.pure(try builder.reference(builder.parameter(helper, 1))));
+    try builder.define(
+        helper,
+        try builder.pure(try builder.reference(builder.parameter(helper, 1))),
+    );
     try builder.define(main, try builder.term(.{ .call = .{
         .function = helper,
         .arguments = &.{
@@ -176,11 +185,22 @@ test "stable lowering records custody exit before a sibling binding scope" {
     const inner = try builder.variable(queue);
     const later = try builder.variable(queue);
     const observed = try builder.variable(integer);
-    const value = try builder.bind(inner, try builder.pure(empty), try builder.pure(try builder.constant(u64, 0)));
+    const value = try builder.bind(
+        inner,
+        try builder.pure(empty),
+        try builder.pure(try builder.constant(u64, 0)),
+    );
     const failure = try builder.term(.{ .fail = try builder.constant(u64, 9) });
     const next = try builder.bind(later, try builder.pure(empty), failure);
     const entry = try builder.declare(&.{}, integer, &.{}, &.{});
-    try builder.define(entry, try builder.bind(outer, try builder.pure(empty), try builder.bind(observed, value, next)));
+    try builder.define(
+        entry,
+        try builder.bind(
+            outer,
+            try builder.pure(empty),
+            try builder.bind(observed, value, next),
+        ),
+    );
     var compiled = try lower(testing.allocator, builder.module(entry, integer));
     defer compiled.deinit();
     const image = compiled.program;
@@ -238,7 +258,11 @@ test "stable clause payload admission distinguishes an older capability from its
     inline for (.{ false, true }) |older| inline for (.{ false, true }) |delegated| {
         var builder = source.Builder.init(testing.allocator);
         defer builder.deinit();
-        const module = try @import("clause_payload_example.zig").variant(&builder, older, delegated);
+        const module = try @import("clause_payload_example.zig").variant(
+            &builder,
+            older,
+            delegated,
+        );
         if (older) {
             var compiled = try lower(testing.allocator, module);
             defer compiled.deinit();
@@ -256,14 +280,30 @@ test "stable resource borrow cannot escape a protected body for an immediate cal
     const body_function = b.values.items[@intCast(body_value)].expression.lambda;
     const parameter = b.parameter(body_function, 0);
     const borrowed = b.variables.items[@intCast(parameter)];
-    var signature = b.schemas.items[@intCast(b.values.items[@intCast(body_value)].schema)].internal.computation;
+    var signature = b.schemas.items[
+        @intCast(b.values.items[
+            @intCast(body_value)
+        ].schema)
+    ].internal.computation;
     signature.result = borrowed;
-    b.values.items[@intCast(body_value)].schema = try b.schema(.{ .internal = .{ .computation = signature } });
+    b.values.items[
+        @intCast(body_value)
+    ].schema = try b.schema(.{ .internal = .{ .computation = signature } });
     b.functions.items[@intCast(body_function)].result = borrowed;
     b.functions.items[@intCast(body_function)].body = try b.pure(try b.reference(parameter));
     const escaped = try b.variable(borrowed);
-    const read = try b.term(.{ .call = .{ .function = b.resources.items[0].eliminators[0], .arguments = &.{try b.reference(escaped)} } });
+    const read = try b.term(.{ .call = .{
+        .function = b.resources.items[0].eliminators[0],
+        .arguments = &.{try b.reference(escaped)},
+    } });
     const next = try b.bind(escaped, protected, read);
-    b.functions.items[@intCast(original.entry)].body = try b.bind(main_bind.variable, main_bind.value, next);
-    try testing.expectError(error.InvalidOwnership, lower(testing.allocator, b.module(original.entry, original.failure)));
+    b.functions.items[@intCast(original.entry)].body = try b.bind(
+        main_bind.variable,
+        main_bind.value,
+        next,
+    );
+    try testing.expectError(
+        error.InvalidOwnership,
+        lower(testing.allocator, b.module(original.entry, original.failure)),
+    );
 }

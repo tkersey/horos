@@ -14,7 +14,11 @@ pub const Object = struct {
     exports: []const Symbol,
     borrows: []const @import("borrow_contract.zig").Summary = &.{},
 };
-pub const Error = @import("activation_ownership.zig").Error || record.Error || error{ InvalidSymbol, DuplicateSymbol, InvalidImport };
+pub const Error = @import("activation_ownership.zig").Error || record.Error || error{
+    InvalidSymbol,
+    DuplicateSymbol,
+    InvalidImport,
+};
 pub const magic = "ABL_BMO1";
 pub const identity_domain = "boundary.component/v1\x00";
 /// Budget includes declared regions, which otherwise cost only one wire integer.
@@ -24,10 +28,18 @@ fn symbols(program: ir.Program, values: []const Symbol) Error!void {
     const counts = try relocation.sizes(program);
     var previous: ?[]const u8 = null;
     for (values) |symbol| {
-        if (symbol.name.len == 0 or !std.unicode.utf8ValidateSlice(symbol.name)) return error.InvalidSymbol;
-        if (previous) |prior| if (!std.mem.lessThan(u8, prior, symbol.name)) return error.DuplicateSymbol;
+        if (symbol.name.len == 0 or !std.unicode.utf8ValidateSlice(
+            symbol.name,
+        )) return error.InvalidSymbol;
+        if (previous) |prior| if (!std.mem.lessThan(
+            u8,
+            prior,
+            symbol.name,
+        )) return error.DuplicateSymbol;
         previous = symbol.name;
-        if (symbol.reference.id >= counts[@backingInt(symbol.reference.kind)]) return error.InvalidReference;
+        if (symbol.reference.id >= counts[
+            @backingInt(symbol.reference.kind)
+        ]) return error.InvalidReference;
     }
 }
 
@@ -40,7 +52,10 @@ pub fn interfaceFunctions(allocator: std.mem.Allocator, object: Object) Error![]
         try symbols(object.program, list);
         for (list) |symbol| switch (symbol.reference.kind) {
             .function => try result.append(allocator, symbol.reference.id),
-            .constructor => try result.append(allocator, object.program.constructors[@intCast(symbol.reference.id)].function),
+            .constructor => try result.append(
+                allocator,
+                object.program.constructors[@intCast(symbol.reference.id)].function,
+            ),
             .handler => {
                 const handler = object.program.handlers[@intCast(symbol.reference.id)];
                 try result.append(allocator, handler.return_function);
@@ -76,19 +91,33 @@ pub fn validate(allocator: std.mem.Allocator, object: Object) Error!void {
     var imports: std.ArrayList(p.Id) = .empty;
     var seen: std.AutoHashMapUnmanaged(relocation.Reference, void) = .empty;
     for (object.imports) |symbol| {
-        if ((try seen.getOrPut(scratch.allocator(), symbol.reference)).found_existing) return error.InvalidImport;
+        if ((try seen.getOrPut(
+            scratch.allocator(),
+            symbol.reference,
+        )).found_existing) return error.InvalidImport;
         switch (symbol.reference.kind) {
             .function => try imports.append(scratch.allocator(), symbol.reference.id),
             .resource => {
                 const resource = object.program.scopes.resources[@intCast(symbol.reference.id)];
-                if (resource.introducers.len != 0 or resource.eliminators.len != 0) return error.InvalidOwnership;
+                if (resource.introducers.len != 0 or
+                    resource.eliminators.len != 0)
+                    return error.InvalidOwnership;
             },
             .schema, .effect, .region, .handler, .constructor => {},
             .constant, .block, .capture => return error.InvalidImport,
         }
     }
-    if (std.mem.indexOfScalar(p.Id, imports.items, object.program.roots.entry) != null) return error.InvalidImport;
-    var facts = try @import("activation_ownership.zig").analyzeComponent(allocator, object.program, imports.items, object.borrows);
+    if (std.mem.indexOfScalar(
+        p.Id,
+        imports.items,
+        object.program.roots.entry,
+    ) != null) return error.InvalidImport;
+    var facts = try @import("activation_ownership.zig").analyzeComponent(
+        allocator,
+        object.program,
+        imports.items,
+        object.borrows,
+    );
     facts.deinit();
     for (try interfaceFunctions(scratch.allocator(), object)) |function| {
         for (object.borrows) |summary| {
@@ -143,13 +172,29 @@ pub fn decode(allocator: std.mem.Allocator, input: []const u8) Error!Decoded {
     if (try reader.fixed(u64) != bytes.len - wire.header_length) return error.InvalidLength;
     var budget: program_record.Budget = .{ .used = bytes.len, .maximum = std.math.maxInt(usize) };
     var context: program_record.Context = .{};
-    const program = try program_record.read(ir.Program, &reader, arena.allocator(), &budget, &context);
+    const program = try program_record.read(
+        ir.Program,
+        &reader,
+        arena.allocator(),
+        &budget,
+        &context,
+    );
     var remaining = budget.maximum - budget.used;
     const imports = try record.readBounded([]const Symbol, &reader, arena.allocator(), &remaining);
     const exports = try record.readBounded([]const Symbol, &reader, arena.allocator(), &remaining);
-    const borrows = try record.readBounded([]const @import("borrow_contract.zig").Summary, &reader, arena.allocator(), &remaining);
+    const borrows = try record.readBounded(
+        []const @import("borrow_contract.zig").Summary,
+        &reader,
+        arena.allocator(),
+        &remaining,
+    );
     try reader.finish();
-    const object: Object = .{ .program = program, .imports = imports, .exports = exports, .borrows = borrows };
+    const object: Object = .{
+        .program = program,
+        .imports = imports,
+        .exports = exports,
+        .borrows = borrows,
+    };
     try validate(allocator, object);
     var comparison: wire.Writer = .{ .expected = bytes[wire.header_length..] };
     try write(object, &comparison);

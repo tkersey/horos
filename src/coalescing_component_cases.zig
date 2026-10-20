@@ -4,7 +4,15 @@ const std = @import("std");
 const source = @import("source.zig");
 const data = @import("horos_data");
 const Id = data.program.Id;
-pub const Kind = enum { leaf, client, region_leaf, resource_leaf, effect_leaf, effect_import_leaf, effect_client };
+pub const Kind = enum {
+    leaf,
+    client,
+    region_leaf,
+    resource_leaf,
+    effect_leaf,
+    effect_import_leaf,
+    effect_client,
+};
 
 pub fn emit(a: std.mem.Allocator, kind: Kind) ![]u8 {
     var builder = source.Builder.init(a);
@@ -15,7 +23,13 @@ pub fn emit(a: std.mem.Allocator, kind: Kind) ![]u8 {
         .leaf => try leaf(a, &builder, integer, unit),
         .client, .effect_client => try client(a, &builder, integer, unit, kind == .effect_client),
         .region_leaf, .resource_leaf => try nominalLeaf(a, &builder, integer, unit, kind),
-        .effect_leaf, .effect_import_leaf => try effectLeaf(a, &builder, integer, unit, kind == .effect_import_leaf),
+        .effect_leaf, .effect_import_leaf => try effectLeaf(
+            a,
+            &builder,
+            integer,
+            unit,
+            kind == .effect_import_leaf,
+        ),
     };
     defer compiled.deinit();
     const bytes = try a.alloc(u8, try data.component.encodedLength(compiled.object));
@@ -28,11 +42,20 @@ fn addTen(b: *source.Builder, integer: Id, value: Id) !Id {
     return b.value(.{ .schema = integer, .expression = .{ .primitive = .{
         .opcode = .integer_add,
         .operands = &.{ value, try b.constant(u64, 10) },
-        .failures = &.{.{ .kind = .arithmetic_overflow, .value = try b.failureLiteral(try b.constant(void, {})) }},
+        .failures = &.{.{
+            .kind = .arithmetic_overflow,
+            .value = try b.failureLiteral(try b.constant(void, {})),
+        }},
     } } });
 }
 
-fn nominalLeaf(a: std.mem.Allocator, b: *source.Builder, integer: Id, unit: Id, kind: Kind) !source.component.Compiled {
+fn nominalLeaf(
+    a: std.mem.Allocator,
+    b: *source.Builder,
+    integer: Id,
+    unit: Id,
+    kind: Kind,
+) !source.component.Compiled {
     const main = try b.declare(&.{integer}, integer, &.{}, &.{});
     const argument = try b.reference(b.parameter(main, 0));
     if (kind == .resource_leaf) {
@@ -44,14 +67,20 @@ fn nominalLeaf(a: std.mem.Allocator, b: *source.Builder, integer: Id, unit: Id, 
     } else {
         const region = b.region();
         const token = try b.schema(.{ .internal = .{ .region = region } });
-        const cell_type = try b.schema(.{ .internal = .{ .cell = .{ .element = integer, .region = region } } });
+        const cell_type = try b.schema(.{ .internal = .{ .cell = .{
+            .element = integer,
+            .region = region,
+        } } });
         const inside = try b.declare(&.{token}, integer, &.{}, &.{region});
         const cell = try b.variable(cell_type);
         const allocated = try b.primitive(cell_type, .cell_new, &.{
             try b.reference(b.parameter(inside, 0)), argument,
         }, 0);
         const read = try b.primitive(integer, .cell_get, &.{try b.reference(cell)}, 0);
-        try b.define(inside, try b.bind(cell, try b.pure(allocated), try b.pure(try addTen(b, integer, read))));
+        try b.define(
+            inside,
+            try b.bind(cell, try b.pure(allocated), try b.pure(try addTen(b, integer, read))),
+        );
         const shape = try b.schema(.{ .internal = .{ .computation = .{
             .parameters = &.{token},
             .result = integer,
@@ -69,7 +98,12 @@ fn nominalLeaf(a: std.mem.Allocator, b: *source.Builder, integer: Id, unit: Id, 
     }, .{});
 }
 
-fn leaf(a: std.mem.Allocator, b: *source.Builder, integer: Id, unit: Id) !source.component.Compiled {
+fn leaf(
+    a: std.mem.Allocator,
+    b: *source.Builder,
+    integer: Id,
+    unit: Id,
+) !source.component.Compiled {
     const main = try b.declare(&.{integer}, integer, &.{}, &.{});
     const helper = try b.declare(&.{integer}, integer, &.{}, &.{});
     const shape = try b.schema(.{ .internal = .{ .computation = .{
@@ -81,7 +115,10 @@ fn leaf(a: std.mem.Allocator, b: *source.Builder, integer: Id, unit: Id) !source
     const failure = try b.failureLiteral(try b.constant(void, {}));
     const sum = try b.value(.{ .schema = integer, .expression = .{ .primitive = .{
         .opcode = .integer_add,
-        .operands = &.{ try b.reference(b.parameter(helper, 0)), try b.reference(b.parameter(main, 0)) },
+        .operands = &.{
+            try b.reference(b.parameter(helper, 0)),
+            try b.reference(b.parameter(main, 0)),
+        },
         .failures = &.{.{ .kind = .arithmetic_overflow, .value = failure }},
     } } });
     try b.define(helper, try b.pure(sum));
@@ -96,22 +133,51 @@ fn leaf(a: std.mem.Allocator, b: *source.Builder, integer: Id, unit: Id) !source
     }, .{});
 }
 
-fn effectLeaf(a: std.mem.Allocator, b: *source.Builder, integer: Id, unit: Id, imported: bool) !source.component.Compiled {
-    const effect = try b.effect(.{ .identity = "coalescing/component-read", .payload = integer, .result = integer });
+fn effectLeaf(
+    a: std.mem.Allocator,
+    b: *source.Builder,
+    integer: Id,
+    unit: Id,
+    imported: bool,
+) !source.component.Compiled {
+    const effect = try b.effect(.{
+        .identity = "coalescing/component-read",
+        .payload = integer,
+        .result = integer,
+    });
     const main = try b.declare(&.{integer}, integer, &.{effect}, &.{});
-    try b.define(main, try b.term(.{ .perform = .{ .effect = effect, .payload = try b.reference(b.parameter(main, 0)) } }));
-    const read: data.component.Symbol = .{ .name = "read", .reference = .{ .kind = .effect, .id = effect } };
+    try b.define(
+        main,
+        try b.term(.{ .perform = .{
+            .effect = effect,
+            .payload = try b.reference(b.parameter(main, 0)),
+        } }),
+    );
+    const read: data.component.Symbol = .{
+        .name = "read",
+        .reference = .{ .kind = .effect, .id = effect },
+    };
     return source.component.compileObserved(a, b.module(main, unit), .{
         .imports = if (imported) &.{read} else &.{},
         .exports = &.{ .{ .name = "main", .reference = .{ .kind = .function, .id = main } }, read },
     }, .{});
 }
 
-fn client(a: std.mem.Allocator, b: *source.Builder, integer: Id, unit: Id, external: bool) !source.component.Compiled {
+fn client(
+    a: std.mem.Allocator,
+    b: *source.Builder,
+    integer: Id,
+    unit: Id,
+    external: bool,
+) !source.component.Compiled {
     const pair = try b.schema(.{ .product = &.{ integer, integer } });
     var effects: [2]Id = undefined;
     if (external) for (&effects) |*effect| {
-        effect.* = try b.effect(.{ .identity = "coalescing/component-read", .payload = integer, .result = integer });
+        effect.* = try b.effect(.{
+            .identity = "coalescing/component-read",
+            .payload = integer,
+            .result = integer,
+        });
     };
     const first = try b.declare(&.{integer}, integer, if (external) effects[0..1] else &.{}, &.{});
     const second = try b.declare(&.{integer}, integer, if (external) effects[1..2] else &.{}, &.{});
@@ -126,8 +192,16 @@ fn client(a: std.mem.Allocator, b: *source.Builder, integer: Id, unit: Id, exter
         .function = second,
         .arguments = &.{try b.constant(u64, 7)},
     } });
-    const result = try b.primitive(pair, .product, &.{ try b.reference(left), try b.reference(right) }, 0);
-    try b.define(main, try b.bind(left, call_left, try b.bind(right, call_right, try b.pure(result))));
+    const result = try b.primitive(
+        pair,
+        .product,
+        &.{ try b.reference(left), try b.reference(right) },
+        0,
+    );
+    try b.define(
+        main,
+        try b.bind(left, call_left, try b.bind(right, call_right, try b.pure(result))),
+    );
     var imports: [4]data.component.Symbol = undefined;
     imports[0] = .{ .name = "a", .reference = .{ .kind = .function, .id = first } };
     imports[1] = .{ .name = "b", .reference = .{ .kind = .function, .id = second } };

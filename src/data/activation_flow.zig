@@ -62,11 +62,20 @@ pub fn analyzeInputDemand(allocator: std.mem.Allocator, image: ir.Program) Error
     return analyzeComponentDemand(allocator, image, &.{}, true);
 }
 
-pub fn analyzeComponent(allocator: std.mem.Allocator, image: ir.Program, imports: []const p.Id) Error!Facts {
+pub fn analyzeComponent(
+    allocator: std.mem.Allocator,
+    image: ir.Program,
+    imports: []const p.Id,
+) Error!Facts {
     return analyzeComponentDemand(allocator, image, imports, false);
 }
 
-fn analyzeComponentDemand(allocator: std.mem.Allocator, image: ir.Program, imports: []const p.Id, comptime require_edge_sources: bool) Error!Facts {
+fn analyzeComponentDemand(
+    allocator: std.mem.Allocator,
+    image: ir.Program,
+    imports: []const p.Id,
+    comptime require_edge_sources: bool,
+) Error!Facts {
     try structure.validateComponent(allocator, image, imports);
     const arena = try allocator.create(std.heap.ArenaAllocator);
     arena.* = std.heap.ArenaAllocator.init(allocator);
@@ -176,7 +185,10 @@ const Analysis = struct {
         };
         if (!checking) {
             if (self.positions[@intCast(id)].len == 0)
-                self.positions[@intCast(id)] = try self.retained.alloc(State, code.instructions.len + 1);
+                self.positions[@intCast(id)] = try self.retained.alloc(
+                    State,
+                    code.instructions.len + 1,
+                );
             self.positions[@intCast(id)][0] = flow.state;
         }
         for (code.instructions, 0..) |instruction, position| {
@@ -241,7 +253,10 @@ const Flow = struct {
     fn read(self: *Flow, slot: p.Id, consuming: bool) Error!void {
         const pool = self.analysis.pool;
         if (self.checking and (!pool.contains(self.state.initialized, slot) or
-            (self.state.available != self.state.initialized and !pool.contains(self.state.available, slot)))) return error.UnavailableSlot;
+            (self.state.available != self.state.initialized and !pool.contains(
+                self.state.available,
+                slot,
+            )))) return error.UnavailableSlot;
         if (consuming and !self.analysis.uses.copy[@intCast(self.layout[@intCast(slot)])]) {
             const available = self.state.available;
             self.state.available = try pool.remove(available, slot);
@@ -384,7 +399,11 @@ const Liveness = struct {
                 var successors: Successors = .{ .image = image, .code = code };
                 while (successors.next()) |next| {
                     const child: usize = @intCast(next.edge.block);
-                    counts[child] = std.math.add(usize, counts[child], 1) catch return error.OutOfMemory;
+                    counts[child] = std.math.add(
+                        usize,
+                        counts[child],
+                        1,
+                    ) catch return error.OutOfMemory;
                     edge_count = std.math.add(usize, edge_count, 1) catch return error.OutOfMemory;
                 }
             }
@@ -424,7 +443,11 @@ const Liveness = struct {
             const root = try result.block(id, require_edge_sources);
             if (root == result.entries[@intCast(id)]) continue;
             result.entries[@intCast(id)] = root;
-            const parents = if (comptime compact_parents) result.parents[@intCast(id)] else result.parents[@intCast(id)].items;
+            const parents = if (comptime compact_parents) result.parents[
+                @intCast(id)
+            ] else result.parents[
+                @intCast(id)
+            ].items;
             for (parents) |parent| try result.enqueue(parent);
         }
         return result;
@@ -447,9 +470,15 @@ const Liveness = struct {
         var before = after;
         // Invert the simultaneous assignment: clear all destinations before
         // adding any required predecessor sources, including cyclic swaps.
-        for (next.assignments) |assignment| before = try pool.remove(before, assignment.destination);
+        for (next.assignments) |assignment| before = try pool.remove(
+            before,
+            assignment.destination,
+        );
         for (next.assignments) |assignment| {
-            if (assignment.source == .slot and (require_edge_sources or pool.contains(after, assignment.destination)))
+            if (assignment.source == .slot and (require_edge_sources or pool.contains(
+                after,
+                assignment.destination,
+            )))
                 before = try pool.insert(before, assignment.source.slot);
         }
         return before;
@@ -470,7 +499,10 @@ const Liveness = struct {
         var position = code.instructions.len;
         live.root = try self.pinOwners(id, position, live.root);
         if (self.positions[@intCast(id)].len == 0)
-            self.positions[@intCast(id)] = try self.analysis.retained.alloc(sets.Root, position + 1);
+            self.positions[@intCast(id)] = try self.analysis.retained.alloc(
+                sets.Root,
+                position + 1,
+            );
         self.positions[@intCast(id)][position] = live.root;
         while (position != 0) {
             position -= 1;

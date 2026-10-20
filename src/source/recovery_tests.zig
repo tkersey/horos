@@ -26,9 +26,20 @@ test "source recovery bounds target domains before allocation" {
         var admitted = try data.activation_ownership.analyze(a, forged.program);
         admitted.deinit();
         bounded.reset();
-        try std.testing.expectError(error.InvalidCorrespondence, source.recovery.parameters(bounded.allocator(), module, forged.program, forged.recovery_evidence.?));
+        try std.testing.expectError(
+            error.InvalidCorrespondence,
+            source.recovery.parameters(
+                bounded.allocator(),
+                module,
+                forged.program,
+                forged.recovery_evidence.?,
+            ),
+        );
         bounded.reset();
-        try std.testing.expectError(error.InvalidCorrespondence, source.recovery.validate(bounded.allocator(), module, &forged));
+        try std.testing.expectError(
+            error.InvalidCorrespondence,
+            source.recovery.validate(bounded.allocator(), module, &forged),
+        );
     }
 }
 
@@ -80,25 +91,74 @@ test "source recovery retains binding aliases through checked function coalescin
     try b.define(second, try b.pure(try b.reference(b.parameter(second, 0))));
     const left = try b.variable(word);
     const right = try b.variable(word);
-    const result = try b.pure(try b.primitive(pair, .product, &.{ try b.reference(left), try b.reference(right) }, 0));
-    try b.define(entry, try b.bind(left, try b.term(.{ .call = .{ .function = first, .arguments = &.{try b.reference(b.parameter(entry, 0))} } }), try b.bind(right, try b.term(.{ .call = .{ .function = second, .arguments = &.{try b.reference(b.parameter(entry, 1))} } }), result)));
+    const result = try b.pure(try b.primitive(
+        pair,
+        .product,
+        &.{ try b.reference(left), try b.reference(right) },
+        0,
+    ));
+    try b.define(
+        entry,
+        try b.bind(
+            left,
+            try b.term(.{ .call = .{
+                .function = first,
+                .arguments = &.{try b.reference(b.parameter(entry, 0))},
+            } }),
+            try b.bind(
+                right,
+                try b.term(.{ .call = .{
+                    .function = second,
+                    .arguments = &.{try b.reference(b.parameter(entry, 1))},
+                } }),
+                result,
+            ),
+        ),
+    );
     var compiled = try source.lowerObserved(a, b.module(entry, unit), .{ .recovery = true });
     defer compiled.deinit();
     try source.recovery.validate(a, b.module(entry, unit), &compiled);
     var first_location: ?source.RecoveryBinding = null;
     var second_location: ?source.RecoveryBinding = null;
     for (compiled.recovery) |binding| {
-        if (binding.source_function == first and binding.variable == b.parameter(first, 0)) first_location = binding;
-        if (binding.source_function == second and binding.variable == b.parameter(second, 0)) second_location = binding;
-        try std.testing.expectEqual(compiled.program.functions[@intCast(binding.function)].layout.slots[@intCast(binding.slot)], binding.schema);
+        if (binding.source_function == first and binding.variable == b.parameter(
+            first,
+            0,
+        )) first_location = binding;
+        if (binding.source_function == second and binding.variable == b.parameter(
+            second,
+            0,
+        )) second_location = binding;
+        try std.testing.expectEqual(
+            compiled.program.functions[
+                @intCast(binding.function)
+            ].layout.slots[
+                @intCast(binding.slot)
+            ],
+            binding.schema,
+        );
     }
     try std.testing.expect(first_location != null and second_location != null);
     try std.testing.expectEqual(first_location.?.function, second_location.?.function);
     try std.testing.expectEqual(first_location.?.slot, second_location.?.slot);
-    try std.testing.expectEqual(compiled.program.functions[@intCast(first_location.?.function)].inputs[0], first_location.?.slot);
+    try std.testing.expectEqual(
+        compiled.program.functions[@intCast(first_location.?.function)].inputs[0],
+        first_location.?.slot,
+    );
     try std.testing.expectEqual(@as(usize, 2), compiled.program.functions.len);
-    try std.testing.expectError(error.InvalidCorrespondence, source.lowerObserved(a, b.module(entry, unit), .{ .recovery = true, .contract = .semantic }));
-    var bounded = try source.lowerObserved(a, b.module(entry, unit), .{ .recovery = true, .coalescing = .{ .work_limit = 0 } });
+    try std.testing.expectError(
+        error.InvalidCorrespondence,
+        source.lowerObserved(
+            a,
+            b.module(entry, unit),
+            .{ .recovery = true, .contract = .semantic },
+        ),
+    );
+    var bounded = try source.lowerObserved(
+        a,
+        b.module(entry, unit),
+        .{ .recovery = true, .coalescing = .{ .work_limit = 0 } },
+    );
     defer bounded.deinit();
     for (bounded.recovery) |binding| {
         const target = bounded.program.functions[@intCast(binding.function)];
@@ -117,10 +177,16 @@ test "source recovery retains binding aliases through checked function coalescin
     try std.testing.expectEqual(@as(usize, 2), target.inputs.len);
     parameters[0].slot = target.inputs[1];
     try std.testing.expectEqual(target.layout.slots[@intCast(parameters[0].slot)], old.schema);
-    try std.testing.expectError(error.InvalidCorrespondence, source.recovery.validate(a, b.module(entry, unit), &forged));
+    try std.testing.expectError(
+        error.InvalidCorrespondence,
+        source.recovery.validate(a, b.module(entry, unit), &forged),
+    );
     parameters[0] = old;
     forged.parameters = parameters[1..];
-    try std.testing.expectError(error.InvalidCorrespondence, source.recovery.validate(a, b.module(entry, unit), &forged));
+    try std.testing.expectError(
+        error.InvalidCorrespondence,
+        source.recovery.validate(a, b.module(entry, unit), &forged),
+    );
     forged.parameters = parameters;
 
     // Altering actual final input records remains well typed. Checking merely
@@ -132,7 +198,10 @@ test "source recovery retains binding aliases through checked function coalescin
     forged.program.functions = functions;
     var admitted = try data.activation_ownership.analyze(a, forged.program);
     admitted.deinit();
-    try std.testing.expectError(error.InvalidCorrespondence, source.recovery.validate(a, b.module(entry, unit), &forged));
+    try std.testing.expectError(
+        error.InvalidCorrespondence,
+        source.recovery.validate(a, b.module(entry, unit), &forged),
+    );
 }
 
 test "source recovery derives formal parameters after captured inputs" {
@@ -169,7 +238,15 @@ test "source recovery rejects a same-typed source parameter permutation" {
     const word = try b.scalar(u64);
     const pair = try b.schema(.{ .product = &.{ word, word } });
     const f = try b.declare(&.{ word, word }, pair, &.{}, &.{});
-    try b.define(f, try b.pure(try b.primitive(pair, .product, &.{ try b.reference(b.parameter(f, 0)), try b.reference(b.parameter(f, 1)) }, 0)));
+    try b.define(
+        f,
+        try b.pure(try b.primitive(
+            pair,
+            .product,
+            &.{ try b.reference(b.parameter(f, 0)), try b.reference(b.parameter(f, 1)) },
+            0,
+        )),
+    );
     const module = b.module(f, unit);
     var compiled = try source.lowerObserved(a, module, .{ .recovery = true });
     defer compiled.deinit();
@@ -187,5 +264,8 @@ test "source recovery rejects a same-typed source parameter permutation" {
     for (parameters, reversed) |*binding, variable| binding.variable = variable;
     var forged = compiled;
     forged.parameters = parameters;
-    try std.testing.expectError(error.InvalidCorrespondence, source.recovery.validate(a, substituted, &forged));
+    try std.testing.expectError(
+        error.InvalidCorrespondence,
+        source.recovery.validate(a, substituted, &forged),
+    );
 }

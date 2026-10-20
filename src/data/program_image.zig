@@ -73,7 +73,11 @@ pub fn decode(allocator: std.mem.Allocator, input: []const u8) Error!Decoded {
     return decodeLimited(allocator, input, .{});
 }
 
-pub fn decodeLimited(allocator: std.mem.Allocator, input: []const u8, limits: Limits) Error!Decoded {
+pub fn decodeLimited(
+    allocator: std.mem.Allocator,
+    input: []const u8,
+    limits: Limits,
+) Error!Decoded {
     var checked = try decodeChecked(allocator, input, limits);
     checked.analysis.deinit();
     return checked.decoded;
@@ -102,7 +106,14 @@ fn decodeChecked(allocator: std.mem.Allocator, input: []const u8, limits: Limits
     if (try reader.fixed(u64) != owned.len - wire.header_length) return error.InvalidLength;
     var context: body_record.Context = .{};
     var budget: body_record.Budget = .{ .used = owned.len, .maximum = limits.max_decoded_bytes };
-    const program = try body_record.readProgram(&reader, arena.allocator(), allocator, &block_catalog, &budget, &context);
+    const program = try body_record.readProgram(
+        &reader,
+        arena.allocator(),
+        allocator,
+        &block_catalog,
+        &budget,
+        &context,
+    );
     try reader.finish();
     var checked = try admission.analyze(allocator, program);
     errdefer checked.deinit();
@@ -113,7 +124,17 @@ fn decodeChecked(allocator: std.mem.Allocator, input: []const u8, limits: Limits
     var canonical: wire.Writer = .{ .expected = owned, .hasher = &hash };
     try write(program, owned.len, &canonical);
     if (canonical.position != owned.len) return error.NonCanonical;
-    return .{ .decoded = .{ .arena = arena, .block_catalog = block_catalog, .program = program, .bytes = owned, .identity = hash.finalResult(), .decoded_bytes = budget.used }, .analysis = checked };
+    return .{
+        .decoded = .{
+            .arena = arena,
+            .block_catalog = block_catalog,
+            .program = program,
+            .bytes = owned,
+            .identity = hash.finalResult(),
+            .decoded_bytes = budget.used,
+        },
+        .analysis = checked,
+    };
 }
 
 pub const Analysis = struct {
@@ -144,11 +165,21 @@ pub const Admitted = opaque {
         var checked = try decodeChecked(allocator, input, .{});
         errdefer checked.deinit();
         const derived = checked.analysis.arena.allocator();
-        const schemas = try @import("admission.zig").schemas(derived, checked.decoded.program.schemas);
+        const schemas = try @import("admission.zig").schemas(
+            derived,
+            checked.decoded.program.schemas,
+        );
         const uses = try @import("traits.zig").derive(derived, checked.decoded.program.schemas);
         const effects = try @import("effect_scope.zig").derive(derived, checked.decoded.program);
         const owner = try allocator.create(AdmittedStorage);
-        owner.* = .{ .allocator = allocator, .decoded = checked.decoded, .analysis = checked.analysis, .schemas = schemas, .uses = uses, .effects = effects };
+        owner.* = .{
+            .allocator = allocator,
+            .decoded = checked.decoded,
+            .analysis = checked.analysis,
+            .schemas = schemas,
+            .uses = uses,
+            .effects = effects,
+        };
         return @ptrCast(owner);
     }
     pub fn deinit(self: *Admitted) void {
@@ -176,7 +207,9 @@ pub const Admitted = opaque {
     pub fn storageBytes(self: *const Admitted) usize {
         const owner = self.storage();
         const catalogs = owner.decoded.block_catalog.len * @sizeOf(ir.Block);
-        return @sizeOf(AdmittedStorage) + owner.decoded.arena.queryCapacity() + catalogs + owner.analysis.arena.queryCapacity() + owner.analysis.pool.storageBytes();
+        return @sizeOf(
+            AdmittedStorage,
+        ) + owner.decoded.arena.queryCapacity() + catalogs + owner.analysis.arena.queryCapacity() + owner.analysis.pool.storageBytes();
     }
     /// Per-consumer mutable set nodes; all original maps remain shared read-only.
     /// This analysis borrows the admitted owner for its entire lifetime.
@@ -185,6 +218,9 @@ pub const Admitted = opaque {
         const pool = try allocator.create(sets.Pool);
         errdefer allocator.destroy(pool);
         pool.* = sets.Pool.overlay(allocator, try original.pool.readOnly());
-        return .{ .allocator = allocator, .facts = .{ .pool = pool, .positions = original.positions, .live = original.live } };
+        return .{
+            .allocator = allocator,
+            .facts = .{ .pool = pool, .positions = original.positions, .live = original.live },
+        };
     }
 };

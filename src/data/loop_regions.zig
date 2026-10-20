@@ -13,7 +13,10 @@ pub const Budget = struct {
     pub fn record(self: *@This(), comptime T: type, value: T) Error!void {
         try self.take(1);
         switch (@typeInfo(T)) {
-            .@"struct" => |info| inline for (info.field_names, info.field_types) |field_name, FieldType| try self.record(FieldType, @field(value, field_name)),
+            .@"struct" => |info| inline for (
+                info.field_names,
+                info.field_types,
+            ) |field_name, FieldType| try self.record(FieldType, @field(value, field_name)),
             .@"union" => switch (value) {
                 inline else => |v| try self.record(@TypeOf(v), v),
             },
@@ -26,7 +29,11 @@ pub const Budget = struct {
     }
 };
 pub fn supported(term: ir.Terminator) bool {
-    return term == .jump or term == .branch or term == .switch_variant or term == .return_value or term == .fail;
+    return term == .jump or
+        term == .branch or
+        term == .switch_variant or
+        term == .return_value or
+        term == .fail;
 }
 pub fn edge(term: ir.Terminator, index: usize) ?ir.Edge {
     return switch (term) {
@@ -45,7 +52,12 @@ pub const Graph = struct {
     predecessors: []std.ArrayList(usize),
     reachable: []bool,
     entry: usize,
-    pub fn init(a: std.mem.Allocator, program: ir.Program, function: usize, budget: *Budget) Error!?Graph {
+    pub fn init(
+        a: std.mem.Allocator,
+        program: ir.Program,
+        function: usize,
+        budget: *Budget,
+    ) Error!?Graph {
         var count: usize = 0;
         for (program.blocks) |block| {
             try budget.take(1);
@@ -72,7 +84,16 @@ pub const Graph = struct {
                 try predecessors[local[@intCast(e.block)]].append(a, from);
             }
         }
-        var result: Graph = .{ .allocator = a, .program = program, .function = function, .blocks = blocks, .local = local, .predecessors = predecessors, .reachable = undefined, .entry = local[@intCast(program.functions[function].entry)] };
+        var result: Graph = .{
+            .allocator = a,
+            .program = program,
+            .function = function,
+            .blocks = blocks,
+            .local = local,
+            .predecessors = predecessors,
+            .reachable = undefined,
+            .entry = local[@intCast(program.functions[function].entry)],
+        };
         result.reachable = try result.reachAvoid(null, budget);
         return result;
     }
@@ -87,7 +108,10 @@ pub const Graph = struct {
         seen[self.entry] = true;
         while (pending.pop()) |node| {
             var ordinal: usize = 0;
-            while (edge(self.program.blocks[self.blocks[node]].terminator, ordinal)) |e| : (ordinal += 1) {
+            while (edge(
+                self.program.blocks[self.blocks[node]].terminator,
+                ordinal,
+            )) |e| : (ordinal += 1) {
                 try budget.take(1);
                 const target = self.local[@intCast(e.block)];
                 if (cut == target or seen[target]) continue;
@@ -114,7 +138,10 @@ pub const Graph = struct {
         while (pending.pop()) |node| {
             visited += 1;
             var ordinal: usize = 0;
-            while (edge(self.program.blocks[self.blocks[node]].terminator, ordinal)) |e| : (ordinal += 1) {
+            while (edge(
+                self.program.blocks[self.blocks[node]].terminator,
+                ordinal,
+            )) |e| : (ordinal += 1) {
                 try budget.take(1);
                 const target = self.local[@intCast(e.block)];
                 indegree[target] -= 1;
@@ -128,9 +155,13 @@ pub const Graph = struct {
         const size = std.math.mul(usize, n, n) catch return error.LoopWorkLimit;
         try budget.take(size);
         const dom = try self.allocator.alloc(bool, size);
-        for (0..n) |node| for (0..n) |ancestor| {
-            dom[node * n + ancestor] = self.reachable[node] and self.reachable[ancestor] and (node != self.entry or ancestor == node);
-        };
+        for (0..n) |node|
+            for (0..n) |ancestor| {
+                dom[node * n + ancestor] = self.reachable[node] and
+                    self.reachable[ancestor] and
+                    (node != self.entry or
+                        ancestor == node);
+            };
         var changed = true;
         while (changed) {
             changed = false;
@@ -157,7 +188,12 @@ pub const Graph = struct {
     }
     /// Build a natural loop from all backedges dominated by its header.
     /// Discovery passes matrix membership; validation passes a header-cut proof.
-    pub fn region(self: Graph, header: usize, dominated: []const bool, budget: *Budget) Error!?[]bool {
+    pub fn region(
+        self: Graph,
+        header: usize,
+        dominated: []const bool,
+        budget: *Budget,
+    ) Error!?[]bool {
         const members = try self.allocator.alloc(bool, self.blocks.len);
         @memset(members, false);
         members[header] = true;
@@ -176,10 +212,16 @@ pub const Graph = struct {
             if (members[node]) continue;
             if (!dominated[node]) return null;
             members[node] = true;
-            for (self.predecessors[node].items) |pred| if (self.reachable[pred]) try pending.append(self.allocator, pred);
+            for (self.predecessors[node].items) |pred| if (self.reachable[pred]) try pending.append(
+                self.allocator,
+                pred,
+            );
         }
         // The region has no sanctioned entry other than its header.
-        for (members, 0..) |inside, node| if (inside and node != header) for (self.predecessors[node].items) |pred| {
+        for (
+            members,
+            0..,
+        ) |inside, node| if (inside and node != header) for (self.predecessors[node].items) |pred| {
             try budget.take(1);
             if (self.reachable[pred] and !members[pred]) return null;
         };

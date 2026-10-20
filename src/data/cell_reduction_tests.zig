@@ -6,15 +6,47 @@ const dead = @import("dead_computation.zig");
 const a = std.testing.allocator;
 const private_cell: ir.Program = .{
     .roots = .{ .entry = 0, .result = 0, .failure = 1 },
-    .schemas = &.{ .u64, .unit, .{ .internal = .{ .region = 0 } }, .{ .internal = .{ .cell = .{ .element = 0, .region = 0 } } }, .{ .internal = .{ .computation = .{ .parameters = &.{ 2, 0, 0 }, .result = 0, .use = .reusable, .regions = &.{0} } } } },
+    .schemas = &.{
+        .u64,                                                         .unit, .{ .internal = .{ .region = 0 } },
+        .{ .internal = .{ .cell = .{ .element = 0, .region = 0 } } },
+        .{ .internal = .{ .computation = .{
+            .parameters = &.{ 2, 0, 0 },
+            .result = 0,
+            .use = .reusable,
+            .regions = &.{0},
+        } } },
+    },
     .constants = &.{},
     .effects = &.{},
     .functions = &.{
-        .{ .entry = 0, .inputs = &.{ 0, 1 }, .layout = .{ .slots = &.{ 0, 0, 4, 0 } }, .result = 0 },
-        .{ .entry = 2, .inputs = &.{ 0, 1, 2 }, .layout = .{ .slots = &.{ 2, 0, 0, 3, 0, 1, 0 } }, .result = 0, .regions = &.{0} },
+        .{
+            .entry = 0,
+            .inputs = &.{ 0, 1 },
+            .layout = .{ .slots = &.{ 0, 0, 4, 0 } },
+            .result = 0,
+        },
+        .{
+            .entry = 2,
+            .inputs = &.{ 0, 1, 2 },
+            .layout = .{ .slots = &.{ 2, 0, 0, 3, 0, 1, 0 } },
+            .result = 0,
+            .regions = &.{0},
+        },
     },
     .blocks = &.{
-        .{ .function = 0, .instructions = &.{.{ .destination = 2, .opcode = .computation, .immediate = 0 }}, .terminator = .{ .with_region = .{ .region = 0, .body = 2, .arguments = &.{ 0, 1 }, .next = .{ .block = 1, .assignments = &.{.{ .destination = 3, .source = .returned }} } } } },
+        .{
+            .function = 0,
+            .instructions = &.{.{ .destination = 2, .opcode = .computation, .immediate = 0 }},
+            .terminator = .{ .with_region = .{
+                .region = 0,
+                .body = 2,
+                .arguments = &.{ 0, 1 },
+                .next = .{
+                    .block = 1,
+                    .assignments = &.{.{ .destination = 3, .source = .returned }},
+                },
+            } },
+        },
         .{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 3 } },
         .{ .function = 1, .instructions = &.{
             .{ .destination = 3, .opcode = .cell_new, .operands = &.{ 0, 1 } },
@@ -37,15 +69,28 @@ test "private cell reads and writes become explicit scalar values" {
     var result = try dead.run(a, scalar.program, null, .{});
     defer result.deinit();
     for (result.program.blocks) |block| for (block.instructions) |op| {
-        try std.testing.expect(op.opcode != .cell_new and op.opcode != .cell_get and op.opcode != .cell_set);
+        try std.testing.expect(
+            op.opcode != .cell_new and op.opcode != .cell_get and op.opcode != .cell_set,
+        );
     };
-    std.debug.print("private cell scalar replacement: {d} -> {d} bytes\n", .{ try @import("program_image.zig").encodedLength(private_cell), try @import("program_image.zig").encodedLength(result.program) });
+    std.debug.print(
+        "private cell scalar replacement: {d} -> {d} bytes\n",
+        .{
+            try @import("program_image.zig").encodedLength(private_cell),
+            try @import("program_image.zig").encodedLength(result.program),
+        },
+    );
 }
 
 test "two private stores before any observation leave only their final scalar value" {
     var program = private_cell;
     var blocks = private_cell.blocks[0..3].*;
-    blocks[2].instructions = &.{ private_cell.blocks[2].instructions[0], .{ .destination = 5, .opcode = .cell_set, .operands = &.{ 3, 1 } }, private_cell.blocks[2].instructions[2], private_cell.blocks[2].instructions[3] };
+    blocks[2].instructions = &.{
+        private_cell.blocks[2].instructions[0],
+        .{ .destination = 5, .opcode = .cell_set, .operands = &.{ 3, 1 } },
+        private_cell.blocks[2].instructions[2],
+        private_cell.blocks[2].instructions[3],
+    };
     program.blocks = &blocks;
     var stats: reduce.Statistics = .{};
     var scalar = try reduce.run(a, program, &stats, .{});
@@ -79,17 +124,33 @@ test "independent cell checker rejects a wrong same-type stored value" {
     const witnesses = &.{reduce.Witness{ .block = 2, .construction = 0 }};
     try reduce.validate(a, private_cell, candidate, witnesses);
     instructions[2].operands = &.{1};
-    try std.testing.expectError(error.InvalidCellReduction, reduce.validate(a, private_cell, candidate, witnesses));
+    try std.testing.expectError(
+        error.InvalidCellReduction,
+        reduce.validate(a, private_cell, candidate, witnesses),
+    );
 }
 
 test "aliasing the cell into another value retains its representation" {
     var program = private_cell;
-    program.schemas = &.{ private_cell.schemas[0], private_cell.schemas[1], private_cell.schemas[2], private_cell.schemas[3], private_cell.schemas[4], .{ .product = &.{3} } };
+    program.schemas = &.{
+        private_cell.schemas[0],
+        private_cell.schemas[1],
+        private_cell.schemas[2],
+        private_cell.schemas[3],
+        private_cell.schemas[4],
+        .{ .product = &.{3} },
+    };
     var functions = private_cell.functions[0..2].*;
     functions[1].layout.slots = &.{ 2, 0, 0, 3, 0, 1, 0, 5 };
     program.functions = &functions;
     var blocks = private_cell.blocks[0..3].*;
-    blocks[2].instructions = &.{ private_cell.blocks[2].instructions[0], .{ .destination = 7, .opcode = .product, .operands = &.{3} }, private_cell.blocks[2].instructions[1], private_cell.blocks[2].instructions[2], private_cell.blocks[2].instructions[3] };
+    blocks[2].instructions = &.{
+        private_cell.blocks[2].instructions[0],
+        .{ .destination = 7, .opcode = .product, .operands = &.{3} },
+        private_cell.blocks[2].instructions[1],
+        private_cell.blocks[2].instructions[2],
+        private_cell.blocks[2].instructions[3],
+    };
     program.blocks = &blocks;
     var stats: reduce.Statistics = .{};
     var result = try reduce.run(a, program, &stats, .{});
@@ -101,8 +162,17 @@ test "aliasing the cell into another value retains its representation" {
 test "suspension across the cell lifetime retains checkpoint-visible storage" {
     var program = private_cell;
     program.blocks = &.{
-        private_cell.blocks[0],                                                                                                           private_cell.blocks[1],
-        .{ .function = 1, .instructions = private_cell.blocks[2].instructions[0..1], .terminator = .{ .yield_value = .{ .block = 3 } } }, .{ .function = 1, .instructions = private_cell.blocks[2].instructions[1..], .terminator = private_cell.blocks[2].terminator },
+        private_cell.blocks[0], private_cell.blocks[1],
+        .{
+            .function = 1,
+            .instructions = private_cell.blocks[2].instructions[0..1],
+            .terminator = .{ .yield_value = .{ .block = 3 } },
+        },
+        .{
+            .function = 1,
+            .instructions = private_cell.blocks[2].instructions[1..],
+            .terminator = private_cell.blocks[2].terminator,
+        },
     };
     var stats: reduce.Statistics = .{};
     var result = try reduce.run(a, program, &stats, .{});
@@ -122,7 +192,20 @@ test "a fault observation during the cell lifetime retains the original storage"
     var program = private_cell;
     program.constants = &.{.{ .schema = 1, .bytes = &.{} }};
     var blocks = private_cell.blocks[0..3].*;
-    blocks[2].instructions = &.{ private_cell.blocks[2].instructions[0], .{ .destination = 4, .opcode = .integer_div, .operands = &.{ 1, 2 }, .failures = &.{ .{ .kind = .arithmetic_overflow, .value = 0 }, .{ .kind = .division_by_zero, .value = 0 } } }, private_cell.blocks[2].instructions[2], private_cell.blocks[2].instructions[3] };
+    blocks[2].instructions = &.{
+        private_cell.blocks[2].instructions[0],
+        .{
+            .destination = 4,
+            .opcode = .integer_div,
+            .operands = &.{ 1, 2 },
+            .failures = &.{
+                .{ .kind = .arithmetic_overflow, .value = 0 },
+                .{ .kind = .division_by_zero, .value = 0 },
+            },
+        },
+        private_cell.blocks[2].instructions[2],
+        private_cell.blocks[2].instructions[3],
+    };
     program.blocks = &blocks;
     var stats: reduce.Statistics = .{};
     var result = try reduce.run(a, program, &stats, .{});

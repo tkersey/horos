@@ -101,11 +101,23 @@ fn program(b: *source.Builder, mode: Mode) !source.Module {
     const r = try resource(b, unit);
     const author = try typed.Context.init(b);
     const family = try choice.family(author, "test/outer-choice");
-    const c: ChoiceOperation = .{ .effect = try typed.interop.operationId(author, family.effect()), .capability = try typed.interop.schemaId(author, family.capability()) };
+    const c: ChoiceOperation = .{
+        .effect = try typed.interop.operationId(author, family.effect()),
+        .capability = try typed.interop.schemaId(author, family.capability()),
+    };
     const capture_ids = [_]Id{ unit, boolean, sequence, c.capability };
     var captures: [capture_ids.len]*const typed.Schema(typed.Dynamic) = undefined;
     for (capture_ids, &captures) |id, *schema| schema.* = try typed.interop.schema(author, id);
-    const interpreted = try choice.all(author, family, try author.schema(void), .{ .captures = .{ .continuation = &captures }, .residual = &.{}, .borrowed_regions = &.{try typed.interop.region(author, r.loan)} });
+    const interpreted = try choice.all(
+        author,
+        family,
+        try author.schema(void),
+        .{
+            .captures = .{ .continuation = &captures },
+            .residual = &.{},
+            .borrowed_regions = &.{try typed.interop.region(author, r.loan)},
+        },
+    );
     const all = .{ .handler = try typed.interop.handlerId(author, interpreted.handler) };
     const protected_body = try b.declare(&.{r.borrowed}, sequence, &.{}, &.{r.loan});
     try b.define(protected_body, try b.term(.{ .handle = .{
@@ -117,7 +129,12 @@ fn program(b: *source.Builder, mode: Mode) !source.Module {
     const owned = try b.variable(r.owned);
     const body = try closure(b, protected_body, &.{r.borrowed}, sequence, &.{}, &.{r.loan});
     const finalizer = try closure(b, r.finalizer, &.{ r.info, r.owned }, unit, &.{}, &.{});
-    const protected = try b.term(.{ .protect = .{ .resource = try b.reference(owned), .loan_region = r.loan, .body = body, .cleanup = finalizer } });
+    const protected = try b.term(.{ .protect = .{
+        .resource = try b.reference(owned),
+        .loan_region = r.loan,
+        .body = body,
+        .cleanup = finalizer,
+    } });
     const acquired = try b.term(.{ .call = .{ .function = r.acquire, .arguments = &.{} } });
     try b.define(entry, try b.bind(owned, acquired, protected));
     return b.module(entry, unit);

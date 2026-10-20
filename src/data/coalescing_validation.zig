@@ -86,7 +86,12 @@ fn checkCatalogues(check: Check, original: ir.Program, candidate: ir.Program) Er
             .constant => .{ .phase = .constant },
             .effect => .{ .phase = .effect, .effect = id },
             .handler => .{ .phase = .handler, .handler = id },
-            .constructor => .{ .phase = .constructor, .function = record.function, .capture = record.capture, .schema = record.schema },
+            .constructor => .{
+                .phase = .constructor,
+                .function = record.function,
+                .capture = record.capture,
+                .schema = record.schema,
+            },
             else => @compileError("classify new coalescing catalogue diagnostic"),
         };
         try item[2](check, record, @field(candidate, item[1])[try check.id(item[0], id)]);
@@ -467,7 +472,10 @@ const Body = struct {
             else => @compileError("control payload requires explicit classification"),
         };
         comptime fields(@TypeOf(old), names);
-        inline for (@typeInfo(@TypeOf(old)).@"struct".field_names, @typeInfo(@TypeOf(old)).@"struct".field_types) |field_name, FieldType| {
+        inline for (
+            @typeInfo(@TypeOf(old)).@"struct".field_names,
+            @typeInfo(@TypeOf(old)).@"struct".field_types,
+        ) |field_name, FieldType| {
             const a = @field(old, field_name);
             const b = @field(new, field_name);
             if (comptime std.mem.eql(u8, field_name, "function")) {

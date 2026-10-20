@@ -97,7 +97,10 @@ fn childPath(comptime path: []const u8, comptime child: []const u8) []const u8 {
 }
 
 fn describe(comptime T: type, comptime path: []const u8, comptime ancestors: []const type) Info {
-    for (ancestors) |Ancestor| if (T == Ancestor) invalid(path, "recursive native type requires an explicit runtime declaration");
+    for (ancestors) |Ancestor| if (T == Ancestor) invalid(
+        path,
+        "recursive native type requires an explicit runtime declaration",
+    );
     const seen = ancestors ++ &[_]type{T};
     if (wrapped(T)) {
         if (T.protean_value_kind == .text) return .{ .text = T.max_length };
@@ -119,8 +122,16 @@ fn describe(comptime T: type, comptime path: []const u8, comptime ancestors: []c
         },
         .@"struct" => |record| blk: {
             var children: [record.field_types.len]type = undefined;
-            for (record.field_names, record.field_types, record.field_attrs, 0..) |name, Child, attrs, index| {
-                if (attrs.@"comptime") invalid(childPath(path, name), "fields must be runtime values");
+            for (
+                record.field_names,
+                record.field_types,
+                record.field_attrs,
+                0..,
+            ) |name, Child, attrs, index| {
+                if (attrs.@"comptime") invalid(
+                    childPath(path, name),
+                    "fields must be runtime values",
+                );
                 children[index] = Contract(describe(Child, childPath(path, name), seen));
             }
             break :blk .{ .product = Fields(record.field_names, &children) };
@@ -151,9 +162,17 @@ fn describe(comptime T: type, comptime path: []const u8, comptime ancestors: []c
         },
         .@"enum" => |enumeration| blk: {
             if (enumeration.mode != .exhaustive) invalid(path, "enum must be exhaustive");
-            if (enumeration.field_values.len == 0) break :blk .{ .enumeration = @Enum(noreturn, .exhaustive, &.{}, &.{}) };
+            if (enumeration.field_values.len == 0) break :blk .{ .enumeration = @Enum(
+                noreturn,
+                .exhaustive,
+                &.{},
+                &.{},
+            ) };
             for (enumeration.field_values) |value| {
-                if (value < 0 or value > std.math.maxInt(u32)) invalid(path, "enum tag must fit u32");
+                if (value < 0 or value > std.math.maxInt(u32)) invalid(
+                    path,
+                    "enum tag must fit u32",
+                );
             }
             break :blk .{ .enumeration = canonicalEnum(T) };
         },
@@ -180,7 +199,13 @@ fn canonicalEnum(comptime T: type) type {
 /// Struct construction interns the ordered names and canonical child types.
 /// Do not pass native field defaults, layout, alignment, or declaration identity.
 pub fn Fields(comptime names: []const [:0]const u8, comptime children: []const type) type {
-    return @Struct(.auto, null, names, children, &(@as([names.len]std.lang.Type.Struct.FieldAttributes, @splat(.{}))));
+    return @Struct(
+        .auto,
+        null,
+        names,
+        children,
+        &(@as([names.len]std.lang.Type.Struct.FieldAttributes, @splat(.{}))),
+    );
 }
 
 pub fn enumTags(comptime T: type) [@typeInfo(T).@"enum".field_values.len]u32 {
@@ -208,7 +233,10 @@ pub fn lower(comptime description: Info, builder: anytype) @TypeOf(builder.schem
         .product, .sum => |Children, kind| blk: {
             const fields = @typeInfo(Children).@"struct";
             var ids: [fields.field_types.len]p.Id = undefined;
-            inline for (fields.field_types, 0..) |Child, i| ids[i] = try lower(Child.contract, builder);
+            inline for (
+                fields.field_types,
+                0..,
+            ) |Child, i| ids[i] = try lower(Child.contract, builder);
             break :blk builder.schema(@unionInit(p.Schema, @tagName(kind), &ids));
         },
         .array => |array| builder.schema(.{ .array = .{

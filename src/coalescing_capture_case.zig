@@ -26,12 +26,20 @@ pub fn build(b: *source.Builder) !source.Module {
         result.* = try b.variable(integer);
         const subtraction = try b.value(.{ .schema = integer, .expression = .{ .primitive = .{
             .opcode = .integer_sub,
-            .operands = &.{ try b.reference(captures[side * 2]), try b.reference(captures[side * 2 + 1]) },
+            .operands = &.{
+                try b.reference(captures[side * 2]),
+                try b.reference(captures[side * 2 + 1]),
+            },
             .failures = &.{.{ .kind = .arithmetic_overflow, .value = failure }},
         } } });
         try b.define(function.*, try b.pure(subtraction));
     }
-    var next = try b.pure(try b.primitive(pair, .product, &.{ try b.reference(results[0]), try b.reference(results[1]) }, 0));
+    var next = try b.pure(try b.primitive(
+        pair,
+        .product,
+        &.{ try b.reference(results[0]), try b.reference(results[1]) },
+        0,
+    ));
     var cursor: usize = 2;
     while (cursor != 0) {
         cursor -= 1;
@@ -39,7 +47,11 @@ pub fn build(b: *source.Builder) !source.Module {
             .computation = try b.reference(closures[cursor]),
             .arguments = &.{},
         } });
-        next = try b.bind(closures[cursor], try b.pure(try b.lambda(functions[cursor], shape)), try b.bind(results[cursor], apply, next));
+        next = try b.bind(
+            closures[cursor],
+            try b.pure(try b.lambda(functions[cursor], shape)),
+            try b.bind(results[cursor], apply, next),
+        );
     }
     // The second closure intentionally captures right then left. Both fields
     // have the same schema, so sorting operands would silently change behavior.
@@ -47,7 +59,11 @@ pub fn build(b: *source.Builder) !source.Module {
     cursor = captures.len;
     while (cursor != 0) {
         cursor -= 1;
-        next = try b.bind(captures[cursor], try b.pure(try b.reference(b.parameter(main, parameter_order[cursor]))), next);
+        next = try b.bind(
+            captures[cursor],
+            try b.pure(try b.reference(b.parameter(main, parameter_order[cursor]))),
+            next,
+        );
     }
     try b.define(main, next);
     return b.module(main, unit);

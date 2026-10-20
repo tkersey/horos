@@ -79,8 +79,16 @@ pub const Facts = struct {
         self.arena.deinit();
         self.* = undefined;
     }
-    pub fn requireEpoch(self: *const Facts, allocator: std.mem.Allocator, program: ir.Program) Error!void {
-        if (!std.mem.eql(u8, &self.epoch, &try image.identity(allocator, program))) return error.StaleFacts;
+    pub fn requireEpoch(
+        self: *const Facts,
+        allocator: std.mem.Allocator,
+        program: ir.Program,
+    ) Error!void {
+        if (!std.mem.eql(
+            u8,
+            &self.epoch,
+            &try image.identity(allocator, program),
+        )) return error.StaleFacts;
     }
 };
 
@@ -91,12 +99,21 @@ pub const Facts = struct {
 pub fn analyze(allocator: std.mem.Allocator, program: ir.Program) Error!Facts {
     return analyzeWithLimit(allocator, program, default_work_limit);
 }
-pub fn analyzeWithLimit(allocator: std.mem.Allocator, program: ir.Program, work_limit: u64) Error!Facts {
+pub fn analyzeWithLimit(
+    allocator: std.mem.Allocator,
+    program: ir.Program,
+    work_limit: u64,
+) Error!Facts {
     return analyzeObservedWithLimit(allocator, program, work_limit, null);
 }
 /// Observe original continuation captures during the same mandatory admission
 /// pass. Observations cannot replace or weaken any of its checks.
-pub fn analyzeObservedWithLimit(allocator: std.mem.Allocator, program: ir.Program, work_limit: u64, observer: ?ownership.CaptureObserver) Error!Facts {
+pub fn analyzeObservedWithLimit(
+    allocator: std.mem.Allocator,
+    program: ir.Program,
+    work_limit: u64,
+    observer: ?ownership.CaptureObserver,
+) Error!Facts {
     var checked = try ownership.analyzeObserved(allocator, program, null, observer);
     defer checked.deinit();
     var budget: Work = .{ .remaining = work_limit };
@@ -114,18 +131,36 @@ pub fn analyzeObservedWithLimit(allocator: std.mem.Allocator, program: ir.Progra
         const definitions = try a.alloc(Definition, layout.len + block.instructions.len);
         for (layout, versions, 0..) |schema, *version, slot| {
             version.* = slot;
-            definitions[slot] = .{ .slot = slot, .instruction = null, .operands = &.{}, .value = bounds(program.schemas[@intCast(schema)]) };
+            definitions[slot] = .{
+                .slot = slot,
+                .instruction = null,
+                .operands = &.{},
+                .value = bounds(program.schemas[@intCast(schema)]),
+            };
         }
         const results = try a.alloc(Version, block.instructions.len);
         for (block.instructions, results, 0..) |instruction, *result, index| {
             try budget.take(instruction.operands.len);
             const operands = try a.alloc(Version, instruction.operands.len);
-            for (instruction.operands, operands) |slot, *version| version.* = versions[@intCast(slot)];
+            for (
+                instruction.operands,
+                operands,
+            ) |slot, *version| version.* = versions[@intCast(slot)];
             result.* = layout.len + index;
-            definitions[result.*] = .{ .slot = instruction.destination, .instruction = index, .operands = operands, .value = .{} };
+            definitions[result.*] = .{
+                .slot = instruction.destination,
+                .instruction = index,
+                .operands = operands,
+                .value = .{},
+            };
             versions[@intCast(instruction.destination)] = result.*;
         }
-        out.* = .{ .definitions = definitions, .results = results, .exit = versions, .outgoing = try a.alloc(Value, layout.len) };
+        out.* = .{
+            .definitions = definitions,
+            .results = results,
+            .exit = versions,
+            .outgoing = try a.alloc(Value, layout.len),
+        };
     }
     const incoming = try a.alloc(Value, max_slots);
     const overwritten_slots = try a.alloc(bool, max_slots);
@@ -158,17 +193,51 @@ pub fn analyzeObservedWithLimit(allocator: std.mem.Allocator, program: ir.Progra
         const layout = program.functions[@intCast(block.function)].layout.slots;
         for (block.instructions, state.results, 0..) |instruction, version, index| {
             try budget.take(1 + instruction.operands.len);
-            state.definitions[version].value = transfer(program, layout[@intCast(instruction.destination)], instruction, state.definitions[version].operands, state.definitions, index);
+            state.definitions[version].value = transfer(
+                program,
+                layout[@intCast(instruction.destination)],
+                instruction,
+                state.definitions[version].operands,
+                state.definitions,
+                index,
+            );
             transfers += 1;
         }
         try budget.take(state.exit.len);
-        for (state.exit, state.outgoing) |version, *value| value.* = state.definitions[version].value;
-        var propagation: Propagation = .{ .program = program, .work = work, .source = state, .allocator = a, .queue = &queue, .queued = queued, .budget = &budget, .incoming = incoming, .overwritten_slots = overwritten_slots };
+        for (
+            state.exit,
+            state.outgoing,
+        ) |version, *value| value.* = state.definitions[version].value;
+        var propagation: Propagation = .{
+            .program = program,
+            .work = work,
+            .source = state,
+            .allocator = a,
+            .queue = &queue,
+            .queued = queued,
+            .budget = &budget,
+            .incoming = incoming,
+            .overwritten_slots = overwritten_slots,
+        };
         try propagation.terminator(block.terminator);
     }
     const blocks = try a.alloc(Block, work.len);
-    for (work, blocks) |state, *out| out.* = .{ .reachable = state.reachable, .definitions = state.definitions, .results = state.results, .exit = state.exit };
-    return .{ .arena = arena, .epoch = epoch, .blocks = blocks, .transfers = transfers, .block_visits = visits };
+    for (
+        work,
+        blocks,
+    ) |state, *out| out.* = .{
+        .reachable = state.reachable,
+        .definitions = state.definitions,
+        .results = state.results,
+        .exit = state.exit,
+    };
+    return .{
+        .arena = arena,
+        .epoch = epoch,
+        .blocks = blocks,
+        .transfers = transfers,
+        .block_visits = visits,
+    };
 }
 const Working = struct {
     reachable: bool = false,
@@ -198,8 +267,15 @@ fn joined(left: Value, right: Value) Value {
     };
     if (left.constructors_known and right.constructors_known) {
         result.constructors_known = true;
-        for ([_]Value{ left, right }) |value| for (value.constructors[0..value.constructor_count]) |id| {
-            if (std.mem.indexOfScalar(p.Id, result.constructors[0..result.constructor_count], id) != null) continue;
+        for ([_]Value{
+            left,
+            right,
+        }) |value| for (value.constructors[0..value.constructor_count]) |id| {
+            if (std.mem.indexOfScalar(
+                p.Id,
+                result.constructors[0..result.constructor_count],
+                id,
+            ) != null) continue;
             if (result.constructor_count == result.constructors.len) {
                 result.constructors_known = false;
                 result.constructor_count = 0;
@@ -209,7 +285,12 @@ fn joined(left: Value, right: Value) Value {
             result.constructors[result.constructor_count] = id;
             result.constructor_count += 1;
         };
-        std.mem.sort(p.Id, result.constructors[0..result.constructor_count], {}, std.sort.asc(p.Id));
+        std.mem.sort(
+            p.Id,
+            result.constructors[0..result.constructor_count],
+            {},
+            std.sort.asc(p.Id),
+        );
         if (result.constructor_count == 1) result.constructor = result.constructors[0];
     }
     return result;
@@ -240,7 +321,10 @@ const Propagation = struct {
             self.incoming[@intCast(destination)] = forgetOrigin(self.value(argument));
         try self.budget.take(function.layout.slots.len);
         for (self.incoming[0..function.layout.slots.len], 0..) |incoming, slot| {
-            const merged = if (target.reachable) joined(target.definitions[slot].value, incoming) else incoming;
+            const merged = if (target.reachable) joined(
+                target.definitions[slot].value,
+                incoming,
+            ) else incoming;
             if (!std.meta.eql(target.definitions[slot].value, merged)) {
                 target.definitions[slot].value = merged;
                 changed = true;
@@ -255,7 +339,11 @@ const Propagation = struct {
     fn edge(self: Propagation, next: ir.Edge, overwritten: []const p.Id) Error!void {
         const target = &self.work[@intCast(next.block)];
         var changed = !target.reachable;
-        const layout = self.program.functions[@intCast(self.program.blocks[@intCast(next.block)].function)].layout.slots;
+        const layout = self.program.functions[
+            @intCast(self.program.blocks[
+                @intCast(next.block)
+            ].function)
+        ].layout.slots;
         // Read only source exit versions. No assignment can see an earlier
         // destination write from this same parallel edge.
         try self.budget.take(layout.len + overwritten.len + next.assignments.len);
@@ -266,19 +354,32 @@ const Propagation = struct {
         }
         for (overwritten) |slot| {
             self.overwritten_slots[@intCast(slot)] = true;
-            self.incoming[@intCast(slot)] = bounds(self.program.schemas[@intCast(layout[@intCast(slot)])]);
+            self.incoming[
+                @intCast(slot)
+            ] = bounds(self.program.schemas[
+                @intCast(layout[
+                    @intCast(slot)
+                ])
+            ]);
         }
         for (next.assignments) |assignment| {
             const slot: usize = @intCast(assignment.destination);
             self.incoming[slot] = switch (assignment.source) {
                 .returned => bounds(self.program.schemas[@intCast(layout[slot])]),
-                .slot => |origin| if (self.overwritten_slots[@intCast(origin)]) bounds(self.program.schemas[@intCast(layout[slot])]) else self.value(origin),
+                .slot => |origin| if (self.overwritten_slots[
+                    @intCast(origin)
+                ]) bounds(self.program.schemas[
+                    @intCast(layout[slot])
+                ]) else self.value(origin),
             };
         }
         try self.budget.take(layout.len);
         for (self.incoming[0..layout.len], 0..) |value_in, slot| {
             const incoming = forgetOrigin(value_in);
-            const merged = if (target.reachable) joined(target.definitions[slot].value, incoming) else incoming;
+            const merged = if (target.reachable) joined(
+                target.definitions[slot].value,
+                incoming,
+            ) else incoming;
             if (!std.meta.eql(target.definitions[slot].value, merged)) {
                 target.definitions[slot].value = merged;
                 changed = true;
@@ -304,7 +405,11 @@ const Propagation = struct {
                 const variants = self.value(v.value).variants;
                 for (v.cases, 0..) |next, tag| {
                     try self.budget.take(1);
-                    if (variants.known and std.mem.indexOfScalar(p.Id, variants.tags[0..variants.count], tag) == null) continue;
+                    if (variants.known and std.mem.indexOfScalar(
+                        p.Id,
+                        variants.tags[0..variants.count],
+                        tag,
+                    ) == null) continue;
                     try self.edge(next, &.{});
                 }
             },
@@ -331,7 +436,14 @@ fn bounds(schema: p.Schema) Value {
 fn number(value: u64) Value {
     return .{ .unsigned = value, .maximum = value, .known_zero = ~value, .known_one = value };
 }
-fn transfer(program: ir.Program, schema: p.Id, instruction: ir.Instruction, operands: []const Version, definitions: []const Definition, index: usize) Value {
+fn transfer(
+    program: ir.Program,
+    schema: p.Id,
+    instruction: ir.Instruction,
+    operands: []const Version,
+    definitions: []const Definition,
+    index: usize,
+) Value {
     const result = bounds(program.schemas[@intCast(schema)]);
     const left: Value = if (operands.len > 0) definitions[operands[0]].value else .{};
     const right: Value = if (operands.len > 1) definitions[operands[1]].value else .{};
@@ -348,30 +460,71 @@ fn transfer(program: ir.Program, schema: p.Id, instruction: ir.Instruction, oper
             };
         },
         .move => left,
-        .computation => .{ .constructor = instruction.immediate, .construction = index, .constructors_known = true, .constructors = .{ instruction.immediate, 0, 0, 0 }, .constructor_count = 1 },
+        .computation => .{
+            .constructor = instruction.immediate,
+            .construction = index,
+            .constructors_known = true,
+            .constructors = .{ instruction.immediate, 0, 0, 0 },
+            .constructor_count = 1,
+        },
         .variant => .{ .variants = VariantSet.one(instruction.immediate) },
         .variant_tag => if (left.variants.singleton()) |tag| number(tag) else result,
         .boolean_not => if (left.boolean) |v| .{ .boolean = !v } else result,
-        .equal => if (left.unsigned != null and right.unsigned != null) .{ .boolean = left.unsigned.? == right.unsigned.? } else if (left.boolean != null and right.boolean != null) .{ .boolean = left.boolean.? == right.boolean.? } else result,
-        .less => if (left.unsigned != null and right.unsigned != null) .{ .boolean = left.unsigned.? < right.unsigned.? } else result,
+        .equal => if (left.unsigned != null and right.unsigned != null) .{
+            .boolean = left.unsigned.? == right.unsigned.?,
+        } else if (left.boolean != null and right.boolean != null) .{
+            .boolean = left.boolean.? == right.boolean.?,
+        } else result,
+        .less => if (left.unsigned != null and right.unsigned != null) .{
+            .boolean = left.unsigned.? < right.unsigned.?,
+        } else result,
         .integer_bit_and => blk: {
             if (result.maximum == null) break :blk result;
-            if (left.unsigned != null and right.unsigned != null) break :blk number(left.unsigned.? & right.unsigned.?);
+            if (left.unsigned != null and right.unsigned != null) break :blk number(
+                left.unsigned.? & right.unsigned.?,
+            );
             const mask = right.unsigned orelse left.unsigned orelse break :blk result;
             const other = if (right.unsigned != null) left else right;
             if (mask == 0) break :blk number(0);
-            break :blk .{ .maximum = mask & ~other.known_zero, .known_zero = other.known_zero | ~mask, .known_one = other.known_one & mask };
+            break :blk .{
+                .maximum = mask & ~other.known_zero,
+                .known_zero = other.known_zero | ~mask,
+                .known_one = other.known_one & mask,
+            };
         },
         .sequence => .{ .length = instruction.operands.len, .length_bound = result.length_bound },
         .sequence_length => if (left.length) |length| number(length) else .{ .maximum = left.length_bound },
-        .select => if (left.boolean) |condition| definitions[operands[if (condition) 1 else 2]].value else joined(definitions[operands[1]].value, definitions[operands[2]].value),
+        .select => if (left.boolean) |condition|
+            definitions[
+                operands[
+                    if (condition)
+                        1
+                    else
+                        2
+                ]
+            ].value
+        else
+            joined(definitions[operands[1]].value, definitions[operands[2]].value),
         else => result,
     };
 }
 
 test "constructor-set precision cap widens to unknown rather than an empty set" {
-    var value: Value = .{ .constructor = 0, .constructors_known = true, .constructors = .{ 0, 0, 0, 0 }, .constructor_count = 1 };
-    for (1..5) |id| value = joined(value, .{ .constructor = id, .constructors_known = true, .constructors = .{ id, 0, 0, 0 }, .constructor_count = 1 });
+    var value: Value = .{
+        .constructor = 0,
+        .constructors_known = true,
+        .constructors = .{ 0, 0, 0, 0 },
+        .constructor_count = 1,
+    };
+    for (1..5) |id| value = joined(
+        value,
+        .{
+            .constructor = id,
+            .constructors_known = true,
+            .constructors = .{ id, 0, 0, 0 },
+            .constructor_count = 1,
+        },
+    );
     try std.testing.expect(!value.constructors_known);
     try std.testing.expectEqual(@as(?p.Id, null), value.constructor);
     try std.testing.expectEqual(@as(u3, 0), value.constructor_count);
@@ -405,10 +558,22 @@ test "parallel fact transfer is linear and reads every source before writes" {
         .roots = .{ .entry = 0, .result = 0, .failure = 1 },
         .schemas = &.{ .u64, .unit },
         .effects = &.{},
-        .constants = &.{ .{ .schema = 0, .bytes = &.{ 0, 0, 0, 0, 0, 0, 0, 0 } }, .{ .schema = 0, .bytes = &.{ 1, 0, 0, 0, 0, 0, 0, 0 } } },
-        .functions = &.{.{ .entry = 0, .inputs = &.{}, .layout = .{ .slots = &slots }, .result = 0 }},
+        .constants = &.{
+            .{ .schema = 0, .bytes = &.{ 0, 0, 0, 0, 0, 0, 0, 0 } },
+            .{ .schema = 0, .bytes = &.{ 1, 0, 0, 0, 0, 0, 0, 0 } },
+        },
+        .functions = &.{.{
+            .entry = 0,
+            .inputs = &.{},
+            .layout = .{ .slots = &slots },
+            .result = 0,
+        }},
         .blocks = &.{
-            .{ .function = 0, .instructions = &instructions, .terminator = .{ .jump = .{ .block = 1, .assignments = &assignments } } },
+            .{
+                .function = 0,
+                .instructions = &instructions,
+                .terminator = .{ .jump = .{ .block = 1, .assignments = &assignments } },
+            },
             .{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 0 } },
         },
     };
@@ -435,11 +600,25 @@ test "parallel fact transfer is linear and reads every source before writes" {
         .{ .entry = 2, .inputs = &inputs, .layout = .{ .slots = &slots }, .result = 0 },
     };
     called.blocks = &.{
-        .{ .function = 0, .instructions = &instructions, .terminator = .{ .call = .{ .function = 1, .arguments = &arguments, .next = .{ .block = 1, .assignments = &.{.{ .destination = 0, .source = .returned }} } } } },
+        .{
+            .function = 0,
+            .instructions = &instructions,
+            .terminator = .{ .call = .{
+                .function = 1,
+                .arguments = &arguments,
+                .next = .{
+                    .block = 1,
+                    .assignments = &.{.{ .destination = 0, .source = .returned }},
+                },
+            } },
+        },
         program.blocks[1],
         .{ .function = 1, .instructions = &.{}, .terminator = .{ .return_value = 0 } },
     };
     var call_result = try analyzeWithLimit(a, called, 2500);
     defer call_result.deinit();
-    for (0..n) |slot| try std.testing.expectEqual(@as(u64, ((slot + 1) % n) % 2), call_result.blocks[2].definitions[slot].value.unsigned.?);
+    for (0..n) |slot| try std.testing.expectEqual(
+        @as(u64, ((slot + 1) % n) % 2),
+        call_result.blocks[2].definitions[slot].value.unsigned.?,
+    );
 }

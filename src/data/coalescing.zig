@@ -117,7 +117,11 @@ pub fn run(allocator: std.mem.Allocator, original: ir.Program, options: Options)
 
 fn runInternal(allocator: std.mem.Allocator, original: ir.Program, options: Options) Error!Owned {
     const round_storage: []Round = if (options.statistics) |stats| stats.rounds else &.{};
-    var checked = admission.analyzeDiagnosed(allocator, original, if (options.diagnostic) |d| &d.target else null) catch |err| {
+    var checked = admission.analyzeDiagnosed(
+        allocator,
+        original,
+        if (options.diagnostic) |d| &d.target else null,
+    ) catch |err| {
         if (options.diagnostic) |d| origins.explainOriginal(original, d);
         return err;
     };
@@ -134,7 +138,11 @@ fn runInternal(allocator: std.mem.Allocator, original: ir.Program, options: Opti
         null;
     defer if (trace) |*value| value.deinit();
     if (options.diagnostic) |d| d.* = .{ .stage = .baseline };
-    var flow = admission.analyzeDiagnosed(allocator, baseline.program, if (options.diagnostic) |d| &d.target else null) catch |err| {
+    var flow = admission.analyzeDiagnosed(
+        allocator,
+        baseline.program,
+        if (options.diagnostic) |d| &d.target else null,
+    ) catch |err| {
         if (options.diagnostic) |d| if (trace) |*t| t.explain(null, d);
         return err;
     };
@@ -150,7 +158,13 @@ fn runInternal(allocator: std.mem.Allocator, original: ir.Program, options: Opti
     defer {
         if (options.statistics) |output| output.* = stats;
     }
-    const selected = attempt(allocator, baseline.program, &stats, if (trace) |*t| t else null, options.diagnostic) catch |err| switch (err) {
+    const selected = attempt(
+        allocator,
+        baseline.program,
+        &stats,
+        if (trace) |*t| t else null,
+        options.diagnostic,
+    ) catch |err| switch (err) {
         error.WorkLimit => blk: {
             // The attempt may have selected earlier rounds before exhausting
             // its allowance. Returning the baseline also restores its mapping.
@@ -217,7 +231,13 @@ fn recordRound(stats: *Statistics, selected: ?discovery.Profile, materialized: b
     stats.round_count += 1;
 }
 
-fn attempt(allocator: std.mem.Allocator, baseline: ir.Program, stats: *Statistics, trace: ?*origins.Trace, diagnostic: ?*Diagnostic) Error!?Owned {
+fn attempt(
+    allocator: std.mem.Allocator,
+    baseline: ir.Program,
+    stats: *Statistics,
+    trace: ?*origins.Trace,
+    diagnostic: ?*Diagnostic,
+) Error!?Owned {
     var selected: ?Owned = null;
     errdefer if (selected) |*value| value.deinit();
     stats.outcome = .no_change;
@@ -249,16 +269,19 @@ fn attempt(allocator: std.mem.Allocator, baseline: ir.Program, stats: *Statistic
         // and materializations are identical. Reuse the independently checked
         // full candidate; the existing tie-break selects it in either case.
         const same_profiles = !mapHasMerge(full_map.representatives[@backingInt(r.Kind.function)]);
-        var separate_descriptions: ?candidate.Candidate = if (same_profiles) null else try candidate.buildObserved(
-            allocator,
-            a,
-            program,
-            analysis,
-            .descriptions,
-            &stats.work,
-            trace,
-            diagnostic,
-        );
+        var separate_descriptions: ?candidate.Candidate = if (same_profiles)
+            null
+        else
+            try candidate.buildObserved(
+                allocator,
+                a,
+                program,
+                analysis,
+                .descriptions,
+                &stats.work,
+                trace,
+                diagnostic,
+            );
         const descriptions = if (separate_descriptions) |*value| value else &full;
         var keep_descriptions = false;
         defer if (!keep_descriptions) if (separate_descriptions) |*value| value.deinit();
@@ -345,7 +368,14 @@ test "coalescing size guard independently rejects growth and nonreducing extract
     defer scratch.deinit();
     var work: graph.Work = .{};
     const analysis = try discovery.analyze(scratch.allocator(), original, &work);
-    var proposed = try candidate.build(testing.allocator, scratch.allocator(), original, analysis, .full, &work);
+    var proposed = try candidate.build(
+        testing.allocator,
+        scratch.allocator(),
+        original,
+        analysis,
+        .full,
+        &work,
+    );
     defer proposed.deinit();
     const baseline = try Counts.of(original);
     try testing.expect(eligible(proposed, baseline));

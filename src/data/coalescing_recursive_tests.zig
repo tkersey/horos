@@ -15,14 +15,21 @@ fn program(a: std.mem.Allocator, changed: bool) !ir.Program {
             .result = 0,
         };
         const operations = try a.alloc(ir.Instruction, 1);
-        operations[0] = .{ .destination = 1, .opcode = .constant, .immediate = if (changed and id == 3) 2 else id % 2 };
+        operations[0] = .{
+            .destination = 1,
+            .opcode = .constant,
+            .immediate = if (changed and id == 3) 2 else id % 2,
+        };
         blocks[id * 2] = .{
             .function = id,
             .instructions = operations,
             .terminator = .{ .call = .{
                 .function = id ^ 1,
                 .arguments = &.{0},
-                .next = .{ .block = id * 2 + 1, .assignments = &.{.{ .destination = 0, .source = .returned }} },
+                .next = .{
+                    .block = id * 2 + 1,
+                    .assignments = &.{.{ .destination = 0, .source = .returned }},
+                },
             } },
         };
         blocks[id * 2 + 1] = .{
@@ -77,5 +84,8 @@ test "coalescing actual recursive candidates merge role for role and propagate d
     var again = try pass.run(testing.allocator, equal.program, .{});
     defer again.deinit();
     const image = @import("program_image.zig");
-    try testing.expectEqual(try image.identity(testing.allocator, equal.program), try image.identity(testing.allocator, again.program));
+    try testing.expectEqual(
+        try image.identity(testing.allocator, equal.program),
+        try image.identity(testing.allocator, again.program),
+    );
 }

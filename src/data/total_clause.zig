@@ -9,7 +9,36 @@ const traits = @import("traits.zig");
 pub fn instruction(operation: ir.Instruction) bool {
     if (operation.failures.len != 0) return false;
     return switch (operation.opcode) {
-        .constant, .move, .equal, .less, .boolean_not, .product, .field, .variant, .variant_tag, .sequence, .sequence_length, .sequence_get, .sequence_append, .sequence_concat, .sequence_pop, .integer_bit_not, .integer_bit_and, .integer_bit_or, .integer_bit_xor, .integer_convert, .enum_tag, .blob_length, .blob_compare, .blob_byte, .text_integer, .blob_from_byte, .sequence_take, .sequence_pop_last, .select => true,
+        .constant,
+        .move,
+        .equal,
+        .less,
+        .boolean_not,
+        .product,
+        .field,
+        .variant,
+        .variant_tag,
+        .sequence,
+        .sequence_length,
+        .sequence_get,
+        .sequence_append,
+        .sequence_concat,
+        .sequence_pop,
+        .integer_bit_not,
+        .integer_bit_and,
+        .integer_bit_or,
+        .integer_bit_xor,
+        .integer_convert,
+        .enum_tag,
+        .blob_length,
+        .blob_compare,
+        .blob_byte,
+        .text_integer,
+        .blob_from_byte,
+        .sequence_take,
+        .sequence_pop_last,
+        .select,
+        => true,
         // Existing local cell operations neither suspend nor have authored
         // failures. Type/region/borrow admission still checks their authority.
         .cell_get, .cell_set => true,
@@ -76,7 +105,12 @@ test "tail clause wire tag is explicit and rejects the predecessor flag" {
     var bytes: [4]u8 = undefined;
     var writer: wire.Writer = .{ .output = &bytes };
     var context: records.Context = .{};
-    try records.write(ir.Clause, .{ .effect = 3, .function = 4, .resumption = 5, .strategy = .tail }, &writer, &context);
+    try records.write(
+        ir.Clause,
+        .{ .effect = 3, .function = 4, .resumption = 5, .strategy = .tail },
+        &writer,
+        &context,
+    );
     try std.testing.expectEqualSlices(u8, &.{ 3, 4, 5, 2 }, &bytes);
     var budget: records.Budget = .{ .maximum = 1024 };
     var reader: wire.Reader = .{ .input = &bytes };
@@ -84,5 +118,8 @@ test "tail clause wire tag is explicit and rejects the predecessor flag" {
     try std.testing.expect(decoded.strategy == .tail);
     bytes[3] = 1;
     reader.position = 0;
-    try std.testing.expectError(error.InvalidTag, records.read(ir.Clause, &reader, std.testing.allocator, &budget, &context));
+    try std.testing.expectError(
+        error.InvalidTag,
+        records.read(ir.Clause, &reader, std.testing.allocator, &budget, &context),
+    );
 }

@@ -45,7 +45,10 @@ pub fn dependencies(allocator: std.mem.Allocator, image: anytype) a.Error!Depend
         }
     };
     const width = regions.items.len;
-    const result = try allocator.alloc(bool, std.math.mul(usize, image.schemas.len, width) catch return error.InvalidLength);
+    const result = try allocator.alloc(
+        bool,
+        std.math.mul(usize, image.schemas.len, width) catch return error.InvalidLength,
+    );
     @memset(result, false);
     var changed = true;
     while (changed) {
@@ -83,8 +86,16 @@ pub fn dependencies(allocator: std.mem.Allocator, image: anytype) a.Error!Depend
                 },
                 else => &.{},
             };
-            for (fields) |child| for (target, result[@as(usize, @intCast(child)) * width ..][0..width], 0..) |*to, from, region_id| {
-                if (shape == .internal and shape.internal == .resumption and std.mem.indexOfScalar(p.Id, shape.internal.resumption.owned_regions, regions.items[region_id]) != null) continue;
+            for (fields) |child| for (
+                target,
+                result[@as(usize, @intCast(child)) * width ..][0..width],
+                0..,
+            ) |*to, from, region_id| {
+                if (shape == .internal and shape.internal == .resumption and std.mem.indexOfScalar(
+                    p.Id,
+                    shape.internal.resumption.owned_regions,
+                    regions.items[region_id],
+                ) != null) continue;
                 if (from and !to.*) {
                     to.* = true;
                     changed = true;
@@ -99,7 +110,11 @@ pub fn validate(allocator: std.mem.Allocator, image: anytype) a.Error!void {
     return validateDiagnosed(allocator, image, null);
 }
 
-pub fn validateDiagnosed(allocator: std.mem.Allocator, image: anytype, diagnostic: ?*a.Diagnostic) a.Error!void {
+pub fn validateDiagnosed(
+    allocator: std.mem.Allocator,
+    image: anytype,
+    diagnostic: ?*a.Diagnostic,
+) a.Error!void {
     if (diagnostic) |d| d.* = .{ .phase = .region };
     const deps = try dependencies(allocator, image);
     for (image.functions, 0..) |function, index| {
@@ -112,15 +127,30 @@ pub fn validateDiagnosed(allocator: std.mem.Allocator, image: anytype, diagnosti
         try allowed(deps, function.result, function.regions);
     }
     for (image.blocks, 0..) |block, index| {
-        if (diagnostic) |d| d.* = .{ .phase = .region, .function = block.function, .block = index, .terminator = std.meta.activeTag(block.terminator), .callee = if (block.terminator == .call) block.terminator.call.function else null };
+        if (diagnostic) |d| d.* = .{
+            .phase = .region,
+            .function = block.function,
+            .block = index,
+            .terminator = std.meta.activeTag(block.terminator),
+            .callee = if (block.terminator == .call) block.terminator.call.function else null,
+        };
         const regions = image.functions[@intCast(block.function)].regions;
 
         switch (block.terminator) {
-            .call => |call| try contracts.subset(image.functions[@intCast(call.function)].regions, regions),
+            .call => |call| try contracts.subset(
+                image.functions[@intCast(call.function)].regions,
+                regions,
+            ),
             .handle => |handle| {
                 const handler = image.handlers[@intCast(handle.handler)];
-                try contracts.subset(image.functions[@intCast(handler.return_function)].regions, regions);
-                for (handler.clauses) |clause| try contracts.subset(image.functions[@intCast(clause.function)].regions, regions);
+                try contracts.subset(
+                    image.functions[@intCast(handler.return_function)].regions,
+                    regions,
+                );
+                for (handler.clauses) |clause| try contracts.subset(
+                    image.functions[@intCast(clause.function)].regions,
+                    regions,
+                );
             },
             .with_region => |scope| {
                 const body_schema = try codeSlot(image, block, scope.body);
@@ -134,8 +164,14 @@ pub fn validateDiagnosed(allocator: std.mem.Allocator, image: anytype, diagnosti
             },
             .resume_with => |resuming| {
                 const successor = image.handlers[@intCast(resuming.handler)];
-                try contracts.subset(image.functions[@intCast(successor.return_function)].regions, regions);
-                for (successor.clauses) |clause| try contracts.subset(image.functions[@intCast(clause.function)].regions, regions);
+                try contracts.subset(
+                    image.functions[@intCast(successor.return_function)].regions,
+                    regions,
+                );
+                for (successor.clauses) |clause| try contracts.subset(
+                    image.functions[@intCast(clause.function)].regions,
+                    regions,
+                );
             },
             else => {},
         }
@@ -148,11 +184,20 @@ fn codeSlot(image: anytype, block: anytype, slot: p.Id) a.Error!p.Id {
 
 fn allowed(deps: Dependencies, schema: p.Id, regions: []const p.Id) a.Error!void {
     for (deps.of(schema), deps.regions) |needed, id| {
-        if (needed and std.mem.indexOfScalar(p.Id, regions, id) == null) return error.InvalidOwnership;
+        if (needed and std.mem.indexOfScalar(
+            p.Id,
+            regions,
+            id,
+        ) == null) return error.InvalidOwnership;
     }
 }
 
-pub fn instruction(image: anytype, op: anytype, slots: []const p.Id, uses: @import("traits.zig").Facts) a.Error!void {
+pub fn instruction(
+    image: anytype,
+    op: anytype,
+    slots: []const p.Id,
+    uses: @import("traits.zig").Facts,
+) a.Error!void {
     if (op.immediate != 0) return error.InvalidProgram;
     const operands = op.operands;
     if (op.opcode == .cell_new) {
@@ -161,15 +206,28 @@ pub fn instruction(image: anytype, op: anytype, slots: []const p.Id, uses: @impo
         if (shape != .internal or shape.internal != .cell) return error.TypeMismatch;
         const cell = shape.internal.cell;
         const region = image.schemas[@intCast(slots[@intCast(operands[0])])];
-        if (region != .internal or region.internal != .region or region.internal.region != cell.region or slots[@intCast(operands[1])] != cell.element) return error.TypeMismatch;
+        if (region != .internal or
+            region.internal != .region or
+            region.internal.region != cell.region or
+            slots[
+                @intCast(operands[1])
+            ] != cell.element)
+            return error.TypeMismatch;
     } else {
-        if (operands.len != @as(usize, if (op.opcode == .cell_get) 1 else 2)) return error.TypeMismatch;
+        if (operands.len != @as(
+            usize,
+            if (op.opcode == .cell_get) 1 else 2,
+        )) return error.TypeMismatch;
         const shape = image.schemas[@intCast(slots[@intCast(operands[0])])];
         if (shape != .internal or shape.internal != .cell) return error.TypeMismatch;
         const cell = shape.internal.cell;
         if (!uses.copy[@intCast(cell.element)]) return error.InvalidOwnership;
         if (op.opcode == .cell_get) {
             if (op.result_type != cell.element) return error.TypeMismatch;
-        } else if (slots[@intCast(operands[1])] != cell.element or image.schemas[@intCast(op.result_type)] != .unit) return error.TypeMismatch;
+        } else if (slots[
+            @intCast(operands[1])
+        ] != cell.element or image.schemas[
+            @intCast(op.result_type)
+        ] != .unit) return error.TypeMismatch;
     }
 }

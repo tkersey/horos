@@ -6,7 +6,10 @@ const Id = source.Id;
 const Binding = @FieldType(source.ast.Term, "bind");
 
 fn binding(b: *const source.Builder, variable: Id) !Binding {
-    for (b.terms.items) |term| if (term == .bind and term.bind.variable == variable) return term.bind;
+    for (b.terms.items) |term|
+        if (term == .bind and
+            term.bind.variable == variable)
+            return term.bind;
     return error.InvalidSource;
 }
 fn staticValue(b: *const source.Builder, initial: Id) !Id {
@@ -15,7 +18,9 @@ fn staticValue(b: *const source.Builder, initial: Id) !Id {
         const value = b.values.items[@intCast(id)];
         if (value.expression == .lambda) return id;
         if (value.expression != .variable) return error.InvalidSource;
-        const definition = b.terms.items[@intCast((try binding(b, value.expression.variable)).value)];
+        const definition = b.terms.items[
+            @intCast((try binding(b, value.expression.variable)).value)
+        ];
         if (definition != .value) return error.InvalidSource;
         id = definition.value;
     }
@@ -26,10 +31,16 @@ fn mutableBody(b: *source.Builder, value_id: Id) !Id {
     const target = value.expression.lambda;
     const signature = b.functions.items[@intCast(target)];
     const schemas = try b.allocator().alloc(Id, signature.parameters.len);
-    for (signature.parameters, schemas) |parameter, *schema| schema.* = b.variables.items[@intCast(parameter)];
+    for (
+        signature.parameters,
+        schemas,
+    ) |parameter, *schema| schema.* = b.variables.items[@intCast(parameter)];
     const wrapper = try b.declare(schemas, signature.result, signature.effects, signature.regions);
     const arguments = try b.allocator().alloc(Id, schemas.len);
-    for (arguments, 0..) |*argument, index| argument.* = try b.reference(b.parameter(wrapper, index));
+    for (
+        arguments,
+        0..,
+    ) |*argument, index| argument.* = try b.reference(b.parameter(wrapper, index));
     try b.define(wrapper, try b.term(.{ .call = .{ .function = target, .arguments = arguments } }));
     return b.lambda(wrapper, value.schema);
 }

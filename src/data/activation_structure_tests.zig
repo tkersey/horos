@@ -53,10 +53,22 @@ test "stable structure rejects malformed assignments without predecessor expansi
             .{ .destination = 0, .source = .{ .slot = 1 } },
             .{ .destination = 0, .source = .{ .slot = 0 } },
         }, .expected = error.DuplicateDestination },
-        .{ .assignments = &.{.{ .destination = 9, .source = .{ .slot = 0 } }}, .expected = error.InvalidReference },
-        .{ .assignments = &.{.{ .destination = 0, .source = .{ .slot = 9 } }}, .expected = error.InvalidReference },
-        .{ .assignments = &.{.{ .destination = 0, .source = .{ .slot = 2 } }}, .expected = error.TypeMismatch },
-        .{ .assignments = &.{.{ .destination = 0, .source = .returned }}, .expected = error.TypeMismatch },
+        .{
+            .assignments = &.{.{ .destination = 9, .source = .{ .slot = 0 } }},
+            .expected = error.InvalidReference,
+        },
+        .{
+            .assignments = &.{.{ .destination = 0, .source = .{ .slot = 9 } }},
+            .expected = error.InvalidReference,
+        },
+        .{
+            .assignments = &.{.{ .destination = 0, .source = .{ .slot = 2 } }},
+            .expected = error.TypeMismatch,
+        },
+        .{
+            .assignments = &.{.{ .destination = 0, .source = .returned }},
+            .expected = error.TypeMismatch,
+        },
     };
     for (cases) |case| {
         const blocks = [_]ir.Block{ .{

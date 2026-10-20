@@ -8,12 +8,37 @@ const diamond: ir.Program = .{
     .schemas = &.{ .u64, .boolean, .unit },
     .constants = &.{},
     .effects = &.{},
-    .functions = &.{.{ .entry = 0, .inputs = &.{ 0, 1, 2 }, .layout = .{ .slots = &.{ 0, 0, 1, 0, 0 } }, .result = 0 }},
+    .functions = &.{.{
+        .entry = 0,
+        .inputs = &.{ 0, 1, 2 },
+        .layout = .{ .slots = &.{ 0, 0, 1, 0, 0 } },
+        .result = 0,
+    }},
     .blocks = &.{
-        .{ .function = 0, .instructions = &.{.{ .destination = 3, .opcode = .integer_bit_xor, .operands = &.{ 0, 1 } }}, .terminator = .{ .branch = .{ .condition = 2, .when_true = .{ .block = 1 }, .when_false = .{ .block = 2 } } } },
+        .{
+            .function = 0,
+            .instructions = &.{.{
+                .destination = 3,
+                .opcode = .integer_bit_xor,
+                .operands = &.{ 0, 1 },
+            }},
+            .terminator = .{ .branch = .{
+                .condition = 2,
+                .when_true = .{ .block = 1 },
+                .when_false = .{ .block = 2 },
+            } },
+        },
         .{ .function = 0, .instructions = &.{}, .terminator = .{ .jump = .{ .block = 3 } } },
         .{ .function = 0, .instructions = &.{}, .terminator = .{ .jump = .{ .block = 3 } } },
-        .{ .function = 0, .instructions = &.{.{ .destination = 4, .opcode = .integer_bit_xor, .operands = &.{ 0, 1 } }}, .terminator = .{ .return_value = 4 } },
+        .{
+            .function = 0,
+            .instructions = &.{.{
+                .destination = 4,
+                .opcode = .integer_bit_xor,
+                .operands = &.{ 0, 1 },
+            }},
+            .terminator = .{ .return_value = 4 },
+        },
     },
 };
 
@@ -32,7 +57,11 @@ test "total expression available on both sides of a diamond is reused after its 
 
 test "local repeated expression reuses its prior successful value" {
     var program = diamond;
-    program.blocks = &.{.{ .function = 0, .instructions = &.{ diamond.blocks[0].instructions[0], diamond.blocks[3].instructions[0] }, .terminator = diamond.blocks[3].terminator }};
+    program.blocks = &.{.{
+        .function = 0,
+        .instructions = &.{ diamond.blocks[0].instructions[0], diamond.blocks[3].instructions[0] },
+        .terminator = diamond.blocks[3].terminator,
+    }};
     var stats: reuse.Statistics = .{};
     var result = try reuse.run(a, program, &stats, .{});
     defer result.deinit();
@@ -53,12 +82,26 @@ test "one-path operand write invalidates the old value version" {
     forged_blocks[3].instructions = &.{.{ .destination = 4, .opcode = .move, .operands = &.{3} }};
     var forged = program;
     forged.blocks = &forged_blocks;
-    try std.testing.expectError(error.InvalidExpressionReuse, reuse.validate(a, program, forged, &.{.{ .source = .{ .block = 0, .instruction = 0 }, .target = .{ .block = 3, .instruction = 0 } }}));
+    try std.testing.expectError(
+        error.InvalidExpressionReuse,
+        reuse.validate(
+            a,
+            program,
+            forged,
+            &.{.{
+                .source = .{ .block = 0, .instruction = 0 },
+                .target = .{ .block = 3, .instruction = 0 },
+            }},
+        ),
+    );
 }
 
 test "parallel edge replacement of an operand invalidates reuse" {
     var blocks = diamond.blocks[0..4].*;
-    blocks[1].terminator.jump.assignments = &.{ .{ .destination = 0, .source = .{ .slot = 1 } }, .{ .destination = 1, .source = .{ .slot = 0 } } };
+    blocks[1].terminator.jump.assignments = &.{
+        .{ .destination = 0, .source = .{ .slot = 1 } },
+        .{ .destination = 1, .source = .{ .slot = 0 } },
+    };
     var program = diamond;
     program.blocks = &blocks;
     var stats: reuse.Statistics = .{};
@@ -82,21 +125,62 @@ test "non-dominating expression is not available at the join" {
     forged_blocks[3].instructions = &.{.{ .destination = 4, .opcode = .move, .operands = &.{3} }};
     var forged = program;
     forged.blocks = &forged_blocks;
-    try std.testing.expectError(error.InvalidExpressionReuse, reuse.validate(a, program, forged, &.{.{ .source = .{ .block = 1, .instruction = 0 }, .target = .{ .block = 3, .instruction = 0 } }}));
+    try std.testing.expectError(
+        error.InvalidExpressionReuse,
+        reuse.validate(
+            a,
+            program,
+            forged,
+            &.{.{
+                .source = .{ .block = 1, .instruction = 0 },
+                .target = .{ .block = 3, .instruction = 0 },
+            }},
+        ),
+    );
 }
 
 test "checker rejects using a producer that overwrote its own operand" {
     var program = diamond;
-    program.blocks = &.{.{ .function = 0, .instructions = &.{ .{ .destination = 0, .opcode = .integer_bit_xor, .operands = &.{ 0, 1 } }, diamond.blocks[3].instructions[0] }, .terminator = diamond.blocks[3].terminator }};
+    program.blocks = &.{.{
+        .function = 0,
+        .instructions = &.{
+            .{ .destination = 0, .opcode = .integer_bit_xor, .operands = &.{ 0, 1 } },
+            diamond.blocks[3].instructions[0],
+        },
+        .terminator = diamond.blocks[3].terminator,
+    }};
     var forged = program;
-    forged.blocks = &.{.{ .function = 0, .instructions = &.{ program.blocks[0].instructions[0], .{ .destination = 4, .opcode = .move, .operands = &.{0} } }, .terminator = program.blocks[0].terminator }};
-    try std.testing.expectError(error.InvalidExpressionReuse, reuse.validate(a, program, forged, &.{.{ .source = .{ .block = 0, .instruction = 0 }, .target = .{ .block = 0, .instruction = 1 } }}));
+    forged.blocks = &.{.{
+        .function = 0,
+        .instructions = &.{
+            program.blocks[0].instructions[0],
+            .{ .destination = 4, .opcode = .move, .operands = &.{0} },
+        },
+        .terminator = program.blocks[0].terminator,
+    }};
+    try std.testing.expectError(
+        error.InvalidExpressionReuse,
+        reuse.validate(
+            a,
+            program,
+            forged,
+            &.{.{
+                .source = .{ .block = 0, .instruction = 0 },
+                .target = .{ .block = 0, .instruction = 1 },
+            }},
+        ),
+    );
 }
 
 test "work exhaustion rolls back expression candidates and still runs P01" {
     var stats: reuse.Statistics = .{};
     var p01: @import("coalescing.zig").Statistics = .{};
-    var result = try reuse.run(a, diamond, &stats, .{ .work_limit = 1, .coalescing = .{ .statistics = &p01 } });
+    var result = try reuse.run(
+        a,
+        diamond,
+        &stats,
+        .{ .work_limit = 1, .coalescing = .{ .statistics = &p01 } },
+    );
     defer result.deinit();
     try std.testing.expect(stats.work_limit);
     try std.testing.expectEqual(@as(usize, 0), stats.expressions_reused);
@@ -123,16 +207,32 @@ test "late proof-budget exhaustion discards already selected replacements" {
     var baseline = try @import("coalescing.zig").run(a, diamond, .{});
     defer baseline.deinit();
     const image = @import("program_image.zig");
-    try std.testing.expectEqual(try image.identity(a, baseline.program), try image.identity(a, result.program));
+    try std.testing.expectEqual(
+        try image.identity(a, baseline.program),
+        try image.identity(a, result.program),
+    );
 }
 
 test "potentially failing expressions with different payloads are never reused" {
     var program = diamond;
     program.roots.failure = 0;
-    program.constants = &.{ .{ .schema = 0, .bytes = &.{ 11, 0, 0, 0, 0, 0, 0, 0 } }, .{ .schema = 0, .bytes = &.{ 22, 0, 0, 0, 0, 0, 0, 0 } } };
+    program.constants = &.{
+        .{ .schema = 0, .bytes = &.{ 11, 0, 0, 0, 0, 0, 0, 0 } },
+        .{ .schema = 0, .bytes = &.{ 22, 0, 0, 0, 0, 0, 0, 0 } },
+    };
     var blocks = diamond.blocks[0..4].*;
-    blocks[0].instructions = &.{.{ .destination = 3, .opcode = .integer_add, .operands = &.{ 0, 1 }, .failures = &.{.{ .kind = .arithmetic_overflow, .value = 0 }} }};
-    blocks[3].instructions = &.{.{ .destination = 4, .opcode = .integer_add, .operands = &.{ 0, 1 }, .failures = &.{.{ .kind = .arithmetic_overflow, .value = 1 }} }};
+    blocks[0].instructions = &.{.{
+        .destination = 3,
+        .opcode = .integer_add,
+        .operands = &.{ 0, 1 },
+        .failures = &.{.{ .kind = .arithmetic_overflow, .value = 0 }},
+    }};
+    blocks[3].instructions = &.{.{
+        .destination = 4,
+        .opcode = .integer_add,
+        .operands = &.{ 0, 1 },
+        .failures = &.{.{ .kind = .arithmetic_overflow, .value = 1 }},
+    }};
     program.blocks = &blocks;
     var stats: reuse.Statistics = .{};
     var result = try reuse.run(a, program, &stats, .{});
@@ -143,17 +243,68 @@ test "potentially failing expressions with different payloads are never reused" 
 test "same closure code with distinct captures retains both constructions" {
     const program: ir.Program = .{
         .roots = .{ .entry = 0, .result = 3, .failure = 1 },
-        .schemas = &.{ .u64, .unit, .{ .internal = .{ .computation = .{ .parameters = &.{0}, .result = 3, .capture_bound = &.{0}, .use = .reusable } } }, .{ .product = &.{ 0, 0 } } },
+        .schemas = &.{
+            .u64,                       .unit,
+            .{ .internal = .{ .computation = .{
+                .parameters = &.{0},
+                .result = 3,
+                .capture_bound = &.{0},
+                .use = .reusable,
+            } } },
+            .{ .product = &.{ 0, 0 } },
+        },
         .constants = &.{},
         .effects = &.{},
         .functions = &.{
-            .{ .entry = 0, .inputs = &.{ 0, 1 }, .layout = .{ .slots = &.{ 0, 0, 2, 2, 3 } }, .result = 3 },
-            .{ .entry = 2, .inputs = &.{ 0, 1 }, .layout = .{ .slots = &.{ 0, 0, 3 } }, .result = 3 },
+            .{
+                .entry = 0,
+                .inputs = &.{ 0, 1 },
+                .layout = .{ .slots = &.{ 0, 0, 2, 2, 3 } },
+                .result = 3,
+            },
+            .{
+                .entry = 2,
+                .inputs = &.{ 0, 1 },
+                .layout = .{ .slots = &.{ 0, 0, 3 } },
+                .result = 3,
+            },
         },
         .blocks = &.{
-            .{ .function = 0, .instructions = &.{ .{ .destination = 2, .opcode = .computation, .operands = &.{0}, .immediate = 0 }, .{ .destination = 3, .opcode = .computation, .operands = &.{1}, .immediate = 0 } }, .terminator = .{ .apply = .{ .computation = 3, .arguments = &.{1}, .next = .{ .block = 1, .assignments = &.{.{ .destination = 4, .source = .returned }} } } } },
+            .{
+                .function = 0,
+                .instructions = &.{
+                    .{
+                        .destination = 2,
+                        .opcode = .computation,
+                        .operands = &.{0},
+                        .immediate = 0,
+                    },
+                    .{
+                        .destination = 3,
+                        .opcode = .computation,
+                        .operands = &.{1},
+                        .immediate = 0,
+                    },
+                },
+                .terminator = .{ .apply = .{
+                    .computation = 3,
+                    .arguments = &.{1},
+                    .next = .{
+                        .block = 1,
+                        .assignments = &.{.{ .destination = 4, .source = .returned }},
+                    },
+                } },
+            },
             .{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 4 } },
-            .{ .function = 1, .instructions = &.{.{ .destination = 2, .opcode = .product, .operands = &.{ 0, 1 } }}, .terminator = .{ .return_value = 2 } },
+            .{
+                .function = 1,
+                .instructions = &.{.{
+                    .destination = 2,
+                    .opcode = .product,
+                    .operands = &.{ 0, 1 },
+                }},
+                .terminator = .{ .return_value = 2 },
+            },
         },
         .scopes = .{ .captures = &.{.{ .fields = &.{0}, .use = .reusable }} },
         .constructors = &.{.{ .function = 1, .capture = 0, .schema = 2 }},
@@ -163,23 +314,69 @@ test "same closure code with distinct captures retains both constructions" {
     defer result.deinit();
     try std.testing.expectEqual(@as(usize, 0), stats.expressions_reused);
     var blocks = program.blocks[0..3].*;
-    blocks[0].instructions = &.{ program.blocks[0].instructions[0], .{ .destination = 3, .opcode = .move, .operands = &.{2} } };
+    blocks[0].instructions = &.{
+        program.blocks[0].instructions[0],
+        .{ .destination = 3, .opcode = .move, .operands = &.{2} },
+    };
     var forged = program;
     forged.blocks = &blocks;
-    try std.testing.expectError(error.InvalidExpressionReuse, reuse.validate(a, program, forged, &.{.{ .source = .{ .block = 0, .instruction = 0 }, .target = .{ .block = 0, .instruction = 1 } }}));
+    try std.testing.expectError(
+        error.InvalidExpressionReuse,
+        reuse.validate(
+            a,
+            program,
+            forged,
+            &.{.{
+                .source = .{ .block = 0, .instruction = 0 },
+                .target = .{ .block = 0, .instruction = 1 },
+            }},
+        ),
+    );
 }
 
 const private_cell: ir.Program = .{
     .roots = .{ .entry = 0, .result = 0, .failure = 1 },
-    .schemas = &.{ .u64, .unit, .{ .internal = .{ .region = 0 } }, .{ .internal = .{ .cell = .{ .element = 0, .region = 0 } } }, .{ .internal = .{ .computation = .{ .parameters = &.{ 2, 0, 0 }, .result = 0, .use = .reusable, .regions = &.{0} } } } },
+    .schemas = &.{
+        .u64,                                                         .unit, .{ .internal = .{ .region = 0 } },
+        .{ .internal = .{ .cell = .{ .element = 0, .region = 0 } } },
+        .{ .internal = .{ .computation = .{
+            .parameters = &.{ 2, 0, 0 },
+            .result = 0,
+            .use = .reusable,
+            .regions = &.{0},
+        } } },
+    },
     .constants = &.{},
     .effects = &.{},
     .functions = &.{
-        .{ .entry = 0, .inputs = &.{ 0, 1 }, .layout = .{ .slots = &.{ 0, 0, 4, 0 } }, .result = 0 },
-        .{ .entry = 2, .inputs = &.{ 0, 1, 2 }, .layout = .{ .slots = &.{ 2, 0, 0, 3, 0, 1, 0 } }, .result = 0, .regions = &.{0} },
+        .{
+            .entry = 0,
+            .inputs = &.{ 0, 1 },
+            .layout = .{ .slots = &.{ 0, 0, 4, 0 } },
+            .result = 0,
+        },
+        .{
+            .entry = 2,
+            .inputs = &.{ 0, 1, 2 },
+            .layout = .{ .slots = &.{ 2, 0, 0, 3, 0, 1, 0 } },
+            .result = 0,
+            .regions = &.{0},
+        },
     },
     .blocks = &.{
-        .{ .function = 0, .instructions = &.{.{ .destination = 2, .opcode = .computation, .immediate = 0 }}, .terminator = .{ .with_region = .{ .region = 0, .body = 2, .arguments = &.{ 0, 1 }, .next = .{ .block = 1, .assignments = &.{.{ .destination = 3, .source = .returned }} } } } },
+        .{
+            .function = 0,
+            .instructions = &.{.{ .destination = 2, .opcode = .computation, .immediate = 0 }},
+            .terminator = .{ .with_region = .{
+                .region = 0,
+                .body = 2,
+                .arguments = &.{ 0, 1 },
+                .next = .{
+                    .block = 1,
+                    .assignments = &.{.{ .destination = 3, .source = .returned }},
+                },
+            } },
+        },
         .{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 3 } },
         .{ .function = 1, .instructions = &.{
             .{ .destination = 3, .opcode = .cell_new, .operands = &.{ 0, 1 } },
@@ -203,7 +400,18 @@ test "equal-looking cell reads separated by mutation are excluded" {
     blocks[2].instructions = &instructions;
     var forged = private_cell;
     forged.blocks = &blocks;
-    try std.testing.expectError(error.InvalidExpressionReuse, reuse.validate(a, private_cell, forged, &.{.{ .source = .{ .block = 2, .instruction = 1 }, .target = .{ .block = 2, .instruction = 3 } }}));
+    try std.testing.expectError(
+        error.InvalidExpressionReuse,
+        reuse.validate(
+            a,
+            private_cell,
+            forged,
+            &.{.{
+                .source = .{ .block = 2, .instruction = 1 },
+                .target = .{ .block = 2, .instruction = 3 },
+            }},
+        ),
+    );
 }
 
 test "expression reuse does not introduce retention across a capture boundary" {
@@ -219,7 +427,18 @@ test "expression reuse does not introduce retention across a capture boundary" {
     changed[3].instructions = &.{.{ .destination = 4, .opcode = .move, .operands = &.{3} }};
     var candidate = original;
     candidate.blocks = &changed;
-    try std.testing.expectError(error.InvalidExpressionReuse, reuse.validate(a, original, candidate, &.{.{ .source = .{ .block = 0, .instruction = 0 }, .target = .{ .block = 3, .instruction = 0 } }}));
+    try std.testing.expectError(
+        error.InvalidExpressionReuse,
+        reuse.validate(
+            a,
+            original,
+            candidate,
+            &.{.{
+                .source = .{ .block = 0, .instruction = 0 },
+                .target = .{ .block = 3, .instruction = 0 },
+            }},
+        ),
+    );
 }
 
 test "unique expressions do not allocate a global availability universe" {
@@ -237,8 +456,17 @@ test "unique expressions do not allocate a global availability universe" {
         .schemas = &.{ .u64, .unit },
         .constants = &constants,
         .effects = &.{},
-        .functions = &.{.{ .entry = 0, .inputs = &.{}, .layout = .{ .slots = &.{0} }, .result = 0 }},
-        .blocks = &.{.{ .function = 0, .instructions = &instructions, .terminator = .{ .return_value = 0 } }},
+        .functions = &.{.{
+            .entry = 0,
+            .inputs = &.{},
+            .layout = .{ .slots = &.{0} },
+            .result = 0,
+        }},
+        .blocks = &.{.{
+            .function = 0,
+            .instructions = &instructions,
+            .terminator = .{ .return_value = 0 },
+        }},
     };
     var stats: reuse.Statistics = .{};
     var result = try reuse.run(a, original, &stats, .{});
@@ -262,7 +490,12 @@ test "equal expressions separated by capture boundaries do not share availabilit
         .schemas = &.{ .u64, .unit },
         .constants = &.{.{ .schema = 0, .bytes = &.{ 7, 0, 0, 0, 0, 0, 0, 0 } }},
         .effects = &.{},
-        .functions = &.{.{ .entry = 0, .inputs = &.{}, .layout = .{ .slots = &.{0} }, .result = 0 }},
+        .functions = &.{.{
+            .entry = 0,
+            .inputs = &.{},
+            .layout = .{ .slots = &.{0} },
+            .result = 0,
+        }},
         .blocks = blocks,
     };
     var stats: reuse.Statistics = .{};

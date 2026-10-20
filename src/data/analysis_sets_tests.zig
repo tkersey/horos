@@ -287,7 +287,10 @@ test "direct insertion agrees with independent union across range and word bound
                 try testing.expectEqual(expected, actual);
                 try testing.expectEqual(length, pool.count(before));
                 try testing.expect(pool.contains(actual, member));
-                try testing.expectEqual(length + @intFromBool(member < low or member >= low + length), pool.count(actual));
+                try testing.expectEqual(
+                    length + @intFromBool(member < low or member >= low + length),
+                    pool.count(actual),
+                );
             }
         }
     }

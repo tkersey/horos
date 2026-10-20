@@ -4,7 +4,18 @@ const std = @import("std");
 const p = @import("program.zig");
 const ir = @import("activation.zig");
 const roles = @import("reference_roles.zig");
-pub const Kind = enum(u8) { schema, constant, effect, function, block, handler, capture, region, resource, constructor };
+pub const Kind = enum(u8) {
+    schema,
+    constant,
+    effect,
+    function,
+    block,
+    handler,
+    capture,
+    region,
+    resource,
+    constructor,
+};
 pub const Reference = struct { kind: Kind, id: p.Id };
 pub const kind_count = @typeInfo(Kind).@"enum".field_names.len;
 pub const missing = std.math.maxInt(p.Id);
@@ -40,7 +51,18 @@ const RegionNames = struct {
 
 pub fn sizes(program: ir.Program) Error![kind_count]usize {
     const regions = std.math.cast(usize, program.scopes.region_count) orelse return error.Capacity;
-    return .{ program.schemas.len, program.constants.len, program.effects.len, program.functions.len, program.blocks.len, program.handlers.len, program.scopes.captures.len, regions, program.scopes.resources.len, program.constructors.len };
+    return .{
+        program.schemas.len,
+        program.constants.len,
+        program.effects.len,
+        program.functions.len,
+        program.blocks.len,
+        program.handlers.len,
+        program.scopes.captures.len,
+        regions,
+        program.scopes.resources.len,
+        program.constructors.len,
+    };
 }
 pub const Mapper = struct {
     allocator: std.mem.Allocator,
@@ -49,7 +71,10 @@ pub const Mapper = struct {
     references: ?*std.ArrayList(Reference) = null,
 
     pub fn id(self: Mapper, kind: Kind, value: p.Id) Error!p.Id {
-        if (self.references) |found| try found.append(self.allocator, .{ .kind = kind, .id = value });
+        if (self.references) |found| try found.append(
+            self.allocator,
+            .{ .kind = kind, .id = value },
+        );
         if (kind == .region) if (self.region_names) |names| return names.id(value);
         const map = self.maps[@backingInt(kind)];
         if (value >= map.len or map[@intCast(value)] == missing) return error.InvalidReference;
@@ -75,8 +100,14 @@ pub const Mapper = struct {
             .product => |v| .{ .product = try self.ids(.schema, v, false) },
             .sum => |v| .{ .sum = try self.ids(.schema, v, false) },
             .seq => |v| .{ .seq = try self.id(.schema, v) },
-            .vector => |v| .{ .vector = .{ .element = try self.id(.schema, v.element), .maximum = v.maximum } },
-            .array => |v| .{ .array = .{ .element = try self.id(.schema, v.element), .length = v.length } },
+            .vector => |v| .{ .vector = .{
+                .element = try self.id(.schema, v.element),
+                .maximum = v.maximum,
+            } },
+            .array => |v| .{ .array = .{
+                .element = try self.id(.schema, v.element),
+                .length = v.length,
+            } },
             .enumeration => |v| .{ .enumeration = try self.local(u32, v) },
             .internal => |v| .{ .internal = switch (v) {
                 .computation => |c| .{ .computation = .{
@@ -101,37 +132,84 @@ pub const Mapper = struct {
                     .obligations = c.obligations,
                 } },
                 .capability => |v_| .{ .capability = try self.id(.effect, v_) },
-                .cell => |v_| .{ .cell = .{ .element = try self.id(.schema, v_.element), .region = try self.id(.region, v_.region) } },
+                .cell => |v_| .{ .cell = .{
+                    .element = try self.id(.schema, v_.element),
+                    .region = try self.id(.region, v_.region),
+                } },
                 .region => |v_| .{ .region = try self.id(.region, v_) },
                 .suspension_package => |v_| .{ .suspension_package = try self.id(.schema, v_) },
                 .abstract_resource => |v_| .{ .abstract_resource = try self.id(.resource, v_) },
-                .borrowed => |v_| .{ .borrowed = .{ .value = try self.id(.schema, v_.value), .region = try self.id(.region, v_.region) } },
+                .borrowed => |v_| .{ .borrowed = .{
+                    .value = try self.id(.schema, v_.value),
+                    .region = try self.id(.region, v_.region),
+                } },
             } },
             else => value,
         };
     }
     pub fn literal(self: Mapper, value: p.Literal) Error!p.Literal {
-        return .{ .schema = try self.id(.schema, value.schema), .bytes = try self.local(u8, value.bytes) };
+        return .{
+            .schema = try self.id(.schema, value.schema),
+            .bytes = try self.local(u8, value.bytes),
+        };
     }
     pub fn effect(self: Mapper, value: p.Effect) Error!p.Effect {
-        return .{ .identity = try self.local(u8, value.identity), .payload = try self.id(.schema, value.payload), .result = try self.id(.schema, value.result), .use_site_effects = try self.ids(.effect, value.use_site_effects, false), .bodies = try self.ids(.schema, value.bodies, false), .control_use = value.control_use, .external = value.external };
+        return .{
+            .identity = try self.local(u8, value.identity),
+            .payload = try self.id(.schema, value.payload),
+            .result = try self.id(.schema, value.result),
+            .use_site_effects = try self.ids(.effect, value.use_site_effects, false),
+            .bodies = try self.ids(.schema, value.bodies, false),
+            .control_use = value.control_use,
+            .external = value.external,
+        };
     }
     pub fn function(self: Mapper, value: ir.Function) Error!ir.Function {
-        return .{ .entry = if (value.entry == missing) missing else try self.id(.block, value.entry), .inputs = try self.local(p.Id, value.inputs), .layout = .{ .slots = try self.ids(.schema, value.layout.slots, false) }, .custody = try self.local(ir.CustodyScope, value.custody), .result = try self.id(.schema, value.result), .effects = try self.ids(.effect, value.effects, true), .regions = try self.ids(.region, value.regions, true) };
+        return .{
+            .entry = if (value.entry == missing) missing else try self.id(.block, value.entry),
+            .inputs = try self.local(p.Id, value.inputs),
+            .layout = .{ .slots = try self.ids(.schema, value.layout.slots, false) },
+            .custody = try self.local(ir.CustodyScope, value.custody),
+            .result = try self.id(.schema, value.result),
+            .effects = try self.ids(.effect, value.effects, true),
+            .regions = try self.ids(.region, value.regions, true),
+        };
     }
     fn instruction(self: Mapper, value: ir.Instruction) Error!ir.Instruction {
         const failures = try self.allocator.alloc(p.InstructionFailure, value.failures.len);
-        for (failures, value.failures) |*target, failure| target.* = .{ .kind = failure.kind, .value = try self.id(.constant, failure.value) };
-        return .{ .destination = value.destination, .opcode = value.opcode, .operands = try self.local(p.Id, value.operands), .failures = failures, .immediate = switch (@import("opcode_contract.zig").describe(value.opcode).immediate_role) {
-            .constant => try self.id(.constant, value.immediate),
-            .constructor => try self.id(.constructor, value.immediate),
-            .numeric => value.immediate,
-        } };
+        for (
+            failures,
+            value.failures,
+        ) |*target, failure| target.* = .{
+            .kind = failure.kind,
+            .value = try self.id(.constant, failure.value),
+        };
+        return .{
+            .destination = value.destination,
+            .opcode = value.opcode,
+            .operands = try self.local(p.Id, value.operands),
+            .failures = failures,
+            .immediate = switch (@import("opcode_contract.zig").describe(
+                value.opcode,
+            ).immediate_role) {
+                .constant => try self.id(.constant, value.immediate),
+                .constructor => try self.id(.constructor, value.immediate),
+                .numeric => value.immediate,
+            },
+        };
     }
     pub fn block(self: Mapper, value: ir.Block) Error!ir.Block {
         const instructions = try self.allocator.alloc(ir.Instruction, value.instructions.len);
-        for (instructions, value.instructions) |*target, operation| target.* = try self.instruction(operation);
-        return .{ .function = try self.id(.function, value.function), .custody = value.custody, .instructions = instructions, .terminator = try self.terminator(value.terminator) };
+        for (
+            instructions,
+            value.instructions,
+        ) |*target, operation| target.* = try self.instruction(operation);
+        return .{
+            .function = try self.id(.function, value.function),
+            .custody = value.custody,
+            .instructions = instructions,
+            .terminator = try self.terminator(value.terminator),
+        };
     }
     fn terminator(self: Mapper, value: ir.Terminator) Error!ir.Terminator {
         var control: ControlMapper = .{ .mapper = self };
@@ -139,25 +217,63 @@ pub const Mapper = struct {
     }
     pub fn handler(self: Mapper, value: ir.Handler) Error!ir.Handler {
         const clauses = try self.allocator.alloc(ir.Clause, value.clauses.len);
-        for (clauses, value.clauses) |*target, clause| target.* = .{ .effect = try self.id(.effect, clause.effect), .function = try self.id(.function, clause.function), .resumption = try self.id(.schema, clause.resumption), .strategy = clause.strategy };
-        return .{ .mode = value.mode, .input = try self.id(.schema, value.input), .answer = try self.id(.schema, value.answer), .return_function = try self.id(.function, value.return_function), .clauses = clauses, .state = try self.ids(.schema, value.state, false), .effects = try self.ids(.effect, value.effects, true) };
+        for (
+            clauses,
+            value.clauses,
+        ) |*target, clause| target.* = .{
+            .effect = try self.id(.effect, clause.effect),
+            .function = try self.id(.function, clause.function),
+            .resumption = try self.id(.schema, clause.resumption),
+            .strategy = clause.strategy,
+        };
+        return .{
+            .mode = value.mode,
+            .input = try self.id(.schema, value.input),
+            .answer = try self.id(.schema, value.answer),
+            .return_function = try self.id(.function, value.return_function),
+            .clauses = clauses,
+            .state = try self.ids(.schema, value.state, false),
+            .effects = try self.ids(.effect, value.effects, true),
+        };
     }
     pub fn capture(self: Mapper, value: p.Capture) Error!p.Capture {
-        return .{ .fields = try self.ids(.schema, value.fields, false), .owned_regions = try self.ids(.region, value.owned_regions, true), .borrowed_regions = try self.ids(.region, value.borrowed_regions, true), .use = value.use };
+        return .{
+            .fields = try self.ids(.schema, value.fields, false),
+            .owned_regions = try self.ids(.region, value.owned_regions, true),
+            .borrowed_regions = try self.ids(.region, value.borrowed_regions, true),
+            .use = value.use,
+        };
     }
     pub fn resource(self: Mapper, value: p.Resource) Error!p.Resource {
-        return .{ .representation = try self.id(.schema, value.representation), .introducers = try self.ids(.function, value.introducers, true), .eliminators = try self.ids(.function, value.eliminators, true) };
+        return .{
+            .representation = try self.id(.schema, value.representation),
+            .introducers = try self.ids(.function, value.introducers, true),
+            .eliminators = try self.ids(.function, value.eliminators, true),
+        };
     }
     pub fn constructor(self: Mapper, value: p.Constructor) Error!p.Constructor {
-        return .{ .function = try self.id(.function, value.function), .capture = try self.id(.capture, value.capture), .schema = try self.id(.schema, value.schema) };
+        return .{
+            .function = try self.id(.function, value.function),
+            .capture = try self.id(.capture, value.capture),
+            .schema = try self.id(.schema, value.schema),
+        };
     }
 };
 
 const ControlMapper = struct {
     pub const VisitError = Error;
     mapper: Mapper,
-    pub fn reference(self: *ControlMapper, comptime role: roles.Role, comptime cardinality: roles.Cardinality, value: anytype) Error!@TypeOf(value) {
-        if (comptime cardinality == .optional) return if (value) |present| try self.reference(role, .one, present) else null;
+    pub fn reference(
+        self: *ControlMapper,
+        comptime role: roles.Role,
+        comptime cardinality: roles.Cardinality,
+        value: anytype,
+    ) Error!@TypeOf(value) {
+        if (comptime cardinality == .optional) return if (value) |present| try self.reference(
+            role,
+            .one,
+            present,
+        ) else null;
         if (comptime cardinality == .list) {
             const Child = @typeInfo(@TypeOf(value)).pointer.child;
             const result = try self.mapper.allocator.alloc(Child, value.len);
@@ -198,7 +314,11 @@ pub const Projection = struct {
 /// Project an already checked closed Program onto its typed reference closure.
 /// All catalog declarations retain their relative order and nominal distinction.
 /// Components must retain their interfaces; their unlinked objects do not use this.
-pub fn ownReachable(output: std.mem.Allocator, scratch: std.mem.Allocator, input: ir.Program) Error!Projection {
+pub fn ownReachable(
+    output: std.mem.Allocator,
+    scratch: std.mem.Allocator,
+    input: ir.Program,
+) Error!Projection {
     var selection = try Selection.init(scratch, input);
     try selection.scan(input);
     var orders: [kind_count][]p.Id = undefined;
@@ -215,14 +335,29 @@ pub fn ownReachable(output: std.mem.Allocator, scratch: std.mem.Allocator, input
             }
         }
     }
-    const mapper: Mapper = .{ .allocator = output, .maps = selection.maps, .region_names = &selection.regions };
+    const mapper: Mapper = .{
+        .allocator = output,
+        .maps = selection.maps,
+        .region_names = &selection.regions,
+    };
     const result = try copySelected(mapper, input, orders, selection.regions.ids.count());
-    return .{ .program = result, .function_origins = orders[@backingInt(Kind.function)], .maps = selection.maps, .regions = selection.regions.ids };
+    return .{
+        .program = result,
+        .function_origins = orders[@backingInt(Kind.function)],
+        .maps = selection.maps,
+        .regions = selection.regions.ids,
+    };
 }
 
 /// Materialize selected whole records using the same typed field rewriter as
 /// reachability. Representatives/final maps require independent validation.
-pub fn ownQuotient(output: std.mem.Allocator, scratch: std.mem.Allocator, input: ir.Program, representatives: Maps, final: Maps) Error!ir.Program {
+pub fn ownQuotient(
+    output: std.mem.Allocator,
+    scratch: std.mem.Allocator,
+    input: ir.Program,
+    representatives: Maps,
+    final: Maps,
+) Error!ir.Program {
     var orders: [kind_count][]p.Id = undefined;
     for (representatives, &orders, try sizes(input)) |map, *order, size| {
         if (map.len != size) return error.InvalidReference;
@@ -243,15 +378,35 @@ pub fn ownQuotient(output: std.mem.Allocator, scratch: std.mem.Allocator, input:
     return copySelected(mapper, input, orders, orders[@backingInt(Kind.region)].len);
 }
 
-fn copySelected(mapper: Mapper, input: ir.Program, orders: [kind_count][]p.Id, regions: p.Id) Error!ir.Program {
+fn copySelected(
+    mapper: Mapper,
+    input: ir.Program,
+    orders: [kind_count][]p.Id,
+    regions: p.Id,
+) Error!ir.Program {
     const output = mapper.allocator;
     var result = input;
-    result.roots = .{ .entry = try mapper.id(.function, input.roots.entry), .result = try mapper.id(.schema, input.roots.result), .failure = try mapper.id(.schema, input.roots.failure) };
-    inline for (.{ .{ Kind.schema, "schemas", Mapper.schema }, .{ Kind.constant, "constants", Mapper.literal }, .{ Kind.effect, "effects", Mapper.effect }, .{ Kind.function, "functions", Mapper.function }, .{ Kind.block, "blocks", Mapper.block }, .{ Kind.handler, "handlers", Mapper.handler }, .{ Kind.constructor, "constructors", Mapper.constructor } }) |item| {
+    result.roots = .{
+        .entry = try mapper.id(.function, input.roots.entry),
+        .result = try mapper.id(.schema, input.roots.result),
+        .failure = try mapper.id(.schema, input.roots.failure),
+    };
+    inline for (.{
+        .{ Kind.schema, "schemas", Mapper.schema },
+        .{ Kind.constant, "constants", Mapper.literal },
+        .{ Kind.effect, "effects", Mapper.effect },
+        .{ Kind.function, "functions", Mapper.function },
+        .{ Kind.block, "blocks", Mapper.block },
+        .{ Kind.handler, "handlers", Mapper.handler },
+        .{ Kind.constructor, "constructors", Mapper.constructor },
+    }) |item| {
         const T = std.meta.Elem(@TypeOf(@field(input, item[1])));
         const order = orders[@backingInt(item[0])];
         const values = try output.alloc(T, order.len);
-        for (values, order) |*target, old| target.* = try item[2](mapper, @field(input, item[1])[@intCast(old)]);
+        for (
+            values,
+            order,
+        ) |*target, old| target.* = try item[2](mapper, @field(input, item[1])[@intCast(old)]);
         @field(result, item[1]) = values;
     }
     const captures = try output.alloc(p.Capture, orders[@backingInt(Kind.capture)].len);
@@ -271,9 +426,25 @@ const Selection = struct {
     regions: RegionNames,
 
     fn init(allocator: std.mem.Allocator, input: ir.Program) Error!Selection {
-        var result: Selection = .{ .allocator = allocator, .maps = undefined, .seen = undefined, .regions = .{ .allocator = allocator, .declared = input.scopes.region_count } };
+        var result: Selection = .{
+            .allocator = allocator,
+            .maps = undefined,
+            .seen = undefined,
+            .regions = .{ .allocator = allocator, .declared = input.scopes.region_count },
+        };
         // Region names are sparse nominal IDs, not a dense allocation bound.
-        const counts = [_]usize{ input.schemas.len, input.constants.len, input.effects.len, input.functions.len, input.blocks.len, input.handlers.len, input.scopes.captures.len, 0, input.scopes.resources.len, input.constructors.len };
+        const counts = [_]usize{
+            input.schemas.len,
+            input.constants.len,
+            input.effects.len,
+            input.functions.len,
+            input.blocks.len,
+            input.handlers.len,
+            input.scopes.captures.len,
+            0,
+            input.scopes.resources.len,
+            input.constructors.len,
+        };
         for (&result.maps, &result.seen, counts) |*map, *seen, count| {
             map.* = try allocator.alloc(p.Id, count);
             for (map.*, 0..) |*id, index| id.* = index;
@@ -285,7 +456,14 @@ const Selection = struct {
 
     fn scan(self: *Selection, input: ir.Program) Error!void {
         var pending: std.ArrayList(Reference) = .empty;
-        try pending.appendSlice(self.allocator, &.{ .{ .kind = .function, .id = input.roots.entry }, .{ .kind = .schema, .id = input.roots.result }, .{ .kind = .schema, .id = input.roots.failure } });
+        try pending.appendSlice(
+            self.allocator,
+            &.{
+                .{ .kind = .function, .id = input.roots.entry },
+                .{ .kind = .schema, .id = input.roots.result },
+                .{ .kind = .schema, .id = input.roots.failure },
+            },
+        );
         while (pending.pop()) |reference| {
             if (reference.kind == .region) {
                 _ = try self.regions.id(reference.id);
@@ -301,7 +479,12 @@ const Selection = struct {
             var temporary = std.heap.ArenaAllocator.init(self.allocator);
             defer temporary.deinit();
             var found: std.ArrayList(Reference) = .empty;
-            const mapper: Mapper = .{ .allocator = temporary.allocator(), .maps = self.maps, .region_names = &self.regions, .references = &found };
+            const mapper: Mapper = .{
+                .allocator = temporary.allocator(),
+                .maps = self.maps,
+                .region_names = &self.regions,
+                .references = &found,
+            };
             switch (reference.kind) {
                 .schema => _ = try mapper.schema(input.schemas[id]),
                 .constant => _ = try mapper.literal(input.constants[id]),

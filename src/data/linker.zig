@@ -11,7 +11,15 @@ const Id = p.Id;
 pub const Instance = struct { key: []const u8, object: []const u8 };
 pub const Endpoint = struct { instance: []const u8, symbol: []const u8 };
 pub const Binding = struct { required: Endpoint, supplied: Endpoint };
-pub const Error = @import("closed_compilation.zig").Error || component.Error || error{ DuplicateInstance, MissingInstance, MissingSymbol, DuplicateBinding, UnresolvedImport, IncompatibleInterface, IncompatibleFailure };
+pub const Error = @import("closed_compilation.zig").Error || component.Error || error{
+    DuplicateInstance,
+    MissingInstance,
+    MissingSymbol,
+    DuplicateBinding,
+    UnresolvedImport,
+    IncompatibleInterface,
+    IncompatibleFailure,
+};
 pub const Linked = struct {
     arena: std.heap.ArenaAllocator,
     program: ir.Program,
@@ -21,11 +29,20 @@ pub const Linked = struct {
         self.arena.deinit();
         self.* = undefined;
     }
-    pub fn encode(self: *const Linked, allocator: std.mem.Allocator, output: []u8) Error![]const u8 {
+    pub fn encode(
+        self: *const Linked,
+        allocator: std.mem.Allocator,
+        output: []u8,
+    ) Error![]const u8 {
         return @import("program_image.zig").encode(allocator, self.program, output);
     }
 };
-const Unit = struct { key: []const u8, object: component.Object, offsets: [relocate.kind_count]usize, maps: relocate.Maps };
+const Unit = struct {
+    key: []const u8,
+    object: component.Object,
+    offsets: [relocate.kind_count]usize,
+    maps: relocate.Maps,
+};
 
 fn less(_: void, a: Instance, b: Instance) bool {
     return std.mem.lessThan(u8, a.key, b.key);
@@ -49,15 +66,32 @@ fn resolve(aliases: []const Id, imported: []const bool, start: usize) Error!usiz
     return cursor;
 }
 
-pub fn link(allocator: std.mem.Allocator, input: []const Instance, bindings: []const Binding, entry: Endpoint) Error!Linked {
+pub fn link(
+    allocator: std.mem.Allocator,
+    input: []const Instance,
+    bindings: []const Binding,
+    entry: Endpoint,
+) Error!Linked {
     return linkWithOptions(allocator, input, bindings, entry, .{});
 }
 
-pub fn linkWithOptions(allocator: std.mem.Allocator, input: []const Instance, bindings: []const Binding, entry: Endpoint, options: @import("coalescing.zig").Options) Error!Linked {
+pub fn linkWithOptions(
+    allocator: std.mem.Allocator,
+    input: []const Instance,
+    bindings: []const Binding,
+    entry: Endpoint,
+    options: @import("coalescing.zig").Options,
+) Error!Linked {
     return linkWithCompilation(allocator, input, bindings, entry, .{ .coalescing = options });
 }
 
-pub fn linkWithCompilation(allocator: std.mem.Allocator, input: []const Instance, bindings: []const Binding, entry: Endpoint, options: @import("closed_compilation.zig").Options) Error!Linked {
+pub fn linkWithCompilation(
+    allocator: std.mem.Allocator,
+    input: []const Instance,
+    bindings: []const Binding,
+    entry: Endpoint,
+    options: @import("closed_compilation.zig").Options,
+) Error!Linked {
     options.resetObservations();
     var temporary = std.heap.ArenaAllocator.init(allocator);
     defer temporary.deinit();
@@ -70,12 +104,30 @@ pub fn linkWithCompilation(allocator: std.mem.Allocator, input: []const Instance
     const units = try a.alloc(Unit, sorted.len);
     var totals = @as([relocate.kind_count]usize, @splat(0));
     for (sorted, units, decoded, 0..) |instance, *unit, *owner, i| {
-        if (instance.key.len == 0 or !std.unicode.utf8ValidateSlice(instance.key)) return error.InvalidSymbol;
-        if (i != 0 and std.mem.eql(u8, sorted[i - 1].key, instance.key)) return error.DuplicateInstance;
+        if (instance.key.len == 0 or !std.unicode.utf8ValidateSlice(
+            instance.key,
+        )) return error.InvalidSymbol;
+        if (i != 0 and std.mem.eql(
+            u8,
+            sorted[i - 1].key,
+            instance.key,
+        )) return error.DuplicateInstance;
         owner.* = try component.decode(allocator, instance.object);
         initialized += 1;
-        unit.* = .{ .key = instance.key, .object = owner.object, .offsets = totals, .maps = undefined };
-        for (&totals, try relocate.sizes(owner.object.program)) |*total, count| total.* = std.math.add(usize, total.*, count) catch return error.InvalidLength;
+        unit.* = .{
+            .key = instance.key,
+            .object = owner.object,
+            .offsets = totals,
+            .maps = undefined,
+        };
+        for (
+            &totals,
+            try relocate.sizes(owner.object.program),
+        ) |*total, count| total.* = std.math.add(
+            usize,
+            total.*,
+            count,
+        ) catch return error.InvalidLength;
         var entries: usize = 0;
         for (totals) |count| {
             entries = std.math.add(usize, entries, count) catch return error.Capacity;
@@ -95,7 +147,12 @@ pub fn linkWithCompilation(allocator: std.mem.Allocator, input: []const Instance
         @memset(map.*, relocate.missing);
     }
     for (units) |unit| for (unit.object.imports) |symbol| {
-        imported[@backingInt(symbol.reference.kind)][unit.offsets[@backingInt(symbol.reference.kind)] + @as(usize, @intCast(symbol.reference.id))] = true;
+        imported[@backingInt(symbol.reference.kind)][
+            unit.offsets[@backingInt(symbol.reference.kind)] + @as(
+                usize,
+                @intCast(symbol.reference.id),
+            )
+        ] = true;
     };
     for (bindings) |binding| {
         const from = units[try unitAt(units, binding.required.instance)];
@@ -117,7 +174,12 @@ pub fn linkWithCompilation(allocator: std.mem.Allocator, input: []const Instance
     for (maps, aliases, imported) |map, alias, is_import| for (map, 0..) |*target, id| {
         if (is_import[id]) target.* = map[try resolve(alias, is_import, id)];
     };
-    for (units) |*unit| for (&unit.maps, maps, unit.offsets, try relocate.sizes(unit.object.program)) |*map, global, offset, count| {
+    for (units) |*unit| for (
+        &unit.maps,
+        maps,
+        unit.offsets,
+        try relocate.sizes(unit.object.program),
+    ) |*map, global, offset, count| {
         map.* = global[offset..][0..count];
     };
     const selected_unit = units[try unitAt(units, entry.instance)];
@@ -126,18 +188,33 @@ pub fn linkWithCompilation(allocator: std.mem.Allocator, input: []const Instance
     const selected_mapper: relocate.Mapper = .{ .allocator = a, .maps = selected_unit.maps };
     const root = try selected_mapper.id(.function, selected.id);
     var provisional = try assemble(a, units, imported, counts);
-    provisional.roots = .{ .entry = root, .result = provisional.functions[@intCast(root)].result, .failure = try selected_mapper.id(.schema, selected_unit.object.program.roots.failure) };
+    provisional.roots = .{
+        .entry = root,
+        .result = provisional.functions[@intCast(root)].result,
+        .failure = try selected_mapper.id(.schema, selected_unit.object.program.roots.failure),
+    };
     const schema_map = try @import("schema_partition.zig").compute(a, provisional);
     var final_maps = try relocate.identityMaps(a, try relocate.sizes(provisional));
     final_maps[@backingInt(Kind.schema)] = schema_map;
     const result = try rewrite(a, provisional, final_maps);
     for (units) |*unit| {
         const mapped = try a.alloc(Id, unit.maps[@backingInt(Kind.schema)].len);
-        for (mapped, unit.maps[@backingInt(Kind.schema)]) |*target, id| target.* = schema_map[@intCast(id)];
+        for (
+            mapped,
+            unit.maps[@backingInt(Kind.schema)],
+        ) |*target, id| target.* = schema_map[@intCast(id)];
         unit.maps[@backingInt(Kind.schema)] = mapped;
         const mapper: relocate.Mapper = .{ .allocator = a, .maps = unit.maps };
-        if (try mapper.id(.schema, unit.object.program.roots.failure) != result.roots.failure) return error.IncompatibleFailure;
-        for (unit.object.imports) |symbol| try compatible(mapper, unit.object.program, result, symbol.reference);
+        if (try mapper.id(
+            .schema,
+            unit.object.program.roots.failure,
+        ) != result.roots.failure) return error.IncompatibleFailure;
+        for (unit.object.imports) |symbol| try compatible(
+            mapper,
+            unit.object.program,
+            result,
+            symbol.reference,
+        );
     }
     var checked = try @import("activation_ownership.zig").analyze(allocator, result);
     defer checked.deinit();
@@ -158,15 +235,37 @@ fn checkBorrows(a: std.mem.Allocator, units: []const Unit, result: ir.Program) E
         for (unit.object.imports) |symbol| switch (symbol.reference.kind) {
             .constructor => {
                 const expected = unit.object.program.constructors[@intCast(symbol.reference.id)];
-                const actual = result.constructors[@intCast(try mapper.id(.constructor, symbol.reference.id))];
-                try callableBorrow(&borrow_flow, mapper, unit.object, expected.function, actual.function);
+                const actual = result.constructors[
+                    @intCast(try mapper.id(.constructor, symbol.reference.id))
+                ];
+                try callableBorrow(
+                    &borrow_flow,
+                    mapper,
+                    unit.object,
+                    expected.function,
+                    actual.function,
+                );
             },
             .handler => {
                 const expected = unit.object.program.handlers[@intCast(symbol.reference.id)];
-                const actual = result.handlers[@intCast(try mapper.id(.handler, symbol.reference.id))];
-                try callableBorrow(&borrow_flow, mapper, unit.object, expected.return_function, actual.return_function);
+                const actual = result.handlers[
+                    @intCast(try mapper.id(.handler, symbol.reference.id))
+                ];
+                try callableBorrow(
+                    &borrow_flow,
+                    mapper,
+                    unit.object,
+                    expected.return_function,
+                    actual.return_function,
+                );
                 for (expected.clauses, actual.clauses) |left, right|
-                    try callableBorrow(&borrow_flow, mapper, unit.object, left.function, right.function);
+                    try callableBorrow(
+                        &borrow_flow,
+                        mapper,
+                        unit.object,
+                        left.function,
+                        right.function,
+                    );
             },
             else => {},
         };
@@ -189,7 +288,15 @@ fn callableBorrow(
     return error.InvalidOwnership;
 }
 
-fn catalog(comptime T: type, comptime kind: Kind, allocator: std.mem.Allocator, units: []const Unit, imported: []const bool, count: usize, comptime method: anytype) Error![]const T {
+fn catalog(
+    comptime T: type,
+    comptime kind: Kind,
+    allocator: std.mem.Allocator,
+    units: []const Unit,
+    imported: []const bool,
+    count: usize,
+    comptime method: anytype,
+) Error![]const T {
     const result = try allocator.alloc(T, count);
     for (units) |unit| {
         const mapper: relocate.Mapper = .{ .allocator = allocator, .maps = unit.maps };
@@ -226,17 +333,98 @@ fn slice(comptime kind: Kind, program: ir.Program) switch (kind) {
         .region => {},
     };
 }
-fn assemble(a: std.mem.Allocator, units: []const Unit, imported: [relocate.kind_count][]bool, counts: [relocate.kind_count]usize) Error!ir.Program {
+fn assemble(
+    a: std.mem.Allocator,
+    units: []const Unit,
+    imported: [relocate.kind_count][]bool,
+    counts: [relocate.kind_count]usize,
+) Error!ir.Program {
     return .{
         .roots = .{ .entry = 0, .result = 0, .failure = 0 },
-        .schemas = try catalog(p.Schema, .schema, a, units, imported[0], counts[0], relocate.Mapper.schema),
-        .constants = try catalog(p.Literal, .constant, a, units, imported[1], counts[1], relocate.Mapper.literal),
-        .effects = try catalog(p.Effect, .effect, a, units, imported[2], counts[2], relocate.Mapper.effect),
-        .functions = try catalog(ir.Function, .function, a, units, imported[3], counts[3], relocate.Mapper.function),
-        .blocks = try catalog(ir.Block, .block, a, units, imported[4], counts[4], relocate.Mapper.block),
-        .handlers = try catalog(ir.Handler, .handler, a, units, imported[5], counts[5], relocate.Mapper.handler),
-        .scopes = .{ .captures = try catalog(p.Capture, .capture, a, units, imported[6], counts[6], relocate.Mapper.capture), .region_count = counts[7], .resources = try catalog(p.Resource, .resource, a, units, imported[8], counts[8], relocate.Mapper.resource) },
-        .constructors = try catalog(p.Constructor, .constructor, a, units, imported[9], counts[9], relocate.Mapper.constructor),
+        .schemas = try catalog(
+            p.Schema,
+            .schema,
+            a,
+            units,
+            imported[0],
+            counts[0],
+            relocate.Mapper.schema,
+        ),
+        .constants = try catalog(
+            p.Literal,
+            .constant,
+            a,
+            units,
+            imported[1],
+            counts[1],
+            relocate.Mapper.literal,
+        ),
+        .effects = try catalog(
+            p.Effect,
+            .effect,
+            a,
+            units,
+            imported[2],
+            counts[2],
+            relocate.Mapper.effect,
+        ),
+        .functions = try catalog(
+            ir.Function,
+            .function,
+            a,
+            units,
+            imported[3],
+            counts[3],
+            relocate.Mapper.function,
+        ),
+        .blocks = try catalog(
+            ir.Block,
+            .block,
+            a,
+            units,
+            imported[4],
+            counts[4],
+            relocate.Mapper.block,
+        ),
+        .handlers = try catalog(
+            ir.Handler,
+            .handler,
+            a,
+            units,
+            imported[5],
+            counts[5],
+            relocate.Mapper.handler,
+        ),
+        .scopes = .{
+            .captures = try catalog(
+                p.Capture,
+                .capture,
+                a,
+                units,
+                imported[6],
+                counts[6],
+                relocate.Mapper.capture,
+            ),
+            .region_count = counts[7],
+            .resources = try catalog(
+                p.Resource,
+                .resource,
+                a,
+                units,
+                imported[8],
+                counts[8],
+                relocate.Mapper.resource,
+            ),
+        },
+        .constructors = try catalog(
+            p.Constructor,
+            .constructor,
+            a,
+            units,
+            imported[9],
+            counts[9],
+            relocate.Mapper.constructor,
+        ),
     };
 }
 fn rewrite(a: std.mem.Allocator, program: ir.Program, maps: relocate.Maps) Error!ir.Program {
@@ -250,54 +438,110 @@ fn rewrite(a: std.mem.Allocator, program: ir.Program, maps: relocate.Maps) Error
         seen[@intCast(mapped)] = true;
     };
     var result = program;
-    result.roots = .{ .entry = program.roots.entry, .result = try mapper.id(.schema, program.roots.result), .failure = try mapper.id(.schema, program.roots.failure) };
+    result.roots = .{
+        .entry = program.roots.entry,
+        .result = try mapper.id(.schema, program.roots.result),
+        .failure = try mapper.id(.schema, program.roots.failure),
+    };
     result.schemas = schemas;
-    inline for (.{ .{ "constants", relocate.Mapper.literal }, .{ "effects", relocate.Mapper.effect }, .{ "functions", relocate.Mapper.function }, .{ "blocks", relocate.Mapper.block }, .{ "handlers", relocate.Mapper.handler }, .{ "constructors", relocate.Mapper.constructor } }) |item| {
+    inline for (.{
+        .{ "constants", relocate.Mapper.literal },
+        .{ "effects", relocate.Mapper.effect },
+        .{ "functions", relocate.Mapper.function },
+        .{ "blocks", relocate.Mapper.block },
+        .{ "handlers", relocate.Mapper.handler },
+        .{ "constructors", relocate.Mapper.constructor },
+    }) |item| {
         const T = std.meta.Elem(@TypeOf(@field(program, item[0])));
         const values = try a.alloc(T, @field(program, item[0]).len);
-        for (values, @field(program, item[0])) |*target, source| target.* = try item[1](mapper, source);
+        for (
+            values,
+            @field(program, item[0]),
+        ) |*target, source| target.* = try item[1](mapper, source);
         @field(result, item[0]) = values;
     }
     const captures = try a.alloc(p.Capture, program.scopes.captures.len);
     for (captures, program.scopes.captures) |*target, source| target.* = try mapper.capture(source);
     const resources = try a.alloc(p.Resource, program.scopes.resources.len);
-    for (resources, program.scopes.resources) |*target, source| target.* = try mapper.resource(source);
-    result.scopes = .{ .captures = captures, .resources = resources, .region_count = program.scopes.region_count };
+    for (
+        resources,
+        program.scopes.resources,
+    ) |*target, source| target.* = try mapper.resource(source);
+    result.scopes = .{
+        .captures = captures,
+        .resources = resources,
+        .region_count = program.scopes.region_count,
+    };
     return result;
 }
 fn sameFunction(a: ir.Function, b: ir.Function) bool {
-    if (a.inputs.len != b.inputs.len or a.result != b.result or !std.mem.eql(Id, a.effects, b.effects) or !std.mem.eql(Id, a.regions, b.regions)) return false;
-    for (a.inputs, b.inputs) |left, right| if (a.layout.slots[@intCast(left)] != b.layout.slots[@intCast(right)]) return false;
+    if (a.inputs.len != b.inputs.len or a.result != b.result or !std.mem.eql(
+        Id,
+        a.effects,
+        b.effects,
+    ) or !std.mem.eql(Id, a.regions, b.regions)) return false;
+    for (
+        a.inputs,
+        b.inputs,
+    ) |left, right| if (a.layout.slots[
+        @intCast(left)
+    ] != b.layout.slots[
+        @intCast(right)
+    ]) return false;
     return true;
 }
-fn compatible(mapper: relocate.Mapper, local: ir.Program, linked: ir.Program, reference: relocate.Reference) Error!void {
+fn compatible(
+    mapper: relocate.Mapper,
+    local: ir.Program,
+    linked: ir.Program,
+    reference: relocate.Reference,
+) Error!void {
     const id: usize = @intCast(reference.id);
     const target: usize = @intCast(try mapper.id(reference.kind, reference.id));
     const matches = switch (reference.kind) {
-        .function => sameFunction(try mapper.function(local.functions[id]), linked.functions[target]),
+        .function => sameFunction(
+            try mapper.function(local.functions[id]),
+            linked.functions[target],
+        ),
         .schema => equal(p.Schema, try mapper.schema(local.schemas[id]), linked.schemas[target]),
         .effect => blk: {
             var expected = try mapper.effect(local.effects[id]);
             expected.identity = linked.effects[target].identity; // Names are not nominal identity.
             break :blk equal(p.Effect, expected, linked.effects[target]);
         },
-        .resource => try mapper.id(.schema, local.scopes.resources[id].representation) == linked.scopes.resources[target].representation,
+        .resource => try mapper.id(
+            .schema,
+            local.scopes.resources[id].representation,
+        ) == linked.scopes.resources[target].representation,
         .region => true,
         .constructor => blk: {
             const expected = try mapper.constructor(local.constructors[id]);
             const actual = linked.constructors[target];
-            break :blk expected.schema == actual.schema and equal(p.Capture, linked.scopes.captures[@intCast(expected.capture)], linked.scopes.captures[@intCast(actual.capture)]) and
-                sameFunction(linked.functions[@intCast(expected.function)], linked.functions[@intCast(actual.function)]);
+            break :blk expected.schema == actual.schema and equal(
+                p.Capture,
+                linked.scopes.captures[@intCast(expected.capture)],
+                linked.scopes.captures[@intCast(actual.capture)],
+            ) and
+                sameFunction(
+                    linked.functions[@intCast(expected.function)],
+                    linked.functions[@intCast(actual.function)],
+                );
         },
         .handler => blk: {
             var expected = try mapper.handler(local.handlers[id]);
             const actual = linked.handlers[target];
             if (expected.clauses.len != actual.clauses.len) break :blk false;
-            if (!sameFunction(linked.functions[@intCast(expected.return_function)], linked.functions[@intCast(actual.return_function)])) break :blk false;
+            if (!sameFunction(
+                linked.functions[@intCast(expected.return_function)],
+                linked.functions[@intCast(actual.return_function)],
+            )) break :blk false;
             expected.return_function = actual.return_function;
             const clauses = try mapper.allocator.dupe(ir.Clause, expected.clauses);
             for (clauses, actual.clauses) |*clause, supplied| {
-                if (!sameFunction(linked.functions[@intCast(clause.function)], linked.functions[@intCast(supplied.function)])) break :blk false;
+                if (!sameFunction(
+                    linked.functions[@intCast(clause.function)],
+                    linked.functions[@intCast(supplied.function)],
+                )) break :blk false;
                 clause.function = supplied.function;
             }
             expected.clauses = clauses;

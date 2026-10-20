@@ -11,8 +11,16 @@ const admission = @import("admission.zig");
 const equal = @import("record_equal.zig").equal;
 const p01 = @import("coalescing.zig");
 pub const Error = p01.Error || error{ InvalidSlotPacking, SlotPackingLimit };
-pub const Options = struct { work_limit: usize = 10_000_000, max_slots: usize = 128, coalescing: p01.Options = .{} };
-pub const Statistics = struct { functions: usize = 0, slots_removed: usize = 0, work_limit: bool = false };
+pub const Options = struct {
+    work_limit: usize = 10_000_000,
+    max_slots: usize = 128,
+    coalescing: p01.Options = .{},
+};
+pub const Statistics = struct {
+    functions: usize = 0,
+    slots_removed: usize = 0,
+    work_limit: bool = false,
+};
 pub const Candidate = struct {
     arena: std.heap.ArenaAllocator,
     program: ir.Program,
@@ -29,12 +37,30 @@ const Budget = struct {
         self.left -= 1;
     }
 };
-fn eligible(program: ir.Program, id: usize, permissions: traits.Facts, exportable: []const bool, options: Options, budget: *Budget) Error!bool {
+fn eligible(
+    program: ir.Program,
+    id: usize,
+    permissions: traits.Facts,
+    exportable: []const bool,
+    options: Options,
+    budget: *Budget,
+) Error!bool {
     const function = program.functions[id];
-    if (function.layout.slots.len < 2 or function.layout.slots.len > options.max_slots or function.effects.len != 0 or function.regions.len != 0 or function.custody.len != 1) return false;
+    if (function.layout.slots.len < 2 or
+        function.layout.slots.len > options.max_slots or
+        function.effects.len != 0 or
+        function.regions.len != 0 or
+        function.custody.len != 1)
+        return false;
     for (function.layout.slots) |schema| {
         try budget.tick();
-        if (!permissions.copy[@intCast(schema)] or !permissions.drop[@intCast(schema)] or !exportable[@intCast(schema)]) return false;
+        if (!permissions.copy[
+            @intCast(schema)
+        ] or !permissions.drop[
+            @intCast(schema)
+        ] or !exportable[
+            @intCast(schema)
+        ]) return false;
     }
     for (program.blocks) |block| {
         try budget.tick();
@@ -48,7 +74,20 @@ fn eligible(program: ir.Program, id: usize, permissions: traits.Facts, exportabl
             try budget.tick();
             if (op.failures.len != 0) return false;
             switch (op.opcode) {
-                .constant, .move, .equal, .less, .boolean_not, .integer_bit_not, .integer_bit_and, .integer_bit_or, .integer_bit_xor, .product, .field, .variant, .select => {},
+                .constant,
+                .move,
+                .equal,
+                .less,
+                .boolean_not,
+                .integer_bit_not,
+                .integer_bit_and,
+                .integer_bit_or,
+                .integer_bit_xor,
+                .product,
+                .field,
+                .variant,
+                .select,
+                => {},
                 else => return false,
             }
         }
@@ -58,7 +97,12 @@ fn eligible(program: ir.Program, id: usize, permissions: traits.Facts, exportabl
 fn successor(term: ir.Terminator, index: usize) ?ir.Edge {
     return switch (term) {
         .jump => |edge| if (index == 0) edge else null,
-        .branch => |branch| if (index == 0) branch.when_true else if (index == 1) branch.when_false else null,
+        .branch => |branch| if (index == 0)
+            branch.when_true
+        else if (index == 1)
+            branch.when_false
+        else
+            null,
         else => null,
     };
 }
@@ -68,7 +112,13 @@ fn interfere(matrix: []bool, n: usize, x: usize, y: usize) void {
         matrix[y * n + x] = true;
     }
 }
-fn liveClique(matrix: []bool, n: usize, facts: *flow.Facts, live: sets.Root, budget: *Budget) Error!void {
+fn liveClique(
+    matrix: []bool,
+    n: usize,
+    facts: *flow.Facts,
+    live: sets.Root,
+    budget: *Budget,
+) Error!void {
     for (0..n) |x| if (facts.pool.contains(live, x)) {
         for (x + 1..n) |y| {
             try budget.tick();
@@ -76,7 +126,13 @@ fn liveClique(matrix: []bool, n: usize, facts: *flow.Facts, live: sets.Root, bud
         }
     };
 }
-fn interference(a: std.mem.Allocator, program: ir.Program, id: usize, facts: *flow.Facts, budget: *Budget) Error![]bool {
+fn interference(
+    a: std.mem.Allocator,
+    program: ir.Program,
+    id: usize,
+    facts: *flow.Facts,
+    budget: *Budget,
+) Error![]bool {
     const function = program.functions[id];
     const n = function.layout.slots.len;
     const matrix = try a.alloc(bool, std.math.mul(usize, n, n) catch return error.Capacity);
@@ -100,11 +156,19 @@ fn interference(a: std.mem.Allocator, program: ir.Program, id: usize, facts: *fl
             for (edge.assignments) |assignment| {
                 for (edge.assignments) |other| {
                     try budget.tick();
-                    interfere(matrix, n, @intCast(assignment.destination), @intCast(other.destination));
+                    interfere(
+                        matrix,
+                        n,
+                        @intCast(assignment.destination),
+                        @intCast(other.destination),
+                    );
                 }
                 if (facts.live[@intCast(edge.block)].len != 0) for (0..n) |live| {
                     try budget.tick();
-                    if (facts.pool.contains(facts.live[@intCast(edge.block)][0], live)) interfere(matrix, n, @intCast(assignment.destination), live);
+                    if (facts.pool.contains(
+                        facts.live[@intCast(edge.block)][0],
+                        live,
+                    )) interfere(matrix, n, @intCast(assignment.destination), live);
                 };
             }
         }
@@ -122,16 +186,25 @@ fn edgeMap(a: std.mem.Allocator, edge: ir.Edge, map: []const p.Id) Error!ir.Edge
         var assignment = old;
         assignment.destination = map[@intCast(old.destination)];
         if (old.source == .slot) assignment.source = .{ .slot = map[@intCast(old.source.slot)] };
-        if (assignment.source == .slot and assignment.source.slot == assignment.destination) continue;
+        if (assignment.source == .slot and
+            assignment.source.slot == assignment.destination)
+            continue;
         try assignments.append(a, assignment);
     }
     return .{ .block = edge.block, .assignments = try assignments.toOwnedSlice(a) };
 }
 pub fn possible(program: ir.Program) bool {
-    for (program.functions) |function| if (function.layout.slots.len >= 2 and function.layout.slots.len > function.inputs.len) return true;
+    for (program.functions) |function|
+        if (function.layout.slots.len >= 2 and
+            function.layout.slots.len > function.inputs.len)
+            return true;
     return false;
 }
-pub fn construct(allocator: std.mem.Allocator, original: ir.Program, options: Options) Error!?Candidate {
+pub fn construct(
+    allocator: std.mem.Allocator,
+    original: ir.Program,
+    options: Options,
+) Error!?Candidate {
     var facts = try own.analyze(allocator, original);
     defer facts.deinit();
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -146,7 +219,14 @@ pub fn construct(allocator: std.mem.Allocator, original: ir.Program, options: Op
     @memset(maps, null);
     var changed = false;
     for (original.functions, functions, 0..) |function, *out, id| {
-        if (!try eligible(original, id, permissions, schemas.exportable, options, &budget)) continue;
+        if (!try eligible(
+            original,
+            id,
+            permissions,
+            schemas.exportable,
+            options,
+            &budget,
+        )) continue;
         const n = function.layout.slots.len;
         const matrix = try interference(a, original, id, &facts, &budget);
         const map = try a.alloc(p.Id, n);
@@ -201,7 +281,11 @@ pub fn construct(allocator: std.mem.Allocator, original: ir.Program, options: Op
             .return_value => |slot| .{ .return_value = map[@intCast(slot)] },
             .fail => |slot| .{ .fail = map[@intCast(slot)] },
             .jump => |edge| .{ .jump = try edgeMap(a, edge, map) },
-            .branch => |branch| .{ .branch = .{ .condition = map[@intCast(branch.condition)], .when_true = try edgeMap(a, branch.when_true, map), .when_false = try edgeMap(a, branch.when_false, map) } },
+            .branch => |branch| .{ .branch = .{
+                .condition = map[@intCast(branch.condition)],
+                .when_true = try edgeMap(a, branch.when_true, map),
+                .when_false = try edgeMap(a, branch.when_false, map),
+            } },
             else => return error.InvalidSlotPacking,
         };
     }
@@ -223,24 +307,39 @@ fn edgeMatches(old: ir.Edge, new: ir.Edge, map: []const p.Id) bool {
     if (old.block != new.block) return false;
     var next: usize = 0;
     for (old.assignments) |x| {
-        if (x.source == .slot and map[@intCast(x.source.slot)] == map[@intCast(x.destination)]) continue;
+        if (x.source == .slot and map[
+            @intCast(x.source.slot)
+        ] == map[
+            @intCast(x.destination)
+        ]) continue;
         if (next >= new.assignments.len) return false;
         const y = new.assignments[next];
         if (map[@intCast(x.destination)] != y.destination) return false;
         switch (x.source) {
             .returned => if (y.source != .returned) return false,
-            .slot => |slot| if (y.source != .slot or y.source.slot != map[@intCast(slot)]) return false,
+            .slot => |slot| if (y.source != .slot or y.source.slot != map[
+                @intCast(slot)
+            ]) return false,
         }
         next += 1;
     }
     return next == new.assignments.len;
 }
-pub fn validate(allocator: std.mem.Allocator, original: ir.Program, candidate: ir.Program, maps: []const ?[]const p.Id, options: Options) Error!void {
+pub fn validate(
+    allocator: std.mem.Allocator,
+    original: ir.Program,
+    candidate: ir.Program,
+    maps: []const ?[]const p.Id,
+    options: Options,
+) Error!void {
     var facts = try own.analyze(allocator, original);
     defer facts.deinit();
     var admitted = try own.analyze(allocator, candidate);
     defer admitted.deinit();
-    if (maps.len != original.functions.len or candidate.functions.len != original.functions.len or candidate.blocks.len != original.blocks.len) return error.InvalidSlotPacking;
+    if (maps.len != original.functions.len or
+        candidate.functions.len != original.functions.len or
+        candidate.blocks.len != original.blocks.len)
+        return error.InvalidSlotPacking;
     var unchanged = candidate;
     unchanged.functions = original.functions;
     unchanged.blocks = original.blocks;
@@ -256,7 +355,10 @@ pub fn validate(allocator: std.mem.Allocator, original: ir.Program, candidate: i
             if (!equal(ir.Function, old, new)) return error.InvalidSlotPacking;
             continue;
         };
-        if (!try eligible(original, id, permissions, schemas.exportable, options, &budget) or map.len != old.layout.slots.len or new.layout.slots.len >= map.len) return error.InvalidSlotPacking;
+        if (!try eligible(original, id, permissions, schemas.exportable, options, &budget) or
+            map.len != old.layout.slots.len or
+            new.layout.slots.len >= map.len)
+            return error.InvalidSlotPacking;
         var metadata = new;
         metadata.layout = old.layout;
         metadata.inputs = old.inputs;
@@ -264,7 +366,9 @@ pub fn validate(allocator: std.mem.Allocator, original: ir.Program, candidate: i
         const seen = try a.alloc(bool, new.layout.slots.len);
         @memset(seen, false);
         for (map, old.layout.slots) |color, schema| {
-            if (color >= seen.len or new.layout.slots[@intCast(color)] != schema) return error.InvalidSlotPacking;
+            if (color >= seen.len or new.layout.slots[
+                @intCast(color)
+            ] != schema) return error.InvalidSlotPacking;
             seen[@intCast(color)] = true;
         }
         for (seen) |used| if (!used) return error.InvalidSlotPacking;
@@ -275,9 +379,15 @@ pub fn validate(allocator: std.mem.Allocator, original: ir.Program, candidate: i
             if (!equal(ir.Block, old, new)) return error.InvalidSlotPacking;
             continue;
         };
-        if (old.function != new.function or old.custody != new.custody or old.instructions.len != new.instructions.len) return error.InvalidSlotPacking;
+        if (old.function != new.function or
+            old.custody != new.custody or
+            old.instructions.len != new.instructions.len)
+            return error.InvalidSlotPacking;
         var structural_edge: usize = 0;
-        while (successor(old.terminator, structural_edge)) |edge| : (structural_edge += 1) for (edge.assignments) |assignment| {
+        while (successor(
+            old.terminator,
+            structural_edge,
+        )) |edge| : (structural_edge += 1) for (edge.assignments) |assignment| {
             for (edge.assignments) |other| {
                 try budget.tick();
                 try distinct(map, assignment.destination, other.destination);
@@ -297,32 +407,67 @@ pub fn validate(allocator: std.mem.Allocator, original: ir.Program, candidate: i
                 if (facts.pool.contains(facts.live[bid][index + 1], live)) try distinct(map, op.destination, live);
             };
             var index: usize = 0;
-            while (successor(old.terminator, index)) |edge| : (index += 1) for (edge.assignments) |assignment| {
-                for (edge.assignments) |other| try distinct(map, assignment.destination, other.destination);
+            while (successor(
+                old.terminator,
+                index,
+            )) |edge| : (index += 1) for (edge.assignments) |assignment| {
+                for (edge.assignments) |other| try distinct(
+                    map,
+                    assignment.destination,
+                    other.destination,
+                );
                 if (facts.live[@intCast(edge.block)].len != 0) for (0..map.len) |live| {
                     try budget.tick();
-                    if (facts.pool.contains(facts.live[@intCast(edge.block)][0], live)) try distinct(map, assignment.destination, live);
+                    if (facts.pool.contains(
+                        facts.live[@intCast(edge.block)][0],
+                        live,
+                    )) try distinct(map, assignment.destination, live);
                 };
             };
         }
         for (old.instructions, new.instructions) |op, replacement| {
             try budget.tick();
-            if (replacement.destination != map[@intCast(op.destination)] or !sameIds(op.operands, replacement.operands, map)) return error.InvalidSlotPacking;
+            if (replacement.destination != map[@intCast(op.destination)] or !sameIds(
+                op.operands,
+                replacement.operands,
+                map,
+            )) return error.InvalidSlotPacking;
             var metadata = replacement;
             metadata.destination = op.destination;
             metadata.operands = op.operands;
             if (!equal(ir.Instruction, op, metadata)) return error.InvalidSlotPacking;
         }
         switch (old.terminator) {
-            .return_value => |slot| if (new.terminator != .return_value or new.terminator.return_value != map[@intCast(slot)]) return error.InvalidSlotPacking,
-            .fail => |slot| if (new.terminator != .fail or new.terminator.fail != map[@intCast(slot)]) return error.InvalidSlotPacking,
-            .jump => |edge| if (new.terminator != .jump or !edgeMatches(edge, new.terminator.jump, map)) return error.InvalidSlotPacking,
-            .branch => |branch| if (new.terminator != .branch or new.terminator.branch.condition != map[@intCast(branch.condition)] or !edgeMatches(branch.when_true, new.terminator.branch.when_true, map) or !edgeMatches(branch.when_false, new.terminator.branch.when_false, map)) return error.InvalidSlotPacking,
+            .return_value => |slot| if (new.terminator != .return_value or
+                new.terminator.return_value != map[
+                    @intCast(slot)
+                ])
+                return error.InvalidSlotPacking,
+            .fail => |slot| if (new.terminator != .fail or new.terminator.fail != map[
+                @intCast(slot)
+            ]) return error.InvalidSlotPacking,
+            .jump => |edge| if (new.terminator != .jump or !edgeMatches(
+                edge,
+                new.terminator.jump,
+                map,
+            )) return error.InvalidSlotPacking,
+            .branch => |branch| if (new.terminator != .branch or
+                new.terminator.branch.condition != map[
+                    @intCast(branch.condition)
+                ] or
+                !edgeMatches(branch.when_true, new.terminator.branch.when_true, map) or
+                !edgeMatches(branch.when_false, new.terminator.branch.when_false, map))
+                return error.InvalidSlotPacking,
             else => return error.InvalidSlotPacking,
         }
     }
 }
-pub fn run(allocator: std.mem.Allocator, original: ir.Program, statistics: ?*Statistics, options: Options) Error!p01.Owned {
+pub fn run(
+    allocator: std.mem.Allocator,
+    original: ir.Program,
+    statistics: ?*Statistics,
+    options: Options,
+) Error!p01.Owned {
     var stats: Statistics = .{};
     defer if (statistics) |out| {
         out.* = stats;
@@ -335,14 +480,24 @@ pub fn run(allocator: std.mem.Allocator, original: ir.Program, statistics: ?*Sta
         else => return err,
     }) orelse return p01.run(allocator, original, options.coalescing);
     defer candidate.deinit();
-    validate(allocator, original, candidate.program, candidate.maps, options) catch |err| switch (err) {
+    validate(
+        allocator,
+        original,
+        candidate.program,
+        candidate.maps,
+        options,
+    ) catch |err| switch (err) {
         error.SlotPackingLimit => {
             stats.work_limit = true;
             return p01.run(allocator, original, options.coalescing);
         },
         else => return err,
     };
-    for (original.functions, candidate.program.functions, candidate.maps) |old, new, map| if (map != null) {
+    for (
+        original.functions,
+        candidate.program.functions,
+        candidate.maps,
+    ) |old, new, map| if (map != null) {
         stats.functions += 1;
         stats.slots_removed += old.layout.slots.len - new.layout.slots.len;
     };

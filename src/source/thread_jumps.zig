@@ -5,7 +5,10 @@ const data = @import("horos_data");
 const ir = data.activation;
 const Id = data.program.Id;
 
-pub fn optimize(allocator: std.mem.Allocator, input: ir.Program) std.mem.Allocator.Error!ir.Program {
+pub fn optimize(
+    allocator: std.mem.Allocator,
+    input: ir.Program,
+) std.mem.Allocator.Error!ir.Program {
     const targets = try allocator.alloc(Id, input.blocks.len);
     defer allocator.free(targets);
     const visited = try allocator.alloc(u2, input.blocks.len);
@@ -25,7 +28,9 @@ pub fn optimize(allocator: std.mem.Allocator, input: ir.Program) std.mem.Allocat
             if (block.instructions.len != 0 or block.terminator != .jump or
                 block.terminator.jump.assignments.len != 0) break;
             const next: usize = @intCast(block.terminator.jump.block);
-            if (block.function != input.blocks[next].function or block.custody != input.blocks[next].custody) break;
+            if (block.function != input.blocks[next].function or
+                block.custody != input.blocks[next].custody)
+                break;
             current = next;
         }
         // A repeated current at the end of the path is its non-forwarding sink;
@@ -42,14 +47,24 @@ pub fn optimize(allocator: std.mem.Allocator, input: ir.Program) std.mem.Allocat
         function.entry = targets[@intCast(function.entry)];
     };
     const blocks = try allocator.dupe(ir.Block, input.blocks);
-    for (blocks) |*block| block.terminator = try redirect(ir.Terminator, allocator, block.terminator, targets);
+    for (blocks) |*block| block.terminator = try redirect(
+        ir.Terminator,
+        allocator,
+        block.terminator,
+        targets,
+    );
     var result = input;
     result.functions = functions;
     result.blocks = blocks;
     return result;
 }
 
-fn redirect(comptime T: type, allocator: std.mem.Allocator, input: T, targets: []const Id) std.mem.Allocator.Error!T {
+fn redirect(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    input: T,
+    targets: []const Id,
+) std.mem.Allocator.Error!T {
     if (T == ir.Edge) {
         var edge = input;
         edge.block = targets[@intCast(input.block)];
@@ -58,19 +73,34 @@ fn redirect(comptime T: type, allocator: std.mem.Allocator, input: T, targets: [
     return switch (@typeInfo(T)) {
         .@"struct" => |info| blk: {
             var result = input;
-            inline for (info.field_names, info.field_types) |field_name, FieldType| @field(result, field_name) = try redirect(FieldType, allocator, @field(input, field_name), targets);
+            inline for (
+                info.field_names,
+                info.field_types,
+            ) |field_name, FieldType| @field(result, field_name) = try redirect(FieldType, allocator, @field(input, field_name), targets);
             break :blk result;
         },
         .@"union" => switch (input) {
-            inline else => |value, tag| @unionInit(T, @tagName(tag), try redirect(@TypeOf(value), allocator, value, targets)),
+            inline else => |value, tag| @unionInit(
+                T,
+                @tagName(tag),
+                try redirect(@TypeOf(value), allocator, value, targets),
+            ),
         },
         .pointer => |info| blk: {
             if (@typeInfo(info.child) == .int) break :blk input;
             const result = try allocator.alloc(info.child, input.len);
-            for (result, input) |*to, from| to.* = try redirect(info.child, allocator, from, targets);
+            for (
+                result,
+                input,
+            ) |*to, from| to.* = try redirect(info.child, allocator, from, targets);
             break :blk result;
         },
-        .optional => |info| if (input) |value| try redirect(info.child, allocator, value, targets) else null,
+        .optional => |info| if (input) |value| try redirect(
+            info.child,
+            allocator,
+            value,
+            targets,
+        ) else null,
         else => input,
     };
 }
@@ -84,15 +114,37 @@ test "jump threading preserves assignments, custody boundaries and cycles" {
         .schemas = &.{ .u64, .unit },
         .constants = &.{.{ .schema = 0, .bytes = &.{ 42, 0, 0, 0, 0, 0, 0, 0 } }},
         .effects = &.{},
-        .functions = &.{.{ .entry = 0, .inputs = &.{}, .layout = .{ .slots = &.{0} }, .result = 0, .custody = &.{ .{}, .{ .parent = 0 } } }},
+        .functions = &.{.{
+            .entry = 0,
+            .inputs = &.{},
+            .layout = .{ .slots = &.{0} },
+            .result = 0,
+            .custody = &.{ .{}, .{ .parent = 0 } },
+        }},
         .blocks = &.{
             .{ .function = 0, .instructions = &.{}, .terminator = .{ .jump = .{ .block = 1 } } },
             .{ .function = 0, .instructions = &.{}, .terminator = .{ .jump = .{ .block = 2 } } },
-            .{ .function = 0, .instructions = &.{.{ .destination = 0, .opcode = .constant }}, .terminator = .{ .return_value = 0 } },
-            .{ .function = 0, .instructions = &.{}, .terminator = .{ .jump = .{ .block = 4, .assignments = &.{.{ .destination = 0, .source = .{ .slot = 0 } }} } } },
+            .{
+                .function = 0,
+                .instructions = &.{.{ .destination = 0, .opcode = .constant }},
+                .terminator = .{ .return_value = 0 },
+            },
+            .{
+                .function = 0,
+                .instructions = &.{},
+                .terminator = .{ .jump = .{
+                    .block = 4,
+                    .assignments = &.{.{ .destination = 0, .source = .{ .slot = 0 } }},
+                } },
+            },
             .{ .function = 0, .instructions = &.{}, .terminator = .{ .jump = .{ .block = 2 } } },
             .{ .function = 0, .instructions = &.{}, .terminator = .{ .jump = .{ .block = 6 } } },
-            .{ .function = 0, .custody = 1, .instructions = &.{}, .terminator = .{ .jump = .{ .block = 2 } } },
+            .{
+                .function = 0,
+                .custody = 1,
+                .instructions = &.{},
+                .terminator = .{ .jump = .{ .block = 2 } },
+            },
             .{ .function = 0, .instructions = &.{}, .terminator = .{ .jump = .{ .block = 8 } } },
             .{ .function = 0, .instructions = &.{}, .terminator = .{ .jump = .{ .block = 7 } } },
             .{ .function = 0, .instructions = &.{}, .terminator = .{ .jump = .{ .block = 9 } } },
@@ -104,7 +156,11 @@ test "jump threading preserves assignments, custody boundaries and cycles" {
     try testing.expectEqual(2, output.functions[0].entry);
     try testing.expectEqual(2, output.blocks[0].terminator.jump.block);
     try testing.expectEqual(2, output.blocks[3].terminator.jump.block);
-    try testing.expectEqualSlices(ir.Assignment, input.blocks[3].terminator.jump.assignments, output.blocks[3].terminator.jump.assignments);
+    try testing.expectEqualSlices(
+        ir.Assignment,
+        input.blocks[3].terminator.jump.assignments,
+        output.blocks[3].terminator.jump.assignments,
+    );
     try testing.expectEqual(6, output.blocks[5].terminator.jump.block);
     try testing.expectEqual(2, output.blocks[6].terminator.jump.block);
     try testing.expectEqual(8, output.blocks[7].terminator.jump.block);
@@ -120,7 +176,14 @@ test "jump threading handles long paths without recursive control traversal" {
     const testing = std.testing;
     const blocks = try testing.allocator.alloc(ir.Block, 10000);
     defer testing.allocator.free(blocks);
-    for (blocks, 0..) |*block, i| block.* = .{ .function = 0, .instructions = &.{}, .terminator = .{ .jump = .{ .block = @min(i + 1, blocks.len - 1) } } };
+    for (
+        blocks,
+        0..,
+    ) |*block, i| block.* = .{
+        .function = 0,
+        .instructions = &.{},
+        .terminator = .{ .jump = .{ .block = @min(i + 1, blocks.len - 1) } },
+    };
     const input: ir.Program = .{
         .roots = .{ .entry = 0, .result = 0, .failure = 0 },
         .schemas = &.{.unit},

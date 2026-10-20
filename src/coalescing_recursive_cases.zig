@@ -6,7 +6,11 @@ const data = @import("horos_data");
 const Id = source.Id;
 pub const Kind = enum { recursive, recursive_near, recursive_infinite };
 
-pub fn compile(allocator: std.mem.Allocator, kind: Kind, options: data.coalescing.Options) !source.Compiled {
+pub fn compile(
+    allocator: std.mem.Allocator,
+    kind: Kind,
+    options: data.coalescing.Options,
+) !source.Compiled {
     var b = source.Builder.init(allocator);
     defer b.deinit();
     const integer = try b.scalar(u64);
@@ -14,7 +18,11 @@ pub fn compile(allocator: std.mem.Allocator, kind: Kind, options: data.coalescin
     const unit = try b.scalar(void);
     const pair = try b.schema(.{ .product = &.{ integer, integer } });
     const effect: ?Id = if (kind == .recursive_infinite)
-        try b.effect(.{ .identity = "coalescing/recursive-step", .payload = integer, .result = unit })
+        try b.effect(.{
+            .identity = "coalescing/recursive-step",
+            .payload = integer,
+            .result = unit,
+        })
     else
         null;
     const row: []const Id = if (effect) |*id| id[0..1] else &.{};
@@ -41,7 +49,10 @@ pub fn compile(allocator: std.mem.Allocator, kind: Kind, options: data.coalescin
             const decrement = try b.value(.{ .schema = integer, .expression = .{ .primitive = .{
                 .opcode = .integer_sub,
                 .operands = &.{ n, try b.constant(u64, 1) },
-                .failures = &.{.{ .kind = .arithmetic_overflow, .value = try b.failureLiteral(try b.constant(void, {})) }},
+                .failures = &.{.{
+                    .kind = .arithmetic_overflow,
+                    .value = try b.failureLiteral(try b.constant(void, {})),
+                }},
             } } });
             try b.define(function, try b.term(.{ .conditional = .{
                 .condition = zero,
@@ -59,7 +70,12 @@ pub fn compile(allocator: std.mem.Allocator, kind: Kind, options: data.coalescin
     const right = try b.variable(integer);
     const first = try b.term(.{ .call = .{ .function = groups[0][0], .arguments = &.{n} } });
     const second = try b.term(.{ .call = .{ .function = groups[1][0], .arguments = &.{n} } });
-    const result = try b.primitive(pair, .product, &.{ try b.reference(left), try b.reference(right) }, 0);
+    const result = try b.primitive(
+        pair,
+        .product,
+        &.{ try b.reference(left), try b.reference(right) },
+        0,
+    );
     try b.define(entry, try b.bind(left, first, try b.bind(right, second, try b.pure(result))));
     return source.lowerObserved(allocator, b.module(entry, unit), .{ .coalescing = options });
 }

@@ -10,7 +10,11 @@ const custody = @import("custody_order_example.zig");
 const operand_failures = @import("operand_failure_example.zig");
 
 pub fn build(b: *source.Builder) Error!source.Module {
-    const release = try b.effect(.{ .identity = "custody/release", .payload = try b.scalar(u64), .result = try b.scalar(void) });
+    const release = try b.effect(.{
+        .identity = "custody/release",
+        .payload = try b.scalar(u64),
+        .result = try b.scalar(void),
+    });
     const main = try b.declare(&.{try b.scalar(u8)}, try b.scalar(u64), &.{release}, &.{});
     const input = try b.reference(b.parameter(main, 0));
     var cases: [20 + edges.count + custody.count + operand_failures.count]p.Id = undefined;
@@ -128,7 +132,12 @@ fn finish(b: *source.Builder, kind: Kind, operand: p.Id, populated: bool) Error!
     }
     const owned = kind == .owned_length or kind == .owned_tag;
     const tag = kind == .tag or kind == .owned_tag;
-    const observed = try b.primitive(integer, if (tag) .variant_tag else .sequence_length, &.{operand}, 0);
+    const observed = try b.primitive(
+        integer,
+        if (tag) .variant_tag else .sequence_length,
+        &.{operand},
+        0,
+    );
     const expected = try b.constant(u64, if (owned) @intFromBool(populated) else 0);
     const condition = try b.primitive(try b.scalar(bool), .equal, &.{ observed, expected }, 0);
     return b.term(.{ .conditional = .{

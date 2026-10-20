@@ -6,23 +6,49 @@ const borrows = @import("borrow_flow.zig");
 const testing = std.testing;
 
 test "stable borrow requirements use the value and owner versions at a store" {
-    const writing: ir.Instruction = .{ .destination = 3, .opcode = .cell_set, .operands = &.{ 2, 1 } };
+    const writing: ir.Instruction = .{
+        .destination = 3,
+        .opcode = .cell_set,
+        .operands = &.{ 2, 1 },
+    };
     const value_rebind: ir.Instruction = .{ .destination = 1, .opcode = .move, .operands = &.{0} };
     const owner_rebind: ir.Instruction = .{ .destination = 2, .opcode = .move, .operands = &.{4} };
     for ([_]bool{ false, true }) |before| {
-        const code = if (before) [_]ir.Instruction{ value_rebind, owner_rebind, writing } else [_]ir.Instruction{ writing, value_rebind, owner_rebind };
+        const code = if (before) [_]ir.Instruction{
+            value_rebind,
+            owner_rebind,
+            writing,
+        } else [_]ir.Instruction{ writing, value_rebind, owner_rebind };
         const program: ir.Program = .{
             .roots = .{ .entry = 1, .result = 0, .failure = 0 },
-            .schemas = &.{ .unit, .{ .internal = .{ .capability = 0 } }, .{ .internal = .{ .cell = .{ .element = 1, .region = 0 } } } },
+            .schemas = &.{
+                .unit,                                                        .{ .internal = .{ .capability = 0 } },
+                .{ .internal = .{ .cell = .{ .element = 1, .region = 0 } } },
+            },
             .constants = &.{.{ .schema = 0, .bytes = &.{} }},
-            .effects = &.{.{ .identity = "borrow/store", .payload = 0, .result = 0, .external = false }},
+            .effects = &.{.{
+                .identity = "borrow/store",
+                .payload = 0,
+                .result = 0,
+                .external = false,
+            }},
             .functions = &.{
-                .{ .entry = 0, .inputs = &.{ 0, 1, 2, 4 }, .layout = .{ .slots = &.{ 1, 1, 2, 0, 2 } }, .result = 0, .regions = &.{0} },
+                .{
+                    .entry = 0,
+                    .inputs = &.{ 0, 1, 2, 4 },
+                    .layout = .{ .slots = &.{ 1, 1, 2, 0, 2 } },
+                    .result = 0,
+                    .regions = &.{0},
+                },
                 .{ .entry = 1, .inputs = &.{}, .layout = .{ .slots = &.{0} }, .result = 0 },
             },
             .blocks = &.{
                 .{ .function = 0, .instructions = &code, .terminator = .{ .return_value = 3 } },
-                .{ .function = 1, .instructions = &.{.{ .destination = 0, .opcode = .constant }}, .terminator = .{ .return_value = 0 } },
+                .{
+                    .function = 1,
+                    .instructions = &.{.{ .destination = 0, .opcode = .constant }},
+                    .terminator = .{ .return_value = 0 },
+                },
             },
             .scopes = .{ .region_count = 1 },
         };
@@ -57,7 +83,12 @@ test "stable borrow tracing follows simultaneous loop transfers and non-prefix i
         .constants = &.{.{ .schema = 0, .bytes = &.{} }},
         .effects = &.{.{ .identity = "borrow/loop", .payload = 0, .result = 0, .external = false }},
         .functions = &.{
-            .{ .entry = 0, .inputs = &.{ 2, 0, 1 }, .layout = .{ .slots = &.{ 2, 2, 1 } }, .result = 2 },
+            .{
+                .entry = 0,
+                .inputs = &.{ 2, 0, 1 },
+                .layout = .{ .slots = &.{ 2, 2, 1 } },
+                .result = 2,
+            },
             .{ .entry = 3, .inputs = &.{}, .layout = .{ .slots = &.{0} }, .result = 0 },
         },
         .blocks = &.{
@@ -71,7 +102,11 @@ test "stable borrow tracing follows simultaneous loop transfers and non-prefix i
                 } },
             } } },
             .{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 0 } },
-            .{ .function = 1, .instructions = &.{.{ .destination = 0, .opcode = .constant }}, .terminator = .{ .return_value = 0 } },
+            .{
+                .function = 1,
+                .instructions = &.{.{ .destination = 0, .opcode = .constant }},
+                .terminator = .{ .return_value = 0 },
+            },
         },
     };
     try @import("activation_types.zig").validate(testing.allocator, program);

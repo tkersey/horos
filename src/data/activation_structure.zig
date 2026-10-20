@@ -18,10 +18,18 @@ pub fn validate(allocator: std.mem.Allocator, image: ir.Program) Error!void {
 }
 
 /// Imports are bodyless declarations, never executable entry points.
-pub fn validateComponent(allocator: std.mem.Allocator, image: ir.Program, imports: []const p.Id) Error!void {
+pub fn validateComponent(
+    allocator: std.mem.Allocator,
+    image: ir.Program,
+    imports: []const p.Id,
+) Error!void {
     var checker: Checker = .{ .allocator = allocator, .image = image };
     for (imports, 0..) |id, at| {
-        if (id >= image.functions.len or std.mem.indexOfScalar(p.Id, imports[0..at], id) != null) return error.InvalidReference;
+        if (id >= image.functions.len or std.mem.indexOfScalar(
+            p.Id,
+            imports[0..at],
+            id,
+        ) != null) return error.InvalidReference;
     }
     defer checker.destinations.deinit(allocator);
     if (image.roots.profile != 1) return error.InvalidProgram;
@@ -33,12 +41,16 @@ pub fn validateComponent(allocator: std.mem.Allocator, image: ir.Program, import
     for (image.functions, 0..) |function, id| {
         const imported = std.mem.indexOfScalar(p.Id, imports, id) != null;
         if (imported) {
-            if (function.entry != @import("relocation.zig").missing or function.inputs.len != function.layout.slots.len) return error.InvalidProgram;
+            if (function.entry != @import("relocation.zig").missing or
+                function.inputs.len != function.layout.slots.len)
+                return error.InvalidProgram;
         } else {
             try checker.target(id, function.entry);
             if (image.blocks[@intCast(function.entry)].custody != 0) return error.InvalidProgram;
         }
-        if (function.custody.len == 0 or function.custody[0].parent != null) return error.InvalidProgram;
+        if (function.custody.len == 0 or
+            function.custody[0].parent != null)
+            return error.InvalidProgram;
         for (function.custody[1..], 1..) |scope, scope_id| {
             const parent = scope.parent orelse return error.InvalidProgram;
             if (parent >= scope_id) return error.InvalidReference;
@@ -56,7 +68,11 @@ pub fn validateComponent(allocator: std.mem.Allocator, image: ir.Program, import
         }
     }
     for (image.blocks) |block| {
-        if (std.mem.indexOfScalar(p.Id, imports, block.function) != null) return error.InvalidProgram;
+        if (std.mem.indexOfScalar(
+            p.Id,
+            imports,
+            block.function,
+        ) != null) return error.InvalidProgram;
         try checker.block(block);
     }
 }

@@ -8,7 +8,11 @@ const source = @import("../source.zig");
 const ast = source.ast;
 pub const values = @import("static_value.zig");
 pub const Knowledge = values.Knowledge;
-pub const Error = source.Error || error{ SpecializationLimit, UnsupportedSpecialization, InvalidSpecialization };
+pub const Error = source.Error || error{
+    SpecializationLimit,
+    UnsupportedSpecialization,
+    InvalidSpecialization,
+};
 pub const Context = struct {
     core: [32]u8,
     guest: [32]u8,
@@ -17,9 +21,23 @@ pub const Context = struct {
     admission_profile: [32]u8,
     compiler_policy: [32]u8,
 };
-pub const Policy = struct { work: u64 = 1_000_000, keys_per_function: usize = 32, depth: usize = 512 };
-pub const Request = struct { context: Context, function: p.Id, arguments: []const Knowledge, policy: Policy = .{} };
-pub const ValueProof = struct { before: p.Id, after: p.Id, folded: bool = false, children: []const usize = &.{} };
+pub const Policy = struct {
+    work: u64 = 1_000_000,
+    keys_per_function: usize = 32,
+    depth: usize = 512,
+};
+pub const Request = struct {
+    context: Context,
+    function: p.Id,
+    arguments: []const Knowledge,
+    policy: Policy = .{},
+};
+pub const ValueProof = struct {
+    before: p.Id,
+    after: p.Id,
+    folded: bool = false,
+    children: []const usize = &.{},
+};
 pub const TermProof = struct {
     before: p.Id,
     after: p.Id,
@@ -28,7 +46,12 @@ pub const TermProof = struct {
     selected: ?usize = null,
     callee: ?usize = null,
 };
-pub const FunctionProof = struct { before: p.Id, after: p.Id, arguments: []const Knowledge, body: ?usize = null };
+pub const FunctionProof = struct {
+    before: p.Id,
+    after: p.Id,
+    arguments: []const Knowledge,
+    body: ?usize = null,
+};
 pub const Output = struct {
     builder: source.Builder,
     original: ast.Module,
@@ -75,13 +98,29 @@ pub fn identity(m: ast.Module, request: Request) Error![32]u8 {
 /// A policy limit rejects this candidate; the unchanged source remains usable.
 /// No effect is performed and no unchecked partial result is returned.
 pub fn specialize(a: std.mem.Allocator, original: ast.Module, requested: Request) Error!Output {
-    var out: Output = .{ .builder = source.Builder.init(a), .original = undefined, .request = undefined, .entry = undefined, .key = undefined };
+    var out: Output = .{
+        .builder = source.Builder.init(a),
+        .original = undefined,
+        .request = undefined,
+        .entry = undefined,
+        .key = undefined,
+    };
     errdefer out.deinit();
     const storage = out.builder.allocator();
     out.original = try source.own(ast.Module, storage, original);
     out.request = try source.own(Request, storage, requested);
     const m = out.original;
-    inline for (.{ "schemas", "constants", "effects", "handlers", "resources", "variables", "values", "terms", "functions" }) |name| {
+    inline for (.{
+        "schemas",
+        "constants",
+        "effects",
+        "handlers",
+        "resources",
+        "variables",
+        "values",
+        "terms",
+        "functions",
+    }) |name| {
         try @field(out.builder, name).appendSlice(storage, @field(m, name));
     }
     out.builder.region_count = m.region_count;
@@ -94,9 +133,20 @@ pub fn specialize(a: std.mem.Allocator, original: ast.Module, requested: Request
     if (requested.function >= m.functions.len) return error.InvalidReference;
     const f = m.functions[@intCast(requested.function)];
     if (requested.arguments.len != f.parameters.len) return error.TypeMismatch;
-    for (requested.arguments, f.parameters) |k, param| try values.validate(storage, m, schema_facts, m.variables[@intCast(param)], k);
-    var engine: Engine = .{ .out = &out, .facts = schema_facts, .captures = checked.functions, .left = requested.policy.work };
-    const root = try engine.request(requested.function, requested.arguments) orelse return error.UnsupportedSpecialization;
+    for (
+        requested.arguments,
+        f.parameters,
+    ) |k, param| try values.validate(storage, m, schema_facts, m.variables[@intCast(param)], k);
+    var engine: Engine = .{
+        .out = &out,
+        .facts = schema_facts,
+        .captures = checked.functions,
+        .left = requested.policy.work,
+    };
+    const root = try engine.request(
+        requested.function,
+        requested.arguments,
+    ) orelse return error.UnsupportedSpecialization;
     out.entry = out.functions.items[root].after;
     var cursor: usize = 0;
     while (cursor < out.functions.items.len) : (cursor += 1) try engine.function(cursor);
@@ -113,7 +163,9 @@ const Engine = struct {
         return self.out.builder.allocator();
     }
     fn spend(self: *Engine, depth: usize) Error!void {
-        if (self.left == 0 or depth > self.out.request.policy.depth) return error.SpecializationLimit;
+        if (self.left == 0 or
+            depth > self.out.request.policy.depth)
+            return error.SpecializationLimit;
         self.left -= 1;
     }
     fn supported(self: *Engine, id: p.Id, depth: usize) Error!bool {
@@ -126,7 +178,10 @@ const Engine = struct {
             // environment, instead of renaming away its captured bindings.
             .call => |v| self.captures[@intCast(v.function)].items.len == 0,
             .bind => |v| try self.supported(v.value, depth + 1) and try self.supported(v.next, depth + 1),
-            .conditional => |v| try self.supported(v.when_true, depth + 1) and try self.supported(v.when_false, depth + 1),
+            .conditional => |v| try self.supported(
+                v.when_true,
+                depth + 1,
+            ) and try self.supported(v.when_false, depth + 1),
             .yield_then => |v| self.supported(v, depth + 1),
             .unpack_product => |v| self.supported(v.body, depth + 1),
             .match_sum => |v| blk: {
@@ -139,7 +194,10 @@ const Engine = struct {
     fn request(self: *Engine, id: p.Id, raw_arguments: []const Knowledge) Error!?usize {
         try self.spend(0);
         const arguments = try self.a().alloc(Knowledge, raw_arguments.len);
-        for (raw_arguments, arguments) |raw, *canonical| canonical.* = try values.normalize(self.a(), raw, &self.left);
+        for (
+            raw_arguments,
+            arguments,
+        ) |raw, *canonical| canonical.* = try values.normalize(self.a(), raw, &self.left);
         var count: usize = 0;
         for (self.out.functions.items, 0..) |f, i| if (f.before == id) {
             count += 1;
@@ -154,7 +212,9 @@ const Engine = struct {
         };
         // Changing static recursion becomes an ordinary call to the original
         // function. This bounds compiler search without limiting guest recursion.
-        if (count >= self.out.request.policy.keys_per_function or self.captures[@intCast(id)].items.len != 0) return null;
+        if (count >= self.out.request.policy.keys_per_function or self.captures[
+            @intCast(id)
+        ].items.len != 0) return null;
         // Resource permissions name function identities. Keep their owners
         // generic rather than cloning code without its nominal authority.
         for (self.out.original.resources) |resource| {
@@ -168,10 +228,28 @@ const Engine = struct {
         const original = self.out.original.functions[@intCast(id)];
         if (original.body == null or !try self.supported(original.body.?, 0)) return null;
         var parameters: std.ArrayList(p.Id) = .empty;
-        for (original.parameters, arguments) |param, k| if (k != .known) try parameters.append(self.a(), self.out.original.variables[@intCast(param)]);
-        const residual = try self.out.builder.declare(parameters.items, original.result, original.effects, original.regions);
+        for (
+            original.parameters,
+            arguments,
+        ) |param, k| if (k != .known) try parameters.append(
+            self.a(),
+            self.out.original.variables[@intCast(param)],
+        );
+        const residual = try self.out.builder.declare(
+            parameters.items,
+            original.result,
+            original.effects,
+            original.regions,
+        );
         const index = self.out.functions.items.len;
-        try self.out.functions.append(self.a(), .{ .before = id, .after = residual, .arguments = try source.own([]const Knowledge, self.a(), arguments) });
+        try self.out.functions.append(
+            self.a(),
+            .{
+                .before = id,
+                .after = residual,
+                .arguments = try source.own([]const Knowledge, self.a(), arguments),
+            },
+        );
         return index;
     }
     fn function(self: *Engine, index: usize) Error!void {
@@ -204,7 +282,9 @@ const Engine = struct {
             },
             .literal => |v| knowledge = .{ .known = self.out.original.constants[@intCast(v)] },
             .lambda => |v| {
-                if (self.captures[@intCast(v)].items.len != 0) return error.UnsupportedSpecialization;
+                if (self.captures[
+                    @intCast(v)
+                ].items.len != 0) return error.UnsupportedSpecialization;
                 total = false;
             },
             .primitive => |op| {
@@ -218,16 +298,32 @@ const Engine = struct {
                     try children.append(self.a(), result.proof);
                 }
                 expression.expression.primitive.operands = args;
-                knowledge = try values.normalize(self.a(), try values.primitive(self.a(), self.out.original, self.facts, before, known, &self.left), &self.left);
+                knowledge = try values.normalize(
+                    self.a(),
+                    try values.primitive(
+                        self.a(),
+                        self.out.original,
+                        self.facts,
+                        before,
+                        known,
+                        &self.left,
+                    ),
+                    &self.left,
+                );
                 // Only a fully evaluated ordinary result proves a primitive total.
                 // Partial record fields cannot erase a potentially failing sibling.
                 total = total and knowledge == .known;
             },
         }
         const folded = total and knowledge == .known;
-        const residual = if (folded) try self.out.builder.literal(knowledge.known) else try self.out.builder.value(expression);
+        const residual = if (folded) try self.out.builder.literal(
+            knowledge.known,
+        ) else try self.out.builder.value(expression);
         const proof = self.out.value_proofs.items.len;
-        try self.out.value_proofs.append(self.a(), .{ .before = id, .after = residual, .folded = folded, .children = children.items });
+        try self.out.value_proofs.append(
+            self.a(),
+            .{ .before = id, .after = residual, .folded = folded, .children = children.items },
+        );
         return .{ .id = residual, .knowledge = knowledge, .total = total, .proof = proof };
     }
     fn term(self: *Engine, id: p.Id, env: Env, depth: usize) Error!Term {
@@ -249,11 +345,23 @@ const Engine = struct {
             },
             .bind => |v| {
                 const first = try self.term(v.value, env, depth + 1);
-                const variable = try self.out.builder.variable(self.out.original.variables[@intCast(v.variable)]);
-                const next_env = try extend(self.a(), env, .{ .before = v.variable, .after = variable, .knowledge = first.knowledge });
+                const variable = try self.out.builder.variable(
+                    self.out.original.variables[
+                        @intCast(v.variable)
+                    ],
+                );
+                const next_env = try extend(
+                    self.a(),
+                    env,
+                    .{ .before = v.variable, .after = variable, .knowledge = first.knowledge },
+                );
                 const next = try self.term(v.next, next_env, depth + 1);
                 try tp.appendSlice(self.a(), &.{ first.proof, next.proof });
-                residual = .{ .bind = .{ .variable = variable, .value = first.id, .next = next.id } };
+                residual = .{ .bind = .{
+                    .variable = variable,
+                    .value = first.id,
+                    .next = next.id,
+                } };
                 knowledge = next.knowledge;
             },
             .conditional => |v| {
@@ -261,7 +369,11 @@ const Engine = struct {
                 try vp.append(self.a(), condition.proof);
                 if (condition.total and condition.knowledge == .known) {
                     selected = if (condition.knowledge.known.bytes[0] == 1) 0 else 1;
-                    const child = try self.term(if (selected.? == 0) v.when_true else v.when_false, env, depth + 1);
+                    const child = try self.term(
+                        if (selected.? == 0) v.when_true else v.when_false,
+                        env,
+                        depth + 1,
+                    );
                     alias = child.id;
                     knowledge = child.knowledge;
                     try tp.append(self.a(), child.proof);
@@ -269,7 +381,11 @@ const Engine = struct {
                     const yes = try self.term(v.when_true, env, depth + 1);
                     const no = try self.term(v.when_false, env, depth + 1);
                     try tp.appendSlice(self.a(), &.{ yes.proof, no.proof });
-                    residual = .{ .conditional = .{ .condition = condition.id, .when_true = yes.id, .when_false = no.id } };
+                    residual = .{ .conditional = .{
+                        .condition = condition.id,
+                        .when_true = yes.id,
+                        .when_false = no.id,
+                    } };
                     if (values.equal(yes.knowledge, no.knowledge)) knowledge = yes.knowledge;
                 }
             },
@@ -286,8 +402,14 @@ const Engine = struct {
                 callee = try self.request(v.function, ks);
                 if (callee) |index| {
                     var dynamic: std.ArrayList(p.Id) = .empty;
-                    for (args, self.out.functions.items[index].arguments) |arg, k| if (k != .known) try dynamic.append(self.a(), arg);
-                    residual = .{ .call = .{ .function = self.out.functions.items[index].after, .arguments = dynamic.items } };
+                    for (
+                        args,
+                        self.out.functions.items[index].arguments,
+                    ) |arg, k| if (k != .known) try dynamic.append(self.a(), arg);
+                    residual = .{ .call = .{
+                        .function = self.out.functions.items[index].after,
+                        .arguments = dynamic.items,
+                    } };
                 } else residual = .{ .call = .{ .function = v.function, .arguments = args } };
             },
             .perform => |v| {
@@ -323,12 +445,35 @@ const Engine = struct {
                 const vars = try self.a().alloc(p.Id, v.variables.len);
                 var next_env = env;
                 for (v.variables, vars, 0..) |before, *after, i| {
-                    after.* = try self.out.builder.variable(self.out.original.variables[@intCast(before)]);
-                    next_env = try extend(self.a(), next_env, .{ .before = before, .after = after.*, .knowledge = try values.field(self.a(), self.out.original, self.facts, x.knowledge, i, &self.left) });
+                    after.* = try self.out.builder.variable(
+                        self.out.original.variables[
+                            @intCast(before)
+                        ],
+                    );
+                    next_env = try extend(
+                        self.a(),
+                        next_env,
+                        .{
+                            .before = before,
+                            .after = after.*,
+                            .knowledge = try values.field(
+                                self.a(),
+                                self.out.original,
+                                self.facts,
+                                x.knowledge,
+                                i,
+                                &self.left,
+                            ),
+                        },
+                    );
                 }
                 const body = try self.term(v.body, next_env, depth + 1);
                 try tp.append(self.a(), body.proof);
-                residual = .{ .unpack_product = .{ .value = x.id, .variables = vars, .body = body.id } };
+                residual = .{ .unpack_product = .{
+                    .value = x.id,
+                    .variables = vars,
+                    .body = body.id,
+                } };
                 knowledge = body.knowledge;
             },
             .match_sum => |v| {
@@ -341,18 +486,46 @@ const Engine = struct {
                     const schema = self.out.original.variables[@intCast(branch.variable)];
                     const payload_fact = (try values.payload(x.knowledge, schema)).value;
                     const variable = try self.out.builder.variable(schema);
-                    const next_env = try extend(self.a(), env, .{ .before = branch.variable, .after = variable, .knowledge = payload_fact });
+                    const next_env = try extend(
+                        self.a(),
+                        env,
+                        .{
+                            .before = branch.variable,
+                            .after = variable,
+                            .knowledge = payload_fact,
+                        },
+                    );
                     const body = try self.term(branch.body, next_env, depth + 1);
                     try tp.append(self.a(), body.proof);
                     selected = tag;
                     knowledge = body.knowledge;
-                    residual = .{ .bind = .{ .variable = variable, .value = try self.out.builder.pure(try self.out.builder.literal(payload_fact.known)), .next = body.id } };
+                    residual = .{
+                        .bind = .{
+                            .variable = variable,
+                            .value = try self.out.builder.pure(
+                                try self.out.builder.literal(payload_fact.known),
+                            ),
+                            .next = body.id,
+                        },
+                    };
                 } else {
                     const Case = @typeInfo(@TypeOf(v.cases)).pointer.child;
                     const cases = try self.a().alloc(Case, v.cases.len);
                     for (v.cases, cases) |before, *after| {
-                        const variable = try self.out.builder.variable(self.out.original.variables[@intCast(before.variable)]);
-                        const next_env = try extend(self.a(), env, .{ .before = before.variable, .after = variable, .knowledge = .dynamic });
+                        const variable = try self.out.builder.variable(
+                            self.out.original.variables[
+                                @intCast(before.variable)
+                            ],
+                        );
+                        const next_env = try extend(
+                            self.a(),
+                            env,
+                            .{
+                                .before = before.variable,
+                                .after = variable,
+                                .knowledge = .dynamic,
+                            },
+                        );
                         const body = try self.term(before.body, next_env, depth + 1);
                         try tp.append(self.a(), body.proof);
                         after.* = .{ .variable = variable, .body = body.id };
@@ -364,7 +537,17 @@ const Engine = struct {
         }
         const after = alias orelse try self.out.builder.term(residual);
         const proof = self.out.term_proofs.items.len;
-        try self.out.term_proofs.append(self.a(), .{ .before = id, .after = after, .values = vp.items, .children = tp.items, .selected = selected, .callee = callee });
+        try self.out.term_proofs.append(
+            self.a(),
+            .{
+                .before = id,
+                .after = after,
+                .values = vp.items,
+                .children = tp.items,
+                .selected = selected,
+                .callee = callee,
+            },
+        );
         return .{ .id = after, .knowledge = knowledge, .proof = proof };
     }
 };

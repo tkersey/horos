@@ -3,7 +3,12 @@ const std = @import("std");
 const data = @import("horos_data");
 
 pub fn get(allocator: std.mem.Allocator, name: []const u8) !data.program_image.Decoded {
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, @embedFile("coalescing_predecessors.json"), .{});
+    const parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        @embedFile("coalescing_predecessors.json"),
+        .{},
+    );
     defer parsed.deinit();
     const entry = parsed.value.object.get("images").?.object.get(name) orelse
         return error.MissingPredecessorFixture;
@@ -21,7 +26,11 @@ pub fn get(allocator: std.mem.Allocator, name: []const u8) !data.program_image.D
     return data.program_image.decode(allocator, bytes);
 }
 
-pub fn kind(allocator: std.mem.Allocator, comptime prefix: []const u8, value: anytype) !data.program_image.Decoded {
+pub fn kind(
+    allocator: std.mem.Allocator,
+    comptime prefix: []const u8,
+    value: anytype,
+) !data.program_image.Decoded {
     var key: [128]u8 = undefined;
     return get(allocator, try std.fmt.bufPrint(&key, "{s}{s}", .{ prefix, @tagName(value) }));
 }

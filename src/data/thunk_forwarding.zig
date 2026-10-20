@@ -20,7 +20,10 @@ const Budget = struct {
     fn record(self: *@This(), comptime T: type, value: T) Error!void {
         try self.tick();
         switch (@typeInfo(T)) {
-            .@"struct" => |info| inline for (info.field_names, info.field_types) |field_name, FieldType| try self.record(FieldType, @field(value, field_name)),
+            .@"struct" => |info| inline for (
+                info.field_names,
+                info.field_types,
+            ) |field_name, FieldType| try self.record(FieldType, @field(value, field_name)),
             .@"union" => switch (value) {
                 inline else => |v| try self.record(@TypeOf(v), v),
             },
@@ -32,25 +35,67 @@ const Budget = struct {
         }
     }
 };
-fn forwarding(program: ir.Program, id: p.Id, permissions: traits.Facts, budget: *Budget) Error!bool {
+fn forwarding(
+    program: ir.Program,
+    id: p.Id,
+    permissions: traits.Facts,
+    budget: *Budget,
+) Error!bool {
     try budget.tick();
     const constructor = program.constructors[@intCast(id)];
     const capture = program.scopes.captures[@intCast(constructor.capture)];
-    if (capture.fields.len != 1 or capture.fields[0] != constructor.schema or capture.use != .reusable or capture.owned_regions.len != 0 or capture.borrowed_regions.len != 0) return false;
+    if (capture.fields.len != 1 or
+        capture.fields[0] != constructor.schema or
+        capture.use != .reusable or
+        capture.owned_regions.len != 0 or
+        capture.borrowed_regions.len != 0)
+        return false;
     const signature = program.schemas[@intCast(constructor.schema)].internal.computation;
-    if (signature.parameters.len != 0 or signature.use != .reusable or signature.regions.len != 0 or signature.effects.len != 0) return false;
-    if (!permissions.copy[@intCast(constructor.schema)] or !permissions.drop[@intCast(constructor.schema)] or !permissions.copy[@intCast(signature.result)] or !permissions.drop[@intCast(signature.result)]) return false;
+    if (signature.parameters.len != 0 or
+        signature.use != .reusable or
+        signature.regions.len != 0 or
+        signature.effects.len != 0)
+        return false;
+    if (!permissions.copy[
+        @intCast(constructor.schema)
+    ] or !permissions.drop[
+        @intCast(constructor.schema)
+    ] or !permissions.copy[
+        @intCast(signature.result)
+    ] or !permissions.drop[
+        @intCast(signature.result)
+    ]) return false;
     const function = program.functions[@intCast(constructor.function)];
-    if (function.inputs.len != 1 or function.effects.len != 0 or function.regions.len != 0 or function.custody.len != 1) return false;
+    if (function.inputs.len != 1 or
+        function.effects.len != 0 or
+        function.regions.len != 0 or
+        function.custody.len != 1)
+        return false;
     const entry = program.blocks[@intCast(function.entry)];
-    if (entry.custody != 0 or entry.instructions.len != 0 or entry.terminator != .apply) return false;
+    if (entry.custody != 0 or
+        entry.instructions.len != 0 or
+        entry.terminator != .apply)
+        return false;
     const apply = entry.terminator.apply;
-    if (apply.computation != function.inputs[0] or apply.arguments.len != 0 or apply.next.assignments.len != 1 or apply.next.assignments[0].source != .returned or apply.next.block == function.entry) return false;
+    if (apply.computation != function.inputs[0] or
+        apply.arguments.len != 0 or
+        apply.next.assignments.len != 1 or
+        apply.next.assignments[0].source != .returned or
+        apply.next.block == function.entry)
+        return false;
     const returned = program.blocks[@intCast(apply.next.block)];
-    if (returned.function != constructor.function or returned.custody != 0 or returned.instructions.len != 0 or returned.terminator != .return_value or returned.terminator.return_value != apply.next.assignments[0].destination) return false;
+    if (returned.function != constructor.function or
+        returned.custody != 0 or
+        returned.instructions.len != 0 or
+        returned.terminator != .return_value or
+        returned.terminator.return_value != apply.next.assignments[0].destination)
+        return false;
     for (program.blocks, 0..) |block, bid| {
         try budget.tick();
-        if (block.function == constructor.function and bid != function.entry and bid != apply.next.block) return false;
+        if (block.function == constructor.function and
+            bid != function.entry and
+            bid != apply.next.block)
+            return false;
     }
     return true;
 }
@@ -64,7 +109,11 @@ pub const Candidate = struct {
         self.* = undefined;
     }
 };
-pub fn construct(allocator: std.mem.Allocator, original: ir.Program, options: Options) Error!?Candidate {
+pub fn construct(
+    allocator: std.mem.Allocator,
+    original: ir.Program,
+    options: Options,
+) Error!?Candidate {
     var admitted = try own.analyze(allocator, original);
     defer admitted.deinit();
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -87,7 +136,10 @@ pub fn construct(allocator: std.mem.Allocator, original: ir.Program, options: Op
             try sites.append(a, .{ .block = bid, .instruction = position });
             // There is no intervening operation or write on this edge. Returning
             // the captured value directly also avoids an inlining temporary.
-            if (position + 1 == instructions.len and block.terminator == .return_value and block.terminator.return_value == op.destination) {
+            if (position + 1 == instructions.len and
+                block.terminator == .return_value and
+                block.terminator.return_value == op.destination)
+            {
                 block.terminator.return_value = op.operands[0];
                 count -= 1;
             } else {
@@ -106,7 +158,12 @@ pub fn construct(allocator: std.mem.Allocator, original: ir.Program, options: Op
 }
 /// Original function bodies prove the eta law; every actual changed instruction
 /// must copy the exact captured value. No construction maps or discovery flags.
-pub fn validate(allocator: std.mem.Allocator, original: ir.Program, candidate: ir.Program, options: Options) Error!void {
+pub fn validate(
+    allocator: std.mem.Allocator,
+    original: ir.Program,
+    candidate: ir.Program,
+    options: Options,
+) Error!void {
     var before = try own.analyze(allocator, original);
     defer before.deinit();
     var after = try own.analyze(allocator, candidate);
@@ -123,17 +180,34 @@ pub fn validate(allocator: std.mem.Allocator, original: ir.Program, candidate: i
     const permissions = try traits.derive(arena.allocator(), original.schemas);
     var changed: usize = 0;
     for (original.blocks, candidate.blocks) |old, new| {
-        if (old.function != new.function or old.custody != new.custody) return error.InvalidThunkForwarding;
+        if (old.function != new.function or
+            old.custody != new.custody)
+            return error.InvalidThunkForwarding;
         if (old.instructions.len != new.instructions.len) {
-            if (old.instructions.len != new.instructions.len + 1 or old.terminator != .return_value or new.terminator != .return_value) return error.InvalidThunkForwarding;
+            if (old.instructions.len != new.instructions.len + 1 or
+                old.terminator != .return_value or
+                new.terminator != .return_value)
+                return error.InvalidThunkForwarding;
             const last = old.instructions[old.instructions.len - 1];
-            if (last.opcode != .computation or last.destination != old.terminator.return_value or !try forwarding(original, last.immediate, permissions, &budget) or new.terminator.return_value != last.operands[0]) return error.InvalidThunkForwarding;
+            if (last.opcode != .computation or
+                last.destination != old.terminator.return_value or
+                !try forwarding(original, last.immediate, permissions, &budget) or
+                new.terminator.return_value != last.operands[0])
+                return error.InvalidThunkForwarding;
             changed += 1;
-        } else if (!equal(ir.Terminator, old.terminator, new.terminator)) return error.InvalidThunkForwarding;
+        } else if (!equal(
+            ir.Terminator,
+            old.terminator,
+            new.terminator,
+        )) return error.InvalidThunkForwarding;
         for (old.instructions[0..new.instructions.len], new.instructions) |before_op, after_op| {
             try budget.tick();
             if (equal(ir.Instruction, before_op, after_op)) continue;
-            if (before_op.opcode != .computation or after_op.opcode != .move or after_op.immediate != 0 or !try forwarding(original, before_op.immediate, permissions, &budget)) return error.InvalidThunkForwarding;
+            if (before_op.opcode != .computation or
+                after_op.opcode != .move or
+                after_op.immediate != 0 or
+                !try forwarding(original, before_op.immediate, permissions, &budget))
+                return error.InvalidThunkForwarding;
             var restored = after_op;
             restored.opcode = .computation;
             restored.immediate = before_op.immediate;
@@ -146,11 +220,19 @@ pub fn validate(allocator: std.mem.Allocator, original: ir.Program, candidate: i
 pub fn possible(program: ir.Program) bool {
     for (program.constructors) |constructor| {
         const capture = program.scopes.captures[@intCast(constructor.capture)];
-        if (capture.fields.len == 1 and capture.fields[0] == constructor.schema and capture.use == .reusable) return true;
+        if (capture.fields.len == 1 and
+            capture.fields[0] == constructor.schema and
+            capture.use == .reusable)
+            return true;
     }
     return false;
 }
-pub fn run(allocator: std.mem.Allocator, original: ir.Program, statistics: ?*Statistics, options: Options) Error!p01.Owned {
+pub fn run(
+    allocator: std.mem.Allocator,
+    original: ir.Program,
+    statistics: ?*Statistics,
+    options: Options,
+) Error!p01.Owned {
     var stats: Statistics = .{};
     defer if (statistics) |out| {
         out.* = stats;

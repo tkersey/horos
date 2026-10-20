@@ -9,11 +9,27 @@ const traits = @import("traits.zig");
 const equal = @import("record_equal.zig").equal;
 const coalescing = @import("coalescing.zig");
 pub const Error = coalescing.Error || error{InvalidDeadComputation};
-pub const Options = struct { work_limit: u64 = std.math.maxInt(u64), round_limit: usize = std.math.maxInt(usize), coalescing: coalescing.Options = .{} };
-pub const Statistics = struct { instructions_removed: usize = 0, constructions_removed: usize = 0, rounds: usize = 0, round_attempts: usize = 0, work: u64 = 0, work_limit: bool = false };
+pub const Options = struct {
+    work_limit: u64 = std.math.maxInt(u64),
+    round_limit: usize = std.math.maxInt(usize),
+    coalescing: coalescing.Options = .{},
+};
+pub const Statistics = struct {
+    instructions_removed: usize = 0,
+    constructions_removed: usize = 0,
+    rounds: usize = 0,
+    round_attempts: usize = 0,
+    work: u64 = 0,
+    work_limit: bool = false,
+};
 pub const Witness = struct { block: usize, removed: []const usize };
 
-pub fn run(allocator: std.mem.Allocator, original: ir.Program, statistics: ?*Statistics, options: Options) Error!coalescing.Owned {
+pub fn run(
+    allocator: std.mem.Allocator,
+    original: ir.Program,
+    statistics: ?*Statistics,
+    options: Options,
+) Error!coalescing.Owned {
     var stats: Statistics = .{};
     defer if (statistics) |out| {
         out.* = stats;
@@ -66,7 +82,10 @@ pub fn run(allocator: std.mem.Allocator, original: ir.Program, statistics: ?*Sta
                         if (instruction.opcode == .computation) removed_constructions += 1;
                     } else {
                         demand = try flow.pool.remove(demand, instruction.destination);
-                        for (instruction.operands) |slot| demand = try flow.pool.insert(demand, slot);
+                        for (instruction.operands) |slot| demand = try flow.pool.insert(
+                            demand,
+                            slot,
+                        );
                     }
                 }
             }
@@ -76,7 +95,10 @@ pub fn run(allocator: std.mem.Allocator, original: ir.Program, statistics: ?*Sta
                 if (discard) try removed.append(a, index) else try instructions.append(a, instruction);
             }
             out.instructions = try instructions.toOwnedSlice(a);
-            if (removed.items.len != 0) try witnesses.append(a, .{ .block = id, .removed = try removed.toOwnedSlice(a) });
+            if (removed.items.len != 0) try witnesses.append(
+                a,
+                .{ .block = id, .removed = try removed.toOwnedSlice(a) },
+            );
         }
         if (removed_count == 0) break;
         var candidate = current;
@@ -95,21 +117,51 @@ pub fn run(allocator: std.mem.Allocator, original: ir.Program, statistics: ?*Sta
     return coalescing.run(allocator, current, options.coalescing);
 }
 
-fn totalDroppable(program: ir.Program, function: p.Id, instruction: ir.Instruction, permissions: traits.Facts) bool {
+fn totalDroppable(
+    program: ir.Program,
+    function: p.Id,
+    instruction: ir.Instruction,
+    permissions: traits.Facts,
+) bool {
     if (instruction.failures.len != 0) return false;
     const slots = program.functions[@intCast(function)].layout.slots;
     const schema = slots[@intCast(instruction.destination)];
     if (!permissions.copy[@intCast(schema)] or !permissions.drop[@intCast(schema)]) return false;
     for (instruction.operands) |slot| {
         const operand = slots[@intCast(slot)];
-        if (!permissions.copy[@intCast(operand)] or !permissions.drop[@intCast(operand)]) return false;
+        if (!permissions.copy[
+            @intCast(operand)
+        ] or !permissions.drop[
+            @intCast(operand)
+        ]) return false;
     }
     return switch (instruction.opcode) {
-        .constant, .move, .equal, .less, .boolean_not, .integer_bit_not, .integer_bit_and, .integer_bit_or, .integer_bit_xor, .product, .field, .variant, .variant_tag, .enum_tag, .sequence_length, .select => true,
+        .constant,
+        .move,
+        .equal,
+        .less,
+        .boolean_not,
+        .integer_bit_not,
+        .integer_bit_and,
+        .integer_bit_or,
+        .integer_bit_xor,
+        .product,
+        .field,
+        .variant,
+        .variant_tag,
+        .enum_tag,
+        .sequence_length,
+        .select,
+        => true,
         .computation => blk: {
             const constructor = program.constructors[@intCast(instruction.immediate)];
             const capture = program.scopes.captures[@intCast(constructor.capture)];
-            break :blk capture.fields.len == 0 and capture.owned_regions.len == 0 and capture.borrowed_regions.len == 0 and program.functions[@intCast(constructor.function)].regions.len == 0;
+            break :blk capture.fields.len == 0 and
+                capture.owned_regions.len == 0 and
+                capture.borrowed_regions.len == 0 and
+                program.functions[
+                    @intCast(constructor.function)
+                ].regions.len == 0;
         },
         else => false,
     };
@@ -117,19 +169,31 @@ fn totalDroppable(program: ir.Program, function: p.Id, instruction: ir.Instructi
 
 /// Check the retained subsequence and each deletion against candidate demand.
 /// An erased fault/control operation cannot be justified by output admission.
-pub fn validate(allocator: std.mem.Allocator, original: ir.Program, candidate: ir.Program, witnesses: []const Witness) Error!void {
+pub fn validate(
+    allocator: std.mem.Allocator,
+    original: ir.Program,
+    candidate: ir.Program,
+    witnesses: []const Witness,
+) Error!void {
     var original_flow = try ownership.analyze(allocator, original);
     defer original_flow.deinit();
     var admitted_candidate = try ownership.analyze(allocator, candidate);
     defer admitted_candidate.deinit();
-    var candidate_flow = try @import("activation_flow.zig").analyzeInputDemand(allocator, candidate);
+    var candidate_flow = try @import("activation_flow.zig").analyzeInputDemand(
+        allocator,
+        candidate,
+    );
     defer candidate_flow.deinit();
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const permissions = try traits.derive(arena.allocator(), original.schemas);
     var unchanged = candidate;
     unchanged.blocks = original.blocks;
-    if (!equal(ir.Program, original, unchanged) or candidate.blocks.len != original.blocks.len) return error.InvalidDeadComputation;
+    if (!equal(
+        ir.Program,
+        original,
+        unchanged,
+    ) or candidate.blocks.len != original.blocks.len) return error.InvalidDeadComputation;
     for (original.blocks, candidate.blocks, 0..) |before, after, id| {
         var removed: []const usize = &.{};
         var found = false;
@@ -138,20 +202,40 @@ pub fn validate(allocator: std.mem.Allocator, original: ir.Program, candidate: i
             found = true;
             removed = witness.removed;
         };
-        if (before.function != after.function or before.custody != after.custody or !equal(ir.Terminator, before.terminator, after.terminator)) return error.InvalidDeadComputation;
+        if (before.function != after.function or before.custody != after.custody or !equal(
+            ir.Terminator,
+            before.terminator,
+            after.terminator,
+        )) return error.InvalidDeadComputation;
         var next: usize = 0;
         var erased: usize = 0;
         for (before.instructions, 0..) |instruction, index| {
             if (erased < removed.len and removed[erased] == index) {
-                if (!totalDroppable(original, before.function, instruction, permissions)) return error.InvalidDeadComputation;
-                if (candidate_flow.live[id].len != 0 and candidate_flow.pool.contains(candidate_flow.live[id][next], instruction.destination)) return error.InvalidDeadComputation;
+                if (!totalDroppable(
+                    original,
+                    before.function,
+                    instruction,
+                    permissions,
+                )) return error.InvalidDeadComputation;
+                if (candidate_flow.live[id].len != 0 and candidate_flow.pool.contains(
+                    candidate_flow.live[id][next],
+                    instruction.destination,
+                )) return error.InvalidDeadComputation;
                 erased += 1;
             } else {
-                if (next >= after.instructions.len or !equal(ir.Instruction, instruction, after.instructions[next])) return error.InvalidDeadComputation;
+                if (next >= after.instructions.len or !equal(
+                    ir.Instruction,
+                    instruction,
+                    after.instructions[next],
+                )) return error.InvalidDeadComputation;
                 next += 1;
             }
         }
-        if (erased != removed.len or next != after.instructions.len) return error.InvalidDeadComputation;
+        if (erased != removed.len or
+            next != after.instructions.len)
+            return error.InvalidDeadComputation;
     }
-    for (witnesses) |witness| if (witness.block >= original.blocks.len) return error.InvalidDeadComputation;
+    for (witnesses) |witness|
+        if (witness.block >= original.blocks.len)
+            return error.InvalidDeadComputation;
 }

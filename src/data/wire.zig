@@ -23,7 +23,9 @@ pub const Reader = struct {
     position: usize = 0,
 
     pub fn take(self: *Reader, length: usize) Error![]const u8 {
-        if (self.position > self.input.len or length > self.input.len - self.position) return error.Truncated;
+        if (self.position > self.input.len or
+            length > self.input.len - self.position)
+            return error.Truncated;
         const result = self.input[self.position..][0..length];
         self.position += length;
         return result;

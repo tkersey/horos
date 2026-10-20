@@ -26,14 +26,22 @@ pub const RecoveryBinding = struct {
 
     /// Transport an actual lowering origin through a checked correspondence.
     /// This operation does not certify the correspondence or the source origin.
-    pub fn relocated(self: RecoveryBinding, map: data.coalescing.Correspondence) error{InvalidCorrespondence}!?RecoveryBinding {
+    pub fn relocated(
+        self: RecoveryBinding,
+        map: data.coalescing.Correspondence,
+    ) error{InvalidCorrespondence}!?RecoveryBinding {
         const functions = map.maps[@backingInt(data.relocation.Kind.function)];
         const schemas = map.maps[@backingInt(data.relocation.Kind.schema)];
-        if (self.function >= functions.len or self.function >= map.locals.len or self.schema >= schemas.len) return error.InvalidCorrespondence;
+        if (self.function >= functions.len or
+            self.function >= map.locals.len or
+            self.schema >= schemas.len)
+            return error.InvalidCorrespondence;
         const function = functions[@intCast(self.function)];
         if (function == data.relocation.missing) return null;
         const slots = map.locals[@intCast(self.function)].slots;
-        if (self.slot >= slots.len or schemas[@intCast(self.schema)] == data.relocation.missing) return error.InvalidCorrespondence;
+        if (self.slot >= slots.len or schemas[
+            @intCast(self.schema)
+        ] == data.relocation.missing) return error.InvalidCorrespondence;
         var result = self;
         result.function = function;
         result.schema = schemas[@intCast(self.schema)];
@@ -55,7 +63,11 @@ pub const Construction = struct {
     parameters: []const RecoveryBinding = &.{},
     recovery_evidence: ?RecoveryEvidence = null,
 
-    pub fn encode(self: *const Construction, allocator: std.mem.Allocator, output: []u8) data.program_image.Error![]const u8 {
+    pub fn encode(
+        self: *const Construction,
+        allocator: std.mem.Allocator,
+        output: []u8,
+    ) data.program_image.Error![]const u8 {
         return data.program_image.encode(allocator, self.program, output);
     }
 
@@ -73,7 +85,11 @@ pub fn lower(allocator: std.mem.Allocator, input: ast.Module) Error!Construction
     return lowerObserved(allocator, input, .{});
 }
 
-pub fn lowerObserved(allocator: std.mem.Allocator, input: ast.Module, options: source.CompileOptions) Error!Construction {
+pub fn lowerObserved(
+    allocator: std.mem.Allocator,
+    input: ast.Module,
+    options: source.CompileOptions,
+) Error!Construction {
     return lowerInternal(allocator, input, &.{}, false, &.{}, options);
 }
 
@@ -139,7 +155,10 @@ fn lowerBody(
         .source = owned,
         .facts = facts,
         .capture_observer = options.captures,
-        .slot_variables = if (options.captures != null) try a.alloc([]const ?p.Id, owned.functions.len) else &.{},
+        .slot_variables = if (options.captures != null) try a.alloc(
+            []const ?p.Id,
+            owned.functions.len,
+        ) else &.{},
         .cacheable = try @import("value_cache.zig").derive(a, owned, traits),
         .uses = traits,
         .recovery_enabled = options.recovery,
@@ -176,15 +195,35 @@ fn lowerBody(
     };
     if (options.diagnostic) |diagnostic| diagnostic.function = null;
     options.stage(.target_check);
-    var original_facts = try checkTarget(allocator, &compiler, program, imports, component, borrows, null, options);
+    var original_facts = try checkTarget(
+        allocator,
+        &compiler,
+        program,
+        imports,
+        component,
+        borrows,
+        null,
+        options,
+    );
     original_facts.deinit();
     options.stage(.direct_optimization);
     const threaded = try @import("thread_jumps.zig").optimize(a, program);
     // Tail-clause conversion adds functions and erases a resumption input. It
     // has no source-binding transport yet. Recovery keeps the general clauses;
     // source specialization and checked structural coalescing remain enabled.
-    const selected = if (options.recovery) threaded else try data.tail_clauses.optimize(a, threaded, traits);
-    const ordered = try @import("slot_order.zig").optimizeObserved(a, selected, if (options.recovery) .{ .context = &compiler, .receive = Compiler.reorderBindings } else null);
+    const selected = if (options.recovery) threaded else try data.tail_clauses.optimize(
+        a,
+        threaded,
+        traits,
+    );
+    const ordered = try @import("slot_order.zig").optimizeObserved(
+        a,
+        selected,
+        if (options.recovery) .{
+            .context = &compiler,
+            .receive = Compiler.reorderBindings,
+        } else null,
+    );
     if (!component and !recovery_input) return coalesce(allocator, ordered, &compiler, options);
     if (component) {
         if (options.semantic_statistics) |stats| stats.outcome = .deferred_open_component;
@@ -199,26 +238,56 @@ fn lowerBody(
     const result = try source.own(ir.Program, output.allocator(), ordered);
     options.stage(.target_check);
     const recovery = try output.allocator().dupe(RecoveryBinding, compiler.recovery_bindings.items);
-    const parameters = try output.allocator().dupe(RecoveryBinding, compiler.parameter_bindings.items);
-    const flow = try checkTarget(allocator, &compiler, result, imports, component, borrows, null, options);
+    const parameters = try output.allocator().dupe(
+        RecoveryBinding,
+        compiler.parameter_bindings.items,
+    );
+    const flow = try checkTarget(
+        allocator,
+        &compiler,
+        result,
+        imports,
+        component,
+        borrows,
+        null,
+        options,
+    );
     options.stage(.complete);
     if (options.diagnostic) |diagnostic| diagnostic.* = .{ .phase = .complete };
-    return .{ .arena = output, .program = result, .flow = flow, .recovery = recovery, .parameters = parameters };
+    return .{
+        .arena = output,
+        .program = result,
+        .flow = flow,
+        .recovery = recovery,
+        .parameters = parameters,
+    };
 }
 
 const CompilationObserver = struct {
     options: source.CompileOptions,
     compiler: *Compiler,
-    fn correspondence(context: *anyopaque, trace: *const data.coalescing.OriginsTrace) data.coalescing.Error!void {
+    fn correspondence(
+        context: *anyopaque,
+        trace: *const data.coalescing.OriginsTrace,
+    ) data.coalescing.Error!void {
         const self: *CompilationObserver = @ptrCast(@alignCast(context));
-        self.compiler.correspondence = try data.coalescing.Correspondence.copy(self.compiler.allocator, trace);
+        self.compiler.correspondence = try data.coalescing.Correspondence.copy(
+            self.compiler.allocator,
+            trace,
+        );
         for (self.compiler.recovery_bindings.items) |binding| {
             if (try binding.relocated(self.compiler.correspondence.?)) |final|
                 try self.compiler.final_bindings.append(self.compiler.allocator, final);
         }
-        if (self.options.coalescing.correspondence) |observer| try observer.receive(observer.context, trace);
+        if (self.options.coalescing.correspondence) |observer| try observer.receive(
+            observer.context,
+            trace,
+        );
     }
-    fn service(context: *anyopaque, report: ?data.closed_compilation.ServiceObservation.Report) void {
+    fn service(
+        context: *anyopaque,
+        report: ?data.closed_compilation.ServiceObservation.Report,
+    ) void {
         const self: *CompilationObserver = @ptrCast(@alignCast(context));
         const observer = self.options.compilation_observer.?;
         observer.service.?.receive(observer.context, report);
@@ -229,7 +298,12 @@ const CompilationObserver = struct {
         if (self.options.compilation_observer) |observer| observer.enter(observer.context, stage);
     }
 };
-fn coalesce(allocator: std.mem.Allocator, program: ir.Program, compiler: *Compiler, options: source.CompileOptions) Error!Construction {
+fn coalesce(
+    allocator: std.mem.Allocator,
+    program: ir.Program,
+    compiler: *Compiler,
+    options: source.CompileOptions,
+) Error!Construction {
     var observation: CompilationObserver = .{ .options = options, .compiler = compiler };
     var statistics: data.closed_compilation.Statistics = .{};
     defer if (options.semantic_statistics) |out| {
@@ -237,7 +311,10 @@ fn coalesce(allocator: std.mem.Allocator, program: ir.Program, compiler: *Compil
     };
     var detail: data.coalescing.Diagnostic = .{};
     var selected = options.coalescing;
-    if (options.recovery) selected.correspondence = .{ .context = &observation, .receive = CompilationObserver.correspondence };
+    if (options.recovery) selected.correspondence = .{
+        .context = &observation,
+        .receive = CompilationObserver.correspondence,
+    };
     if (options.diagnostic) |diagnostic| {
         diagnostic.target = .{};
         diagnostic.function = null;
@@ -250,20 +327,37 @@ fn coalesce(allocator: std.mem.Allocator, program: ir.Program, compiler: *Compil
             out.* = detail;
         };
     }
-    var result = data.closed_compilation.run(allocator, program, .{
-        .contract = options.contract,
-        .objective = options.objective,
-        .image_growth_bytes = options.image_growth_bytes,
-        .max_image_bytes = options.max_image_bytes,
-        .profile = options.profile,
-        .work_limit = options.semantic_work_limit,
-        .round_limit = options.semantic_round_limit,
-        .statistics = &statistics,
-        .observer = .{ .context = &observation, .enter = CompilationObserver.enter, .service = if (options.compilation_observer) |observer| if (observer.service) |service| .{ .contract = service.contract, .receive = CompilationObserver.service } else null else null },
-        .coalescing = selected,
-    }) catch |err| {
+    var result = data.closed_compilation.run(
+        allocator,
+        program,
+        .{
+            .contract = options.contract,
+            .objective = options.objective,
+            .image_growth_bytes = options.image_growth_bytes,
+            .max_image_bytes = options.max_image_bytes,
+            .profile = options.profile,
+            .work_limit = options.semantic_work_limit,
+            .round_limit = options.semantic_round_limit,
+            .statistics = &statistics,
+            .observer = .{
+                .context = &observation,
+                .enter = CompilationObserver.enter,
+                .service = if (options.compilation_observer) |observer|
+                    if (observer.service) |service|
+                        .{ .contract = service.contract, .receive = CompilationObserver.service }
+                    else
+                        null
+                else
+                    null,
+            },
+            .coalescing = selected,
+        },
+    ) catch |err| {
         if (options.diagnostic) |diagnostic| {
-            if (statistics.stages_run != 0 or (statistics.failed_stage != null and statistics.failed_stage != .p01)) {
+            if (statistics.stages_run != 0 or
+                (statistics.failed_stage != null and
+                    statistics.failed_stage != .p01))
+            {
                 // Semantic records no longer use the source's original indices.
                 diagnostic.target = .{};
                 diagnostic.origins = .{ .ambiguous = true };
@@ -287,30 +381,65 @@ fn coalesce(allocator: std.mem.Allocator, program: ir.Program, compiler: *Compil
         return err;
     };
     errdefer result.deinit();
-    const recovery = try result.arena.allocator().dupe(RecoveryBinding, compiler.final_bindings.items);
+    const recovery = try result.arena.allocator().dupe(
+        RecoveryBinding,
+        compiler.final_bindings.items,
+    );
     for (recovery) |binding| {
         if (binding.function >= result.program.functions.len) return error.InvalidSource;
         const slots = result.program.functions[@intCast(binding.function)].layout.slots;
-        if (binding.slot >= slots.len or slots[@intCast(binding.slot)] != binding.schema) return error.InvalidSource;
+        if (binding.slot >= slots.len or slots[
+            @intCast(binding.slot)
+        ] != binding.schema) return error.InvalidSource;
     }
     var parameters: std.ArrayList(RecoveryBinding) = .empty;
-    const evidence: ?RecoveryEvidence = if (options.recovery) try source.own(RecoveryEvidence, result.arena.allocator(), .{
-        .correspondence = compiler.correspondence orelse return error.InvalidCorrespondence,
-    }) else null;
+    const evidence: ?RecoveryEvidence = if (options.recovery) try source.own(
+        RecoveryEvidence,
+        result.arena.allocator(),
+        .{
+            .correspondence = compiler.correspondence orelse return error.InvalidCorrespondence,
+        },
+    ) else null;
     if (evidence) |proof| {
-        try data.coalescing.validateCorrespondence(allocator, program, result.program, proof.correspondence);
+        try data.coalescing.validateCorrespondence(
+            allocator,
+            program,
+            result.program,
+            proof.correspondence,
+        );
         for (compiler.parameter_bindings.items) |binding|
             if (try binding.relocated(proof.correspondence)) |final|
                 try parameters.append(result.arena.allocator(), final);
     }
-    const constructed: Construction = .{ .arena = result.arena, .program = result.program, .flow = result.flow, .recovery = recovery, .parameters = parameters.items, .recovery_evidence = evidence };
+    const constructed: Construction = .{
+        .arena = result.arena,
+        .program = result.program,
+        .flow = result.flow,
+        .recovery = recovery,
+        .parameters = parameters.items,
+        .recovery_evidence = evidence,
+    };
     options.stage(.complete);
     if (options.diagnostic) |diagnostic| diagnostic.* = .{ .phase = .complete };
     return constructed;
 }
 
-fn checkTarget(allocator: std.mem.Allocator, compiler: *Compiler, program: ir.Program, imports: []const p.Id, component: bool, borrows: []const data.borrow_contract.Summary, origins: ?[]const p.Id, options: source.CompileOptions) Error!data.activation_flow.Facts {
-    if (component) return data.activation_ownership.analyzeComponent(allocator, program, imports, borrows);
+fn checkTarget(
+    allocator: std.mem.Allocator,
+    compiler: *Compiler,
+    program: ir.Program,
+    imports: []const p.Id,
+    component: bool,
+    borrows: []const data.borrow_contract.Summary,
+    origins: ?[]const p.Id,
+    options: source.CompileOptions,
+) Error!data.activation_flow.Facts {
+    if (component) return data.activation_ownership.analyzeComponent(
+        allocator,
+        program,
+        imports,
+        borrows,
+    );
     // Admission can fail before setting a location (notably on allocation).
     // A previous pass's function ID belongs to a different, unprojected catalog.
     if (options.diagnostic) |diagnostic| {
@@ -319,10 +448,30 @@ fn checkTarget(allocator: std.mem.Allocator, compiler: *Compiler, program: ir.Pr
         diagnostic.variable = null;
         diagnostic.origins = .{};
     }
-    return data.activation_ownership.analyzeObserved(allocator, program, if (options.diagnostic) |diagnostic| &diagnostic.target else null, if (origins == null and compiler.capture_observer != null) .{ .context = compiler, .capture = Compiler.observeCapture, .explanation = if (compiler.capture_observer.?.explanation != null) Compiler.observeExplanation else null } else null) catch |err|
+    return data.activation_ownership.analyzeObserved(
+        allocator,
+        program,
+        if (options.diagnostic) |diagnostic| &diagnostic.target else null,
+        if (origins == null and compiler.capture_observer != null)
+            .{
+                .context = compiler,
+                .capture = Compiler.observeCapture,
+                .explanation = if (compiler.capture_observer.?.explanation != null)
+                    Compiler.observeExplanation
+                else
+                    null,
+            }
+        else
+            null,
+    ) catch |err|
         {
             if (options.diagnostic) |diagnostic| {
-                @import("diagnostic_origins.zig").translate(diagnostic, program, origins, compiler.facts.functions);
+                @import("diagnostic_origins.zig").translate(
+                    diagnostic,
+                    program,
+                    origins,
+                    compiler.facts.functions,
+                );
             }
             return err;
         };
@@ -350,46 +499,97 @@ const Compiler = struct {
 
     fn rememberBinding(self: *Compiler, function: p.Id, variable: p.Id, slot: p.Id) Error!void {
         if (!self.recovery_enabled) return;
-        try self.recovery_bindings.append(self.allocator, self.bindingOrigin(function, variable, slot));
+        try self.recovery_bindings.append(
+            self.allocator,
+            self.bindingOrigin(function, variable, slot),
+        );
     }
-    fn bindingOrigin(self: *const Compiler, function: p.Id, variable: p.Id, slot: p.Id) RecoveryBinding {
+    fn bindingOrigin(
+        self: *const Compiler,
+        function: p.Id,
+        variable: p.Id,
+        slot: p.Id,
+    ) RecoveryBinding {
         const schema = self.source.variables[@intCast(variable)];
-        return .{ .source_function = function, .variable = variable, .source_schema = schema, .function = function, .slot = slot, .schema = schema };
+        return .{
+            .source_function = function,
+            .variable = variable,
+            .source_schema = schema,
+            .function = function,
+            .slot = slot,
+            .schema = schema,
+        };
     }
-    fn reorderBindings(context: *anyopaque, maps: []const ?[]const p.Id) std.mem.Allocator.Error!void {
+    fn reorderBindings(
+        context: *anyopaque,
+        maps: []const ?[]const p.Id,
+    ) std.mem.Allocator.Error!void {
         const self: *Compiler = @ptrCast(@alignCast(context));
         inline for (.{ "recovery_bindings", "parameter_bindings" }) |field|
-            for (@field(self, field).items) |*binding| if (maps[@intCast(binding.function)]) |slots| {
+            for (@field(
+                self,
+                field,
+            ).items) |*binding| if (maps[@intCast(binding.function)]) |slots| {
                 binding.slot = slots[@intCast(binding.slot)];
             };
     }
 
-    fn observeCapture(pointer: *anyopaque, function: p.Id, selected: *const data.activation_ownership.CaptureSite, slot: p.Id) void {
+    fn observeCapture(
+        pointer: *anyopaque,
+        function: p.Id,
+        selected: *const data.activation_ownership.CaptureSite,
+        slot: p.Id,
+    ) void {
         const self: *Compiler = @ptrCast(@alignCast(pointer));
         if (self.slot_variables[@intCast(function)][@intCast(slot)]) |variable|
             self.capture_observer.?.capture(self.capture_observer.?.context, selected, variable);
     }
 
-    fn observeExplanation(pointer: *anyopaque, function: p.Id, selected: *const data.activation_ownership.CaptureSite, slot: p.Id, explanation: ?data.activation_ownership.CaptureExplanation) void {
+    fn observeExplanation(
+        pointer: *anyopaque,
+        function: p.Id,
+        selected: *const data.activation_ownership.CaptureSite,
+        slot: p.Id,
+        explanation: ?data.activation_ownership.CaptureExplanation,
+    ) void {
         const self: *Compiler = @ptrCast(@alignCast(pointer));
         const variable = self.slot_variables[@intCast(function)][@intCast(slot)] orelse return;
         var mapped = explanation;
         if (mapped) |*present| {
-            const reasons = self.allocator.dupe(data.activation_ownership.CaptureExplanation.Reason, present.reasons) catch {
-                self.capture_observer.?.explanation.?(self.capture_observer.?.context, selected, variable, null);
+            const reasons = self.allocator.dupe(
+                data.activation_ownership.CaptureExplanation.Reason,
+                present.reasons,
+            ) catch {
+                self.capture_observer.?.explanation.?(
+                    self.capture_observer.?.context,
+                    selected,
+                    variable,
+                    null,
+                );
                 return;
             };
             for (reasons) |*reason| if (reason.location.function) |origin_function| {
                 if (reason.location.slot) |origin_slot|
-                    reason.location.source_variable = self.slot_variables[@intCast(origin_function)][@intCast(origin_slot)];
+                    reason.location.source_variable = self.slot_variables[
+                        @intCast(origin_function)
+                    ][
+                        @intCast(origin_slot)
+                    ];
             };
             present.reasons = reasons;
         }
-        self.capture_observer.?.explanation.?(self.capture_observer.?.context, selected, variable, mapped);
+        self.capture_observer.?.explanation.?(
+            self.capture_observer.?.context,
+            selected,
+            variable,
+            mapped,
+        );
     }
 
     fn constructor(self: *Compiler, function: p.Id, schema: p.Id, value_id: p.Id) Error!p.Id {
-        if (self.capture_observer) |observer| for (self.facts.functions[@intCast(function)].items) |variable|
+        if (self.capture_observer) |observer| for (self.facts.functions[
+            @intCast(function)
+        ].items) |variable|
             observer.closure(observer.context, value_id, variable);
         const key: ConstructorKey = .{ .function = function, .schema = schema };
         if (self.constructor_ids.get(key)) |id| return id;
@@ -432,16 +632,40 @@ fn stableHandlers(allocator: std.mem.Allocator, input: []const p.Handler) Error!
     for (output, input) |*target, handler| {
         const clauses = try allocator.alloc(ir.Clause, handler.clauses.len);
         for (clauses, handler.clauses) |*clause, original| {
-            clause.* = .{ .effect = original.effect, .function = original.function, .resumption = original.resumption };
+            clause.* = .{
+                .effect = original.effect,
+                .function = original.function,
+                .resumption = original.resumption,
+            };
         }
-        target.* = .{ .mode = handler.mode, .input = handler.input, .answer = handler.answer, .return_function = handler.return_function, .clauses = clauses, .state = handler.state, .effects = handler.effects };
+        target.* = .{
+            .mode = handler.mode,
+            .input = handler.input,
+            .answer = handler.answer,
+            .return_function = handler.return_function,
+            .clauses = clauses,
+            .state = handler.state,
+            .effects = handler.effects,
+        };
     }
     return output;
 }
 
 const Continuation = struct { block: p.Id, destination: p.Id };
-const Task = struct { block: p.Id, term: p.Id, environment: p.Id, next: ?Continuation, custody: p.Id };
-const TaskKey = struct { term: p.Id, environment: p.Id, next: p.Id, destination: p.Id, custody: p.Id };
+const Task = struct {
+    block: p.Id,
+    term: p.Id,
+    environment: p.Id,
+    next: ?Continuation,
+    custody: p.Id,
+};
+const TaskKey = struct {
+    term: p.Id,
+    environment: p.Id,
+    next: p.Id,
+    destination: p.Id,
+    custody: p.Id,
+};
 
 const Function = struct {
     compiler: *Compiler,
@@ -469,11 +693,21 @@ const Function = struct {
             environment = try self.bind(environment, name);
             inputs[free.len + index] = try self.resolve(environment, name);
             if (compiler.recovery_enabled)
-                try compiler.parameter_bindings.append(compiler.allocator, compiler.bindingOrigin(self.id, name, inputs[free.len + index]));
+                try compiler.parameter_bindings.append(
+                    compiler.allocator,
+                    compiler.bindingOrigin(self.id, name, inputs[free.len + index]),
+                );
         }
-        const entry = if (definition.body) |body| try self.schedule(body, environment, null, 0) else data.relocation.missing;
+        const entry = if (definition.body) |body| try self.schedule(
+            body,
+            environment,
+            null,
+            0,
+        ) else data.relocation.missing;
         while (self.tasks.pop()) |task| try self.emit(task);
-        if (compiler.capture_observer != null) compiler.slot_variables[@intCast(self.id)] = self.slot_variables.items;
+        if (compiler.capture_observer != null) compiler.slot_variables[
+            @intCast(self.id)
+        ] = self.slot_variables.items;
         return .{
             .entry = entry,
             .inputs = inputs,
@@ -488,14 +722,19 @@ const Function = struct {
     fn slot(self: *Function, schema: p.Id) Error!p.Id {
         const id = self.slots.items.len;
         try self.slots.append(self.compiler.allocator, schema);
-        if (self.compiler.capture_observer != null) try self.slot_variables.append(self.compiler.allocator, null);
+        if (self.compiler.capture_observer != null) try self.slot_variables.append(
+            self.compiler.allocator,
+            null,
+        );
         return id;
     }
 
     fn bind(self: *Function, parent: p.Id, name: p.Id) Error!p.Id {
         const destination = try self.slot(self.compiler.source.variables[@intCast(name)]);
         try self.compiler.rememberBinding(self.id, name, destination);
-        if (self.compiler.capture_observer != null) self.slot_variables.items[@intCast(destination)] = name;
+        if (self.compiler.capture_observer != null) self.slot_variables.items[
+            @intCast(destination)
+        ] = name;
         return self.bindings.bind(parent, name, destination);
     }
 
@@ -524,7 +763,13 @@ const Function = struct {
         return id;
     }
 
-    fn schedule(self: *Function, term_id: p.Id, env: p.Id, next: ?Continuation, custody: p.Id) Error!p.Id {
+    fn schedule(
+        self: *Function,
+        term_id: p.Id,
+        env: p.Id,
+        next: ?Continuation,
+        custody: p.Id,
+    ) Error!p.Id {
         const key: TaskKey = .{
             .term = term_id,
             .environment = env,
@@ -593,12 +838,29 @@ const Function = struct {
             if (value < first_fresh) {
                 // Preserve distinct named-variable provenance for aliases.
                 const environment = try self.bind(current.environment, binding.variable);
-                const rest = try self.schedule(binding.next, environment, current.next, current.custody);
-                return .{ .jump = try self.edge(.{ .block = rest, .destination = try self.resolve(environment, binding.variable) }, .{ .slot = value }) };
+                const rest = try self.schedule(
+                    binding.next,
+                    environment,
+                    current.next,
+                    current.custody,
+                );
+                return .{ .jump = try self.edge(
+                    .{
+                        .block = rest,
+                        .destination = try self.resolve(environment, binding.variable),
+                    },
+                    .{ .slot = value },
+                ) };
             }
-            if (self.compiler.capture_observer != null) self.slot_variables.items[@intCast(value)] = binding.variable;
+            if (self.compiler.capture_observer != null) self.slot_variables.items[
+                @intCast(value)
+            ] = binding.variable;
             try self.compiler.rememberBinding(self.id, binding.variable, value);
-            current.environment = try self.bindings.bind(current.environment, binding.variable, value);
+            current.environment = try self.bindings.bind(
+                current.environment,
+                binding.variable,
+                value,
+            );
             current.term = binding.next;
             block.environment = current.environment;
             // Staging remains eager. A repeated cell read after a write must
@@ -655,10 +917,20 @@ const Function = struct {
             .conditional => |branch| return .{ .branch = .{
                 .condition = try block.value(branch.condition),
                 .when_true = .{
-                    .block = try self.schedule(branch.when_true, task.environment, task.next, task.custody),
+                    .block = try self.schedule(
+                        branch.when_true,
+                        task.environment,
+                        task.next,
+                        task.custody,
+                    ),
                 },
                 .when_false = .{
-                    .block = try self.schedule(branch.when_false, task.environment, task.next, task.custody),
+                    .block = try self.schedule(
+                        branch.when_false,
+                        task.environment,
+                        task.next,
+                        task.custody,
+                    ),
                 },
             } },
             .match_sum => return self.match(block, task),
@@ -798,7 +1070,11 @@ const Block = struct {
     computed: std.AutoHashMapUnmanaged(p.Id, p.Id) = .empty,
     products: std.AutoHashMapUnmanaged(p.Id, []const p.Id) = .empty,
 
-    fn handler(self: *Block, handle: @FieldType(ast.Term, "handle"), next: ir.Edge) Error!ir.Terminator {
+    fn handler(
+        self: *Block,
+        handle: @FieldType(ast.Term, "handle"),
+        next: ir.Edge,
+    ) Error!ir.Terminator {
         const compiler = self.function.compiler;
         const body_value = compiler.source.values[@intCast(handle.body)];
         const shape = compiler.source.schemas[@intCast(body_value.schema)];
@@ -807,12 +1083,20 @@ const Block = struct {
         // all argument/state evaluation keeps its original relative order.
         const closed = body_value.expression == .lambda and
             compiler.facts.functions[@intCast(body_value.expression.lambda)].items.len == 0 and
-            shape == .internal and shape.internal == .computation and shape.internal.computation.use == .reusable;
+            shape == .internal and
+            shape.internal == .computation and
+            shape.internal.computation.use == .reusable;
         const early_body: ?p.Id = if (closed) null else try self.value(handle.body);
         const arguments = try self.values(handle.arguments);
         const state = try self.values(handle.state);
         const body = early_body orelse try self.value(handle.body);
-        return .{ .handle = .{ .handler = handle.handler, .body = body, .arguments = arguments, .state = state, .next = next } };
+        return .{ .handle = .{
+            .handler = handle.handler,
+            .body = body,
+            .arguments = arguments,
+            .state = state,
+            .next = next,
+        } };
     }
 
     const Operation = struct {
@@ -832,7 +1116,11 @@ const Block = struct {
             operation.failures.len == 0 and compiler.uses.copy[@intCast(schema)])
         {
             if (self.products.get(operation.operands[0])) |fields| {
-                const product = compiler.source.schemas[@intCast(self.function.slots.items[@intCast(operation.operands[0])])].product;
+                const product = compiler.source.schemas[
+                    @intCast(self.function.slots.items[
+                        @intCast(operation.operands[0])
+                    ])
+                ].product;
                 // Full target admission follows lowering. Leave malformed source
                 // projections intact for that owner to reject, rather than
                 // erasing their invalid type, index, arity or failure mapping.
@@ -849,7 +1137,9 @@ const Block = struct {
             .immediate = operation.immediate,
             .failures = operation.failures,
         });
-        if (operation.opcode == .product and compiler.source.schemas[@intCast(schema)] == .product and
+        if (operation.opcode == .product and compiler.source.schemas[
+            @intCast(schema)
+        ] == .product and
             compiler.uses.copy[@intCast(schema)] and compiler.uses.drop[@intCast(schema)])
             try self.products.put(compiler.allocator, destination, operation.operands);
         return destination;

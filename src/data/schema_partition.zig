@@ -17,7 +17,11 @@ pub const Statistics = struct { rounds: usize = 0, comparisons: usize = 0, looku
 pub fn compute(a: std.mem.Allocator, program: ir.Program) Error![]const Id {
     return computeObserved(a, program, null);
 }
-pub fn computeObserved(a: std.mem.Allocator, program: ir.Program, statistics: ?*Statistics) Error![]const Id {
+pub fn computeObserved(
+    a: std.mem.Allocator,
+    program: ir.Program,
+    statistics: ?*Statistics,
+) Error![]const Id {
     return computeImpl(a, program, statistics, false, 0);
 }
 fn KeyContext(comptime collide: bool, comptime seed: u64) type {
@@ -40,7 +44,13 @@ fn encodeKey(a: std.mem.Allocator, shape: p.Schema) Error![]const u8 {
     try record.write(p.Schema, shape, &writer);
     return bytes;
 }
-fn computeImpl(a: std.mem.Allocator, program: ir.Program, statistics: ?*Statistics, comptime collide: bool, comptime seed: u64) Error![]const Id {
+fn computeImpl(
+    a: std.mem.Allocator,
+    program: ir.Program,
+    statistics: ?*Statistics,
+    comptime collide: bool,
+    comptime seed: u64,
+) Error![]const Id {
     var stats: Statistics = .{};
     defer if (statistics) |out| {
         out.* = stats;
@@ -78,7 +88,15 @@ fn computeImpl(a: std.mem.Allocator, program: ir.Program, statistics: ?*Statisti
                 continue;
             }
             if (!indexed) {
-                for (shapes[0..i], 0..) |prior, j| if (next[j] == j) try index.putContext(pass.allocator(), try encodeKey(pass.allocator(), prior), next[j], context);
+                for (
+                    shapes[0..i],
+                    0..,
+                ) |prior, j| if (next[j] == j) try index.putContext(
+                    pass.allocator(),
+                    try encodeKey(pass.allocator(), prior),
+                    next[j],
+                    context,
+                );
                 indexed = true;
             }
             const encoded = try encodeKey(pass.allocator(), shape.*);
@@ -140,7 +158,10 @@ test "indexed partition agrees with pairwise reference under forced hash collisi
     const a = arena.allocator();
     var schemas: [66]p.Schema = undefined;
     schemas[0] = .u8;
-    for (schemas[1..65], 0..) |*schema, i| schema.* = .{ .array = .{ .element = 0, .length = i % 40 } };
+    for (
+        schemas[1..65],
+        0..,
+    ) |*schema, i| schema.* = .{ .array = .{ .element = 0, .length = i % 40 } };
     schemas[65] = .{ .internal = .{ .region = 0 } };
     const program = fixtureProgram(&schemas, 1);
     var admitted = try @import("activation_ownership.zig").analyze(a, program);
@@ -155,13 +176,23 @@ test "indexed partition agrees with pairwise reference under forced hash collisi
         break :blk values;
     };
     inline for (seeds) |seed|
-        try std.testing.expectEqualSlices(Id, expected, try computeImpl(a, program, null, false, seed));
+        try std.testing.expectEqualSlices(
+            Id,
+            expected,
+            try computeImpl(a, program, null, false, seed),
+        );
 }
 test "recursive definitions and nominal leaves are reindexed from each current input" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var schemas = [_]p.Schema{ .u8, .{ .sum = &.{ 0, 1 } }, .{ .sum = &.{ 0, 2 } }, .{ .internal = .{ .region = 0 } }, .{ .internal = .{ .region = 1 } } };
+    var schemas = [_]p.Schema{
+        .u8,
+        .{ .sum = &.{ 0, 1 } },
+        .{ .sum = &.{ 0, 2 } },
+        .{ .internal = .{ .region = 0 } },
+        .{ .internal = .{ .region = 1 } },
+    };
     const program = fixtureProgram(&schemas, 2);
     var admitted = try @import("activation_ownership.zig").analyze(a, program);
     admitted.deinit();
@@ -188,7 +219,24 @@ fn allocationAttempt(allocator: std.mem.Allocator) !void {
 }
 fn fixtureProgram(schemas: []const p.Schema, regions: Id) ir.Program {
     if (!@import("builtin").is_test) @compileError("test-only fixture");
-    return .{ .roots = .{ .entry = 0, .result = 0, .failure = 0 }, .schemas = schemas, .constants = &.{}, .effects = &.{}, .functions = &.{.{ .entry = 0, .inputs = &.{0}, .layout = .{ .slots = &.{0} }, .result = 0 }}, .blocks = &.{.{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 0 } }}, .scopes = .{ .region_count = regions } };
+    return .{
+        .roots = .{ .entry = 0, .result = 0, .failure = 0 },
+        .schemas = schemas,
+        .constants = &.{},
+        .effects = &.{},
+        .functions = &.{.{
+            .entry = 0,
+            .inputs = &.{0},
+            .layout = .{ .slots = &.{0} },
+            .result = 0,
+        }},
+        .blocks = &.{.{
+            .function = 0,
+            .instructions = &.{},
+            .terminator = .{ .return_value = 0 },
+        }},
+        .scopes = .{ .region_count = regions },
+    };
 }
 test "partition indexing releases every failed allocation" {
     try @import("allocation_testing.zig").check(std.testing.allocator, allocationAttempt, .{});

@@ -46,7 +46,14 @@ pub fn pairWith(b: *source.Builder, a: Id, z: Id, captures: []const Id) source.E
     const peer_backward = try b.reserveSchema();
     const answer_forward = try b.reserveSchema();
     const answer_backward = try b.reserveSchema();
-    const ids = [_]Id{ forward, backward, peer_forward, peer_backward, answer_forward, answer_backward };
+    const ids = [_]Id{
+        forward,
+        backward,
+        peer_forward,
+        peer_backward,
+        answer_forward,
+        answer_backward,
+    };
     const bound = try b.allocator().alloc(Id, captures.len + ids.len + 2);
     @memcpy(bound[0..captures.len], captures);
     @memcpy(bound[captures.len..][0..ids.len], &ids);
@@ -133,7 +140,10 @@ test "hyper recursive wrapping cannot declare an exclusive capture reusable" {
     _ = try pairWith(&b, integer, integer, &.{owned});
     const entry = try b.declare(&.{}, integer, &.{}, &.{});
     try b.define(entry, try b.pure(try b.constant(u64, 42)));
-    try std.testing.expectError(error.InvalidOwnership, source.lower(std.testing.allocator, b.module(entry, try b.scalar(void))));
+    try std.testing.expectError(
+        error.InvalidOwnership,
+        source.lower(std.testing.allocator, b.module(entry, try b.scalar(void))),
+    );
 }
 
 pub const Ana = struct { function: Id, interface: Id };
@@ -190,8 +200,19 @@ pub const Query = struct {
         const thunk = try b.declare(&.{}, answer, &.{}, &.{});
         const peer = try b.variable(self.types.backward);
         const result = try b.variable(self.types.answer_backward);
-        const invoked = try invoke(b, try b.reference(peer), try b.lambda(tail, self.types.peer_forward));
-        try b.define(thunk, try b.bind(peer, try force(b, self.peer), try b.bind(result, invoked, try force(b, try b.reference(result)))));
+        const invoked = try invoke(
+            b,
+            try b.reference(peer),
+            try b.lambda(tail, self.types.peer_forward),
+        );
+        try b.define(
+            thunk,
+            try b.bind(
+                peer,
+                try force(b, self.peer),
+                try b.bind(result, invoked, try force(b, try b.reference(result))),
+            ),
+        );
         return b.pure(try b.lambda(thunk, self.types.answer_backward));
     }
 };
@@ -226,7 +247,14 @@ pub fn push(b: *source.Builder, types: Pair, transform: Id, tail: Id) source.Err
     const peer = try b.variable(types.backward);
     const answer = try b.variable(types.answer_backward);
     const requested = try invoke(b, try b.reference(peer), tail);
-    try b.define(argument, try b.bind(peer, try force(b, try b.reference(b.parameter(body, 0))), try b.bind(answer, requested, try force(b, try b.reference(answer)))));
+    try b.define(
+        argument,
+        try b.bind(
+            peer,
+            try force(b, try b.reference(b.parameter(body, 0))),
+            try b.bind(answer, requested, try force(b, try b.reference(answer))),
+        ),
+    );
     try b.define(body, try b.term(.{ .call = .{
         .function = transform,
         .arguments = &.{try b.lambda(argument, types.answer_backward)},
@@ -238,11 +266,17 @@ pub fn push(b: *source.Builder, types: Pair, transform: Id, tail: Id) source.Err
 /// construction never invokes transform or unfolds future participant instances.
 pub fn lift(b: *source.Builder, types: Pair, transform: Id) source.Error!Id {
     const cache = try b.specialization(Id, "boundary.hyper.lift/v1", .{ types, transform });
-    if (cache.cached) |function| return b.term(.{ .call = .{ .function = function, .arguments = &.{} } });
+    if (cache.cached) |function| return b.term(.{ .call = .{
+        .function = function,
+        .arguments = &.{},
+    } });
     const maker = try b.declare(&.{}, types.forward, &.{}, &.{});
     const tail = try b.declare(&.{}, types.forward, &.{}, &.{});
     try b.define(tail, try b.term(.{ .call = .{ .function = maker, .arguments = &.{} } }));
-    try b.define(maker, try b.pure(try push(b, types, transform, try b.lambda(tail, types.peer_forward))));
+    try b.define(
+        maker,
+        try b.pure(try push(b, types, transform, try b.lambda(tail, types.peer_forward))),
+    );
     _ = try cache.finish(b, maker);
     return b.term(.{ .call = .{ .function = maker, .arguments = &.{} } });
 }
@@ -283,8 +317,16 @@ pub const Group = struct {
     pairs: []const Pair,
     pub fn get(self: Group, from: usize, to: usize) source.Error!Pair {
         if (from >= self.endpoints.len or to >= self.endpoints.len) return error.InvalidReference;
-        const offset = @import("std").math.mul(usize, from, self.endpoints.len) catch return error.InvalidReference;
-        const index = @import("std").math.add(usize, offset, to) catch return error.InvalidReference;
+        const offset = @import("std").math.mul(
+            usize,
+            from,
+            self.endpoints.len,
+        ) catch return error.InvalidReference;
+        const index = @import("std").math.add(
+            usize,
+            offset,
+            to,
+        ) catch return error.InvalidReference;
         if (index >= self.pairs.len) return error.InvalidReference;
         return self.pairs[index];
     }
@@ -302,7 +344,11 @@ pub fn group(b: *source.Builder, endpoints: []const Id, captures: []const Id) so
     const nodes = std.math.add(usize, doubled, endpoints.len) catch return error.Capacity;
     if (nodes > @import("horos_data").component.max_catalog_entries) return error.Capacity;
     const with_endpoints = std.math.add(usize, nodes, endpoints.len) catch return error.Capacity;
-    const bound_length = std.math.add(usize, with_endpoints, captures.len) catch return error.Capacity;
+    const bound_length = std.math.add(
+        usize,
+        with_endpoints,
+        captures.len,
+    ) catch return error.Capacity;
     const references = std.math.mul(usize, nodes, bound_length) catch return error.Capacity;
     if (references > @import("horos_data").component.max_catalog_entries) return error.Capacity;
     const ids = try b.allocator().alloc(Id, nodes);
@@ -327,19 +373,48 @@ pub fn group(b: *source.Builder, endpoints: []const Id, captures: []const Id) so
             .result = hyper_id,
             .capture_bound = bound,
         } } });
-        pairs[index] = .{ .forward = hyper_id, .backward = ids[reverse], .peer_forward = peer, .peer_backward = ids[count + reverse], .answer_forward = ids[2 * count + to], .answer_backward = ids[2 * count + from] };
+        pairs[index] = .{
+            .forward = hyper_id,
+            .backward = ids[reverse],
+            .peer_forward = peer,
+            .peer_backward = ids[count + reverse],
+            .answer_forward = ids[2 * count + to],
+            .answer_backward = ids[2 * count + from],
+        };
     };
-    for (endpoints, 0..) |endpoint, index| try b.defineSchema(ids[2 * count + index], .{ .internal = .{ .computation = .{
-        .parameters = &.{},
-        .result = endpoint,
-        .capture_bound = bound,
-    } } });
+    for (
+        endpoints,
+        0..,
+    ) |endpoint, index| try b.defineSchema(
+        ids[2 * count + index],
+        .{
+            .internal = .{
+                .computation = .{
+                    .parameters = &.{},
+                    .result = endpoint,
+                    .capture_bound = bound,
+                },
+            },
+        },
+    );
     return cache.finish(b, .{ .endpoints = try b.allocator().dupe(Id, endpoints), .pairs = pairs });
 }
 
 /// compose(left: H(B,C), right: H(A,B)) -> H(A,C), with lazy reciprocal rotation.
-pub fn compose(b: *source.Builder, interfaces: Group, a: usize, middle: usize, c: usize, left: Id, right: Id) source.Error!Id {
-    const cache = try b.specialization(Id, "boundary.hyper.compose/v1", .{ interfaces, a, middle, c });
+pub fn compose(
+    b: *source.Builder,
+    interfaces: Group,
+    a: usize,
+    middle: usize,
+    c: usize,
+    left: Id,
+    right: Id,
+) source.Error!Id {
+    const cache = try b.specialization(
+        Id,
+        "boundary.hyper.compose/v1",
+        .{ interfaces, a, middle, c },
+    );
     const maker = if (cache.cached) |function| function else blk: {
         const rotations = [_][3]usize{ .{ a, middle, c }, .{ c, a, middle }, .{ middle, c, a } };
         var makers: [3]Id = undefined;
@@ -357,7 +432,13 @@ pub fn compose(b: *source.Builder, interfaces: Group, a: usize, middle: usize, c
     return b.term(.{ .call = .{ .function = maker, .arguments = &.{ left, right } } });
 }
 
-fn composeBody(b: *source.Builder, interfaces: Group, rotation: [3]usize, maker: Id, rotated: Id) source.Error!void {
+fn composeBody(
+    b: *source.Builder,
+    interfaces: Group,
+    rotation: [3]usize,
+    maker: Id,
+    rotated: Id,
+) source.Error!void {
     const bc = try interfaces.get(rotation[1], rotation[2]);
     const ac = try interfaces.get(rotation[0], rotation[2]);
     const outer = try b.declare(&.{ac.peer_backward}, ac.answer_forward, &.{}, &.{});
@@ -366,8 +447,18 @@ fn composeBody(b: *source.Builder, interfaces: Group, rotation: [3]usize, maker:
     const combined = try b.term(.{ .call = .{ .function = rotated, .arguments = &.{
         try b.reference(b.parameter(maker, 1)), try b.reference(peer),
     } } });
-    try b.define(inner, try b.bind(peer, try force(b, try b.reference(b.parameter(outer, 0))), combined));
-    try b.define(outer, try invoke(b, try b.reference(b.parameter(maker, 0)), try b.lambda(inner, bc.peer_backward)));
+    try b.define(
+        inner,
+        try b.bind(peer, try force(b, try b.reference(b.parameter(outer, 0))), combined),
+    );
+    try b.define(
+        outer,
+        try invoke(
+            b,
+            try b.reference(b.parameter(maker, 0)),
+            try b.lambda(inner, bc.peer_backward),
+        ),
+    );
     try b.define(maker, try b.pure(try make(b, outer, ac.forward)));
 }
 
@@ -383,7 +474,12 @@ pub fn lazyProduct(b: *source.Builder, fields: []const Id) source.Error!Id {
 }
 
 /// Inspecting this sum's tag does not force its selected payload.
-pub fn lazySum(b: *source.Builder, alternatives: []const Id, tag: usize, payload: Id) source.Error!Id {
+pub fn lazySum(
+    b: *source.Builder,
+    alternatives: []const Id,
+    tag: usize,
+    payload: Id,
+) source.Error!Id {
     if (tag >= alternatives.len) return error.TypeMismatch;
     for (alternatives) |schema| _ = try delayedResult(b, schema);
     return b.primitive(try b.schema(.{ .sum = alternatives }), .variant, &.{payload}, tag);
@@ -457,7 +553,11 @@ test "ana emits each authored definition and start reuses its code" {
         var calls: usize = 0;
         pub fn emit(b: *source.Builder, query: Query) source.Error!Id {
             calls += 1;
-            return b.pure(try deferValue(b, query.types.answer_forward, try b.constant(u64, value)));
+            return b.pure(try deferValue(
+                b,
+                query.types.answer_forward,
+                try b.constant(u64, value),
+            ));
         }
     };
     var b = source.Builder.init(std.testing.allocator);

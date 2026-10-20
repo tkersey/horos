@@ -40,7 +40,12 @@ fn buildClosures(
         &.{},
         .{ .use = .reusable, .captures = &.{integer} },
     );
-    const entry = try context.function("entry", try authoring.interop.RuntimeNamed(.schema).init(context, if (literal) &.{} else fields), result_schema, &.{});
+    const entry = try context.function(
+        "entry",
+        try authoring.interop.RuntimeNamed(.schema).init(context, if (literal) &.{} else fields),
+        result_schema,
+        &.{},
+    );
     const body = try context.body(entry);
     const failure = try context.literalFailure(void, {});
     const arguments = try a.alloc(authoring.interop.NamedEntry(.value), count);
@@ -63,7 +68,13 @@ fn buildClosures(
             .handle = authoring.interop.erase(try body.apply(closure, .{ .x = x })),
         };
     }
-    try context.define(entry, try body.ret(try body.product(result_schema, try authoring.interop.RuntimeNamed(.value).init(context, arguments))));
+    try context.define(
+        entry,
+        try body.ret(try body.product(
+            result_schema,
+            try authoring.interop.RuntimeNamed(.value).init(context, arguments),
+        )),
+    );
     return context.compileWithOptions(allocator, entry, unit, options);
 }
 
@@ -167,7 +178,13 @@ test "coalescing retains each original closure observation through constructor c
     var closures_: [3]Id = undefined;
     var results: [3]Id = undefined;
     var values: [3]Id = undefined;
-    for (&lambdas, &closures_, &results, &values, [_]Id{ helpers[0], helpers[0], helpers[1] }) |*lambda, *closure, *result, *value, helper| {
+    for (
+        &lambdas,
+        &closures_,
+        &results,
+        &values,
+        [_]Id{ helpers[0], helpers[0], helpers[1] },
+    ) |*lambda, *closure, *result, *value, helper| {
         lambda.* = try b.lambda(helper, shape);
         closure.* = try b.variable(shape);
         result.* = try b.variable(integer);
@@ -177,8 +194,15 @@ test "coalescing retains each original closure observation through constructor c
     var index: usize = 3;
     while (index != 0) {
         index -= 1;
-        const apply = try b.term(.{ .apply = .{ .computation = try b.reference(closures_[index]), .arguments = &.{} } });
-        next = try b.bind(closures_[index], try b.pure(lambdas[index]), try b.bind(results[index], apply, next));
+        const apply = try b.term(.{ .apply = .{
+            .computation = try b.reference(closures_[index]),
+            .arguments = &.{},
+        } });
+        next = try b.bind(
+            closures_[index],
+            try b.pure(lambdas[index]),
+            try b.bind(results[index], apply, next),
+        );
     }
     try b.define(entry, next);
     const module = b.module(entry, unit);
@@ -194,7 +218,10 @@ test "coalescing retains each original closure observation through constructor c
         try testing.expectEqual(@as(usize, 1), observed.program.constructors.len);
         var plain = try source.lowerObserved(testing.allocator, module, .{});
         defer plain.deinit();
-        try testing.expectEqual(try data.program_image.identity(testing.allocator, plain.program), try data.program_image.identity(testing.allocator, observed.program));
+        try testing.expectEqual(
+            try data.program_image.identity(testing.allocator, plain.program),
+            try data.program_image.identity(testing.allocator, observed.program),
+        );
     }
 }
 
@@ -206,9 +233,15 @@ test "coalescing shares depth-eight helper chains through calls and constructed 
         var safe = try trees.compile(testing.allocator, kind, .{});
         defer safe.deinit();
         try testing.expectEqual(@as(usize, 19), off.program.functions.len);
-        try testing.expectEqual(@as(usize, if (kind == .tree) 10 else 19), safe.program.functions.len);
+        try testing.expectEqual(
+            @as(usize, if (kind == .tree) 10 else 19),
+            safe.program.functions.len,
+        );
         try testing.expectEqual(@as(usize, 8), off.program.constructors.len);
-        try testing.expectEqual(@as(usize, if (kind == .tree) 4 else 8), safe.program.constructors.len);
+        try testing.expectEqual(
+            @as(usize, if (kind == .tree) 4 else 8),
+            safe.program.constructors.len,
+        );
         try testing.expect(try data.program_image.encodedLength(safe.program) <=
             try data.program_image.encodedLength(off.program));
     }
@@ -251,8 +284,15 @@ test "coalescing handles whole-function slot renaming with simultaneous swaps an
         defer safe.deinit();
         try testing.expectEqual(@as(usize, 3), off.program.functions.len);
         try testing.expectEqual(@as(usize, 2), safe.program.functions.len);
-        try testing.expectEqualSlices(data.program.Id, &.{ 0, 1, 2 }, safe.program.functions[0].inputs);
-        try testing.expectEqual(@as(usize, if (kind == .swap) 2 else 3), safe.program.blocks[0].terminator.jump.assignments.len);
+        try testing.expectEqualSlices(
+            data.program.Id,
+            &.{ 0, 1, 2 },
+            safe.program.functions[0].inputs,
+        );
+        try testing.expectEqual(
+            @as(usize, if (kind == .swap) 2 else 3),
+            safe.program.blocks[0].terminator.jump.assignments.len,
+        );
     }
 }
 
@@ -261,10 +301,16 @@ test "coalescing production generator covers all three-slot renamings and ordere
     for (0..36) |ordinal| for ([_]usize{ 0, 64 }) |mutation| {
         var result = try cases.generated(testing.allocator, ordinal + mutation, .{});
         defer result.deinit();
-        try testing.expectEqual(@as(usize, if (mutation == 0) 2 else 3), result.program.functions.len);
+        try testing.expectEqual(
+            @as(usize, if (mutation == 0) 2 else 3),
+            result.program.functions.len,
+        );
     };
     for (0..36) |ordinal| {
-        try testing.expectError(error.InvalidReference, cases.generated(testing.allocator, ordinal + 128, .{}));
+        try testing.expectError(
+            error.InvalidReference,
+            cases.generated(testing.allocator, ordinal + 128, .{}),
+        );
     }
 }
 
@@ -276,7 +322,10 @@ test "coalescing matches renamed function-local loops and retains changed exit o
         var safe = try edges.compileLoop(testing.allocator, kind, .{});
         defer safe.deinit();
         try testing.expectEqual(@as(usize, 3), off.program.functions.len);
-        try testing.expectEqual(@as(usize, if (kind == .loop) 2 else 3), safe.program.functions.len);
+        try testing.expectEqual(
+            @as(usize, if (kind == .loop) 2 else 3),
+            safe.program.functions.len,
+        );
         try testing.expect(try data.program_image.encodedLength(safe.program) <=
             try data.program_image.encodedLength(off.program));
     }
@@ -290,7 +339,10 @@ test "coalescing authored recursive groups preserve role distinctions and change
         var safe = try cases.compile(testing.allocator, kind, .{});
         defer safe.deinit();
         try testing.expectEqual(@as(usize, 5), off.program.functions.len);
-        try testing.expectEqual(@as(usize, if (kind == .recursive_near) 5 else 3), safe.program.functions.len);
+        try testing.expectEqual(
+            @as(usize, if (kind == .recursive_near) 5 else 3),
+            safe.program.functions.len,
+        );
     }
 }
 
@@ -415,7 +467,10 @@ test "coalescing shares immutable handler descriptions but not installations or 
         var safe = try source.lowerObserved(testing.allocator, module, .{});
         defer safe.deinit();
         try testing.expectEqual(@as(usize, 2), off.program.handlers.len);
-        try testing.expectEqual(@as(usize, if (kind == .mixed_mode) 2 else 1), safe.program.handlers.len);
+        try testing.expectEqual(
+            @as(usize, if (kind == .mixed_mode) 2 else 1),
+            safe.program.handlers.len,
+        );
         var installations: usize = 0;
         for (safe.program.blocks) |block|
             if (block.terminator == .handle) {
@@ -506,7 +561,14 @@ test "coalescing allocation failures cover handlers constructors regions resourc
         var baseline = try frozen.kind(testing.allocator, "", kind);
         defer baseline.deinit();
         const before = try data.program_image.identity(testing.allocator, baseline.program);
-        try @import("allocation_testing.zig").check(testing.allocator, richAllocationCase, .{baseline.program});
-        try testing.expectEqual(before, try data.program_image.identity(testing.allocator, baseline.program));
+        try @import("allocation_testing.zig").check(
+            testing.allocator,
+            richAllocationCase,
+            .{baseline.program},
+        );
+        try testing.expectEqual(
+            before,
+            try data.program_image.identity(testing.allocator, baseline.program),
+        );
     }
 }

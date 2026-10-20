@@ -6,7 +6,15 @@ const ir = @import("activation.zig");
 const equal = @import("record_equal.zig").equal;
 pub const Kind = enum { xor_word, boolean_table };
 pub const Law = struct { kind: Kind, action: p.Id, value: p.Id, width: usize };
-pub const Bindings = struct { summary: p.Id, summary_high: p.Id, action: p.Id, value: p.Id, result: p.Id, scratch: p.Id, scratch_high: p.Id };
+pub const Bindings = struct {
+    summary: p.Id,
+    summary_high: p.Id,
+    action: p.Id,
+    value: p.Id,
+    result: p.Id,
+    scratch: p.Id,
+    scratch_high: p.Id,
+};
 pub fn classify(schemas: []const p.Schema, action: p.Id, value: p.Id) ?Law {
     if (action == value) {
         const width: usize = switch (schemas[@intCast(value)]) {
@@ -19,7 +27,11 @@ pub fn classify(schemas: []const p.Schema, action: p.Id, value: p.Id) ?Law {
         return .{ .kind = .xor_word, .action = action, .value = value, .width = width };
     }
     const shape = schemas[@intCast(action)];
-    if (schemas[@intCast(value)] != .boolean or shape != .product or !std.mem.eql(p.Id, shape.product, &.{ value, value })) return null;
+    if (schemas[@intCast(value)] != .boolean or shape != .product or !std.mem.eql(
+        p.Id,
+        shape.product,
+        &.{ value, value },
+    )) return null;
     return .{ .kind = .boolean_table, .action = action, .value = value, .width = 2 };
 }
 pub fn stateCount(law: Law) usize {
@@ -31,19 +43,46 @@ pub fn identity(law: Law, index: usize) []const u8 {
         .boolean_table => if (index == 0) &.{0} else &.{1},
     };
 }
-fn op(actual: ir.Instruction, tag: p.Opcode, destination: p.Id, operands: []const p.Id, immediate: p.Id) bool {
-    return equal(ir.Instruction, .{ .destination = destination, .opcode = tag, .operands = operands, .immediate = immediate }, actual);
+fn op(
+    actual: ir.Instruction,
+    tag: p.Opcode,
+    destination: p.Id,
+    operands: []const p.Id,
+    immediate: p.Id,
+) bool {
+    return equal(
+        ir.Instruction,
+        .{
+            .destination = destination,
+            .opcode = tag,
+            .operands = operands,
+            .immediate = immediate,
+        },
+        actual,
+    );
 }
 /// Match the original pending action, including its exact operand orientation.
 pub fn matches(law: Law, block: ir.Block, action: p.Id, value: p.Id) bool {
     if (block.terminator != .return_value) return false;
     const out = block.terminator.return_value;
     return switch (law.kind) {
-        .xor_word => block.instructions.len == 1 and op(block.instructions[0], .integer_bit_xor, out, &.{ action, value }, 0),
+        .xor_word => block.instructions.len == 1 and op(
+            block.instructions[0],
+            .integer_bit_xor,
+            out,
+            &.{ action, value },
+            0,
+        ),
         .boolean_table => block.instructions.len == 3 and
             op(block.instructions[0], .field, block.instructions[0].destination, &.{action}, 0) and
             op(block.instructions[1], .field, block.instructions[1].destination, &.{action}, 1) and
-            op(block.instructions[2], .select, out, &.{ value, block.instructions[1].destination, block.instructions[0].destination }, 0),
+            op(
+                block.instructions[2],
+                .select,
+                out,
+                &.{ value, block.instructions[1].destination, block.instructions[0].destination },
+                0,
+            ),
     };
 }
 fn owned(a: std.mem.Allocator, instructions: []const ir.Instruction) ![]const ir.Instruction {
@@ -52,32 +91,86 @@ fn owned(a: std.mem.Allocator, instructions: []const ir.Instruction) ![]const ir
     return result;
 }
 pub fn compose(a: std.mem.Allocator, law: Law, b: Bindings) ![]const ir.Instruction {
-    if (law.kind == .xor_word) return owned(a, &.{.{ .destination = b.summary, .opcode = .integer_bit_xor, .operands = &.{ b.summary, b.action } }});
+    if (law.kind == .xor_word) return owned(
+        a,
+        &.{.{
+            .destination = b.summary,
+            .opcode = .integer_bit_xor,
+            .operands = &.{ b.summary, b.action },
+        }},
+    );
     const s = b.scratch;
     return owned(a, &.{
         .{ .destination = s, .opcode = .field, .operands = &.{b.action}, .immediate = 0 },
-        .{ .destination = b.scratch_high, .opcode = .field, .operands = &.{b.action}, .immediate = 1 },
+        .{
+            .destination = b.scratch_high,
+            .opcode = .field,
+            .operands = &.{b.action},
+            .immediate = 1,
+        },
         .{ .destination = s, .opcode = .select, .operands = &.{ s, b.summary_high, b.summary } },
-        .{ .destination = b.scratch_high, .opcode = .select, .operands = &.{ b.scratch_high, b.summary_high, b.summary } },
+        .{
+            .destination = b.scratch_high,
+            .opcode = .select,
+            .operands = &.{ b.scratch_high, b.summary_high, b.summary },
+        },
     });
 }
 pub fn apply(a: std.mem.Allocator, law: Law, b: Bindings) ![]const ir.Instruction {
-    if (law.kind == .xor_word) return owned(a, &.{.{ .destination = b.result, .opcode = .integer_bit_xor, .operands = &.{ b.summary, b.value } }});
-    return owned(a, &.{.{ .destination = b.result, .opcode = .select, .operands = &.{ b.value, b.summary_high, b.summary } }});
+    if (law.kind == .xor_word) return owned(
+        a,
+        &.{.{
+            .destination = b.result,
+            .opcode = .integer_bit_xor,
+            .operands = &.{ b.summary, b.value },
+        }},
+    );
+    return owned(
+        a,
+        &.{.{
+            .destination = b.result,
+            .opcode = .select,
+            .operands = &.{ b.value, b.summary_high, b.summary },
+        }},
+    );
 }
 // These check the actual operation/operand stream, not output from the emitters.
 pub fn checkComposition(law: Law, b: Bindings, instructions: []const ir.Instruction) bool {
-    if (law.kind == .xor_word) return instructions.len == 1 and op(instructions[0], .integer_bit_xor, b.summary, &.{ b.summary, b.action }, 0);
+    if (law.kind == .xor_word) return instructions.len == 1 and op(
+        instructions[0],
+        .integer_bit_xor,
+        b.summary,
+        &.{ b.summary, b.action },
+        0,
+    );
     if (instructions.len != 4) return false;
     const s = b.scratch;
     return op(instructions[0], .field, s, &.{b.action}, 0) and
         op(instructions[1], .field, b.scratch_high, &.{b.action}, 1) and
         op(instructions[2], .select, s, &.{ s, b.summary_high, b.summary }, 0) and
-        op(instructions[3], .select, b.scratch_high, &.{ b.scratch_high, b.summary_high, b.summary }, 0);
+        op(
+            instructions[3],
+            .select,
+            b.scratch_high,
+            &.{ b.scratch_high, b.summary_high, b.summary },
+            0,
+        );
 }
 pub fn checkApplication(law: Law, b: Bindings, instructions: []const ir.Instruction) bool {
-    if (law.kind == .xor_word) return instructions.len == 1 and op(instructions[0], .integer_bit_xor, b.result, &.{ b.summary, b.value }, 0);
-    return instructions.len == 1 and op(instructions[0], .select, b.result, &.{ b.value, b.summary_high, b.summary }, 0);
+    if (law.kind == .xor_word) return instructions.len == 1 and op(
+        instructions[0],
+        .integer_bit_xor,
+        b.result,
+        &.{ b.summary, b.value },
+        0,
+    );
+    return instructions.len == 1 and op(
+        instructions[0],
+        .select,
+        b.result,
+        &.{ b.value, b.summary_high, b.summary },
+        0,
+    );
 }
 fn tableApply(table: u2, value: u1) u1 {
     return @truncate(table >> value);
@@ -92,8 +185,14 @@ test "Boolean actions exhaustively obey identity composition and noncommuting or
         const z: u2 = @intCast(c);
         try std.testing.expectEqual(x, tableCompose(2, x));
         try std.testing.expectEqual(x, tableCompose(x, 2));
-        try std.testing.expectEqual(tableCompose(tableCompose(x, y), z), tableCompose(x, tableCompose(y, z)));
-        for (0..2) |v| try std.testing.expectEqual(tableApply(x, tableApply(y, @intCast(v))), tableApply(tableCompose(x, y), @intCast(v)));
+        try std.testing.expectEqual(
+            tableCompose(tableCompose(x, y), z),
+            tableCompose(x, tableCompose(y, z)),
+        );
+        for (0..2) |v| try std.testing.expectEqual(
+            tableApply(x, tableApply(y, @intCast(v))),
+            tableApply(tableCompose(x, y), @intCast(v)),
+        );
     };
     try std.testing.expect(tableCompose(1, 0) != tableCompose(0, 1));
 }
@@ -113,8 +212,17 @@ test "finite Boolean-semiring relation composition validates associativity and d
         const z: u4 = @intCast(c);
         try std.testing.expectEqual(x, relationCompose(9, x));
         try std.testing.expectEqual(x, relationCompose(x, 9));
-        try std.testing.expectEqual(relationCompose(relationCompose(x, y), z), relationCompose(x, relationCompose(y, z)));
-        try std.testing.expectEqual(relationCompose(x, y | z), relationCompose(x, y) | relationCompose(x, z));
-        try std.testing.expectEqual(relationCompose(x | y, z), relationCompose(x, z) | relationCompose(y, z));
+        try std.testing.expectEqual(
+            relationCompose(relationCompose(x, y), z),
+            relationCompose(x, relationCompose(y, z)),
+        );
+        try std.testing.expectEqual(
+            relationCompose(x, y | z),
+            relationCompose(x, y) | relationCompose(x, z),
+        );
+        try std.testing.expectEqual(
+            relationCompose(x | y, z),
+            relationCompose(x, z) | relationCompose(y, z),
+        );
     };
 }

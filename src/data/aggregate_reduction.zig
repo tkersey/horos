@@ -13,7 +13,12 @@ pub const Error = facts.Error || coalescing.Error || error{InvalidAggregateReduc
 pub const Witness = struct { block: usize, projection: usize, construction: usize };
 pub const Statistics = struct { fields_forwarded: usize = 0, unavailable_fields: usize = 0 };
 
-pub fn run(allocator: std.mem.Allocator, original: ir.Program, statistics: ?*Statistics, options: coalescing.Options) Error!coalescing.Owned {
+pub fn run(
+    allocator: std.mem.Allocator,
+    original: ir.Program,
+    statistics: ?*Statistics,
+    options: coalescing.Options,
+) Error!coalescing.Owned {
     var stats: Statistics = .{};
     defer if (statistics) |out| {
         out.* = stats;
@@ -50,8 +55,15 @@ pub fn run(allocator: std.mem.Allocator, original: ir.Program, statistics: ?*Sta
                     stats.unavailable_fields += 1;
                     break;
                 }
-                instructions[index] = .{ .destination = instruction.destination, .opcode = .move, .operands = try a.dupe(p.Id, &.{source}) };
-                try witnesses.append(a, .{ .block = id, .projection = index, .construction = origin });
+                instructions[index] = .{
+                    .destination = instruction.destination,
+                    .opcode = .move,
+                    .operands = try a.dupe(p.Id, &.{source}),
+                };
+                try witnesses.append(
+                    a,
+                    .{ .block = id, .projection = index, .construction = origin },
+                );
                 break;
             }
         }
@@ -65,13 +77,22 @@ pub fn run(allocator: std.mem.Allocator, original: ir.Program, statistics: ?*Sta
 
 fn safe(slots: []const p.Id, producer: ir.Instruction, permissions: traits.Facts) bool {
     const aggregate = slots[@intCast(producer.destination)];
-    return producer.failures.len == 0 and permissions.copy[@intCast(aggregate)] and permissions.drop[@intCast(aggregate)];
+    return producer.failures.len == 0 and permissions.copy[
+        @intCast(aggregate)
+    ] and permissions.drop[
+        @intCast(aggregate)
+    ];
 }
 
 /// Trace the raw projection operand backwards through moves and verify the
 /// selected field's actual source has not been overwritten. Finder facts are
 /// neither an input nor a certificate for this correspondence.
-pub fn validate(allocator: std.mem.Allocator, original: ir.Program, candidate: ir.Program, witnesses: []const Witness) Error!void {
+pub fn validate(
+    allocator: std.mem.Allocator,
+    original: ir.Program,
+    candidate: ir.Program,
+    witnesses: []const Witness,
+) Error!void {
     var before_flow = try ownership.analyze(allocator, original);
     defer before_flow.deinit();
     var after_flow = try ownership.analyze(allocator, candidate);
@@ -81,9 +102,14 @@ pub fn validate(allocator: std.mem.Allocator, original: ir.Program, candidate: i
     const permissions = try traits.derive(arena.allocator(), original.schemas);
     var unchanged = candidate;
     unchanged.blocks = original.blocks;
-    if (!equal(ir.Program, original, unchanged) or original.blocks.len != candidate.blocks.len) return error.InvalidAggregateReduction;
+    if (!equal(
+        ir.Program,
+        original,
+        unchanged,
+    ) or original.blocks.len != candidate.blocks.len) return error.InvalidAggregateReduction;
     for (original.blocks, candidate.blocks, 0..) |before, after, block_id| {
-        if (before.instructions.len != after.instructions.len) return error.InvalidAggregateReduction;
+        if (before.instructions.len != after.instructions.len)
+            return error.InvalidAggregateReduction;
         var same = after;
         same.instructions = before.instructions;
         if (!equal(ir.Block, before, same)) return error.InvalidAggregateReduction;
@@ -95,7 +121,9 @@ pub fn validate(allocator: std.mem.Allocator, original: ir.Program, candidate: i
                 witness = item;
             };
             if (witness) |item| {
-                if (instruction.opcode != .field or item.construction >= index) return error.InvalidAggregateReduction;
+                if (instruction.opcode != .field or
+                    item.construction >= index)
+                    return error.InvalidAggregateReduction;
                 var slot = instruction.operands[0];
                 var cursor = index;
                 var found: ?usize = null;
@@ -110,15 +138,34 @@ pub fn validate(allocator: std.mem.Allocator, original: ir.Program, candidate: i
                     if (operation.opcode == .product) found = cursor;
                     break;
                 }
-                if (found == null or found.? != item.construction) return error.InvalidAggregateReduction;
+                if (found == null or
+                    found.? != item.construction)
+                    return error.InvalidAggregateReduction;
                 const product = before.instructions[item.construction];
                 if (!safe(slots, product, permissions)) return error.InvalidAggregateReduction;
                 const source = product.operands[@intCast(instruction.immediate)];
-                for (before.instructions[item.construction..index]) |operation| if (operation.destination == source) return error.InvalidAggregateReduction;
-                const expected: ir.Instruction = .{ .destination = instruction.destination, .opcode = .move, .operands = &.{source} };
-                if (!equal(ir.Instruction, expected, replacement)) return error.InvalidAggregateReduction;
-            } else if (!equal(ir.Instruction, instruction, replacement)) return error.InvalidAggregateReduction;
+                for (before.instructions[item.construction..index]) |operation|
+                    if (operation.destination == source)
+                        return error.InvalidAggregateReduction;
+                const expected: ir.Instruction = .{
+                    .destination = instruction.destination,
+                    .opcode = .move,
+                    .operands = &.{source},
+                };
+                if (!equal(
+                    ir.Instruction,
+                    expected,
+                    replacement,
+                )) return error.InvalidAggregateReduction;
+            } else if (!equal(
+                ir.Instruction,
+                instruction,
+                replacement,
+            )) return error.InvalidAggregateReduction;
         }
     }
-    for (witnesses) |item| if (item.block >= original.blocks.len or item.projection >= original.blocks[item.block].instructions.len) return error.InvalidAggregateReduction;
+    for (witnesses) |item|
+        if (item.block >= original.blocks.len or
+            item.projection >= original.blocks[item.block].instructions.len)
+            return error.InvalidAggregateReduction;
 }

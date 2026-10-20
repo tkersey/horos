@@ -9,16 +9,74 @@ pub const shared: ir.Program = .{
     .constants = &.{},
     .effects = &.{},
     .functions = &.{
-        .{ .entry = 0, .inputs = &.{ 0, 1, 2, 3 }, .layout = .{ .slots = &.{ 0, 0, 1, 1, 2 } }, .result = 2 },
-        .{ .entry = 4, .inputs = &.{ 0, 1, 2 }, .layout = .{ .slots = &.{ 0, 0, 1, 2 } }, .result = 2 },
+        .{
+            .entry = 0,
+            .inputs = &.{ 0, 1, 2, 3 },
+            .layout = .{ .slots = &.{ 0, 0, 1, 1, 2 } },
+            .result = 2,
+        },
+        .{
+            .entry = 4,
+            .inputs = &.{ 0, 1, 2 },
+            .layout = .{ .slots = &.{ 0, 0, 1, 2 } },
+            .result = 2,
+        },
     },
     .blocks = &.{
-        .{ .function = 0, .instructions = &.{}, .terminator = .{ .branch = .{ .condition = 2, .when_true = .{ .block = 1 }, .when_false = .{ .block = 2 } } } },
-        .{ .function = 0, .instructions = &.{}, .terminator = .{ .call = .{ .function = 1, .arguments = &.{ 0, 1, 3 }, .next = .{ .block = 3, .assignments = &.{.{ .destination = 4, .source = .returned }} } } } },
-        .{ .function = 0, .instructions = &.{}, .terminator = .{ .call = .{ .function = 1, .arguments = &.{ 1, 0, 3 }, .next = .{ .block = 3, .assignments = &.{.{ .destination = 4, .source = .returned }} } } } },
+        .{
+            .function = 0,
+            .instructions = &.{},
+            .terminator = .{ .branch = .{
+                .condition = 2,
+                .when_true = .{ .block = 1 },
+                .when_false = .{ .block = 2 },
+            } },
+        },
+        .{
+            .function = 0,
+            .instructions = &.{},
+            .terminator = .{ .call = .{
+                .function = 1,
+                .arguments = &.{ 0, 1, 3 },
+                .next = .{
+                    .block = 3,
+                    .assignments = &.{.{ .destination = 4, .source = .returned }},
+                },
+            } },
+        },
+        .{
+            .function = 0,
+            .instructions = &.{},
+            .terminator = .{ .call = .{
+                .function = 1,
+                .arguments = &.{ 1, 0, 3 },
+                .next = .{
+                    .block = 3,
+                    .assignments = &.{.{ .destination = 4, .source = .returned }},
+                },
+            } },
+        },
         .{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 4 } },
-        .{ .function = 1, .instructions = &.{}, .terminator = .{ .branch = .{ .condition = 2, .when_true = .{ .block = 5, .assignments = &.{ .{ .destination = 0, .source = .{ .slot = 1 } }, .{ .destination = 1, .source = .{ .slot = 0 } } } }, .when_false = .{ .block = 5 } } } },
-        .{ .function = 1, .instructions = &.{.{ .destination = 3, .opcode = .product, .operands = &.{ 0, 1 } }}, .terminator = .{ .return_value = 3 } },
+        .{
+            .function = 1,
+            .instructions = &.{},
+            .terminator = .{ .branch = .{
+                .condition = 2,
+                .when_true = .{
+                    .block = 5,
+                    .assignments = &.{
+                        .{ .destination = 0, .source = .{ .slot = 1 } },
+                        .{ .destination = 1, .source = .{ .slot = 0 } },
+                    },
+                },
+                .when_false = .{ .block = 5 },
+            } },
+        },
+        .{
+            .function = 1,
+            .instructions = &.{.{ .destination = 3, .opcode = .product, .operands = &.{ 0, 1 } }},
+            .terminator = .{ .return_value = 3 },
+        },
     },
 };
 test "two predecessors share one local body with parallel argument and swap edges" {
@@ -26,7 +84,10 @@ test "two predecessors share one local body with parallel argument and swap edge
     defer candidate.deinit();
     try joins.validate(a, shared, candidate.program, candidate.witness, .{});
     try std.testing.expectEqual(@as(usize, 8), candidate.program.blocks.len);
-    try std.testing.expectEqual(candidate.program.blocks[1].terminator.jump.block, candidate.program.blocks[2].terminator.jump.block);
+    try std.testing.expectEqual(
+        candidate.program.blocks[1].terminator.jump.block,
+        candidate.program.blocks[2].terminator.jump.block,
+    );
     const transfers = candidate.program.blocks[6].terminator.branch.when_true.assignments;
     try std.testing.expectEqual(@as(u64, 6), transfers[0].source.slot);
     try std.testing.expectEqual(@as(u64, 5), transfers[1].source.slot);
@@ -43,7 +104,13 @@ test "two predecessors share one local body with parallel argument and swap edge
         }
     }
     try std.testing.expectEqual(@as(usize, 1), products);
-    std.debug.print("shared join bytes: {d} -> {d}\n", .{ try @import("program_image.zig").encodedLength(shared), try @import("program_image.zig").encodedLength(result.program) });
+    std.debug.print(
+        "shared join bytes: {d} -> {d}\n",
+        .{
+            try @import("program_image.zig").encodedLength(shared),
+            try @import("program_image.zig").encodedLength(result.program),
+        },
+    );
 }
 test "admissible wrong incoming argument and swapped-edge mutations reject" {
     var candidate = (try joins.construct(a, shared, .{})).?;
@@ -56,19 +123,29 @@ test "admissible wrong incoming argument and swapped-edge mutations reject" {
     wrong.blocks = &blocks;
     var admitted = try @import("activation_ownership.zig").analyze(a, wrong);
     defer admitted.deinit();
-    try std.testing.expectError(error.InvalidContification, joins.validate(a, shared, wrong, candidate.witness, .{}));
+    try std.testing.expectError(
+        error.InvalidContification,
+        joins.validate(a, shared, wrong, candidate.witness, .{}),
+    );
     blocks[1] = candidate.program.blocks[1];
     var swap = blocks[6].terminator.branch.when_true.assignments[0..2].*;
     swap[1].source.slot = 6;
     blocks[6].terminator.branch.when_true.assignments = &swap;
-    try std.testing.expectError(error.InvalidContification, joins.validate(a, shared, wrong, candidate.witness, .{}));
+    try std.testing.expectError(
+        error.InvalidContification,
+        joins.validate(a, shared, wrong, candidate.witness, .{}),
+    );
 }
 test "different continuations retain the helper" {
     var original = shared;
     var blocks: [7]ir.Block = undefined;
     @memcpy(blocks[0..6], shared.blocks);
     blocks[2].terminator.call.next.block = 6;
-    blocks[6] = .{ .function = 0, .instructions = &.{.{ .destination = 4, .opcode = .product, .operands = &.{ 1, 0 } }}, .terminator = .{ .return_value = 4 } };
+    blocks[6] = .{
+        .function = 0,
+        .instructions = &.{.{ .destination = 4, .opcode = .product, .operands = &.{ 1, 0 } }},
+        .terminator = .{ .return_value = 4 },
+    };
     original.blocks = &blocks;
     var admitted = try @import("activation_ownership.zig").analyze(a, original);
     defer admitted.deinit();
@@ -99,18 +176,30 @@ test "join allocation and budget exhaustion preserve the P01 baseline" {
     try @import("allocation_testing.zig").check(a, allocationAttempt, .{});
     var baseline = try @import("coalescing.zig").run(a, shared, .{});
     defer baseline.deinit();
-    for ([_]joins.Options{ .{ .work_limit = 0 }, .{ .max_blocks = 0 }, .{ .max_slots = 0 }, .{ .max_added_bytes = 0 } }) |options| {
+    for ([_]joins.Options{
+        .{ .work_limit = 0 },
+        .{ .max_blocks = 0 },
+        .{ .max_slots = 0 },
+        .{ .max_added_bytes = 0 },
+    }) |options| {
         var stats: joins.Statistics = .{};
         var result = try joins.run(a, shared, &stats, options);
         defer result.deinit();
         try std.testing.expect(stats.work_limit);
-        try std.testing.expectEqual(try @import("program_image.zig").identity(a, baseline.program), try @import("program_image.zig").identity(a, result.program));
+        try std.testing.expectEqual(
+            try @import("program_image.zig").identity(a, baseline.program),
+            try @import("program_image.zig").identity(a, result.program),
+        );
     }
 }
 
 test "shared pipeline selects a single relocated join body" {
     var stats: @import("closed_compilation.zig").Statistics = .{};
-    var result = try @import("closed_compilation.zig").run(a, shared, .{ .contract = .semantic, .statistics = &stats });
+    var result = try @import("closed_compilation.zig").run(
+        a,
+        shared,
+        .{ .contract = .semantic, .statistics = &stats },
+    );
     defer result.deinit();
     try std.testing.expectEqual(.full, stats.selected_candidate);
     try std.testing.expectEqual(@as(usize, 1), result.program.functions.len);
@@ -118,7 +207,14 @@ test "shared pipeline selects a single relocated join body" {
 
 test "constructor-addressable helpers retain their callable interface" {
     var original = shared;
-    original.schemas = &.{ shared.schemas[0], shared.schemas[1], shared.schemas[2], shared.schemas[3], .{ .internal = .{ .computation = .{ .parameters = &.{ 0, 0, 1 }, .result = 2, .use = .reusable } } } };
+    original.schemas = &.{
+        shared.schemas[0], shared.schemas[1], shared.schemas[2], shared.schemas[3],
+        .{ .internal = .{ .computation = .{
+            .parameters = &.{ 0, 0, 1 },
+            .result = 2,
+            .use = .reusable,
+        } } },
+    };
     original.scopes.captures = &.{.{ .fields = &.{}, .use = .reusable }};
     original.constructors = &.{.{ .function = 1, .capture = 0, .schema = 4 }};
     var admitted = try @import("activation_ownership.zig").analyze(a, original);
@@ -145,7 +241,10 @@ test "return-only continuation may return an original caller value" {
     wrong.blocks = &changed;
     var admitted = try @import("activation_ownership.zig").analyze(a, wrong);
     defer admitted.deinit();
-    try std.testing.expectError(error.InvalidContification, joins.validate(a, original, wrong, candidate.witness, .{}));
+    try std.testing.expectError(
+        error.InvalidContification,
+        joins.validate(a, original, wrong, candidate.witness, .{}),
+    );
 }
 test "a continuation with real work cannot be bypassed by a direct return" {
     var original = shared;
@@ -162,5 +261,8 @@ test "a continuation with real work cannot be bypassed by a direct return" {
     wrong.blocks = &changed;
     var admitted = try @import("activation_ownership.zig").analyze(a, wrong);
     defer admitted.deinit();
-    try std.testing.expectError(error.InvalidContification, joins.validate(a, original, wrong, candidate.witness, .{}));
+    try std.testing.expectError(
+        error.InvalidContification,
+        joins.validate(a, original, wrong, candidate.witness, .{}),
+    );
 }

@@ -11,10 +11,23 @@ fn Shapes(comptime E: type, comptime R: type) type {
         pub const Local = a.OperationSignature(E, R, native.Fields(&.{"inside"}, &.{Inside}));
         pub const Operations = native.Fields(&.{ "ask", "local" }, &.{ Ask, Local });
         pub const Inside = struct {
-            pub const internal: a.InternalInfo = .{ .callable = a.Signature(native.Fields(&.{ "ask", "local" }, &.{ a.Internal(.{ .capability = Ask }), a.Internal(.{ .capability = Local }) }), R) };
+            pub const internal: a.InternalInfo = .{ .callable = a.Signature(
+                native.Fields(
+                    &.{ "ask", "local" },
+                    &.{ a.Internal(.{ .capability = Ask }), a.Internal(.{ .capability = Local }) },
+                ),
+                R,
+            ) };
         };
         pub fn Handler(comptime Result: type) type {
-            return a.HandlerShape(Operations, Result, Result, native.Fields(&.{"environment"}, &.{E}), bridge.Empty, .deep);
+            return a.HandlerShape(
+                Operations,
+                Result,
+                Result,
+                native.Fields(&.{"environment"}, &.{E}),
+                bridge.Empty,
+                .deep,
+            );
         }
     };
 }
@@ -28,10 +41,14 @@ pub fn Family(comptime E: type, comptime R: type) type {
         pub fn local(self: *const @This()) *const a.Operation(S.Local) {
             return @ptrCast(@as(*const runtime.Family, @ptrCast(self)).local());
         }
-        pub fn askCapability(self: *const @This()) *const a.Schema(a.Internal(.{ .capability = S.Ask })) {
+        pub fn askCapability(self: *const @This()) *const a.Schema(
+            a.Internal(.{ .capability = S.Ask }),
+        ) {
             return @ptrCast(@as(*const runtime.Family, @ptrCast(self)).askCapability());
         }
-        pub fn localCapability(self: *const @This()) *const a.Schema(a.Internal(.{ .capability = S.Local })) {
+        pub fn localCapability(self: *const @This()) *const a.Schema(
+            a.Internal(.{ .capability = S.Local }),
+        ) {
             return @ptrCast(@as(*const runtime.Family, @ptrCast(self)).localCapability());
         }
         pub fn inside(self: *const @This()) *const a.Schema(S.Inside) {
@@ -44,7 +61,10 @@ fn familyShape(comptime T: type) type {
     const Child = @typeInfo(T).pointer.child;
     if (!@hasDecl(Child, "family_shape")) @compileError("Horos Reader: expected canonical family");
     const S = Child.family_shape;
-    if (T != *const Family(S.environment, S.inside_result)) @compileError("Horos Reader: expected canonical family");
+    if (T != *const Family(
+        S.environment,
+        S.inside_result,
+    )) @compileError("Horos Reader: expected canonical family");
     return S;
 }
 pub fn Reader(comptime S: type, comptime R: type) type {
@@ -56,14 +76,50 @@ pub fn Reader(comptime S: type, comptime R: type) type {
         resumptions: []const *const a.Schema(a.Dynamic),
     };
 }
-pub fn family(c: *a.Context, identity: []const u8, environment: anytype, inside_result: anytype, inside_captures: anytype, residual: anytype, regions: anytype) a.Error!*const Family(bridge.schemaShape(@TypeOf(environment)), bridge.schemaShape(@TypeOf(inside_result))) {
+pub fn family(
+    c: *a.Context,
+    identity: []const u8,
+    environment: anytype,
+    inside_result: anytype,
+    inside_captures: anytype,
+    residual: anytype,
+    regions: anytype,
+) a.Error!*const Family(
+    bridge.schemaShape(@TypeOf(environment)),
+    bridge.schemaShape(@TypeOf(inside_result)),
+) {
     const captures = bridge.list(.schema, inside_captures);
     const effects = bridge.list(.operation, residual);
     const borrowed = bridge.list(.region, regions);
-    return @ptrCast(try runtime.family(bridge.context(c), identity, bridge.schema(environment), bridge.schema(inside_result), captures.slice(), effects.slice(), borrowed.slice()));
+    return @ptrCast(try runtime.family(
+        bridge.context(c),
+        identity,
+        bridge.schema(environment),
+        bridge.schema(inside_result),
+        captures.slice(),
+        effects.slice(),
+        borrowed.slice(),
+    ));
 }
-pub fn interpret(c: *a.Context, reader: anytype, result: anytype, capture_bounds: anytype) a.Error!Reader(familyShape(@TypeOf(reader)), bridge.schemaShape(@TypeOf(result))) {
+pub fn interpret(
+    c: *a.Context,
+    reader: anytype,
+    result: anytype,
+    capture_bounds: anytype,
+) a.Error!Reader(familyShape(@TypeOf(reader)), bridge.schemaShape(@TypeOf(result))) {
     const captures = bridge.captures(capture_bounds);
-    const value = try runtime.interpret(bridge.context(c), @ptrCast(reader), bridge.schema(result), captures.value());
-    return .{ .handler = @ptrCast(value.handler), .inside_handler = @ptrCast(value.inside_handler), .resumptions = @as([*]const *const a.Schema(a.Dynamic), @ptrCast(value.resumptions.ptr))[0..value.resumptions.len] };
+    const value = try runtime.interpret(
+        bridge.context(c),
+        @ptrCast(reader),
+        bridge.schema(result),
+        captures.value(),
+    );
+    return .{
+        .handler = @ptrCast(value.handler),
+        .inside_handler = @ptrCast(value.inside_handler),
+        .resumptions = @as(
+            [*]const *const a.Schema(a.Dynamic),
+            @ptrCast(value.resumptions.ptr),
+        )[0..value.resumptions.len],
+    };
 }

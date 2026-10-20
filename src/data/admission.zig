@@ -56,7 +56,10 @@ pub fn schemas(allocator: std.mem.Allocator, catalog: []const p.Schema) Error!Sc
 pub fn references(catalog: []const p.Schema, schema: p.Schema) Error!void {
     switch (schema) {
         .enumeration => |tags| {
-            for (tags, 0..) |tag, index| if (index != 0 and tags[index - 1] >= tag) return error.InvalidSchema;
+            for (
+                tags,
+                0..,
+            ) |tag, index| if (index != 0 and tags[index - 1] >= tag) return error.InvalidSchema;
         },
         .product, .sum => |fields| {
             for (fields) |id| _ = try schemaAt(catalog, id);
@@ -87,7 +90,11 @@ pub fn references(catalog: []const p.Schema, schema: p.Schema) Error!void {
             },
             .suspension_package => |id| {
                 const inner = try schemaAt(catalog, id);
-                if (inner != .internal or inner.internal != .resumption or (inner.internal.resumption.use != .linear and inner.internal.resumption.use != .affine)) return error.InvalidSchema;
+                if (inner != .internal or
+                    inner.internal != .resumption or
+                    (inner.internal.resumption.use != .linear and
+                        inner.internal.resumption.use != .affine))
+                    return error.InvalidSchema;
             },
             .borrowed => |borrowed| {
                 _ = try schemaAt(catalog, borrowed.value);
@@ -106,7 +113,11 @@ fn minimumWidth(schema: p.Schema, minimum: []const u64) u64 {
         .i32, .u32, .enumeration => 4,
         .i64, .u64 => 8,
         .bytes, .text, .bounded_bytes, .bounded_text, .seq, .vector => 1,
-        .array => |array| if (array.length == 0) 0 else std.math.mul(u64, minimum[@intCast(array.element)], array.length) catch std.math.maxInt(u64),
+        .array => |array| if (array.length == 0) 0 else std.math.mul(
+            u64,
+            minimum[@intCast(array.element)],
+            array.length,
+        ) catch std.math.maxInt(u64),
         .product => |fields| blk: {
             var size: u64 = 0;
             for (fields) |id| size = std.math.add(u64, size, minimum[@intCast(id)]) catch
@@ -168,7 +179,10 @@ pub fn readValue(
         const minimum = facts.minimum[index];
         if (task.count == 0 or minimum == 0) continue;
         if (task.count > (reader.input.len - reader.position) / minimum) return error.InvalidValue;
-        if (task.count > 1) try pending.append(allocator, .{ .schema = task.schema, .count = task.count - 1 });
+        if (task.count > 1) try pending.append(
+            allocator,
+            .{ .schema = task.schema, .count = task.count - 1 },
+        );
         switch (catalog[index]) {
             .unit => {},
             .boolean => {
@@ -206,13 +220,19 @@ pub fn readValue(
                 if (tag >= fields.len) return error.InvalidValue;
                 try pending.append(allocator, .{ .schema = fields[tag], .count = 1 });
             },
-            .seq => |element| try pending.append(allocator, .{ .schema = element, .count = try reader.natural() }),
+            .seq => |element| try pending.append(
+                allocator,
+                .{ .schema = element, .count = try reader.natural() },
+            ),
             .vector => |vector| {
                 const count = try reader.natural();
                 if (count > vector.maximum) return error.InvalidValue;
                 try pending.append(allocator, .{ .schema = vector.element, .count = count });
             },
-            .array => |array| try pending.append(allocator, .{ .schema = array.element, .count = array.length }),
+            .array => |array| try pending.append(
+                allocator,
+                .{ .schema = array.element, .count = array.length },
+            ),
             .internal => return error.InvalidValue,
         }
     }
@@ -226,10 +246,19 @@ pub fn slotType(slots: []const p.Id, id: p.Id) Error!p.Id {
 
 pub fn arguments(slots: []const p.Id, supplied: []const p.Id, expected: []const p.Id) Error!void {
     if (supplied.len != expected.len) return error.TypeMismatch;
-    for (supplied, expected) |slot, schema| if (try slotType(slots, slot) != schema) return error.TypeMismatch;
+    for (
+        supplied,
+        expected,
+    ) |slot, schema| if (try slotType(slots, slot) != schema) return error.TypeMismatch;
 }
 
-pub fn edge(image: @import("activation.zig").Program, owner: p.Id, slots: []const p.Id, next: @import("activation.zig").Edge, returned: ?p.Id) Error!void {
+pub fn edge(
+    image: @import("activation.zig").Program,
+    owner: p.Id,
+    slots: []const p.Id,
+    next: @import("activation.zig").Edge,
+    returned: ?p.Id,
+) Error!void {
     if (next.block >= image.blocks.len) return error.InvalidReference;
     if (image.blocks[@intCast(next.block)].function != owner) return error.TypeMismatch;
     for (next.assignments) |assignment| {
@@ -242,24 +271,50 @@ pub fn edge(image: @import("activation.zig").Program, owner: p.Id, slots: []cons
     }
 }
 
-pub fn validateInstruction(image: anytype, function: p.Id, instruction: anytype, slots: []const p.Id, uses: @import("traits.zig").Facts) Error!void {
+pub fn validateInstruction(
+    image: anytype,
+    function: p.Id,
+    instruction: anytype,
+    slots: []const p.Id,
+    uses: @import("traits.zig").Facts,
+) Error!void {
     try instructionFailures(image, instruction, slots);
     const operands = instruction.operands;
     const result = instruction.result_type;
     switch (instruction.opcode) {
         .constant => {
-            if (operands.len != 0 or instruction.immediate >= image.constants.len) return error.InvalidReference;
-            if (image.constants[@intCast(instruction.immediate)].schema != result) return error.TypeMismatch;
+            if (operands.len != 0 or
+                instruction.immediate >= image.constants.len)
+                return error.InvalidReference;
+            if (image.constants[
+                @intCast(instruction.immediate)
+            ].schema != result) return error.TypeMismatch;
         },
         .move => {
             if (operands.len != 1 or instruction.immediate != 0) return error.InvalidProgram;
             if (slots[@intCast(operands[0])] != result) return error.TypeMismatch;
         },
-        .integer_add, .integer_sub, .integer_mul, .integer_div, .integer_rem, .integer_bit_and, .integer_bit_or, .integer_bit_xor, .equal, .less => {
+        .integer_add,
+        .integer_sub,
+        .integer_mul,
+        .integer_div,
+        .integer_rem,
+        .integer_bit_and,
+        .integer_bit_or,
+        .integer_bit_xor,
+        .equal,
+        .less,
+        => {
             if (operands.len != 2 or instruction.immediate != 0) return error.InvalidProgram;
             const left = slots[@intCast(operands[0])];
             if (left != slots[@intCast(operands[1])]) return error.TypeMismatch;
-            if (!integer(image.schemas[@intCast(left)]) and !(instruction.opcode == .equal and image.schemas[@intCast(left)] == .boolean)) return error.TypeMismatch;
+            if (!integer(
+                image.schemas[
+                    @intCast(left)
+                ],
+            ) and !(instruction.opcode == .equal and image.schemas[
+                @intCast(left)
+            ] == .boolean)) return error.TypeMismatch;
             const comparison = instruction.opcode == .equal or instruction.opcode == .less;
             if (comparison) {
                 if (image.schemas[@intCast(result)] != .boolean) return error.TypeMismatch;
@@ -274,53 +329,123 @@ pub fn validateInstruction(image: anytype, function: p.Id, instruction: anytype,
                 if (source != .enumeration or target != .u32) return error.TypeMismatch;
             } else {
                 if (!integer(source) or !integer(target)) return error.TypeMismatch;
-                if (instruction.opcode == .integer_bit_not and source_id != result) return error.TypeMismatch;
+                if (instruction.opcode == .integer_bit_not and
+                    source_id != result)
+                    return error.TypeMismatch;
             }
         },
         .boolean_not => {
             if (operands.len != 1 or instruction.immediate != 0) return error.InvalidProgram;
-            if (image.schemas[@intCast(result)] != .boolean or slots[@intCast(operands[0])] != result) return error.TypeMismatch;
+            if (image.schemas[
+                @intCast(result)
+            ] != .boolean or slots[
+                @intCast(operands[0])
+            ] != result) return error.TypeMismatch;
         },
         .computation => {
             if (instruction.immediate >= image.constructors.len) return error.InvalidReference;
             const constructor = image.constructors[@intCast(instruction.immediate)];
             if (constructor.schema != result) return error.TypeMismatch;
-            try arguments(slots, operands, image.scopes.captures[@intCast(constructor.capture)].fields);
+            try arguments(
+                slots,
+                operands,
+                image.scopes.captures[@intCast(constructor.capture)].fields,
+            );
         },
-        .product, .field, .variant, .variant_tag, .variant_payload, .select, .sequence, .sequence_length, .sequence_get, .sequence_append, .sequence_concat, .sequence_pop, .sequence_set, .sequence_take, .sequence_pop_last => try @import("aggregate_admission.zig").instruction(image, instruction, slots),
-        .blob_length, .blob_concat, .blob_slice, .blob_compare, .blob_byte, .text_scalar, .text_integer, .blob_from_byte => try @import("blob_admission.zig").instruction(image, instruction, slots),
-        .cell_new, .cell_get, .cell_set => try @import("region_admission.zig").instruction(image, instruction, slots, uses),
+        .product,
+        .field,
+        .variant,
+        .variant_tag,
+        .variant_payload,
+        .select,
+        .sequence,
+        .sequence_length,
+        .sequence_get,
+        .sequence_append,
+        .sequence_concat,
+        .sequence_pop,
+        .sequence_set,
+        .sequence_take,
+        .sequence_pop_last,
+        => try @import("aggregate_admission.zig").instruction(image, instruction, slots),
+        .blob_length,
+        .blob_concat,
+        .blob_slice,
+        .blob_compare,
+        .blob_byte,
+        .text_scalar,
+        .text_integer,
+        .blob_from_byte,
+        => try @import("blob_admission.zig").instruction(image, instruction, slots),
+        .cell_new, .cell_get, .cell_set => try @import("region_admission.zig").instruction(
+            image,
+            instruction,
+            slots,
+            uses,
+        ),
         .package, .unpack => {
             if (operands.len != 1 or instruction.immediate != 0) return error.InvalidProgram;
             const input = slots[@intCast(operands[0])];
-            const shape = image.schemas[@intCast(if (instruction.opcode == .package) result else input)];
-            if (shape != .internal or shape.internal != .suspension_package or shape.internal.suspension_package != (if (instruction.opcode == .package) input else result)) return error.TypeMismatch;
+            const shape = image.schemas[
+                @intCast(if (instruction.opcode == .package) result else input)
+            ];
+            if (shape != .internal or
+                shape.internal != .suspension_package or
+                shape.internal.suspension_package != (if (instruction.opcode == .package)
+                    input
+                else
+                    result))
+                return error.TypeMismatch;
         },
         .clone_resumption => {
             if (operands.len != 1 or instruction.immediate != 0) return error.InvalidProgram;
-            if (!try @import("contracts.zig").cloneCompatible(image, slots[@intCast(operands[0])], result)) return error.InvalidOwnership;
+            if (!try @import("contracts.zig").cloneCompatible(
+                image,
+                slots[@intCast(operands[0])],
+                result,
+            )) return error.InvalidOwnership;
         },
-        .resource_pack, .resource_unpack => try @import("resource_admission.zig").instruction(image, function, instruction, slots),
+        .resource_pack, .resource_unpack => try @import("resource_admission.zig").instruction(
+            image,
+            function,
+            instruction,
+            slots,
+        ),
     }
 }
 
 fn instructionFailures(image: anytype, instruction: anytype, slots: []const p.Id) Error!void {
     const needed: []const p.Fault = switch (instruction.opcode) {
         .integer_add, .integer_sub, .integer_mul => &.{.arithmetic_overflow},
-        .integer_convert => if (instruction.operands.len == 1 and !@import("scalar.zig").conversionCanFail(image.schemas[@intCast(slots[@intCast(instruction.operands[0])])], image.schemas[@intCast(instruction.result_type)])) &.{} else &.{.arithmetic_overflow},
+        .integer_convert => if (instruction.operands.len == 1 and !@import(
+            "scalar.zig",
+        ).conversionCanFail(
+            image.schemas[@intCast(slots[@intCast(instruction.operands[0])])],
+            image.schemas[@intCast(instruction.result_type)],
+        )) &.{} else &.{.arithmetic_overflow},
         .integer_div, .integer_rem => &.{ .arithmetic_overflow, .division_by_zero },
         .sequence_set => &.{.invalid_index},
         .variant_payload => &.{.invalid_variant},
-        .sequence_append, .sequence_concat => if (image.schemas[@intCast(instruction.result_type)] == .vector) &.{.capacity_exceeded} else &.{},
+        .sequence_append, .sequence_concat => if (image.schemas[
+            @intCast(instruction.result_type)
+        ] == .vector) &.{.capacity_exceeded} else &.{},
         .blob_concat => &.{.capacity_exceeded},
-        .blob_slice => if (@import("blob_admission.zig").isText(image.schemas[@intCast(instruction.result_type)])) &.{ .capacity_exceeded, .invalid_utf8 } else &.{.capacity_exceeded},
+        .blob_slice => if (@import("blob_admission.zig").isText(
+            image.schemas[
+                @intCast(instruction.result_type)
+            ],
+        )) &.{ .capacity_exceeded, .invalid_utf8 } else &.{.capacity_exceeded},
         .text_scalar => &.{.invalid_utf8},
         else => &.{},
     };
     if (instruction.failures.len != needed.len) return error.InvalidProgram;
     for (instruction.failures, needed) |failure, kind| {
-        if (failure.kind != kind or failure.value >= image.constants.len) return error.InvalidProgram;
-        if (image.constants[@intCast(failure.value)].schema != image.roots.failure) return error.TypeMismatch;
+        if (failure.kind != kind or
+            failure.value >= image.constants.len)
+            return error.InvalidProgram;
+        if (image.constants[
+            @intCast(failure.value)
+        ].schema != image.roots.failure) return error.TypeMismatch;
     }
 }
 

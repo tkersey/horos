@@ -17,10 +17,17 @@ pub const Candidate = struct {
     }
 };
 fn fields(program: ir.Program, id: usize) ?[]const p.Id {
-    if (id >= program.constructors.len or !privacy.privateWorker(program, id) or !privacy.privateConstructions(program, id)) return null;
+    if (id >= program.constructors.len or !privacy.privateWorker(
+        program,
+        id,
+    ) or !privacy.privateConstructions(program, id)) return null;
     const ctor = program.constructors[id];
     const capture = program.scopes.captures[@intCast(ctor.capture)];
-    if (capture.fields.len != 1 or capture.use != .reusable or capture.owned_regions.len != 0 or capture.borrowed_regions.len != 0) return null;
+    if (capture.fields.len != 1 or
+        capture.use != .reusable or
+        capture.owned_regions.len != 0 or
+        capture.borrowed_regions.len != 0)
+        return null;
     const schema = program.schemas[@intCast(capture.fields[0])];
     if (schema != .product or schema.product.len < 2 or schema.product.len > 128) return null;
     const scalar = schema.product[0];
@@ -35,29 +42,55 @@ fn fields(program: ir.Program, id: usize) ?[]const p.Id {
         if (block.function != ctor.function) continue;
         for (block.instructions) |op| {
             if (op.destination == input) return null;
-            for (op.operands) |operand| if (operand == input) {
-                if (op.opcode != .field or op.operands.len != 1 or op.failures.len != 0) return null;
-            };
+            for (op.operands) |operand|
+                if (operand == input) {
+                    if (op.opcode != .field or
+                        op.operands.len != 1 or
+                        op.failures.len != 0)
+                        return null;
+                };
         }
-        if (block.terminator == .call and block.terminator.call.function == ctor.function) recursive = true;
+        if (block.terminator == .call and
+            block.terminator.call.function == ctor.function)
+            recursive = true;
         const uses = access(block.terminator, input);
-        const pass_through = block.terminator == .call and block.terminator.call.function == ctor.function and block.terminator.call.arguments[0] == input;
+        const pass_through = block.terminator == .call and
+            block.terminator.call.function == ctor.function and
+            block.terminator.call.arguments[0] == input;
         if (uses.writes != 0 or uses.reads != @intFromBool(pass_through)) return null;
     }
     return if (recursive) schema.product else null;
 }
-fn replacePrefix(a: std.mem.Allocator, old: []const p.Id, prefix: []const p.Id) std.mem.Allocator.Error![]const p.Id {
+fn replacePrefix(
+    a: std.mem.Allocator,
+    old: []const p.Id,
+    prefix: []const p.Id,
+) std.mem.Allocator.Error![]const p.Id {
     const result = try a.alloc(p.Id, old.len - 1 + prefix.len);
     @memcpy(result[0..prefix.len], prefix);
     @memcpy(result[prefix.len..], old[1..]);
     return result;
 }
-fn project(a: std.mem.Allocator, layout: *std.ArrayList(p.Id), instructions: *std.ArrayList(ir.Instruction), product: p.Id, field_types: []const p.Id) std.mem.Allocator.Error![]const p.Id {
+fn project(
+    a: std.mem.Allocator,
+    layout: *std.ArrayList(p.Id),
+    instructions: *std.ArrayList(ir.Instruction),
+    product: p.Id,
+    field_types: []const p.Id,
+) std.mem.Allocator.Error![]const p.Id {
     const slots = try a.alloc(p.Id, field_types.len);
     for (field_types, slots, 0..) |schema, *slot, index| {
         slot.* = layout.items.len;
         try layout.append(a, schema);
-        try instructions.append(a, .{ .destination = slot.*, .opcode = .field, .operands = try a.dupe(p.Id, &.{product}), .immediate = index });
+        try instructions.append(
+            a,
+            .{
+                .destination = slot.*,
+                .opcode = .field,
+                .operands = try a.dupe(p.Id, &.{product}),
+                .immediate = index,
+            },
+        );
     }
     return slots;
 }
@@ -79,11 +112,18 @@ const RepresentationRetention = struct {
             self.retained = true;
             return;
         }
-        if (self.program.functions[@intCast(function)].layout.slots[@intCast(slot)] != ctor.schema) return;
+        if (self.program.functions[
+            @intCast(function)
+        ].layout.slots[
+            @intCast(slot)
+        ] != ctor.schema) return;
         for (self.program.blocks) |block| {
             if (block.function != function) continue;
             for (block.instructions) |op| {
-                if (op.opcode == .computation and op.immediate == self.constructor and op.destination == slot) {
+                if (op.opcode == .computation and
+                    op.immediate == self.constructor and
+                    op.destination == slot)
+                {
                     self.retained = true;
                     return;
                 }
@@ -94,7 +134,12 @@ const RepresentationRetention = struct {
 
 pub fn construct(allocator: std.mem.Allocator, original: ir.Program, id: usize) Error!?Candidate {
     var retention: RepresentationRetention = .{ .program = original, .constructor = id };
-    var admitted = try own.analyzeObserved(allocator, original, null, .{ .context = &retention, .capture = RepresentationRetention.observe });
+    var admitted = try own.analyzeObserved(
+        allocator,
+        original,
+        null,
+        .{ .context = &retention, .capture = RepresentationRetention.observe },
+    );
     defer admitted.deinit();
     const field_types = fields(original, id) orelse return null;
     if (retention.retained) return null;
@@ -135,16 +180,33 @@ pub fn construct(allocator: std.mem.Allocator, original: ir.Program, id: usize) 
         const layout = &layouts[@intCast(block.function)];
         for (block.instructions) |op| {
             var replacement = op;
-            if (block.function == worker_id and op.opcode == .field and op.operands[0] == worker.inputs[0]) replacement = .{ .destination = op.destination, .opcode = .move, .operands = try a.dupe(p.Id, &.{inputs[@intCast(op.immediate)]}) };
+            if (block.function == worker_id and
+                op.opcode == .field and
+                op.operands[0] == worker.inputs[0])
+                replacement = .{
+                    .destination = op.destination,
+                    .opcode = .move,
+                    .operands = try a.dupe(p.Id, &.{inputs[@intCast(op.immediate)]}),
+                };
             if (op.opcode == .computation and op.immediate == id) {
-                replacement.operands = try project(a, layout, &instructions, op.operands[0], field_types);
+                replacement.operands = try project(
+                    a,
+                    layout,
+                    &instructions,
+                    op.operands[0],
+                    field_types,
+                );
                 layout.items[@intCast(op.destination)] = original.schemas.len;
             }
             try instructions.append(a, replacement);
         }
         if (block.terminator == .call and block.terminator.call.function == worker_id) {
             const call = block.terminator.call;
-            const prefix = if (block.function == worker_id and call.arguments[0] == worker.inputs[0]) inputs else try project(a, layout, &instructions, call.arguments[0], field_types);
+            const prefix = if (block.function == worker_id and
+                call.arguments[0] == worker.inputs[0])
+                inputs
+            else
+                try project(a, layout, &instructions, call.arguments[0], field_types);
             out.terminator.call.arguments = try replacePrefix(a, call.arguments, prefix);
         }
         out.instructions = try instructions.toOwnedSlice(a);
@@ -160,21 +222,49 @@ pub fn construct(allocator: std.mem.Allocator, original: ir.Program, id: usize) 
     return .{ .arena = arena, .program = candidate };
 }
 fn correspondence(before: []const p.Id, after: []const p.Id, prefix: []const p.Id) bool {
-    return after.len == before.len - 1 + prefix.len and std.mem.eql(p.Id, after[0..prefix.len], prefix) and std.mem.eql(p.Id, after[prefix.len..], before[1..]);
+    return after.len == before.len - 1 + prefix.len and std.mem.eql(
+        p.Id,
+        after[0..prefix.len],
+        prefix,
+    ) and std.mem.eql(p.Id, after[prefix.len..], before[1..]);
 }
-fn checkProjections(original: ir.Program, candidate: ir.Program, owner: usize, product: p.Id, field_types: []const p.Id, instructions: []const ir.Instruction, cursor: *usize, next: *usize, prefix: []p.Id) Error!void {
+fn checkProjections(
+    original: ir.Program,
+    candidate: ir.Program,
+    owner: usize,
+    product: p.Id,
+    field_types: []const p.Id,
+    instructions: []const ir.Instruction,
+    cursor: *usize,
+    next: *usize,
+    prefix: []p.Id,
+) Error!void {
     for (field_types, prefix, 0..) |schema, *slot, index| {
-        if (cursor.* >= instructions.len or next.* >= candidate.functions[owner].layout.slots.len or candidate.functions[owner].layout.slots[next.*] != schema) return error.InvalidCaptureUnpack;
+        if (cursor.* >= instructions.len or
+            next.* >= candidate.functions[owner].layout.slots.len or
+            candidate.functions[owner].layout.slots[next.*] != schema)
+            return error.InvalidCaptureUnpack;
         const op = instructions[cursor.*];
         slot.* = next.*;
         next.* += 1;
         cursor.* += 1;
-        if (op.destination != slot.* or op.opcode != .field or op.immediate != index or op.operands.len != 1 or op.operands[0] != product or op.failures.len != 0) return error.InvalidCaptureUnpack;
+        if (op.destination != slot.* or
+            op.opcode != .field or
+            op.immediate != index or
+            op.operands.len != 1 or
+            op.operands[0] != product or
+            op.failures.len != 0)
+            return error.InvalidCaptureUnpack;
     }
     _ = original;
 }
 /// Exact ordered record correspondence; admission is necessary but not acceptance.
-pub fn validate(allocator: std.mem.Allocator, original: ir.Program, candidate: ir.Program, id: usize) Error!void {
+pub fn validate(
+    allocator: std.mem.Allocator,
+    original: ir.Program,
+    candidate: ir.Program,
+    id: usize,
+) Error!void {
     var before_flow = try own.analyze(allocator, original);
     defer before_flow.deinit();
     var after_flow = try own.analyze(allocator, candidate);
@@ -188,15 +278,35 @@ pub fn validate(allocator: std.mem.Allocator, original: ir.Program, candidate: i
     same.schemas = original.schemas;
     same.constructors = original.constructors;
     same.scopes.captures = original.scopes.captures;
-    if (!equal(ir.Program, original, same) or candidate.functions.len != original.functions.len or candidate.blocks.len != original.blocks.len or candidate.constructors.len != original.constructors.len or candidate.schemas.len != original.schemas.len + 1 or candidate.scopes.captures.len != original.scopes.captures.len + 1) return error.InvalidCaptureUnpack;
-    for (original.schemas, candidate.schemas[0..original.schemas.len]) |x, y| if (!equal(p.Schema, x, y)) return error.InvalidCaptureUnpack;
-    for (original.scopes.captures, candidate.scopes.captures[0..original.scopes.captures.len]) |x, y| if (!equal(p.Capture, x, y)) return error.InvalidCaptureUnpack;
+    if (!equal(ir.Program, original, same) or
+        candidate.functions.len != original.functions.len or
+        candidate.blocks.len != original.blocks.len or
+        candidate.constructors.len != original.constructors.len or
+        candidate.schemas.len != original.schemas.len + 1 or
+        candidate.scopes.captures.len != original.scopes.captures.len + 1)
+        return error.InvalidCaptureUnpack;
+    for (
+        original.schemas,
+        candidate.schemas[0..original.schemas.len],
+    ) |x, y| if (!equal(p.Schema, x, y)) return error.InvalidCaptureUnpack;
+    for (
+        original.scopes.captures,
+        candidate.scopes.captures[0..original.scopes.captures.len],
+    ) |x, y| if (!equal(p.Capture, x, y)) return error.InvalidCaptureUnpack;
     var expected_schema = original.schemas[@intCast(ctor.schema)];
     expected_schema.internal.computation.capture_bound = field_types[0..1];
-    if (!equal(p.Schema, expected_schema, candidate.schemas[original.schemas.len])) return error.InvalidCaptureUnpack;
+    if (!equal(
+        p.Schema,
+        expected_schema,
+        candidate.schemas[original.schemas.len],
+    )) return error.InvalidCaptureUnpack;
     var expected_capture = original.scopes.captures[@intCast(ctor.capture)];
     expected_capture.fields = field_types;
-    if (!equal(p.Capture, expected_capture, candidate.scopes.captures[original.scopes.captures.len])) return error.InvalidCaptureUnpack;
+    if (!equal(
+        p.Capture,
+        expected_capture,
+        candidate.scopes.captures[original.scopes.captures.len],
+    )) return error.InvalidCaptureUnpack;
     for (original.constructors, candidate.constructors, 0..) |x, y, index| {
         var expected = x;
         if (index == id) {
@@ -215,21 +325,36 @@ pub fn validate(allocator: std.mem.Allocator, original: ir.Program, candidate: i
         var metadata = y;
         metadata.layout = x.layout;
         metadata.inputs = x.inputs;
-        if (!equal(ir.Function, x, metadata) or y.layout.slots.len < x.layout.slots.len) return error.InvalidCaptureUnpack;
-        for (x.layout.slots, y.layout.slots[0..x.layout.slots.len], 0..) |old_type, new_type, slot| {
+        if (!equal(
+            ir.Function,
+            x,
+            metadata,
+        ) or y.layout.slots.len < x.layout.slots.len) return error.InvalidCaptureUnpack;
+        for (
+            x.layout.slots,
+            y.layout.slots[0..x.layout.slots.len],
+            0..,
+        ) |old_type, new_type, slot| {
             var expected = old_type;
-            for (original.blocks) |block| if (block.function == owner) {
-                for (block.instructions) |op| if (op.destination == slot and op.opcode == .computation and op.immediate == id) {
-                    expected = original.schemas.len;
+            for (original.blocks) |block|
+                if (block.function == owner) {
+                    for (block.instructions) |op|
+                        if (op.destination == slot and
+                            op.opcode == .computation and
+                            op.immediate == id)
+                        {
+                            expected = original.schemas.len;
+                        };
                 };
-            };
             if (expected != new_type) return error.InvalidCaptureUnpack;
         }
         count.* = x.layout.slots.len;
         if (owner == ctor.function) {
             if (!correspondence(x.inputs, y.inputs, inputs)) return error.InvalidCaptureUnpack;
             for (field_types) |schema| {
-                if (count.* >= y.layout.slots.len or y.layout.slots[count.*] != schema) return error.InvalidCaptureUnpack;
+                if (count.* >= y.layout.slots.len or
+                    y.layout.slots[count.*] != schema)
+                    return error.InvalidCaptureUnpack;
                 count.* += 1;
             }
         } else if (!std.mem.eql(p.Id, x.inputs, y.inputs)) return error.InvalidCaptureUnpack;
@@ -242,15 +367,36 @@ pub fn validate(allocator: std.mem.Allocator, original: ir.Program, candidate: i
         for (x.instructions) |op| {
             var expected = op;
             var operand: [1]p.Id = undefined;
-            if (x.function == ctor.function and op.opcode == .field and op.operands[0] == worker.inputs[0]) {
+            if (x.function == ctor.function and
+                op.opcode == .field and
+                op.operands[0] == worker.inputs[0])
+            {
                 operand[0] = inputs[@intCast(op.immediate)];
-                expected = .{ .destination = op.destination, .opcode = .move, .operands = &operand };
+                expected = .{
+                    .destination = op.destination,
+                    .opcode = .move,
+                    .operands = &operand,
+                };
             }
             if (op.opcode == .computation and op.immediate == id) {
-                try checkProjections(original, candidate, owner, op.operands[0], field_types, y.instructions, &cursor, &next[owner], prefix);
+                try checkProjections(
+                    original,
+                    candidate,
+                    owner,
+                    op.operands[0],
+                    field_types,
+                    y.instructions,
+                    &cursor,
+                    &next[owner],
+                    prefix,
+                );
                 expected.operands = prefix;
             }
-            if (cursor >= y.instructions.len or !equal(ir.Instruction, expected, y.instructions[cursor])) return error.InvalidCaptureUnpack;
+            if (cursor >= y.instructions.len or !equal(
+                ir.Instruction,
+                expected,
+                y.instructions[cursor],
+            )) return error.InvalidCaptureUnpack;
             cursor += 1;
         }
         var terminator = y.terminator;
@@ -258,16 +404,41 @@ pub fn validate(allocator: std.mem.Allocator, original: ir.Program, candidate: i
             if (terminator != .call) return error.InvalidCaptureUnpack;
             const call = x.terminator.call;
             const direct = x.function == ctor.function and call.arguments[0] == worker.inputs[0];
-            if (!direct) try checkProjections(original, candidate, owner, call.arguments[0], field_types, y.instructions, &cursor, &next[owner], prefix);
-            if (!correspondence(call.arguments, terminator.call.arguments, if (direct) inputs else prefix)) return error.InvalidCaptureUnpack;
+            if (!direct) try checkProjections(
+                original,
+                candidate,
+                owner,
+                call.arguments[0],
+                field_types,
+                y.instructions,
+                &cursor,
+                &next[owner],
+                prefix,
+            );
+            if (!correspondence(
+                call.arguments,
+                terminator.call.arguments,
+                if (direct) inputs else prefix,
+            )) return error.InvalidCaptureUnpack;
             terminator.call.arguments = call.arguments;
         }
-        if (cursor != y.instructions.len or !equal(ir.Terminator, x.terminator, terminator)) return error.InvalidCaptureUnpack;
+        if (cursor != y.instructions.len or !equal(
+            ir.Terminator,
+            x.terminator,
+            terminator,
+        )) return error.InvalidCaptureUnpack;
     }
-    for (candidate.functions, next) |function, count| if (function.layout.slots.len != count) return error.InvalidCaptureUnpack;
+    for (
+        candidate.functions,
+        next,
+    ) |function, count| if (function.layout.slots.len != count) return error.InvalidCaptureUnpack;
 }
 
-pub fn run(allocator: std.mem.Allocator, original: ir.Program, options: @import("coalescing.zig").Options) (Error || @import("coalescing.zig").Error)!@import("coalescing.zig").Owned {
+pub fn run(
+    allocator: std.mem.Allocator,
+    original: ir.Program,
+    options: @import("coalescing.zig").Options,
+) (Error || @import("coalescing.zig").Error)!@import("coalescing.zig").Owned {
     for (original.constructors, 0..) |_, id| {
         var candidate = (try construct(allocator, original, id)) orelse continue;
         defer candidate.deinit();

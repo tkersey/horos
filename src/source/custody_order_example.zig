@@ -27,24 +27,65 @@ fn defineTyped(b: *source.Builder, release_id: p.Id) a.Error!Fixtures {
     const start = try c.body(start_fn);
     const label = try start.parameter("label");
     const capability = try start.parameter("capability");
-    const body_type = try c.callable(.{}, unit, &.{generator.effect()}, .{ .use = .reusable, .captures = &.{ generator.capability(), integer } });
+    const body_type = try c.callable(
+        .{},
+        unit,
+        &.{generator.effect()},
+        .{ .use = .reusable, .captures = &.{ generator.capability(), integer } },
+    );
     const body_fn = try c.functionFor("custody suspension", body_type);
     const body = try start.closureBody(body_fn);
     _ = try body.performLocal(generator.effect(), capability, label);
     try c.define(body_fn, try body.ret(try body.constant(void, {})));
-    const cleanup_type = try c.callable(.{ .exit = try c.cleanupInfo(integer) }, unit, &.{release}, .{ .use = .reusable, .captures = &.{integer} });
+    const cleanup_type = try c.callable(
+        .{ .exit = try c.cleanupInfo(integer) },
+        unit,
+        &.{release},
+        .{ .use = .reusable, .captures = &.{integer} },
+    );
     const cleanup_fn = try c.functionFor("custody release", cleanup_type);
     const cleanup = try start.closureBody(cleanup_fn);
     try c.define(cleanup_fn, try cleanup.ret(try cleanup.perform(release, label)));
-    try c.define(start_fn, try start.ret(try start.protect(try start.lambda(body_fn, body_type), try start.lambda(cleanup_fn, cleanup_type), .{})));
-    const factory_fn = try c.function("custody factory", .{ .label = integer }, generator.package(), &.{release});
+    try c.define(
+        start_fn,
+        try start.ret(try start.protect(
+            try start.lambda(body_fn, body_type),
+            try start.lambda(cleanup_fn, cleanup_type),
+            .{},
+        )),
+    );
+    const factory_fn = try c.function(
+        "custody factory",
+        .{ .label = integer },
+        generator.package(),
+        &.{release},
+    );
     const factory = try c.body(factory_fn);
-    const answer = try factory.handleWithArguments(generator.handler(), try factory.lambda(start_fn, start_type), .{ .label = try factory.parameter("label") }, .{});
+    const answer = try factory.handleWithArguments(
+        generator.handler(),
+        try factory.lambda(start_fn, start_type),
+        .{ .label = try factory.parameter("label") },
+        .{},
+    );
     const done = try factory.caseOf(answer, "done");
     const yielded = try factory.caseOf(answer, "yielded");
     const parts = try yielded.body().destructure(yielded.payload());
-    try c.define(factory_fn, try factory.ret(try factory.match(answer, .{ .done = try done.fail(generator.package(), try done.body().constant(u64, 99)), .yielded = try yielded.ret(try parts.get("future")) })));
-    return .{ .package = try a.interop.schemaId(c, generator.package()), .queue = try a.interop.schemaId(c, try c.sequence(generator.package())), .factory = try a.interop.functionId(c, factory_fn), .release = release_id };
+    try c.define(
+        factory_fn,
+        try factory.ret(try factory.match(
+            answer,
+            .{
+                .done = try done.fail(generator.package(), try done.body().constant(u64, 99)),
+                .yielded = try yielded.ret(try parts.get("future")),
+            },
+        )),
+    );
+    return .{
+        .package = try a.interop.schemaId(c, generator.package()),
+        .queue = try a.interop.schemaId(c, try c.sequence(generator.package())),
+        .factory = try a.interop.functionId(c, factory_fn),
+        .release = release_id,
+    };
 }
 
 // These expert-IR fixtures intentionally vary lexical custody scopes and value
@@ -57,16 +98,60 @@ pub fn build(b: *source.Builder, fixtures: Fixtures, mode: u8) source.Error!p.Id
     const helper = try b.declare(&.{ queue, queue }, integer, &.{release}, &.{});
     const length = try observation(b, helper, queue, mode);
     const failure = try b.term(.{ .fail = try b.constant(u64, 8) });
-    const fails = if (mode == 7) failure else try b.bind(try b.variable(integer), failure, try b.term(.{ .fail = try b.primitive(integer, .sequence_length, &.{try b.reference(b.parameter(helper, if (mode == 2) 0 else 1))}, 0) }));
+    const fails = if (mode == 7) failure else try b.bind(
+        try b.variable(integer),
+        failure,
+        try b.term(.{ .fail = try b.primitive(
+            integer,
+            .sequence_length,
+            &.{try b.reference(b.parameter(helper, if (mode == 2) 0 else 1))},
+            0,
+        ) }),
+    );
     const outer = try b.bind(try b.variable(integer), try b.pure(length), fails);
-    const inner = try b.bind(try b.variable(queue), try b.pure(try b.reference(b.parameter(helper, 1))), try b.term(.{ .fail = try b.constant(u64, 8) }));
+    const inner = try b.bind(
+        try b.variable(queue),
+        try b.pure(try b.reference(b.parameter(helper, 1))),
+        try b.term(.{ .fail = try b.constant(u64, 8) }),
+    );
     const held = try b.variable(queue);
-    const condition = try b.primitive(try b.scalar(bool), .equal, &.{ length, try b.primitive(integer, .sequence_length, &.{try b.reference(held)}, 0) }, 0);
-    const branches = try b.term(.{ .conditional = .{ .condition = condition, .when_true = try b.term(.{ .fail = try b.constant(u64, 8) }), .when_false = try b.term(.{ .fail = try b.constant(u64, 9) }) } });
-    const live_inner = try b.bind(held, try b.pure(try b.reference(b.parameter(helper, 1))), branches);
-    const returned_inner = try b.bind(held, try b.pure(try b.reference(b.parameter(helper, 1))), try b.pure(try b.constant(u64, 3)));
+    const condition = try b.primitive(
+        try b.scalar(bool),
+        .equal,
+        &.{ length, try b.primitive(integer, .sequence_length, &.{try b.reference(held)}, 0) },
+        0,
+    );
+    const branches = try b.term(.{ .conditional = .{
+        .condition = condition,
+        .when_true = try b.term(.{ .fail = try b.constant(u64, 8) }),
+        .when_false = try b.term(.{ .fail = try b.constant(u64, 9) }),
+    } });
+    const live_inner = try b.bind(
+        held,
+        try b.pure(try b.reference(b.parameter(helper, 1))),
+        branches,
+    );
+    const returned_inner = try b.bind(
+        held,
+        try b.pure(try b.reference(b.parameter(helper, 1))),
+        try b.pure(try b.constant(u64, 3)),
+    );
     const after_inner = try b.bind(try b.variable(integer), returned_inner, failure);
-    try b.define(helper, try b.term(.{ .yield_then = if (mode == 9) after_inner else if (mode == 4) live_inner else if (mode == 1) inner else outer }));
+    try b.define(
+        helper,
+        try b.term(
+            .{
+                .yield_then = if (mode == 9)
+                    after_inner
+                else if (mode == 4)
+                    live_inner
+                else if (mode == 1)
+                    inner
+                else
+                    outer,
+            },
+        ),
+    );
     const entry = try b.declare(&.{}, integer, &.{release}, &.{});
     const first = try b.variable(fixtures.package);
     const second = try b.variable(fixtures.package);
@@ -74,8 +159,25 @@ pub fn build(b: *source.Builder, fixtures: Fixtures, mode: u8) source.Error!p.Id
         try b.primitive(queue, .sequence, &.{try b.reference(if (mode == 3) second else first)}, 0),
         try b.primitive(queue, .sequence, &.{try b.reference(if (mode == 3) first else second)}, 0),
     } } });
-    const with_second = try b.bind(second, try b.term(.{ .call = .{ .function = fixtures.factory, .arguments = &.{try b.constant(u64, 2)} } }), called);
-    try b.define(entry, try b.bind(first, try b.term(.{ .call = .{ .function = fixtures.factory, .arguments = &.{try b.constant(u64, 1)} } }), with_second));
+    const with_second = try b.bind(
+        second,
+        try b.term(.{ .call = .{
+            .function = fixtures.factory,
+            .arguments = &.{try b.constant(u64, 2)},
+        } }),
+        called,
+    );
+    try b.define(
+        entry,
+        try b.bind(
+            first,
+            try b.term(.{ .call = .{
+                .function = fixtures.factory,
+                .arguments = &.{try b.constant(u64, 1)},
+            } }),
+            with_second,
+        ),
+    );
     return entry;
 }
 
@@ -99,7 +201,12 @@ fn observation(b: *source.Builder, helper: p.Id, queue: p.Id, mode: u8) source.E
                 .use = .linear,
             } } });
             const sum = try b.schema(.{ .sum = &.{ try b.scalar(void), signature } });
-            const variant = try b.primitive(sum, .variant, &.{try b.lambda(captured, signature)}, 1);
+            const variant = try b.primitive(
+                sum,
+                .variant,
+                &.{try b.lambda(captured, signature)},
+                1,
+            );
             return b.primitive(integer, .variant_tag, &.{variant}, 0);
         },
         else => first,

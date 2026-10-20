@@ -11,11 +11,19 @@ pub const Family = opaque {
         return familyData(self).capability;
     }
 };
-const FamilyData = struct { effect: *const a.Operation, capability: *const a.Schema, interpretations: std.ArrayList(Cached) = .empty };
+const FamilyData = struct {
+    effect: *const a.Operation,
+    capability: *const a.Schema,
+    interpretations: std.ArrayList(Cached) = .empty,
+};
 fn familyData(value: *const Family) *FamilyData {
     return @ptrCast(@alignCast(@constCast(value)));
 }
-pub const Interpretation = struct { handler: *const a.Handler, answer: *const a.Schema, resumption: *const a.Schema };
+pub const Interpretation = struct {
+    handler: *const a.Handler,
+    answer: *const a.Schema,
+    resumption: *const a.Schema,
+};
 pub const Options = struct {
     captures: a.CaptureBounds,
     residual: []const *const a.Operation,
@@ -33,14 +41,30 @@ pub fn family(c: *a.Context, identity: []const u8) a.Error!*const Family {
     result.* = .{ .effect = effect, .capability = try c.capability(effect) };
     return @ptrCast(result);
 }
-pub fn all(c: *a.Context, choice: *const Family, element: *const a.Schema, options: Options) a.Error!Interpretation {
+pub fn all(
+    c: *a.Context,
+    choice: *const Family,
+    element: *const a.Schema,
+    options: Options,
+) a.Error!Interpretation {
     return interpret(c, choice, element, options, true);
 }
-pub fn first(c: *a.Context, choice: *const Family, element: *const a.Schema, options: Options) a.Error!Interpretation {
+pub fn first(
+    c: *a.Context,
+    choice: *const Family,
+    element: *const a.Schema,
+    options: Options,
+) a.Error!Interpretation {
     return interpret(c, choice, element, options, false);
 }
 
-fn interpret(c: *a.Context, choice: *const Family, element: *const a.Schema, options: Options, comptime every: bool) a.Error!Interpretation {
+fn interpret(
+    c: *a.Context,
+    choice: *const Family,
+    element: *const a.Schema,
+    options: Options,
+    comptime every: bool,
+) a.Error!Interpretation {
     const f = familyData(choice);
     _ = try c.capability(f.effect);
     const key: Key = .{ .element = element, .options = options, .every = every };
@@ -58,7 +82,10 @@ fn interpret(c: *a.Context, choice: *const Family, element: *const a.Schema, opt
     });
     const returns_fn = try c.returnFunction(h);
     const returns = try c.body(returns_fn);
-    try c.define(returns_fn, try returns.ret(try returns.sequenceValue(answer, &.{try returns.parameter("result")})));
+    try c.define(
+        returns_fn,
+        try returns.ret(try returns.sequenceValue(answer, &.{try returns.parameter("result")})),
+    );
     const clause_fn = try c.clauseFunction(h);
     const clause = try c.body(clause_fn);
     const token = try clause.parameter("resumption");
@@ -68,8 +95,15 @@ fn interpret(c: *a.Context, choice: *const Family, element: *const a.Schema, opt
         break :blk try clause.concat(left, right);
     } else left;
     try c.define(clause_fn, try clause.ret(result));
-    const value: Interpretation = .{ .handler = h, .answer = answer, .resumption = try c.resumptionSchemaFor(h, f.effect) };
+    const value: Interpretation = .{
+        .handler = h,
+        .answer = answer,
+        .resumption = try c.resumptionSchemaFor(h, f.effect),
+    };
     const allocator = a.interop.builder(c).allocator();
-    try f.interpretations.append(allocator, .{ .key = try KeyOps.snapshot(allocator, key), .value = value });
+    try f.interpretations.append(
+        allocator,
+        .{ .key = try KeyOps.snapshot(allocator, key), .value = value },
+    );
     return value;
 }

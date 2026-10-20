@@ -6,7 +6,14 @@ const p = @import("horos_data").program;
 
 pub fn exitInfo(builder: *source.Builder, failure: p.Id) source.Error!p.Id {
     const unit = try builder.scalar(void);
-    const reason = try builder.schema(.{ .sum = &.{ try builder.schema(.text), try builder.schema(.bytes) } });
+    const reason = try builder.schema(.{ .sum = &.{
+        try builder.schema(.text),
+        try builder.schema(.bytes),
+    } });
     const primary = try builder.schema(.{ .sum = &.{ unit, failure, reason, unit } });
-    return builder.schema(.{ .product = &.{ primary, try builder.schema(.{ .sum = &.{ unit, reason } }), try builder.schema(.{ .seq = failure }) } });
+    return builder.schema(.{ .product = &.{
+        primary,
+        try builder.schema(.{ .sum = &.{ unit, reason } }),
+        try builder.schema(.{ .seq = failure }),
+    } });
 }

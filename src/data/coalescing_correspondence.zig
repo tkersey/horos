@@ -20,9 +20,18 @@ pub const Correspondence = struct {
         var maps: r.Maps = undefined;
         for (trace.maps, &maps) |before, *after| after.* = try a.dupe(p.Id, before);
         const regions = try a.alloc(Region, trace.regions.len);
-        for (trace.regions, regions) |before, *after| after.* = .{ .original = before.original, .current = before.current };
+        for (
+            trace.regions,
+            regions,
+        ) |before, *after| after.* = .{ .original = before.original, .current = before.current };
         const locals = try a.alloc(witness.Local, trace.locals.len);
-        for (trace.locals, locals) |before, *after| after.* = .{ .slots = try a.dupe(p.Id, before.slots), .custody = try a.dupe(p.Id, before.custody) };
+        for (
+            trace.locals,
+            locals,
+        ) |before, *after| after.* = .{
+            .slots = try a.dupe(p.Id, before.slots),
+            .custody = try a.dupe(p.Id, before.custody),
+        };
         return .{ .maps = maps, .regions = regions, .locals = locals };
     }
 };
@@ -31,7 +40,12 @@ fn require(ok: bool) Error!void {
     if (!ok) return error.InvalidCorrespondence;
 }
 
-pub fn validate(a: std.mem.Allocator, original: ir.Program, candidate: ir.Program, map: Correspondence) Error!void {
+pub fn validate(
+    a: std.mem.Allocator,
+    original: ir.Program,
+    candidate: ir.Program,
+    map: Correspondence,
+) Error!void {
     var original_facts = try admission.analyze(a, original);
     original_facts.deinit();
     var candidate_facts = try admission.analyze(a, candidate);
@@ -56,7 +70,9 @@ pub fn validate(a: std.mem.Allocator, original: ir.Program, candidate: ir.Progra
         if (kind == @backingInt(r.Kind.region)) {
             try require(map.regions.len == live.regions.count());
             for (map.regions) |region| {
-                const index = live.regions.get(region.original) orelse return error.InvalidCorrespondence;
+                const index = live.regions.get(
+                    region.original,
+                ) orelse return error.InvalidCorrespondence;
                 try require(index < mapped.len and region.current < targets[kind]);
                 try require(mapped[@intCast(index)] == r.missing);
                 mapped[@intCast(index)] = region.current;
@@ -103,5 +119,10 @@ pub fn validate(a: std.mem.Allocator, original: ir.Program, candidate: ir.Progra
         try require(rep.* != r.missing);
     }
     representatives[block_kind] = block_reps;
-    try validation.validate(a, live.program, candidate, .{ .representatives = representatives, .final = final, .locals = locals });
+    try validation.validate(
+        a,
+        live.program,
+        candidate,
+        .{ .representatives = representatives, .final = final, .locals = locals },
+    );
 }

@@ -17,7 +17,13 @@ const Node = struct {
     high: Member,
     // Runs have zero payload. Word leaves have nonzero bits; split trees have
     // two nonempty roots and span multiple words. No cached count or kind tag.
-    payload: extern union { word: u64, tree: extern struct { left: Root, right: Root } } = .{ .tree = .{ .left = empty, .right = empty } },
+    payload: extern union {
+        word: u64,
+        tree: extern struct {
+            left: Root,
+            right: Root,
+        },
+    } = .{ .tree = .{ .left = empty, .right = empty } },
 
     comptime {
         // Both initialized root lanes must fill the word used for equality.
@@ -35,7 +41,10 @@ const Node = struct {
         std.debug.assert(self.isRun() and (self.low >> 6) == ((self.high - 1) >> 6));
         const base = self.low & ~@as(u64, 63);
         const high = self.high - base;
-        const upper: u64 = if (high == 64) std.math.maxInt(u64) else (@as(u64, 1) << @intCast(high)) - 1;
+        const upper: u64 = if (high == 64) std.math.maxInt(u64) else (@as(
+            u64,
+            1,
+        ) << @intCast(high)) - 1;
         return upper & ~((@as(u64, 1) << @intCast(self.low - base)) - 1);
     }
 };
@@ -81,7 +90,11 @@ const Nodes = union(enum) {
     }
     fn appendAssumeCapacity(self: *Nodes, value: Node) void {
         switch (self.*) {
-            .compact => |*list| list.appendAssumeCapacity(.{ .low = @intCast(value.low), .high = @intCast(value.high), .payload = value.payload.word }),
+            .compact => |*list| list.appendAssumeCapacity(.{
+                .low = @intCast(value.low),
+                .high = @intCast(value.high),
+                .payload = value.payload.word,
+            }),
             .wide => |*list| list.appendAssumeCapacity(value),
         }
     }
@@ -198,21 +211,46 @@ pub const Pool = struct {
     // Unmanaged containers retain no allocator/context pointer. Each operation
     // borrows this Pool only until its allocation or deallocation returns.
     fn bufferAllocator(self: *Pool) std.mem.Allocator {
-        return .{ .ptr = self, .vtable = &.{ .alloc = allocateBuffer, .resize = resizeBuffer, .remap = remapBuffer, .free = freeBuffer } };
+        return .{
+            .ptr = self,
+            .vtable = &.{
+                .alloc = allocateBuffer,
+                .resize = resizeBuffer,
+                .remap = remapBuffer,
+                .free = freeBuffer,
+            },
+        };
     }
-    fn allocateBuffer(context: *anyopaque, length: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+    fn allocateBuffer(
+        context: *anyopaque,
+        length: usize,
+        alignment: std.mem.Alignment,
+        ra: usize,
+    ) ?[*]u8 {
         const self: *Pool = @ptrCast(@alignCast(context));
         const bytes = self.allocator.rawAlloc(length, alignment, ra) orelse return null;
         self.retained_bytes += length;
         return bytes;
     }
-    fn resizeBuffer(context: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, length: usize, ra: usize) bool {
+    fn resizeBuffer(
+        context: *anyopaque,
+        bytes: []u8,
+        alignment: std.mem.Alignment,
+        length: usize,
+        ra: usize,
+    ) bool {
         const self: *Pool = @ptrCast(@alignCast(context));
         if (!self.allocator.rawResize(bytes, alignment, length, ra)) return false;
         self.retained_bytes = self.retained_bytes - bytes.len + length;
         return true;
     }
-    fn remapBuffer(context: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, length: usize, ra: usize) ?[*]u8 {
+    fn remapBuffer(
+        context: *anyopaque,
+        bytes: []u8,
+        alignment: std.mem.Alignment,
+        length: usize,
+        ra: usize,
+    ) ?[*]u8 {
         const self: *Pool = @ptrCast(@alignCast(context));
         const result = self.allocator.rawRemap(bytes, alignment, length, ra) orelse return null;
         self.retained_bytes = self.retained_bytes - bytes.len + length;
@@ -240,14 +278,20 @@ pub const Pool = struct {
         if (value.isWord()) return value.payload.word;
         if (!value.isRun()) return self.lowWord(value.payload.tree.left) | self.lowWord(value.payload.tree.right);
         const high = @min(value.high, 64);
-        const upper: u64 = if (high == 64) std.math.maxInt(u64) else (@as(u64, 1) << @intCast(high)) - 1;
+        const upper: u64 = if (high == 64) std.math.maxInt(u64) else (@as(
+            u64,
+            1,
+        ) << @intCast(high)) - 1;
         const lower = (@as(u64, 1) << @intCast(value.low)) - 1;
         return upper & ~lower;
     }
 
     fn intern(self: *Pool, value: Node) Error!Root {
         const hash = NodeContext.hash(.{}, value);
-        if (self.base) |base| if (base.pool().interned.getKeyAdapted(value, LookupContext{ .pool = base.pool(), .hash_value = hash })) |root| return root;
+        if (self.base) |base| if (base.pool().interned.getKeyAdapted(
+            value,
+            LookupContext{ .pool = base.pool(), .hash_value = hash },
+        )) |root| return root;
         const lookup: LookupContext = .{ .pool = self, .hash_value = hash };
         // A separate index-space bound is needed only when Root is narrower.
         // At pointer width, the checked additions below already enforce it.
@@ -263,7 +307,11 @@ pub const Pool = struct {
             // Existing roots never require allocation, including at capacity.
             if (self.interned.getKeyAdapted(value, lookup)) |root| return root;
             try self.ensureNodeCapacity();
-            try self.interned.ensureUnusedCapacityContext(self.bufferAllocator(), 1, .{ .pool = self });
+            try self.interned.ensureUnusedCapacityContext(
+                self.bufferAllocator(),
+                1,
+                .{ .pool = self },
+            );
         }
         std.debug.assert(value.low < value.high and value.high <= self.limit);
         const local = std.math.add(usize, self.nodeCount(), 1) catch return error.OutOfMemory;
@@ -343,9 +391,15 @@ pub const Pool = struct {
         while (current != empty) {
             const value = self.node(current);
             if (member < value.low or member >= value.high) return false;
-            if (value.isWord()) return value.payload.word & (@as(u64, 1) << @intCast(member & 63)) != 0;
+            if (value.isWord()) return value.payload.word & (@as(
+                u64,
+                1,
+            ) << @intCast(member & 63)) != 0;
             if (value.isRun()) return true;
-            current = if (member < split(value.low, value.high)) value.payload.tree.left else value.payload.tree.right;
+            current = if (member < split(
+                value.low,
+                value.high,
+            )) value.payload.tree.left else value.payload.tree.right;
         }
         return false;
     }
@@ -423,15 +477,24 @@ pub const Pool = struct {
         if (root == empty) return empty;
         const value = self.node(root);
         if (member < value.low or member >= value.high) return root;
-        if (value.isWord()) return self.word(value.low & ~@as(u64, 63), value.payload.word & ~(@as(u64, 1) << @intCast(member & 63)));
+        if (value.isWord()) return self.word(
+            value.low & ~@as(u64, 63),
+            value.payload.word & ~(@as(u64, 1) << @intCast(member & 63)),
+        );
         if (value.isRun()) {
             const left = try self.run(value.low, member);
             const right = try self.run(member + 1, value.high);
             return self.unite(left, right);
         }
         if (member < split(value.low, value.high))
-            return self.join(try self.remove(value.payload.tree.left, member), value.payload.tree.right);
-        return self.join(value.payload.tree.left, try self.remove(value.payload.tree.right, member));
+            return self.join(
+                try self.remove(value.payload.tree.left, member),
+                value.payload.tree.right,
+            );
+        return self.join(
+            value.payload.tree.left,
+            try self.remove(value.payload.tree.right, member),
+        );
     }
 
     pub fn excluding(self: *Pool, root: Root, members: []const Member) Error!Root {
@@ -469,7 +532,10 @@ pub const Pool = struct {
         const middle = split(a.low, b.high);
         std.debug.assert(a.high <= middle and b.low >= middle);
         if (a.isRun() and b.isRun() and a.high == b.low) return self.run(a.low, b.high);
-        if ((a.low >> 6) == ((b.high - 1) >> 6)) return self.word(a.low & ~@as(u64, 63), a.wordBits() | b.wordBits());
+        if ((a.low >> 6) == ((b.high - 1) >> 6)) return self.word(
+            a.low & ~@as(u64, 63),
+            a.wordBits() | b.wordBits(),
+        );
         return self.intern(.{
             .low = a.low,
             .high = b.high,

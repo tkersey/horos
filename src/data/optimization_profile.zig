@@ -19,13 +19,29 @@ pub const Record = struct {
 };
 
 pub fn validate(allocator: std.mem.Allocator, program: ir.Program, record: Record) Error!void {
-    if (record.version != schema_version or !std.mem.eql(u8, record.toolchain_identity, toolchain) or record.block_counts.len != program.blocks.len) return error.InvalidOptimizationProfile;
+    if (record.version != schema_version or !std.mem.eql(
+        u8,
+        record.toolchain_identity,
+        toolchain,
+    ) or record.block_counts.len != program.blocks.len) return error.InvalidOptimizationProfile;
     var total: u64 = 0;
-    for (record.block_counts) |count| total = std.math.add(u64, total, count) catch return error.InvalidOptimizationProfile;
-    if (total != record.total or !std.mem.eql(u8, &record.image_identity, &try image.identity(allocator, program))) return error.InvalidOptimizationProfile;
+    for (record.block_counts) |count| total = std.math.add(
+        u64,
+        total,
+        count,
+    ) catch return error.InvalidOptimizationProfile;
+    if (total != record.total or !std.mem.eql(
+        u8,
+        &record.image_identity,
+        &try image.identity(allocator, program),
+    )) return error.InvalidOptimizationProfile;
 }
 
-pub fn orderedBlocks(allocator: std.mem.Allocator, program: ir.Program, record: Record) Error![]usize {
+pub fn orderedBlocks(
+    allocator: std.mem.Allocator,
+    program: ir.Program,
+    record: Record,
+) Error![]usize {
     try validate(allocator, program, record);
     const order = try allocator.alloc(usize, program.blocks.len);
     for (order, 0..) |*id, index| id.* = index;
@@ -65,13 +81,28 @@ pub const Collector = struct {
     }
     pub fn observe(self: *@This(), block: usize) Error!void {
         if (block >= self.counts.len) return error.InvalidOptimizationProfile;
-        const count = std.math.add(u64, self.counts[block], 1) catch return error.InvalidOptimizationProfile;
-        const total = std.math.add(u64, self.total, 1) catch return error.InvalidOptimizationProfile;
+        const count = std.math.add(
+            u64,
+            self.counts[block],
+            1,
+        ) catch return error.InvalidOptimizationProfile;
+        const total = std.math.add(
+            u64,
+            self.total,
+            1,
+        ) catch return error.InvalidOptimizationProfile;
         self.counts[block] = count;
         self.total = total;
     }
     pub fn snapshot(self: @This(), allocator: std.mem.Allocator) Error!Owned {
-        return .{ .allocator = allocator, .record = .{ .image_identity = self.identity, .block_counts = try allocator.dupe(u64, self.counts), .total = self.total } };
+        return .{
+            .allocator = allocator,
+            .record = .{
+                .image_identity = self.identity,
+                .block_counts = try allocator.dupe(u64, self.counts),
+                .total = self.total,
+            },
+        };
     }
 };
 
@@ -109,7 +140,12 @@ pub fn decode(allocator: std.mem.Allocator, program: ir.Program, bytes: []const 
     errdefer allocator.free(counts);
     for (counts) |*value| value.* = try reader.fixed(u64);
     try reader.finish();
-    const record: Record = .{ .version = version, .image_identity = identity, .block_counts = counts, .total = total };
+    const record: Record = .{
+        .version = version,
+        .image_identity = identity,
+        .block_counts = counts,
+        .total = total,
+    };
     try validate(allocator, program, record);
     return .{ .allocator = allocator, .record = record };
 }

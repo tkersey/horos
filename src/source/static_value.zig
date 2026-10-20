@@ -21,13 +21,21 @@ pub fn equal(a: Knowledge, b: Knowledge) bool {
         .dynamic => true,
         .known => |v| v.schema == b.known.schema and std.mem.eql(u8, v.bytes, b.known.bytes),
         .product => |v| blk: {
-            if (v.schema != b.product.schema or v.fields.len != b.product.fields.len) break :blk false;
+            if (v.schema != b.product.schema or
+                v.fields.len != b.product.fields.len)
+                break :blk false;
             for (v.fields, b.product.fields) |x, y| if (!equal(x, y)) break :blk false;
             break :blk true;
         },
     };
 }
-pub fn validate(a: std.mem.Allocator, m: ast.Module, facts: data.admission.SchemaFacts, schema: p.Id, k: Knowledge) Error!void {
+pub fn validate(
+    a: std.mem.Allocator,
+    m: ast.Module,
+    facts: data.admission.SchemaFacts,
+    schema: p.Id,
+    k: Knowledge,
+) Error!void {
     switch (k) {
         .dynamic => {},
         .known => |literal| {
@@ -35,7 +43,9 @@ pub fn validate(a: std.mem.Allocator, m: ast.Module, facts: data.admission.Schem
             try data.admission.value(a, m.schemas, facts, literal);
         },
         .product => |v| {
-            if (v.schema != schema or schema >= m.schemas.len or m.schemas[@intCast(schema)] != .product) return error.TypeMismatch;
+            if (v.schema != schema or schema >= m.schemas.len or m.schemas[
+                @intCast(schema)
+            ] != .product) return error.TypeMismatch;
             if (!facts.exportable[@intCast(schema)]) return error.InvalidValue;
             const fields = m.schemas[@intCast(schema)].product;
             if (v.fields.len != fields.len) return error.TypeMismatch;
@@ -43,7 +53,14 @@ pub fn validate(a: std.mem.Allocator, m: ast.Module, facts: data.admission.Schem
         },
     }
 }
-pub fn field(a: std.mem.Allocator, m: ast.Module, facts: data.admission.SchemaFacts, value: Knowledge, index: p.Id, left: *u64) Error!Knowledge {
+pub fn field(
+    a: std.mem.Allocator,
+    m: ast.Module,
+    facts: data.admission.SchemaFacts,
+    value: Knowledge,
+    index: p.Id,
+    left: *u64,
+) Error!Knowledge {
     return switch (value) {
         .dynamic => .dynamic,
         .product => |v| if (index < v.fields.len) v.fields[@intCast(index)] else .dynamic,
@@ -65,9 +82,20 @@ fn scalar(a: std.mem.Allocator, m: ast.Module, schema: p.Id, bytes: [8]u8) Error
     return .{ .known = .{ .schema = schema, .bytes = try a.dupe(u8, bytes[0..n]) } };
 }
 fn number(a: std.mem.Allocator, m: ast.Module, schema: p.Id, value: u64) Error!Knowledge {
-    return scalar(a, m, schema, data.scalar.fromInteger(m.schemas[@intCast(schema)], value) orelse return .dynamic);
+    return scalar(
+        a,
+        m,
+        schema,
+        data.scalar.fromInteger(m.schemas[@intCast(schema)], value) orelse return .dynamic,
+    );
 }
-fn encoded(a: std.mem.Allocator, schema: p.Id, prefix: ?u64, fields: []const Knowledge, left: *u64) Error!Knowledge {
+fn encoded(
+    a: std.mem.Allocator,
+    schema: p.Id,
+    prefix: ?u64,
+    fields: []const Knowledge,
+    left: *u64,
+) Error!Knowledge {
     var measure: data.wire.Writer = .{};
     if (prefix) |v| try measure.natural(v);
     for (fields) |f| {
@@ -83,7 +111,14 @@ fn encoded(a: std.mem.Allocator, schema: p.Id, prefix: ?u64, fields: []const Kno
 }
 /// Partial fields may be propagated only after the enclosing expression has
 /// evaluated. The caller separately tracks whether deleting evaluation is safe.
-pub fn primitive(a: std.mem.Allocator, m: ast.Module, facts: data.admission.SchemaFacts, value: ast.Value, operands: []const Knowledge, left: *u64) Error!Knowledge {
+pub fn primitive(
+    a: std.mem.Allocator,
+    m: ast.Module,
+    facts: data.admission.SchemaFacts,
+    value: ast.Value,
+    operands: []const Knowledge,
+    left: *u64,
+) Error!Knowledge {
     const op = value.expression.primitive;
     const schema = value.schema;
     // Knowledge reifies into ordinary source literals. Keep its entire
@@ -101,23 +136,50 @@ pub fn primitive(a: std.mem.Allocator, m: ast.Module, facts: data.admission.Sche
     switch (op.opcode) {
         .product, .field, .move => unreachable,
         .variant => return encoded(a, schema, op.immediate, operands, left),
-        .sequence => return encoded(a, schema, if (m.schemas[@intCast(schema)] == .array) null else operands.len, operands, left),
+        .sequence => return encoded(
+            a,
+            schema,
+            if (m.schemas[@intCast(schema)] == .array) null else operands.len,
+            operands,
+            left,
+        ),
         .boolean_not => {
             var bytes = @as([8]u8, @splat(0));
             bytes[0] = 1 - operands[0].known.bytes[0];
             return scalar(a, m, schema, bytes);
         },
-        .integer_add, .integer_sub, .integer_mul, .integer_div, .integer_rem, .integer_bit_and, .integer_bit_or, .integer_bit_xor, .equal, .less => {
+        .integer_add,
+        .integer_sub,
+        .integer_mul,
+        .integer_div,
+        .integer_rem,
+        .integer_bit_and,
+        .integer_bit_or,
+        .integer_bit_xor,
+        .equal,
+        .less,
+        => {
             const shape = m.schemas[@intCast(operands[0].known.schema)];
             const lhs = data.scalar.fromBytes(shape, operands[0].known.bytes) catch return .dynamic;
-            const right = data.scalar.fromBytes(shape, operands[1].known.bytes) catch return .dynamic;
+            const right = data.scalar.fromBytes(
+                shape,
+                operands[1].known.bytes,
+            ) catch return .dynamic;
             const result = data.scalar.binary(op.opcode, shape, lhs, right) catch return .dynamic;
             return if (result == .value) scalar(a, m, schema, result.value) else .dynamic;
         },
         .integer_convert, .integer_bit_not, .enum_tag => {
             const shape = m.schemas[@intCast(operands[0].known.schema)];
-            const input = data.scalar.fromBytes(shape, operands[0].known.bytes) catch return .dynamic;
-            const result = data.scalar.unary(op.opcode, shape, m.schemas[@intCast(schema)], input) catch return .dynamic;
+            const input = data.scalar.fromBytes(
+                shape,
+                operands[0].known.bytes,
+            ) catch return .dynamic;
+            const result = data.scalar.unary(
+                op.opcode,
+                shape,
+                m.schemas[@intCast(schema)],
+                input,
+            ) catch return .dynamic;
             return if (result == .value) scalar(a, m, schema, result.value) else .dynamic;
         },
         .variant_tag, .variant_payload => {
@@ -142,12 +204,24 @@ pub fn primitive(a: std.mem.Allocator, m: ast.Module, facts: data.admission.Sche
                 .seq => |v| v,
                 else => return .dynamic,
             };
-            if (facts.minimum[@intCast(element)] == 0) return encoded(a, schema, 1, &.{.{ .known = .{ .schema = element, .bytes = &.{} } }}, left);
+            if (facts.minimum[@intCast(element)] == 0) return encoded(
+                a,
+                schema,
+                1,
+                &.{.{ .known = .{ .schema = element, .bytes = &.{} } }},
+                left,
+            );
             var i: u64 = 0;
             while (i <= index) : (i += 1) {
                 try spend(left, 1);
                 const bytes = try data.admission.readValue(a, m.schemas, facts, element, &reader);
-                if (i == index) return encoded(a, schema, 1, &.{.{ .known = .{ .schema = element, .bytes = bytes } }}, left);
+                if (i == index) return encoded(
+                    a,
+                    schema,
+                    1,
+                    &.{.{ .known = .{ .schema = element, .bytes = bytes } }},
+                    left,
+                );
             }
             unreachable;
         },
@@ -179,5 +253,8 @@ pub fn payload(value: Knowledge, schema: p.Id) Error!struct { tag: usize, value:
     if (value != .known) return error.InvalidValue;
     var reader: data.wire.Reader = .{ .input = value.known.bytes };
     const tag = try reader.count();
-    return .{ .tag = tag, .value = .{ .known = .{ .schema = schema, .bytes = reader.input[reader.position..] } } };
+    return .{
+        .tag = tag,
+        .value = .{ .known = .{ .schema = schema, .bytes = reader.input[reader.position..] } },
+    };
 }

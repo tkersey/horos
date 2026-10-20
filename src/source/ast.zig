@@ -8,11 +8,22 @@ pub const Value = struct {
     expression: union(enum) {
         variable: Id,
         literal: Id,
-        primitive: struct { opcode: p.Opcode, operands: []const Id, immediate: Id = 0, failures: []const p.InstructionFailure = &.{} },
+        primitive: struct {
+            opcode: p.Opcode,
+            operands: []const Id,
+            immediate: Id = 0,
+            failures: []const p.InstructionFailure = &.{},
+        },
         lambda: Id,
     },
 };
-pub const Operation = struct { effect: Id, capability: ?Id = null, payload: Id, bodies: []const Id = &.{}, use_site_capabilities: []const Id = &.{} };
+pub const Operation = struct {
+    effect: Id,
+    capability: ?Id = null,
+    payload: Id,
+    bodies: []const Id = &.{},
+    use_site_capabilities: []const Id = &.{},
+};
 pub const Term = union(enum) {
     value: Id,
     bind: struct { variable: Id, value: Id, next: Id },
@@ -20,11 +31,22 @@ pub const Term = union(enum) {
     call: struct { function: Id, arguments: []const Id },
     apply: struct { computation: Id, arguments: []const Id },
     perform: Operation,
-    handle: struct { handler: Id, body: Id, arguments: []const Id = &.{}, state: []const Id = &.{} },
+    handle: struct {
+        handler: Id,
+        body: Id,
+        arguments: []const Id = &.{},
+        state: []const Id = &.{},
+    },
     resume_value: struct { resumption: Id, argument: Id },
     resume_with: struct { resumption: Id, argument: Id, handler: Id, state: []const Id = &.{} },
     resume_computation: struct { resumption: Id, computation: Id },
-    protect: struct { body: Id, cleanup: Id, arguments: []const Id = &.{}, resource: ?Id = null, loan_region: ?Id = null },
+    protect: struct {
+        body: Id,
+        cleanup: Id,
+        arguments: []const Id = &.{},
+        resource: ?Id = null,
+        loan_region: ?Id = null,
+    },
     with_region: struct { region: Id, body: Id, arguments: []const Id = &.{} },
     dispose: Id,
     fail: Id,

@@ -29,7 +29,12 @@ pub const Prover = struct {
     pub fn deinit(self: *Prover) void {
         self.active.deinit(self.allocator);
     }
-    pub fn resolve(self: *Prover, block: usize, before: usize, slot: p.Id) std.mem.Allocator.Error!?Constant {
+    pub fn resolve(
+        self: *Prover,
+        block: usize,
+        before: usize,
+        slot: p.Id,
+    ) std.mem.Allocator.Error!?Constant {
         if (self.exhausted or !self.tick()) return null;
         if (self.active.items.len >= self.max_depth) {
             self.exhausted = true;
@@ -64,13 +69,21 @@ pub const Prover = struct {
                 .computation => .{ .constructor = instruction.immediate },
                 .variant => .{ .variant = instruction.immediate },
                 .variant_tag => blk: {
-                    const value = (try self.resolve(block, index, instruction.operands[0])) orelse break :blk null;
+                    const value = (try self.resolve(
+                        block,
+                        index,
+                        instruction.operands[0],
+                    )) orelse break :blk null;
                     if (value != .variant) break :blk null;
                     break :blk .{ .unsigned = value.variant };
                 },
                 .move => self.resolve(block, index, instruction.operands[0]),
                 .boolean_not => blk: {
-                    const value = (try self.resolve(block, index, instruction.operands[0])) orelse break :blk null;
+                    const value = (try self.resolve(
+                        block,
+                        index,
+                        instruction.operands[0],
+                    )) orelse break :blk null;
                     if (value != .boolean) break :blk null;
                     break :blk .{ .boolean = !value.boolean };
                 },
@@ -110,8 +123,14 @@ pub const Prover = struct {
             // A disagreeing, unknown or cyclic caller invalidates the proof.
             for (self.program.blocks, 0..) |caller, id| {
                 if (!self.tick()) return null;
-                if (caller.terminator != .call or caller.terminator.call.function != source.function) continue;
-                incoming.merge(try self.resolve(id, caller.instructions.len, caller.terminator.call.arguments[parameter]));
+                if (caller.terminator != .call or
+                    caller.terminator.call.function != source.function)
+                    continue;
+                incoming.merge(try self.resolve(
+                    id,
+                    caller.instructions.len,
+                    caller.terminator.call.arguments[parameter],
+                ));
             }
         }
         for (self.program.blocks, 0..) |predecessor, id| {
@@ -121,10 +140,20 @@ pub const Prover = struct {
                 .return_value, .fail => {},
                 .jump, .yield_value => |next| try incoming.edge(id, next, &.{}),
                 .branch => |branch| {
-                    if (branch.when_true.block != block and branch.when_false.block != block) continue;
-                    const condition = try self.resolve(id, predecessor.instructions.len, branch.condition);
+                    if (branch.when_true.block != block and
+                        branch.when_false.block != block)
+                        continue;
+                    const condition = try self.resolve(
+                        id,
+                        predecessor.instructions.len,
+                        branch.condition,
+                    );
                     if (condition != null and condition.? == .boolean) {
-                        try incoming.edge(id, if (condition.?.boolean) branch.when_true else branch.when_false, &.{});
+                        try incoming.edge(
+                            id,
+                            if (condition.?.boolean) branch.when_true else branch.when_false,
+                            &.{},
+                        );
                     } else {
                         try incoming.edge(id, branch.when_true, &.{});
                         try incoming.edge(id, branch.when_false, &.{});
@@ -159,10 +188,18 @@ const Incoming = struct {
     count: usize = 0,
     value: ?Constant = null,
     fn merge(self: *Incoming, value: ?Constant) void {
-        if (self.count == 0) self.value = value else if (!std.meta.eql(self.value, value)) self.value = null;
+        if (self.count == 0) self.value = value else if (!std.meta.eql(
+            self.value,
+            value,
+        )) self.value = null;
         self.count += 1;
     }
-    fn edge(self: *Incoming, predecessor: usize, next: ir.Edge, overwritten: []const p.Id) std.mem.Allocator.Error!void {
+    fn edge(
+        self: *Incoming,
+        predecessor: usize,
+        next: ir.Edge,
+        overwritten: []const p.Id,
+    ) std.mem.Allocator.Error!void {
         if (!self.prover.tick()) {
             self.merge(null);
             return;
@@ -187,6 +224,10 @@ const Incoming = struct {
             return;
         }
         // Resolve the source in the predecessor view, not the updated target.
-        self.merge(try self.prover.resolve(predecessor, self.prover.program.blocks[predecessor].instructions.len, origin));
+        self.merge(try self.prover.resolve(
+            predecessor,
+            self.prover.program.blocks[predecessor].instructions.len,
+            origin,
+        ));
     }
 };

@@ -18,7 +18,10 @@ pub fn coordinate(index: usize) Row {
 }
 pub fn mask(dimension: usize) Row {
     std.debug.assert(dimension <= max_dimension);
-    return if (dimension == max_dimension) std.math.maxInt(Row) else (@as(Row, 1) << @intCast(dimension)) - 1;
+    return if (dimension == max_dimension) std.math.maxInt(Row) else (@as(
+        Row,
+        1,
+    ) << @intCast(dimension)) - 1;
 }
 pub const Space = struct {
     dimension: usize,
@@ -94,7 +97,9 @@ pub const Space = struct {
 /// Pull a successor observation back through a parallel word update. Each
 /// transition row is an expression in the predecessor coordinates.
 pub fn pull(row: Row, transition: []const Row, source_dimension: usize, budget: *Budget) Error!Row {
-    if (transition.len > max_dimension or source_dimension > max_dimension or row & ~mask(transition.len) != 0) return error.InvalidAffineSpace;
+    if (transition.len > max_dimension or source_dimension > max_dimension or row & ~mask(
+        transition.len,
+    ) != 0) return error.InvalidAffineSpace;
     var result: Row = 0;
     for (transition, 0..) |input, index| {
         try budget.charge();
@@ -108,7 +113,12 @@ pub const Edge = struct { source: usize, target: usize, matrix: []const Row };
 
 /// Propagate changed successor requirements through indexed predecessor edges.
 /// The caller owns the returned spaces; failures release every partial owner.
-pub fn closeLocations(allocator: std.mem.Allocator, seeds: []const Space, edges: []const Edge, budget: *Budget) (Error || std.mem.Allocator.Error)![]Space {
+pub fn closeLocations(
+    allocator: std.mem.Allocator,
+    seeds: []const Space,
+    edges: []const Edge,
+    budget: *Budget,
+) (Error || std.mem.Allocator.Error)![]Space {
     const result = try allocator.dupe(Space, seeds);
     errdefer allocator.free(result);
     const none = std.math.maxInt(usize);
@@ -119,8 +129,13 @@ pub fn closeLocations(allocator: std.mem.Allocator, seeds: []const Space, edges:
     defer allocator.free(next);
     for (edges, 0..) |edge, index| {
         try budget.charge();
-        if (edge.source >= seeds.len or edge.target >= seeds.len or edge.matrix.len != seeds[edge.target].dimension) return error.InvalidAffineSpace;
-        for (edge.matrix) |row| if (row & ~mask(seeds[edge.source].dimension) != 0) return error.InvalidAffineSpace;
+        if (edge.source >= seeds.len or
+            edge.target >= seeds.len or
+            edge.matrix.len != seeds[edge.target].dimension)
+            return error.InvalidAffineSpace;
+        for (edge.matrix) |row| if (row & ~mask(
+            seeds[edge.source].dimension,
+        ) != 0) return error.InvalidAffineSpace;
         next[index] = heads[edge.target];
         heads[edge.target] = index;
     }
@@ -142,7 +157,12 @@ pub fn closeLocations(allocator: std.mem.Allocator, seeds: []const Space, edges:
             const edge = edges[index];
             var changed = false;
             for (observations) |row| {
-                const predecessor = try pull(row, edge.matrix, result[edge.source].dimension, budget);
+                const predecessor = try pull(
+                    row,
+                    edge.matrix,
+                    result[edge.source].dimension,
+                    budget,
+                );
                 changed = try result[edge.source].insert(predecessor, budget) or changed;
             }
             if (changed and !pending[edge.source]) {
@@ -155,10 +175,18 @@ pub fn closeLocations(allocator: std.mem.Allocator, seeds: []const Space, edges:
 }
 
 /// Single-location adapter uses the same predecessor-worklist implementation.
-pub fn close(allocator: std.mem.Allocator, seed: Space, transitions: []const []const Row, budget: *Budget) (Error || std.mem.Allocator.Error)!Space {
+pub fn close(
+    allocator: std.mem.Allocator,
+    seed: Space,
+    transitions: []const []const Row,
+    budget: *Budget,
+) (Error || std.mem.Allocator.Error)!Space {
     const edges = try allocator.alloc(Edge, transitions.len);
     defer allocator.free(edges);
-    for (transitions, edges) |matrix, *edge| edge.* = .{ .source = 0, .target = 0, .matrix = matrix };
+    for (
+        transitions,
+        edges,
+    ) |matrix, *edge| edge.* = .{ .source = 0, .target = 0, .matrix = matrix };
     const result = try closeLocations(allocator, &.{seed}, edges, budget);
     defer allocator.free(result);
     return result[0];
@@ -166,8 +194,16 @@ pub fn close(allocator: std.mem.Allocator, seed: Space, transitions: []const []c
 
 /// Independent certificate primitive: reconstruct an equation from supplied
 /// coefficients rather than invoking the closure finder or elimination routine.
-pub fn equation(expected: Row, coefficients_row: Row, basis: []const Row, dimension: usize, budget: *Budget) Error!void {
-    if (basis.len > max_dimension or dimension > max_dimension or coefficients_row & ~mask(basis.len) != 0 or expected & ~mask(dimension) != 0) return error.InvalidAffineSpace;
+pub fn equation(
+    expected: Row,
+    coefficients_row: Row,
+    basis: []const Row,
+    dimension: usize,
+    budget: *Budget,
+) Error!void {
+    if (basis.len > max_dimension or dimension > max_dimension or coefficients_row & ~mask(
+        basis.len,
+    ) != 0 or expected & ~mask(dimension) != 0) return error.InvalidAffineSpace;
     var actual: Row = 0;
     for (basis, 0..) |row, index| {
         try budget.charge();
@@ -200,7 +236,10 @@ test "future reset distinguishes currently equal parity and budgets do not publi
     const closed = try close(std.testing.allocator, seed, &.{&.{ 0, 0b10 }}, &budget);
     try std.testing.expectEqual(@as(usize, 2), closed.rank);
     var exhausted: Budget = .{ .remaining = 0 };
-    try std.testing.expectError(error.WorkLimit, close(std.testing.allocator, seed, &.{&.{ 0, 0b10 }}, &exhausted));
+    try std.testing.expectError(
+        error.WorkLimit,
+        close(std.testing.allocator, seed, &.{&.{ 0, 0b10 }}, &exhausted),
+    );
     try std.testing.expectEqual(@as(usize, 1), seed.rank);
 }
 
@@ -230,7 +269,12 @@ test "location closure retains full entry inspection and compresses future parit
     defer a.free(spaces);
     try std.testing.expectEqual(@as(usize, 2), spaces[0].rank);
     try std.testing.expectEqual(@as(usize, 1), spaces[1].rank);
-    const returned = try closeLocations(a, &.{ entry, loop }, &.{ forward, swap, .{ .source = 1, .target = 0, .matrix = &.{ 1, 2 } } }, &budget);
+    const returned = try closeLocations(
+        a,
+        &.{ entry, loop },
+        &.{ forward, swap, .{ .source = 1, .target = 0, .matrix = &.{ 1, 2 } } },
+        &budget,
+    );
     defer a.free(returned);
     try std.testing.expectEqual(@as(usize, 2), returned[1].rank);
 }

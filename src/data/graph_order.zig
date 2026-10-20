@@ -36,7 +36,11 @@ pub fn Owned(comptime State: type) type {
 
 /// Normalizes irrelevant IDs and interns blobs; distinct nodes never merge.
 /// The returned owner retains every byte, including the immutable blob payloads.
-pub fn canonicalize(allocator: std.mem.Allocator, state: anytype, statistics: ?*Statistics) Error!Owned(@TypeOf(state)) {
+pub fn canonicalize(
+    allocator: std.mem.Allocator,
+    state: anytype,
+    statistics: ?*Statistics,
+) Error!Owned(@TypeOf(state)) {
     const State = @TypeOf(state);
     const Node = std.meta.Elem(@TypeOf(state.nodes));
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -54,7 +58,13 @@ pub fn canonicalize(allocator: std.mem.Allocator, state: anytype, statistics: ?*
         if (statistics) |s| s.remapped_nodes +|= 1;
     }
     const blobs = try storage.alloc(g.Blob, plan.blobs.len);
-    for (blobs, plan.blobs) |*target, source| target.* = .{ .schema = source.schema, .bytes = try storage.dupe(u8, source.bytes) };
+    for (
+        blobs,
+        plan.blobs,
+    ) |*target, source| target.* = .{
+        .schema = source.schema,
+        .bytes = try storage.dupe(u8, source.bytes),
+    };
     const canonical_state: State = .{
         .program_identity = state.program_identity,
         .status = state.status,
@@ -117,7 +127,12 @@ fn discover(scratch: std.mem.Allocator, state: anytype, statistics: ?*Statistics
             },
         }
     }
-    return .{ .node_map = node_map, .blob_map = blob_map, .order = order.items, .blobs = blobs.items };
+    return .{
+        .node_map = node_map,
+        .blob_map = blob_map,
+        .order = order.items,
+        .blobs = blobs.items,
+    };
 }
 
 /// Check the same discovery order without constructing another graph owner.
@@ -125,7 +140,9 @@ pub fn checkCanonical(allocator: std.mem.Allocator, state: anytype) Error!void {
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
     const plan = try discover(scratch.allocator(), state, null);
-    if (plan.order.len != state.nodes.len or plan.blobs.len != state.blobs.len) return error.NonCanonical;
+    if (plan.order.len != state.nodes.len or
+        plan.blobs.len != state.blobs.len)
+        return error.NonCanonical;
     for (plan.node_map, 0..) |mapped, original| if (mapped != original) return error.NonCanonical;
     for (plan.blob_map, 0..) |mapped, original| if (mapped != original) return error.NonCanonical;
 }
@@ -142,7 +159,11 @@ const BlobContext = struct {
     }
 };
 
-fn reverseAppend(list: *std.ArrayList(Reference), children: []const Reference, allocator: std.mem.Allocator) Error!void {
+fn reverseAppend(
+    list: *std.ArrayList(Reference),
+    children: []const Reference,
+    allocator: std.mem.Allocator,
+) Error!void {
     var index = children.len;
     while (index != 0) {
         index -= 1;
@@ -151,21 +172,47 @@ fn reverseAppend(list: *std.ArrayList(Reference), children: []const Reference, a
 }
 
 /// The record type graph is acyclic; process cycles appear only as NodeRef IDs.
-pub fn references(comptime T: type, value: T, list: *std.ArrayList(Reference), allocator: std.mem.Allocator) Error!void {
+pub fn references(
+    comptime T: type,
+    value: T,
+    list: *std.ArrayList(Reference),
+    allocator: std.mem.Allocator,
+) Error!void {
     if (T == g.NodeRef) return list.append(allocator, .{ .node = value.id });
     if (T == g.BlobRef) return list.append(allocator, .{ .blob = value.id });
     switch (@typeInfo(T)) {
         .pointer => |info| {
-            if (info.child != u8) for (value) |element| try references(info.child, element, list, allocator);
+            if (info.child != u8) for (value) |element| try references(
+                info.child,
+                element,
+                list,
+                allocator,
+            );
         },
         .array => |info| {
-            if (info.child != u8) for (value) |element| try references(info.child, element, list, allocator);
+            if (info.child != u8) for (value) |element| try references(
+                info.child,
+                element,
+                list,
+                allocator,
+            );
         },
         .optional => |info| {
             if (value) |present| try references(info.child, present, list, allocator);
         },
-        .@"struct" => |info| inline for (info.field_names, info.field_types) |field_name, FieldType| try references(FieldType, @field(value, field_name), list, allocator),
-        .@"union" => |info| inline for (info.field_names, info.field_types) |field_name, FieldType| {
+        .@"struct" => |info| inline for (
+            info.field_names,
+            info.field_types,
+        ) |field_name, FieldType| try references(
+            FieldType,
+            @field(value, field_name),
+            list,
+            allocator,
+        ),
+        .@"union" => |info| inline for (
+            info.field_names,
+            info.field_types,
+        ) |field_name, FieldType| {
             if (std.mem.eql(u8, @tagName(value), field_name)) {
                 try references(FieldType, @field(value, field_name), list, allocator);
                 return;
@@ -175,30 +222,67 @@ pub fn references(comptime T: type, value: T, list: *std.ArrayList(Reference), a
     }
 }
 
-pub fn remap(comptime T: type, value: T, nodes: []const u64, blobs: []const u64, allocator: std.mem.Allocator) Error!T {
+pub fn remap(
+    comptime T: type,
+    value: T,
+    nodes: []const u64,
+    blobs: []const u64,
+    allocator: std.mem.Allocator,
+) Error!T {
     if (T == g.NodeRef) return .{ .id = nodes[@intCast(value.id)] };
     if (T == g.BlobRef) return .{ .id = blobs[@intCast(value.id)] };
     return switch (@typeInfo(T)) {
         .pointer => |info| blk: {
             const result = try allocator.alloc(info.child, value.len);
-            for (result, value) |*target, source| target.* = try remap(info.child, source, nodes, blobs, allocator);
+            for (
+                result,
+                value,
+            ) |*target, source| target.* = try remap(
+                info.child,
+                source,
+                nodes,
+                blobs,
+                allocator,
+            );
             break :blk result;
         },
-        .optional => |info| if (value) |present| try remap(info.child, present, nodes, blobs, allocator) else null,
+        .optional => |info| if (value) |present| try remap(
+            info.child,
+            present,
+            nodes,
+            blobs,
+            allocator,
+        ) else null,
         .array => |info| blk: {
             var result: T = undefined;
-            for (&result, value) |*target, source| target.* = try remap(info.child, source, nodes, blobs, allocator);
+            for (
+                &result,
+                value,
+            ) |*target, source| target.* = try remap(
+                info.child,
+                source,
+                nodes,
+                blobs,
+                allocator,
+            );
             break :blk result;
         },
         .@"struct" => |info| blk: {
             var result: T = undefined;
-            inline for (info.field_names, info.field_types) |field_name, FieldType| @field(result, field_name) = try remap(FieldType, @field(value, field_name), nodes, blobs, allocator);
+            inline for (
+                info.field_names,
+                info.field_types,
+            ) |field_name, FieldType| @field(result, field_name) = try remap(FieldType, @field(value, field_name), nodes, blobs, allocator);
             break :blk result;
         },
         .@"union" => |info| blk: {
             inline for (info.field_names, info.field_types) |field_name, FieldType| {
                 if (std.mem.eql(u8, @tagName(value), field_name))
-                    break :blk @unionInit(T, field_name, try remap(FieldType, @field(value, field_name), nodes, blobs, allocator));
+                    break :blk @unionInit(
+                        T,
+                        field_name,
+                        try remap(FieldType, @field(value, field_name), nodes, blobs, allocator),
+                    );
             }
             unreachable; // The active tag is one of this closed native union's fields.
         },

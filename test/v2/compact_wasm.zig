@@ -56,7 +56,12 @@ fn envelope(comptime T: type, length: usize) usize {
     var storage = std.heap.FixedBufferAllocator.init(&scratch);
     var decoded = data.invocation.decode(T, storage.allocator(), input[0..length]) catch return 0;
     defer decoded.deinit();
-    const encoded = data.invocation.encode(T, storage.allocator(), decoded.value, &output) catch return 0;
+    const encoded = data.invocation.encode(
+        T,
+        storage.allocator(),
+        decoded.value,
+        &output,
+    ) catch return 0;
     return encoded.len;
 }
 export fn invocation_encode(kind: u32, length: usize) usize {

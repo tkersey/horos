@@ -6,7 +6,11 @@ const p = @import("program.zig");
 const ir = @import("activation.zig");
 const g = @import("graph.zig");
 const invocation = @import("invocation.zig");
-const families = .{ p.Schema, p.Internal, ir.Source, ir.Terminator, g.Node, @FieldType(g.Value, "body"), @FieldType(g.Exit, "reason"), @FieldType(@FieldType(g.Node, "obligation"), "status"), invocation.Reason, invocation.Instance, invocation.Control, invocation.Outcome };
+const families = .{
+    p.Schema,                    p.Internal,                   ir.Source,                                              ir.Terminator,     g.Node,
+    @FieldType(g.Value, "body"), @FieldType(g.Exit, "reason"), @FieldType(@FieldType(g.Node, "obligation"), "status"), invocation.Reason, invocation.Instance,
+    invocation.Control,          invocation.Outcome,
+};
 fn sample(comptime T: type, allocator: std.mem.Allocator, mode: usize) std.mem.Allocator.Error!T {
     return switch (@typeInfo(T)) {
         .void => {},
@@ -26,11 +30,22 @@ fn sample(comptime T: type, allocator: std.mem.Allocator, mode: usize) std.mem.A
         },
         .@"struct" => |s| blk: {
             var out: T = undefined;
-            inline for (s.field_names, s.field_types) |name, Field| @field(out, name) = try sample(Field, allocator, mode);
+            inline for (
+                s.field_names,
+                s.field_types,
+            ) |name, Field| @field(out, name) = try sample(Field, allocator, mode);
             break :blk out;
         },
         .@"union" => |u| blk: {
-            inline for (u.field_names, u.field_types, 0..) |name, Field, i| if (mode % u.field_types.len == i) break :blk @unionInit(T, name, try sample(Field, allocator, mode));
+            inline for (
+                u.field_names,
+                u.field_types,
+                0..,
+            ) |name, Field, i| if (mode % u.field_types.len == i) break :blk @unionInit(
+                T,
+                name,
+                try sample(Field, allocator, mode),
+            );
             unreachable;
         },
         else => @compileError("unsupported fixture shape"),
@@ -39,7 +54,10 @@ fn sample(comptime T: type, allocator: std.mem.Allocator, mode: usize) std.mem.A
 test "direct union dispatch preserves all variants against captured baseline wire vectors" {
     var expected: wire.Writer = .{ .expected = golden };
     inline for (families) |T| {
-        inline for (@typeInfo(T).@"union".field_names, @typeInfo(T).@"union".field_types) |name, Field| {
+        inline for (
+            @typeInfo(T).@"union".field_names,
+            @typeInfo(T).@"union".field_types,
+        ) |name, Field| {
             for (0..4) |mode| {
                 var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
                 defer arena.deinit();
@@ -54,7 +72,11 @@ test "direct union dispatch preserves all variants against captured baseline wir
                 try std.testing.expect(record.equal(T, value, decoded));
                 for (0..new_writer.position) |length| {
                     var truncated: wire.Reader = .{ .input = new_storage[0..length] };
-                    if (record.read(T, &truncated, arena.allocator())) |_| return error.ExpectedTruncation else |_| {}
+                    if (record.read(
+                        T,
+                        &truncated,
+                        arena.allocator(),
+                    )) |_| return error.ExpectedTruncation else |_| {}
                 }
             }
         }
@@ -67,11 +89,17 @@ test "direct dispatch rejects sparse holes oversized tags and retired terminator
     const Value = union(Tag) { first: u64, last };
     for ([_][]const u8{ &.{0}, &.{7}, &.{12}, &.{ 0x80, 0x02 } }) |bytes| {
         var reader: wire.Reader = .{ .input = bytes };
-        try std.testing.expectError(error.InvalidTag, record.read(Value, &reader, std.testing.allocator));
+        try std.testing.expectError(
+            error.InvalidTag,
+            record.read(Value, &reader, std.testing.allocator),
+        );
         try std.testing.expectEqual(bytes.len, reader.position);
     }
     var reader: wire.Reader = .{ .input = &.{14} };
-    try std.testing.expectError(error.InvalidTag, record.read(ir.Terminator, &reader, std.testing.allocator));
+    try std.testing.expectError(
+        error.InvalidTag,
+        record.read(ir.Terminator, &reader, std.testing.allocator),
+    );
     reader = .{ .input = &.{ 15, 1, 2, 0 } };
     const valid = try record.read(ir.Terminator, &reader, std.testing.allocator);
     defer std.testing.allocator.free(valid.dispose.next.assignments);
@@ -85,7 +113,10 @@ test "direct dispatch preserves nested borrowed slices overlap and allocation bu
     const bytes = [_]u8{ 1, 2, 1, 'a', 1, 'b' };
     var reader: wire.Reader = .{ .input = &bytes };
     var budget: usize = @sizeOf([]const u8) * 2 - 1;
-    try std.testing.expectError(error.Capacity, record.readBounded(Value, &reader, std.testing.allocator, &budget));
+    try std.testing.expectError(
+        error.Capacity,
+        record.readBounded(Value, &reader, std.testing.allocator, &budget),
+    );
     try std.testing.expectEqual(@as(usize, 2), reader.position);
     try std.testing.expectEqual(@sizeOf([]const u8) * 2 - 1, budget);
     budget = @sizeOf([]const u8) * 2;
@@ -98,6 +129,9 @@ test "direct dispatch preserves nested borrowed slices overlap and allocation bu
     try std.testing.expect(record.overlaps(Value, decoded, std.mem.sliceAsBytes(decoded.names)));
     reader = .{ .input = &.{ 1, 3, 0 } };
     budget = 0;
-    try std.testing.expectError(error.Truncated, record.readBounded(Value, &reader, std.testing.allocator, &budget));
+    try std.testing.expectError(
+        error.Truncated,
+        record.readBounded(Value, &reader, std.testing.allocator, &budget),
+    );
     try std.testing.expectEqual(@as(usize, 2), reader.position);
 }

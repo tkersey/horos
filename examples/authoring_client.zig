@@ -13,11 +13,24 @@ pub const Application = struct {
         const lookup = try c.external("client/lookup", integer, integer);
         const question = try c.local("client/question", integer, integer, .linear);
         const capability = try c.capability(question);
-        const callable = try c.callable(.{}, integer, &.{question}, .{ .use = .reusable, .captures = &.{ integer, capability } });
+        const callable = try c.callable(
+            .{},
+            integer,
+            &.{question},
+            .{ .use = .reusable, .captures = &.{ integer, capability } },
+        );
         const failure = try c.literalFailure(void, {});
-        const responder = try c.function("lookup responder", .{ .key = integer }, integer, &.{lookup});
+        const responder = try c.function(
+            "lookup responder",
+            .{ .key = integer },
+            integer,
+            &.{lookup},
+        );
         const response = try c.body(responder);
-        try c.define(responder, try response.ret(try response.perform(lookup, try response.parameter("key"))));
+        try c.define(
+            responder,
+            try response.ret(try response.perform(lookup, try response.parameter("key"))),
+        );
         const h = try c.responder(question, integer, responder, .{
             .mode = .deep,
             .use = .linear,
@@ -25,7 +38,12 @@ pub const Application = struct {
             .captures = &.{ integer, input, capability, callable },
             .body_captures = &.{integer},
         });
-        const entry = try c.function("entry", .{ .use_effect = boolean, .numbers = input }, integer, &.{lookup});
+        const entry = try c.function(
+            "entry",
+            .{ .use_effect = boolean, .numbers = input },
+            integer,
+            &.{lookup},
+        );
         const body = try c.body(entry);
         const numbers = try body.parameter("numbers");
         const x = try body.field(numbers, "input");
@@ -47,7 +65,11 @@ pub const Application = struct {
         try c.define(work, try interpreted.ret(result));
         const true_result = try yes.handleWith(h, try yes.lambda(work, handled), .{});
         const false_result = try no.checkedAdd(x, offset, failure);
-        const joined = try body.conditional(try body.parameter("use_effect"), try yes.ret(true_result), try no.ret(false_result));
+        const joined = try body.conditional(
+            try body.parameter("use_effect"),
+            try yes.ret(true_result),
+            try no.ret(false_result),
+        );
         try c.define(entry, try body.ret(joined));
         return c.module(entry, unit);
     }
@@ -55,7 +77,10 @@ pub const Application = struct {
 pub fn main(init: std.process.Init) !void {
     var compiled = try horos.program.lower(init.gpa, Application);
     defer compiled.deinit();
-    const bytes = try init.gpa.alloc(u8, try horos.data.program_image.encodedLength(compiled.program));
+    const bytes = try init.gpa.alloc(
+        u8,
+        try horos.data.program_image.encodedLength(compiled.program),
+    );
     defer init.gpa.free(bytes);
     _ = try compiled.encode(init.gpa, bytes);
     var buffer: [4096]u8 = undefined;

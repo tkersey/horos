@@ -28,7 +28,16 @@ pub const ResumptionType = struct {
     /// Upper bound checked at every protected call/capture edge.
     obligations: bool = false,
 };
-pub const InternalTag = enum(u8) { computation = 0, capability = 1, cell = 2, region = 3, resumption = 4, suspension_package = 5, abstract_resource = 6, borrowed = 7 };
+pub const InternalTag = enum(u8) {
+    computation = 0,
+    capability = 1,
+    cell = 2,
+    region = 3,
+    resumption = 4,
+    suspension_package = 5,
+    abstract_resource = 6,
+    borrowed = 7,
+};
 pub const Internal = union(InternalTag) {
     computation: ComputationType,
     capability: Id,
@@ -40,7 +49,29 @@ pub const Internal = union(InternalTag) {
     borrowed: struct { value: Id, region: Id },
 };
 
-pub const SchemaTag = enum(u8) { unit = 0, boolean = 1, i8 = 2, i16 = 3, i32 = 4, i64 = 5, u8 = 6, u16 = 7, u32 = 8, u64 = 9, bytes = 10, text = 11, product = 12, sum = 13, seq = 14, vector = 15, internal = 16, array = 17, bounded_bytes = 18, bounded_text = 19, enumeration = 20 };
+pub const SchemaTag = enum(u8) {
+    unit = 0,
+    boolean = 1,
+    i8 = 2,
+    i16 = 3,
+    i32 = 4,
+    i64 = 5,
+    u8 = 6,
+    u16 = 7,
+    u32 = 8,
+    u64 = 9,
+    bytes = 10,
+    text = 11,
+    product = 12,
+    sum = 13,
+    seq = 14,
+    vector = 15,
+    internal = 16,
+    array = 17,
+    bounded_bytes = 18,
+    bounded_text = 19,
+    enumeration = 20,
+};
 pub const Schema = union(SchemaTag) {
     unit,
     boolean,
@@ -135,13 +166,38 @@ pub const Opcode = enum(u8) {
     }
 };
 
-pub const Fault = enum(u8) { arithmetic_overflow = 0, division_by_zero = 1, capacity_exceeded = 2, invalid_utf8 = 3, invalid_index = 4, invalid_variant = 5 };
+pub const Fault = enum(u8) {
+    arithmetic_overflow = 0,
+    division_by_zero = 1,
+    capacity_exceeded = 2,
+    invalid_utf8 = 3,
+    invalid_index = 4,
+    invalid_variant = 5,
+};
 pub const InstructionFailure = struct {
     kind: Fault,
     value: Id,
 };
 
-pub const TerminatorTag = enum(u8) { return_value = 0, jump = 1, branch = 2, switch_variant = 3, unpack_product = 4, call = 5, perform = 6, yield_value = 7, fail = 8, apply = 9, handle = 10, resume_value = 11, resume_with = 12, resume_computation = 13, dispose = 15, protect = 16, with_region = 17 };
+pub const TerminatorTag = enum(u8) {
+    return_value = 0,
+    jump = 1,
+    branch = 2,
+    switch_variant = 3,
+    unpack_product = 4,
+    call = 5,
+    perform = 6,
+    yield_value = 7,
+    fail = 8,
+    apply = 9,
+    handle = 10,
+    resume_value = 11,
+    resume_with = 12,
+    resume_computation = 13,
+    dispose = 15,
+    protect = 16,
+    with_region = 17,
+};
 pub const Clause = struct {
     effect: Id,
     function: Id,
@@ -174,5 +230,9 @@ pub const ScopeCatalog = struct {
     resources: []const Resource = &.{},
 };
 /// Only these executable functions may introduce or eliminate a representation.
-pub const Resource = struct { representation: Id, introducers: []const Id, eliminators: []const Id };
+pub const Resource = struct {
+    representation: Id,
+    introducers: []const Id,
+    eliminators: []const Id,
+};
 pub const Roots = struct { profile: u64 = 1, entry: Id, result: Id, failure: Id };

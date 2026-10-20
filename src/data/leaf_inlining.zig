@@ -10,8 +10,18 @@ const equal = @import("record_equal.zig").equal;
 const p01 = @import("coalescing.zig");
 const image = @import("program_image.zig");
 pub const Error = p01.Error || error{ InvalidLeafInlining, InlineLimit };
-pub const Options = struct { work_limit: usize = 1_000_000, max_sites: usize = 32, max_instructions: usize = 8, max_added_bytes: usize = 4096, coalescing: p01.Options = .{} };
-pub const Statistics = struct { calls_removed: usize = 0, instructions_copied: usize = 0, work_limit: bool = false };
+pub const Options = struct {
+    work_limit: usize = 1_000_000,
+    max_sites: usize = 32,
+    max_instructions: usize = 8,
+    max_added_bytes: usize = 4096,
+    coalescing: p01.Options = .{},
+};
+pub const Statistics = struct {
+    calls_removed: usize = 0,
+    instructions_copied: usize = 0,
+    work_limit: bool = false,
+};
 pub const Candidate = struct {
     arena: std.heap.ArenaAllocator,
     program: ir.Program,
@@ -28,7 +38,13 @@ const Budget = struct {
         self.left -= 1;
     }
 };
-fn eligible(program: ir.Program, bid: usize, permissions: traits.Facts, maximum: usize, budget: *Budget) Error!bool {
+fn eligible(
+    program: ir.Program,
+    bid: usize,
+    permissions: traits.Facts,
+    maximum: usize,
+    budget: *Budget,
+) Error!bool {
     try budget.tick();
     const caller = program.blocks[bid];
     if (caller.terminator != .call or caller.custody != 0) return false;
@@ -40,22 +56,46 @@ fn eligible(program: ir.Program, bid: usize, permissions: traits.Facts, maximum:
     }
     if (!private) return false;
     const function = program.functions[@intCast(target)];
-    if (function.effects.len != 0 or function.regions.len != 0 or function.custody.len != 1 or program.functions[@intCast(caller.function)].custody.len != 1) return false;
+    if (function.effects.len != 0 or
+        function.regions.len != 0 or
+        function.custody.len != 1 or
+        program.functions[
+            @intCast(caller.function)
+        ].custody.len != 1)
+        return false;
     const body = program.blocks[@intCast(function.entry)];
-    if (body.custody != 0 or body.terminator != .return_value or body.instructions.len > maximum) return false;
+    if (body.custody != 0 or
+        body.terminator != .return_value or
+        body.instructions.len > maximum)
+        return false;
     for (program.blocks, 0..) |block, id| {
         try budget.tick();
         if (block.function == target and id != function.entry) return false;
     }
     for (function.layout.slots) |schema| {
         try budget.tick();
-        if (!permissions.copy[@intCast(schema)] or !permissions.drop[@intCast(schema)]) return false;
+        if (!permissions.copy[
+            @intCast(schema)
+        ] or !permissions.drop[
+            @intCast(schema)
+        ]) return false;
     }
     for (body.instructions) |op| {
         try budget.tick();
         if (op.failures.len != 0) return false;
         switch (op.opcode) {
-            .move, .constant, .product, .field, .variant, .boolean_not, .select, .integer_bit_not, .integer_bit_and, .integer_bit_or, .integer_bit_xor => {},
+            .move,
+            .constant,
+            .product,
+            .field,
+            .variant,
+            .boolean_not,
+            .select,
+            .integer_bit_not,
+            .integer_bit_and,
+            .integer_bit_or,
+            .integer_bit_xor,
+            => {},
             else => return false,
         }
     }
@@ -65,7 +105,11 @@ pub fn possible(program: ir.Program) bool {
     for (program.blocks) |block| if (block.terminator == .call) return true;
     return false;
 }
-pub fn construct(allocator: std.mem.Allocator, original: ir.Program, options: Options) Error!?Candidate {
+pub fn construct(
+    allocator: std.mem.Allocator,
+    original: ir.Program,
+    options: Options,
+) Error!?Candidate {
     var admitted = try own.analyze(allocator, original);
     defer admitted.deinit();
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -91,7 +135,10 @@ pub fn construct(allocator: std.mem.Allocator, original: ir.Program, options: Op
         const slots = try a.alloc(p.Id, old_len + body.instructions.len);
         @memcpy(slots[0..old_len], caller.layout.slots);
         caller.layout.slots = slots;
-        const instructions = try a.alloc(ir.Instruction, before.instructions.len + body.instructions.len);
+        const instructions = try a.alloc(
+            ir.Instruction,
+            before.instructions.len + body.instructions.len,
+        );
         @memcpy(instructions[0..before.instructions.len], before.instructions);
         for (body.instructions, 0..) |op, index| {
             try budget.tick();
@@ -118,7 +165,9 @@ pub fn construct(allocator: std.mem.Allocator, original: ir.Program, options: Op
     program.blocks = blocks;
     const before_bytes = try image.encodedLength(original);
     const after_bytes = try image.encodedLength(program);
-    if (after_bytes > before_bytes and after_bytes - before_bytes > options.max_added_bytes) return error.InlineLimit;
+    if (after_bytes > before_bytes and
+        after_bytes - before_bytes > options.max_added_bytes)
+        return error.InlineLimit;
     const selected = try sites.toOwnedSlice(a);
     keep = true;
     return .{ .arena = arena, .program = program, .sites = selected };
@@ -126,7 +175,14 @@ pub fn construct(allocator: std.mem.Allocator, original: ir.Program, options: Op
 
 /// Independently trace each callee slot backwards to its last definition or
 /// original argument. No emitter map or derived fact is trusted by this checker.
-fn sourceAt(body: ir.Block, function: ir.Function, arguments: []const p.Id, slot: p.Id, position: usize, first: usize) p.Id {
+fn sourceAt(
+    body: ir.Block,
+    function: ir.Function,
+    arguments: []const p.Id,
+    slot: p.Id,
+    position: usize,
+    first: usize,
+) p.Id {
     var cursor = position;
     while (cursor != 0) {
         cursor -= 1;
@@ -135,12 +191,20 @@ fn sourceAt(body: ir.Block, function: ir.Function, arguments: []const p.Id, slot
     for (function.inputs, arguments) |input, actual| if (input == slot) return actual;
     unreachable; // independently admitted original body has definite values
 }
-pub fn validate(allocator: std.mem.Allocator, original: ir.Program, candidate: ir.Program, sites: []const usize, options: Options) Error!void {
+pub fn validate(
+    allocator: std.mem.Allocator,
+    original: ir.Program,
+    candidate: ir.Program,
+    sites: []const usize,
+    options: Options,
+) Error!void {
     var before = try own.analyze(allocator, original);
     defer before.deinit();
     var after = try own.analyze(allocator, candidate);
     defer after.deinit();
-    if (original.functions.len != candidate.functions.len or original.blocks.len != candidate.blocks.len) return error.InvalidLeafInlining;
+    if (original.functions.len != candidate.functions.len or
+        original.blocks.len != candidate.blocks.len)
+        return error.InvalidLeafInlining;
     var rest = candidate;
     rest.functions = original.functions;
     rest.blocks = original.blocks;
@@ -154,7 +218,15 @@ pub fn validate(allocator: std.mem.Allocator, original: ir.Program, candidate: i
         length.* = old.layout.slots.len;
         var metadata = new;
         metadata.layout = old.layout;
-        if (!equal(ir.Function, metadata, old) or new.layout.slots.len < old.layout.slots.len or !std.mem.eql(p.Id, new.layout.slots[0..old.layout.slots.len], old.layout.slots)) return error.InvalidLeafInlining;
+        if (!equal(
+            ir.Function,
+            metadata,
+            old,
+        ) or new.layout.slots.len < old.layout.slots.len or !std.mem.eql(
+            p.Id,
+            new.layout.slots[0..old.layout.slots.len],
+            old.layout.slots,
+        )) return error.InvalidLeafInlining;
     }
     var budget: Budget = .{ .left = options.work_limit };
     var seen: usize = 0;
@@ -165,35 +237,86 @@ pub fn validate(allocator: std.mem.Allocator, original: ir.Program, candidate: i
             if (!equal(ir.Block, old, new)) return error.InvalidLeafInlining;
             continue;
         }
-        if (count != 1 or !try eligible(original, bid, permissions, options.max_instructions, &budget)) return error.InvalidLeafInlining;
+        if (count != 1 or !try eligible(
+            original,
+            bid,
+            permissions,
+            options.max_instructions,
+            &budget,
+        )) return error.InvalidLeafInlining;
         seen += 1;
         const call = old.terminator.call;
         const function = original.functions[@intCast(call.function)];
         const body = original.blocks[@intCast(function.entry)];
         const first = lengths[@intCast(old.function)];
         const slots = candidate.functions[@intCast(old.function)].layout.slots;
-        if (slots.len < first + body.instructions.len or new.function != old.function or new.custody != old.custody or new.instructions.len != old.instructions.len + body.instructions.len or !equal([]const ir.Instruction, new.instructions[0..old.instructions.len], old.instructions)) return error.InvalidLeafInlining;
+        if (slots.len < first + body.instructions.len or
+            new.function != old.function or
+            new.custody != old.custody or
+            new.instructions.len != old.instructions.len + body.instructions.len or
+            !equal(
+                []const ir.Instruction,
+                new.instructions[0..old.instructions.len],
+                old.instructions,
+            ))
+            return error.InvalidLeafInlining;
         for (body.instructions, new.instructions[old.instructions.len..], 0..) |op, copied, index| {
             try budget.tick();
-            if (copied.destination != first + index or copied.operands.len != op.operands.len or slots[first + index] != function.layout.slots[@intCast(op.destination)]) return error.InvalidLeafInlining;
-            for (op.operands, copied.operands) |old_operand, new_operand| if (new_operand != sourceAt(body, function, call.arguments, old_operand, index, first)) return error.InvalidLeafInlining;
+            if (copied.destination != first + index or
+                copied.operands.len != op.operands.len or
+                slots[first + index] != function.layout.slots[
+                    @intCast(op.destination)
+                ])
+                return error.InvalidLeafInlining;
+            for (
+                op.operands,
+                copied.operands,
+            ) |old_operand, new_operand| if (new_operand != sourceAt(
+                body,
+                function,
+                call.arguments,
+                old_operand,
+                index,
+                first,
+            )) return error.InvalidLeafInlining;
             var metadata = copied;
             metadata.operands = op.operands;
             metadata.destination = op.destination;
             if (!equal(ir.Instruction, op, metadata)) return error.InvalidLeafInlining;
         }
-        if (new.terminator != .jump or new.terminator.jump.block != call.next.block or new.terminator.jump.assignments.len != call.next.assignments.len) return error.InvalidLeafInlining;
-        for (call.next.assignments, new.terminator.jump.assignments) |old_assignment, new_assignment| {
+        if (new.terminator != .jump or
+            new.terminator.jump.block != call.next.block or
+            new.terminator.jump.assignments.len != call.next.assignments.len)
+            return error.InvalidLeafInlining;
+        for (
+            call.next.assignments,
+            new.terminator.jump.assignments,
+        ) |old_assignment, new_assignment| {
             var expected = old_assignment;
-            if (expected.source == .returned) expected.source = .{ .slot = sourceAt(body, function, call.arguments, body.terminator.return_value, body.instructions.len, first) };
+            if (expected.source == .returned) expected.source = .{ .slot = sourceAt(
+                body,
+                function,
+                call.arguments,
+                body.terminator.return_value,
+                body.instructions.len,
+                first,
+            ) };
             if (!equal(ir.Assignment, expected, new_assignment)) return error.InvalidLeafInlining;
         }
         lengths[@intCast(old.function)] += body.instructions.len;
     }
     if (seen != sites.len) return error.InvalidLeafInlining;
-    for (lengths, candidate.functions) |length, function| if (length != function.layout.slots.len) return error.InvalidLeafInlining;
+    for (
+        lengths,
+        candidate.functions,
+    ) |length, function| if (length != function.layout.slots.len) return error.InvalidLeafInlining;
 }
-pub fn run(allocator: std.mem.Allocator, original: ir.Program, statistics: ?*Statistics, options: Options) Error!p01.Owned {
+pub fn run(
+    allocator: std.mem.Allocator,
+    original: ir.Program,
+    statistics: ?*Statistics,
+    options: Options,
+) Error!p01.Owned {
     var stats: Statistics = .{};
     defer if (statistics) |out| {
         out.* = stats;
@@ -206,7 +329,13 @@ pub fn run(allocator: std.mem.Allocator, original: ir.Program, statistics: ?*Sta
         else => return err,
     }) orelse return p01.run(allocator, original, options.coalescing);
     defer candidate.deinit();
-    validate(allocator, original, candidate.program, candidate.sites, options) catch |err| switch (err) {
+    validate(
+        allocator,
+        original,
+        candidate.program,
+        candidate.sites,
+        options,
+    ) catch |err| switch (err) {
         error.InlineLimit => {
             stats.work_limit = true;
             return p01.run(allocator, original, options.coalescing);
@@ -214,6 +343,7 @@ pub fn run(allocator: std.mem.Allocator, original: ir.Program, statistics: ?*Sta
         else => return err,
     };
     stats.calls_removed = candidate.sites.len;
-    for (candidate.sites) |bid| stats.instructions_copied += candidate.program.blocks[bid].instructions.len - original.blocks[bid].instructions.len;
+    for (candidate.sites) |bid|
+        stats.instructions_copied += candidate.program.blocks[bid].instructions.len - original.blocks[bid].instructions.len;
     return p01.run(allocator, candidate.program, options.coalescing);
 }

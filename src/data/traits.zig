@@ -5,7 +5,10 @@ const p = @import("program.zig");
 pub const Facts = struct { copy: []const bool, drop: []const bool, clone: []const bool };
 
 /// Greatest fixed points for recursive immutable data, narrowed by owned leaves.
-pub fn derive(allocator: std.mem.Allocator, schemas: []const p.Schema) @import("admission.zig").Error!Facts {
+pub fn derive(
+    allocator: std.mem.Allocator,
+    schemas: []const p.Schema,
+) @import("admission.zig").Error!Facts {
     for (schemas) |schema| try @import("admission.zig").references(schemas, schema);
     const copy = try allocator.alloc(bool, schemas.len);
     errdefer allocator.free(copy);
@@ -54,19 +57,44 @@ fn properties(schema: p.Schema, facts: Facts) Properties {
         .internal => |internal| switch (internal) {
             .computation => |computation| blk: {
                 var result = all(computation.capture_bound, facts);
-                result.copy = result.copy and (computation.use == .reusable or computation.use == .multi);
+                result.copy = result.copy and
+                    (computation.use == .reusable or
+                        computation.use == .multi);
                 result.drop = result.drop and computation.use != .linear;
-                result.clone = result.clone and (computation.use == .reusable or computation.use == .multi);
+                result.clone = result.clone and
+                    (computation.use == .reusable or
+                        computation.use == .multi);
                 break :blk result;
             },
             .resumption => |resumption| blk: {
                 const captures = all(resumption.capture_bound, facts);
-                break :blk .{ .copy = resumption.use == .multi and captures.clone and !resumption.obligations, .drop = !resumption.obligations and (resumption.use == .multi or (resumption.use == .affine and captures.drop)), .clone = resumption.use == .multi and captures.clone and !resumption.obligations };
+                break :blk .{
+                    .copy = resumption.use == .multi and captures.clone and !resumption.obligations,
+                    .drop = !resumption.obligations and
+                        (resumption.use == .multi or
+                            (resumption.use == .affine and
+                                captures.drop)),
+                    .clone = resumption.use == .multi and
+                        captures.clone and
+                        !resumption.obligations,
+                };
             },
-            .cell => |cell| .{ .copy = true, .drop = true, .clone = facts.clone[@intCast(cell.element)] },
+            .cell => |cell| .{
+                .copy = true,
+                .drop = true,
+                .clone = facts.clone[@intCast(cell.element)],
+            },
             .capability, .region => unrestricted,
-            .borrowed => |borrow| .{ .copy = true, .drop = true, .clone = facts.clone[@intCast(borrow.value)] },
-            .suspension_package, .abstract_resource => .{ .copy = false, .drop = false, .clone = false },
+            .borrowed => |borrow| .{
+                .copy = true,
+                .drop = true,
+                .clone = facts.clone[@intCast(borrow.value)],
+            },
+            .suspension_package, .abstract_resource => .{
+                .copy = false,
+                .drop = false,
+                .clone = false,
+            },
         },
         else => unrestricted,
     };

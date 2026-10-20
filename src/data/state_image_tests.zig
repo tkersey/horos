@@ -15,23 +15,41 @@ test "canonical state serialization shares bytes with digest-only and combined o
     try testing.expectEqual(bytes.len, streamed.length);
     try testing.expectEqualSlices(u8, &expected, &digest_only.finalResult());
     var combined = protocol.stateDigestHasher();
-    const emitted = try codec.serialize(testing.allocator, fixture, .{ .allocate = testing.allocator }, &combined);
+    const emitted = try codec.serialize(
+        testing.allocator,
+        fixture,
+        .{ .allocate = testing.allocator },
+        &combined,
+    );
     defer testing.allocator.free(emitted.bytes.?);
     try testing.expectEqualSlices(u8, bytes, emitted.bytes.?);
     try testing.expectEqualSlices(u8, &expected, &combined.finalResult());
     var buffer: [1024]u8 = undefined;
     var buffered = protocol.stateDigestHasher();
-    const written = try codec.serialize(testing.allocator, fixture, .{ .buffer = &buffer }, &buffered);
+    const written = try codec.serialize(
+        testing.allocator,
+        fixture,
+        .{ .buffer = &buffer },
+        &buffered,
+    );
     try testing.expectEqualSlices(u8, bytes, written.bytes.?);
     try testing.expectEqualSlices(u8, &expected, &buffered.finalResult());
     var failed = protocol.stateDigestHasher();
     const before = failed;
-    try testing.expectError(error.Capacity, codec.serialize(testing.allocator, fixture, .{ .buffer = buffer[0..1] }, &failed));
+    try testing.expectError(
+        error.Capacity,
+        codec.serialize(testing.allocator, fixture, .{ .buffer = buffer[0..1] }, &failed),
+    );
     try testing.expectEqualDeep(before, failed);
 }
 
 test "PST3 rejects an encoded unreachable node instead of dropping it" {
-    const state: s.State = .{ .program_identity = @splat(0), .status = .active, .roots = .{}, .nodes = &.{.{ .record = .{ .environment = .{ .values = &.{}, .tail = null } } }} };
+    const state: s.State = .{
+        .program_identity = @splat(0),
+        .status = .active,
+        .roots = .{},
+        .nodes = &.{.{ .record = .{ .environment = .{ .values = &.{}, .tail = null } } }},
+    };
     const record = @import("record.zig");
     const wire = @import("wire.zig");
     var measure: wire.Writer = .{};
@@ -43,24 +61,38 @@ test "PST3 rejects an encoded unreachable node instead of dropping it" {
     try writer.fixed(u16, 0);
     try writer.fixed(u64, measure.position);
     try record.write(s.State, state, &writer);
-    try testing.expectError(error.NonCanonical, codec.decodeGraph(testing.allocator, bytes[0..writer.position]));
+    try testing.expectError(
+        error.NonCanonical,
+        codec.decodeGraph(testing.allocator, bytes[0..writer.position]),
+    );
 }
 
 test "PST3 capacity accounts for canonical reference widths before output mutation" {
     var nodes: [130]s.Node = undefined;
-    for (&nodes) |*node| node.* = .{ .record = .{ .environment = .{ .values = &.{}, .tail = null } } };
+    for (&nodes) |*node| node.* = .{ .record = .{ .environment = .{
+        .values = &.{},
+        .tail = null,
+    } } };
     var aliases: [100]g.Value = undefined;
     @memset(&aliases, ref(0));
     nodes[nodes.len - 1].record.environment.values = &aliases;
     var roots: [nodes.len - 1]g.OwnedRef = undefined;
     for (&roots, 1..) |*root, id| root.* = .{ .node = .{ .id = id } };
-    const state: s.State = .{ .program_identity = @splat(0), .status = .active, .roots = .{ .detached = &roots }, .nodes = &nodes };
+    const state: s.State = .{
+        .program_identity = @splat(0),
+        .status = .active,
+        .roots = .{ .detached = &roots },
+        .nodes = &nodes,
+    };
     const bytes = try codec.emit(testing.allocator, state);
     defer testing.allocator.free(bytes);
     // 982 predecessor graph bytes plus one activation-option tag per node.
     try testing.expectEqual(1112, bytes.len);
     var output = @as([1112]u8, @splat(0xaa));
-    try testing.expectError(error.Capacity, codec.encode(testing.allocator, state, output[0 .. output.len - 1]));
+    try testing.expectError(
+        error.Capacity,
+        codec.encode(testing.allocator, state, output[0 .. output.len - 1]),
+    );
     try testing.expect(std.mem.allEqual(u8, &output, 0xaa));
     try testing.expectEqualSlices(u8, bytes, try codec.encode(testing.allocator, state, &output));
     var decoded = try codec.decodeGraph(testing.allocator, bytes);
@@ -185,7 +217,10 @@ test "PST3 framing and decoded allocation budget reject malformed input" {
             return error.AcceptedTruncation;
         } else |_| {}
     }
-    try testing.expectError(error.Capacity, codec.decodeGraphLimited(testing.allocator, bytes, .{ .max_decoded_bytes = bytes.len }));
+    try testing.expectError(
+        error.Capacity,
+        codec.decodeGraphLimited(testing.allocator, bytes, .{ .max_decoded_bytes = bytes.len }),
+    );
     for ([_][]const u8{ "ABL_PST1", "ABL_PST2", "ABL_BPI1", "ABL_BPI2", "ABL_BPC1" }) |family| {
         @memcpy(bytes[0..8], family);
         try testing.expectError(error.InvalidFamily, codec.decodeGraph(testing.allocator, bytes));
@@ -200,7 +235,10 @@ test "PST3 terminal unit golden is independently specified" {
         .program_identity = @as([32]u8, @splat(0)),
         .status = .completed,
         .roots = .{ .exit = .{ .id = 0 } },
-        .nodes = &.{.{ .record = .{ .exit = .{ .reason = .{ .normal = .{ .schema = 0, .body = .{ .scalar = @as([8]u8, @splat(0)) } } } } } }},
+        .nodes = &.{.{ .record = .{ .exit = .{ .reason = .{ .normal = .{
+            .schema = 0,
+            .body = .{ .scalar = @as([8]u8, @splat(0)) },
+        } } } } }},
     };
     const golden = "ABL_PST3".* ++ [_]u8{ 3, 0, 0, 0, 59, 0, 0, 0, 0, 0, 0, 0 } ++
         @as([32]u8, @splat(0)) ++ // Program identity
@@ -222,8 +260,14 @@ test "PST3 keeps equal node identities distinct while interning immutable blobs"
         .{ .slot = 0, .value = ref(0) },
         .{ .slot = 1, .value = ref(2) },
     };
-    nodes[0].record = .{ .environment = .{ .values = &.{.{ .schema = 0, .body = .{ .blob = .{ .id = 0 } } }}, .tail = null } };
-    nodes[2].record = .{ .environment = .{ .values = &.{.{ .schema = 0, .body = .{ .blob = .{ .id = 1 } } }}, .tail = null } };
+    nodes[0].record = .{ .environment = .{
+        .values = &.{.{ .schema = 0, .body = .{ .blob = .{ .id = 0 } } }},
+        .tail = null,
+    } };
+    nodes[2].record = .{ .environment = .{
+        .values = &.{.{ .schema = 0, .body = .{ .blob = .{ .id = 1 } } }},
+        .tail = null,
+    } };
     var state = fixture;
     state.nodes = &nodes;
     state.blobs = &.{ .{ .schema = 0, .bytes = "payload" }, .{ .schema = 0, .bytes = "payload" } };

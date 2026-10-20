@@ -9,7 +9,12 @@ pub fn build(b: *source.Builder, kind: Kind) !source.Module {
     const unit = try b.scalar(void);
     const pair = try b.schema(.{ .product = &.{ integer, integer } });
     const effect: ?p.Id = if (kind == .effect_duplicate)
-        try b.effect(.{ .identity = "coalescing/handled", .payload = unit, .result = integer, .external = false })
+        try b.effect(.{
+            .identity = "coalescing/handled",
+            .payload = unit,
+            .result = integer,
+            .external = false,
+        })
     else
         null;
     const cap: ?p.Id = if (effect) |id|
@@ -30,8 +35,14 @@ pub fn build(b: *source.Builder, kind: Kind) !source.Module {
         const returns = try b.declare(&.{ integer, integer }, integer, &.{}, &.{});
         const sum = try b.value(.{ .schema = integer, .expression = .{ .primitive = .{
             .opcode = .integer_add,
-            .operands = &.{ try b.reference(b.parameter(returns, 0)), try b.reference(b.parameter(returns, 1)) },
-            .failures = &.{.{ .kind = .arithmetic_overflow, .value = try b.failureLiteral(try b.constant(void, {})) }},
+            .operands = &.{
+                try b.reference(b.parameter(returns, 0)),
+                try b.reference(b.parameter(returns, 1)),
+            },
+            .failures = &.{.{
+                .kind = .arithmetic_overflow,
+                .value = try b.failureLiteral(try b.constant(void, {})),
+            }},
         } } });
         try b.define(returns, try b.pure(sum));
         handler.* = try b.handler(.{
@@ -55,7 +66,12 @@ pub fn build(b: *source.Builder, kind: Kind) !source.Module {
     }
     const entry = try b.declare(&.{ integer, integer }, pair, &.{}, &.{});
     const results = [_]p.Id{ try b.variable(integer), try b.variable(integer) };
-    var next = try b.pure(try b.primitive(pair, .product, &.{ try b.reference(results[0]), try b.reference(results[1]) }, 0));
+    var next = try b.pure(try b.primitive(
+        pair,
+        .product,
+        &.{ try b.reference(results[0]), try b.reference(results[1]) },
+        0,
+    ));
     var index: usize = handlers.len;
     while (index != 0) {
         index -= 1;
@@ -70,7 +86,13 @@ pub fn build(b: *source.Builder, kind: Kind) !source.Module {
     return b.module(entry, unit);
 }
 
-fn clauses(b: *source.Builder, unit: p.Id, integer: p.Id, cap: p.Id, effect: p.Id) ![]const p.Clause {
+fn clauses(
+    b: *source.Builder,
+    unit: p.Id,
+    integer: p.Id,
+    cap: p.Id,
+    effect: p.Id,
+) ![]const p.Clause {
     const token = try b.schema(.{ .internal = .{ .resumption = .{
         .effect = effect,
         .input = integer,
@@ -85,5 +107,8 @@ fn clauses(b: *source.Builder, unit: p.Id, integer: p.Id, cap: p.Id, effect: p.I
         .resumption = try b.reference(b.parameter(function, 2)),
         .argument = try b.constant(u64, 10),
     } }));
-    return b.allocator().dupe(p.Clause, &.{.{ .effect = effect, .function = function, .resumption = token }});
+    return b.allocator().dupe(
+        p.Clause,
+        &.{.{ .effect = effect, .function = function, .resumption = token }},
+    );
 }

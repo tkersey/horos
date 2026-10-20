@@ -5,7 +5,12 @@ const ir = @import("activation.zig");
 const flow = @import("activation_flow.zig");
 const testing = std.testing;
 
-fn program(blocks: []const ir.Block, layout: []const p.Id, inputs: []const p.Id, function: *ir.Function) ir.Program {
+fn program(
+    blocks: []const ir.Block,
+    layout: []const p.Id,
+    inputs: []const p.Id,
+    function: *ir.Function,
+) ir.Program {
     function.* = .{
         .entry = 0,
         .inputs = inputs,
@@ -36,17 +41,27 @@ test "activation flow rejects an uninitialized read and a partially initialized 
         .instructions = &.{},
         .terminator = .{ .return_value = 0 },
     }};
-    try testing.expectError(error.UnavailableSlot, flow.analyze(testing.allocator, program(&empty, &.{0}, &.{}, &definition)));
+    try testing.expectError(
+        error.UnavailableSlot,
+        flow.analyze(testing.allocator, program(&empty, &.{0}, &.{}, &definition)),
+    );
     const blocks = [_]ir.Block{
         .{ .function = 0, .instructions = &.{}, .terminator = .{ .branch = .{
             .condition = 0,
             .when_true = .{ .block = 1 },
             .when_false = .{ .block = 2 },
         } } },
-        .{ .function = 0, .instructions = &.{.{ .opcode = .constant, .destination = 1 }}, .terminator = .{ .jump = .{ .block = 2 } } },
+        .{
+            .function = 0,
+            .instructions = &.{.{ .opcode = .constant, .destination = 1 }},
+            .terminator = .{ .jump = .{ .block = 2 } },
+        },
         .{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 1 } },
     };
-    try testing.expectError(error.UnavailableSlot, flow.analyze(testing.allocator, program(&blocks, &.{ 2, 0 }, &.{0}, &definition)));
+    try testing.expectError(
+        error.UnavailableSlot,
+        flow.analyze(testing.allocator, program(&blocks, &.{ 2, 0 }, &.{0}, &definition)),
+    );
 }
 
 test "activation flow keeps initialization distinct from consumed ownership" {
@@ -57,9 +72,16 @@ test "activation flow keeps initialization distinct from consumed ownership" {
             .destination = 1,
             .operands = &.{0},
         }}, .terminator = .{ .yield_value = .{ .block = 1 } } },
-        .{ .function = 0, .instructions = &.{.{ .opcode = .constant, .destination = 2 }}, .terminator = .{ .return_value = 2 } },
+        .{
+            .function = 0,
+            .instructions = &.{.{ .opcode = .constant, .destination = 2 }},
+            .terminator = .{ .return_value = 2 },
+        },
     };
-    var facts = try flow.analyze(testing.allocator, program(&blocks, &.{ 3, 3, 0 }, &.{0}, &definition));
+    var facts = try flow.analyze(
+        testing.allocator,
+        program(&blocks, &.{ 3, 3, 0 }, &.{0}, &definition),
+    );
     defer facts.deinit();
     const entry = facts.entries[1].?;
     try testing.expect(facts.pool.contains(entry.initialized, 0));
@@ -76,8 +98,16 @@ test "activation flow rejects duplicate uses of an owner across and within block
         .{ .opcode = .move, .destination = 2, .operands = &.{0} },
     };
     var blocks = [_]ir.Block{
-        .{ .function = 0, .instructions = &operations, .terminator = .{ .yield_value = .{ .block = 1 } } },
-        .{ .function = 0, .instructions = &.{.{ .opcode = .constant, .destination = 3 }}, .terminator = .{ .return_value = 3 } },
+        .{
+            .function = 0,
+            .instructions = &operations,
+            .terminator = .{ .yield_value = .{ .block = 1 } },
+        },
+        .{
+            .function = 0,
+            .instructions = &.{.{ .opcode = .constant, .destination = 3 }},
+            .terminator = .{ .return_value = 3 },
+        },
     };
     const image = program(&blocks, &.{ 3, 3, 3, 0 }, &.{0}, &definition);
     try testing.expectError(error.UnavailableSlot, flow.analyze(testing.allocator, image));
@@ -120,7 +150,13 @@ test "activation flow rejects overwriting a live non-droppable owner" {
         .instructions = &.{.{ .opcode = .move, .destination = 0, .operands = &.{1} }},
         .terminator = .{ .return_value = 2 },
     }};
-    try testing.expectError(error.OverwrittenOwner, flow.analyze(testing.allocator, program(&blocks, &.{ 3, 3, 0 }, &.{ 0, 1, 2 }, &definition)));
+    try testing.expectError(
+        error.OverwrittenOwner,
+        flow.analyze(
+            testing.allocator,
+            program(&blocks, &.{ 3, 3, 0 }, &.{ 0, 1, 2 }, &definition),
+        ),
+    );
 }
 
 test "activation flow reaches a loop fixed point before checking reads" {
@@ -169,7 +205,11 @@ test "activation flow distinguishes unreachable continuation from initialized en
 fn allocationCase(allocator: std.mem.Allocator) !void {
     var definition: ir.Function = undefined;
     const blocks = [_]ir.Block{
-        .{ .function = 0, .instructions = &.{.{ .opcode = .constant, .destination = 0 }}, .terminator = .{ .jump = .{ .block = 1 } } },
+        .{
+            .function = 0,
+            .instructions = &.{.{ .opcode = .constant, .destination = 0 }},
+            .terminator = .{ .jump = .{ .block = 1 } },
+        },
         .{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 0 } },
     };
     var facts = try flow.analyze(allocator, program(&blocks, &.{0}, &.{}, &definition));
@@ -189,14 +229,21 @@ fn cyclicParentsCase(allocator: std.mem.Allocator) !void {
             .when_true = .{ .block = 1 },
             .when_false = .{ .block = 1 },
         } } },
-        .{ .function = 0, .instructions = &.{.{ .opcode = .move, .destination = 2, .operands = &.{1} }}, .terminator = .{ .branch = .{
+        .{ .function = 0, .instructions = &.{.{
+            .opcode = .move,
+            .destination = 2,
+            .operands = &.{1},
+        }}, .terminator = .{ .branch = .{
             .condition = 0,
             .when_true = .{ .block = 1 },
             .when_false = .{ .block = 2 },
         } } },
         .{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 2 } },
     };
-    var facts = try flow.analyze(allocator, program(&blocks, &.{ 2, 0, 0 }, &.{ 0, 1 }, &definition));
+    var facts = try flow.analyze(
+        allocator,
+        program(&blocks, &.{ 2, 0, 0 }, &.{ 0, 1 }, &definition),
+    );
     defer facts.deinit();
     for (0..2) |block| {
         try testing.expect(facts.pool.contains(facts.live[block][0], 0));
@@ -242,7 +289,10 @@ test "activation liveness reverses simultaneous assignments from the successor v
         } } },
         .{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 0 } },
     };
-    var facts = try flow.analyze(testing.allocator, program(&blocks, &.{ 0, 0 }, &.{ 0, 1 }, &definition));
+    var facts = try flow.analyze(
+        testing.allocator,
+        program(&blocks, &.{ 0, 0 }, &.{ 0, 1 }, &definition),
+    );
     defer facts.deinit();
     try testing.expect(facts.pool.contains(facts.live[0][0], 1));
     try testing.expect(!facts.pool.contains(facts.live[0][0], 0));
@@ -252,7 +302,12 @@ test "activation liveness reverses simultaneous assignments from the successor v
 
 test "activation flow rejects multiplying a unique returned value" {
     const functions = [_]ir.Function{
-        .{ .entry = 0, .inputs = &.{ 0, 3 }, .layout = .{ .slots = &.{ 3, 3, 3, 0 } }, .result = 0 },
+        .{
+            .entry = 0,
+            .inputs = &.{ 0, 3 },
+            .layout = .{ .slots = &.{ 3, 3, 3, 0 } },
+            .result = 0,
+        },
         .{ .entry = 2, .inputs = &.{0}, .layout = .{ .slots = &.{3} }, .result = 3 },
     };
     var blocks = [_]ir.Block{
@@ -293,7 +348,10 @@ test "activation flow keeps conditional cleanup custody without granting a read"
         } } },
         .{ .function = 0, .instructions = &.{}, .terminator = .{ .fail = 2 } },
     };
-    var facts = try flow.analyze(testing.allocator, program(&blocks, &.{ 2, 3, 1 }, &.{ 0, 1, 2 }, &definition));
+    var facts = try flow.analyze(
+        testing.allocator,
+        program(&blocks, &.{ 2, 3, 1 }, &.{ 0, 1, 2 }, &definition),
+    );
     defer facts.deinit();
     const entry = facts.entries[2].?;
     try testing.expect(!facts.pool.contains(entry.available, 1));
@@ -308,7 +366,10 @@ test "activation flow keeps its allocator alive for later derived-set allocation
         .instructions = &.{},
         .terminator = .{ .return_value = 0 },
     }};
-    var facts = try flow.analyze(testing.allocator, program(&blocks, &(@as([257]p.Id, @splat(0))), &.{0}, &definition));
+    var facts = try flow.analyze(
+        testing.allocator,
+        program(&blocks, &(@as([257]p.Id, @splat(0))), &.{0}, &definition),
+    );
     defer facts.deinit();
     var root = facts.entries[0].?.initialized;
     for (1..257) |slot| root = try facts.pool.insert(root, slot);
@@ -320,7 +381,11 @@ test "liveness refreshes internal positions when a successor changes but entry d
     var definition: ir.Function = undefined;
     const blocks = [_]ir.Block{
         .{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 1 } },
-        .{ .function = 0, .instructions = &.{.{ .opcode = .move, .destination = 1, .operands = &.{0} }}, .terminator = .{ .jump = .{ .block = 0 } } },
+        .{
+            .function = 0,
+            .instructions = &.{.{ .opcode = .move, .destination = 1, .operands = &.{0} }},
+            .terminator = .{ .jump = .{ .block = 0 } },
+        },
     };
     const image = program(&blocks, &.{ 0, 0 }, &.{0}, &definition);
     definition.entry = 1;

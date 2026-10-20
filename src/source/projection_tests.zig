@@ -50,7 +50,10 @@ test "consuming projections cannot hide repeated owned uses behind an expression
         defer b.deinit();
         const module = try program(&b, mode);
         {
-            try std.testing.expectError(error.UnavailableSlot, horos.program.compileObserved(std.testing.allocator, module, .{}));
+            try std.testing.expectError(
+                error.UnavailableSlot,
+                horos.program.compileObserved(std.testing.allocator, module, .{}),
+            );
         }
     }
 }
@@ -111,7 +114,10 @@ test "borrow expression sharing cannot conceal use after consumption" {
         defer b.deinit();
         const module = try borrowProgram(&b, mode);
         {
-            try std.testing.expectError(error.UnavailableSlot, horos.program.compileObserved(std.testing.allocator, module, .{}));
+            try std.testing.expectError(
+                error.UnavailableSlot,
+                horos.program.compileObserved(std.testing.allocator, module, .{}),
+            );
         }
     }
 }

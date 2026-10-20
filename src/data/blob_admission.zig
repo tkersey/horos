@@ -48,7 +48,11 @@ pub fn instruction(image: anytype, op: anytype, slots: []const p.Id) a.Error!voi
                         const right = image.schemas[@intCast(slots[@intCast(op.operands[1])])];
                         if (isText(right) != isText(source) or isBytes(right) != isBytes(source)) return error.TypeMismatch;
                     } else for (op.operands[1..]) |slot| {
-                        if (image.schemas[@intCast(slots[@intCast(slot)])] != .u64) return error.TypeMismatch;
+                        if (image.schemas[
+                            @intCast(slots[
+                                @intCast(slot)
+                            ])
+                        ] != .u64) return error.TypeMismatch;
                     }
                 },
                 .blob_compare => {
@@ -56,7 +60,15 @@ pub fn instruction(image: anytype, op: anytype, slots: []const p.Id) a.Error!voi
                     if (result != .i8 or isText(right) != isText(source) or isBytes(right) != isBytes(source)) return error.TypeMismatch;
                 },
                 .blob_byte => {
-                    if (image.schemas[@intCast(slots[@intCast(op.operands[1])])] != .u64 or result != .sum or result.sum.len != 2 or image.schemas[@intCast(result.sum[0])] != .unit or image.schemas[@intCast(result.sum[1])] != .u8) return error.TypeMismatch;
+                    if (image.schemas[
+                        @intCast(slots[
+                            @intCast(op.operands[1])
+                        ])
+                    ] != .u64 or result != .sum or result.sum.len != 2 or image.schemas[
+                        @intCast(result.sum[0])
+                    ] != .unit or image.schemas[
+                        @intCast(result.sum[1])
+                    ] != .u8) return error.TypeMismatch;
                 },
                 else => return error.UnsupportedInstruction,
             }

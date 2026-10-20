@@ -171,7 +171,11 @@ const typed_constructors: ir.Program = .{
         .{ .function = 2, .instructions = &.{
             .{ .destination = 2, .opcode = .computation, .immediate = 0, .operands = &.{0} },
             .{ .destination = 3, .opcode = .computation, .immediate = 1, .operands = &.{1} },
-        }, .terminator = .{ .apply = .{ .computation = 2, .arguments = &.{}, .next = .{ .block = 3, .assignments = &.{.{ .destination = 4, .source = .returned }} } } } },
+        }, .terminator = .{ .apply = .{
+            .computation = 2,
+            .arguments = &.{},
+            .next = .{ .block = 3, .assignments = &.{.{ .destination = 4, .source = .returned }} },
+        } } },
         .{ .function = 2, .instructions = &.{}, .terminator = .{ .apply = .{
             .computation = 3,
             .arguments = &.{},
@@ -244,7 +248,13 @@ fn constructorMutant(
     var diagnostic: origins.Diagnostic = .{ .stage = .transformation };
     try testing.expectError(
         error.InvalidCorrespondence,
-        @import("coalescing_validation.zig").validateDiagnosed(testing.allocator, before, changed, map, &diagnostic.target),
+        @import("coalescing_validation.zig").validateDiagnosed(
+            testing.allocator,
+            before,
+            changed,
+            map,
+            &diagnostic.target,
+        ),
     );
     trace.explain(null, &diagnostic);
     try testing.expectEqualSlices(p.Id, &.{0}, diagnostic.origins.items());
@@ -267,7 +277,13 @@ fn sharedBodyMutant(
     var diagnostic: origins.Diagnostic = .{ .stage = .transformation };
     try testing.expectError(
         error.InvalidCorrespondence,
-        @import("coalescing_validation.zig").validateDiagnosed(testing.allocator, before, changed, map, &diagnostic.target),
+        @import("coalescing_validation.zig").validateDiagnosed(
+            testing.allocator,
+            before,
+            changed,
+            map,
+            &diagnostic.target,
+        ),
     );
     trace.explain(null, &diagnostic);
     try testing.expectEqualSlices(p.Id, &.{ 0, 1 }, diagnostic.origins.items());
@@ -278,11 +294,19 @@ test "coalescing origin composition retains sparse nominal regions without dense
     const large = std.math.maxInt(p.Id) - 1;
     const original: ir.Program = .{
         .roots = .{ .entry = 0, .result = 1, .failure = 0 },
-        .schemas = &.{ .unit, .u64, .{ .internal = .{ .region = large } }, .{ .internal = .{ .computation = .{
-            .parameters = &.{2},
-            .result = 1,
-            .regions = &.{large},
-        } } } },
+        .schemas = &.{
+            .unit,                                 .u64,
+            .{ .internal = .{ .region = large } },
+            .{
+                .internal = .{
+                    .computation = .{
+                        .parameters = &.{2},
+                        .result = 1,
+                        .regions = &.{large},
+                    },
+                },
+            },
+        },
         .constants = &.{.{ .schema = 1, .bytes = &.{ 42, 0, 0, 0, 0, 0, 0, 0 } }},
         .effects = &.{},
         .functions = &.{
@@ -296,11 +320,17 @@ test "coalescing origin composition retains sparse nominal regions without dense
             },
         },
         .blocks = &.{
-            .{ .function = 0, .instructions = &.{.{ .destination = 0, .opcode = .computation }}, .terminator = .{ .with_region = .{
+            .{ .function = 0, .instructions = &.{.{
+                .destination = 0,
+                .opcode = .computation,
+            }}, .terminator = .{ .with_region = .{
                 .region = large,
                 .body = 0,
                 .arguments = &.{},
-                .next = .{ .block = 2, .assignments = &.{.{ .destination = 1, .source = .returned }} },
+                .next = .{
+                    .block = 2,
+                    .assignments = &.{.{ .destination = 1, .source = .returned }},
+                },
             } } },
             .{
                 .function = 1,
@@ -310,7 +340,10 @@ test "coalescing origin composition retains sparse nominal regions without dense
             .{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 1 } },
         },
         .constructors = &.{.{ .function = 1, .capture = 0, .schema = 3 }},
-        .scopes = .{ .region_count = std.math.maxInt(p.Id), .captures = &.{.{ .fields = &.{}, .use = .reusable }} },
+        .scopes = .{
+            .region_count = std.math.maxInt(p.Id),
+            .captures = &.{.{ .fields = &.{}, .use = .reusable }},
+        },
     };
     var checked = try @import("activation_ownership.zig").analyze(testing.allocator, original);
     checked.deinit();

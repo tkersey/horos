@@ -12,9 +12,20 @@ const equal = @import("record_equal.zig").equal;
 const p01 = @import("coalescing.zig");
 pub const Error = p01.Error || loops.Error || error{InvalidLoopMotion};
 pub const Options = struct { work_limit: u64 = 2_000_000, coalescing: p01.Options = .{} };
-pub const Statistics = struct { hoisted: usize = 0, guarded_entries: usize = 0, reused_preheaders: usize = 0, work_limit: bool = false };
+pub const Statistics = struct {
+    hoisted: usize = 0,
+    guarded_entries: usize = 0,
+    reused_preheaders: usize = 0,
+    work_limit: bool = false,
+};
 pub const Placement = enum { guarded, preheader, append };
-pub const Witness = struct { header: usize, body: usize, instructions: []const usize, placement: Placement = .guarded, predecessor: ?usize = null };
+pub const Witness = struct {
+    header: usize,
+    body: usize,
+    instructions: []const usize,
+    placement: Placement = .guarded,
+    predecessor: ?usize = null,
+};
 pub const Candidate = struct {
     arena: std.heap.ArenaAllocator,
     program: ir.Program,
@@ -34,9 +45,24 @@ fn scalarOperation(program: ir.Program, function: usize, op: ir.Instruction) boo
     if (op.failures.len != 0) return false;
     const slots = program.functions[function].layout.slots;
     if (!scalar(program.schemas[@intCast(slots[@intCast(op.destination)])])) return false;
-    for (op.operands) |slot| if (!scalar(program.schemas[@intCast(slots[@intCast(slot)])])) return false;
+    for (op.operands) |slot| if (!scalar(
+        program.schemas[
+            @intCast(slots[
+                @intCast(slot)
+            ])
+        ],
+    )) return false;
     return switch (op.opcode) {
-        .constant, .integer_bit_not, .integer_bit_and, .integer_bit_or, .integer_bit_xor, .boolean_not, .equal, .less, .select => true,
+        .constant,
+        .integer_bit_not,
+        .integer_bit_and,
+        .integer_bit_or,
+        .integer_bit_xor,
+        .boolean_not,
+        .equal,
+        .less,
+        .select,
+        => true,
         else => false,
     };
 }
@@ -49,11 +75,17 @@ fn eligible(program: ir.Program, function: usize, op: ir.Instruction) bool {
 /// Direct branch-condition producers are excluded so guarded entry copies do
 /// not masquerade as repeated body work. This is not a latency measurement.
 pub const RepeatedWork = struct { scalars: u64 = 0, branch_tests: u64 = 0 };
-pub fn repeatedScalarWork(allocator: std.mem.Allocator, program: ir.Program) std.mem.Allocator.Error!?u64 {
+pub fn repeatedScalarWork(
+    allocator: std.mem.Allocator,
+    program: ir.Program,
+) std.mem.Allocator.Error!?u64 {
     const result = (try repeatedWorkEstimate(allocator, program)) orelse return null;
     return result.scalars;
 }
-pub fn repeatedWorkEstimate(allocator: std.mem.Allocator, program: ir.Program) std.mem.Allocator.Error!?RepeatedWork {
+pub fn repeatedWorkEstimate(
+    allocator: std.mem.Allocator,
+    program: ir.Program,
+) std.mem.Allocator.Error!?RepeatedWork {
     return repeatedWork(allocator, program) catch |err| switch (err) {
         error.LoopWorkLimit => null,
         error.OutOfMemory => error.OutOfMemory,
@@ -77,35 +109,56 @@ fn repeatedWork(allocator: std.mem.Allocator, program: ir.Program) loops.Error!R
             if (!graph.reachable[h]) continue;
             for (dominated, 0..) |*value, node| value.* = dom[node * graph.blocks.len + h];
             const members = (try graph.region(h, dominated, &budget)) orelse continue;
-            for (graph.blocks, members) |bid, inside| if (inside) {
-                const block = program.blocks[bid];
-                var local_condition = false;
-                for (block.instructions) |op| {
-                    try budget.take(1);
-                    if (block.terminator == .branch and block.terminator.branch.condition == op.destination) {
-                        local_condition = true;
-                        continue;
+            for (graph.blocks, members) |bid, inside|
+                if (inside) {
+                    const block = program.blocks[bid];
+                    var local_condition = false;
+                    for (block.instructions) |op| {
+                        try budget.take(1);
+                        if (block.terminator == .branch and
+                            block.terminator.branch.condition == op.destination)
+                        {
+                            local_condition = true;
+                            continue;
+                        }
+                        if (scalarOperation(program, fid, op)) total.scalars +|= 1;
                     }
-                    if (scalarOperation(program, fid, op)) total.scalars +|= 1;
-                }
-                // Prefer a removed dispatch block, not merely replacing a
-                // condition read with a same-cost jump after a live prefix.
-                if (block.terminator == .branch and !local_condition and block.instructions.len == 0) {
-                    const branch = block.terminator.branch;
-                    if ((branch.when_true.assignments.len == 0 and branch.when_true.block != bid) or
-                        (branch.when_false.assignments.len == 0 and branch.when_false.block != bid)) total.branch_tests +|= 1;
-                }
-            };
+                    // Prefer a removed dispatch block, not merely replacing a
+                    // condition read with a same-cost jump after a live prefix.
+                    if (block.terminator == .branch and
+                        !local_condition and
+                        block.instructions.len == 0)
+                    {
+                        const branch = block.terminator.branch;
+                        if ((branch.when_true.assignments.len == 0 and
+                            branch.when_true.block != bid) or
+                            (branch.when_false.assignments.len == 0 and
+                                branch.when_false.block != bid))
+                            total.branch_tests +|= 1;
+                    }
+                };
         }
     }
     return total;
 }
-fn functionAllowed(program: ir.Program, id: usize, permissions: traits.Facts, exportable: []const bool, budget: *loops.Budget) Error!bool {
+fn functionAllowed(
+    program: ir.Program,
+    id: usize,
+    permissions: traits.Facts,
+    exportable: []const bool,
+    budget: *loops.Budget,
+) Error!bool {
     const f = program.functions[id];
     if (f.effects.len != 0 or f.regions.len != 0 or f.custody.len != 1) return false;
     for (f.layout.slots) |schema| {
         try budget.take(1);
-        if (!permissions.copy[@intCast(schema)] or !permissions.drop[@intCast(schema)] or !exportable[@intCast(schema)]) return false;
+        if (!permissions.copy[
+            @intCast(schema)
+        ] or !permissions.drop[
+            @intCast(schema)
+        ] or !exportable[
+            @intCast(schema)
+        ]) return false;
     }
     for (program.blocks) |block| if (block.function == id) {
         try budget.take(1);
@@ -114,10 +167,24 @@ fn functionAllowed(program: ir.Program, id: usize, permissions: traits.Facts, ex
     return true;
 }
 fn written(edge: ir.Edge, slot: p.Id) bool {
-    for (edge.assignments) |assignment| if (assignment.destination == slot and (assignment.source != .slot or assignment.source.slot != slot)) return true;
+    for (edge.assignments) |assignment|
+        if (assignment.destination == slot and
+            (assignment.source != .slot or
+                assignment.source.slot != slot))
+            return true;
     return false;
 }
-fn stableDefinition(program: ir.Program, graph: loops.Graph, members: []const bool, header: usize, body: usize, index: usize, selected: []const usize, facts: *const flow.Facts, budget: *loops.Budget) Error!bool {
+fn stableDefinition(
+    program: ir.Program,
+    graph: loops.Graph,
+    members: []const bool,
+    header: usize,
+    body: usize,
+    index: usize,
+    selected: []const usize,
+    facts: *const flow.Facts,
+    budget: *loops.Budget,
+) Error!bool {
     const op = program.blocks[body].instructions[index];
     if (!eligible(program, graph.function, op)) return false;
     for (program.blocks[body].instructions[0..index]) |before| {
@@ -142,7 +209,10 @@ fn stableDefinition(program: ir.Program, graph: loops.Graph, members: []const bo
             break;
         };
         if (from_selected) continue;
-        if (!facts.pool.contains(facts.positions[header][program.blocks[header].instructions.len].available, operand)) return false;
+        if (!facts.pool.contains(
+            facts.positions[header][program.blocks[header].instructions.len].available,
+            operand,
+        )) return false;
         for (members, graph.blocks) |inside, bid| if (inside) {
             for (program.blocks[bid].instructions) |other| {
                 try budget.take(1);
@@ -190,7 +260,11 @@ fn redirect(a: std.mem.Allocator, term: ir.Terminator, old: usize, new: usize) !
     }
     return result;
 }
-pub fn construct(allocator: std.mem.Allocator, original: ir.Program, options: Options) Error!?Candidate {
+pub fn construct(
+    allocator: std.mem.Allocator,
+    original: ir.Program,
+    options: Options,
+) Error!?Candidate {
     var facts = try own.analyze(allocator, original);
     defer facts.deinit();
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -217,11 +291,24 @@ pub fn construct(allocator: std.mem.Allocator, original: ir.Program, options: Op
             var selected: std.ArrayList(usize) = .empty;
             for (original.blocks[body].instructions, 0..) |_, index| {
                 try budget.take(1);
-                if (try stableDefinition(original, graph, members, header, body, index, selected.items, &facts, &budget)) try selected.append(a, index);
+                if (try stableDefinition(
+                    original,
+                    graph,
+                    members,
+                    header,
+                    body,
+                    index,
+                    selected.items,
+                    &facts,
+                    &budget,
+                )) try selected.append(a, index);
             }
             if (selected.items.len == 0) continue;
             var needs_guard = false;
-            for (selected.items) |index| if (facts.pool.contains(facts.live[header][0], original.blocks[body].instructions[index].destination)) {
+            for (selected.items) |index| if (facts.pool.contains(
+                facts.live[header][0],
+                original.blocks[body].instructions[index].destination,
+            )) {
                 needs_guard = true;
             };
             var placement: Placement = if (needs_guard) .guarded else .preheader;
@@ -230,7 +317,10 @@ pub fn construct(allocator: std.mem.Allocator, original: ir.Program, options: Op
                 var incoming: usize = 0;
                 for (graph.blocks, 0..) |bid, node| if (!members[node]) {
                     var ordinal: usize = 0;
-                    while (loops.edge(original.blocks[bid].terminator, ordinal)) |e| : (ordinal += 1) {
+                    while (loops.edge(
+                        original.blocks[bid].terminator,
+                        ordinal,
+                    )) |e| : (ordinal += 1) {
                         try budget.take(1);
                         if (e.block == header) {
                             incoming += 1;
@@ -250,11 +340,17 @@ pub fn construct(allocator: std.mem.Allocator, original: ir.Program, options: Op
                 .append => 0,
             };
             const functions = try a.dupe(ir.Function, original.functions);
-            const blocks = try a.alloc(ir.Block, std.math.add(usize, original.blocks.len, added) catch return error.Capacity);
+            const blocks = try a.alloc(
+                ir.Block,
+                std.math.add(usize, original.blocks.len, added) catch return error.Capacity,
+            );
             @memcpy(blocks[0..original.blocks.len], original.blocks);
             const entry = original.blocks.len;
             const moved = try a.alloc(ir.Instruction, selected.items.len);
-            for (selected.items, moved) |index, *op| op.* = original.blocks[body].instructions[index];
+            for (
+                selected.items,
+                moved,
+            ) |index, *op| op.* = original.blocks[body].instructions[index];
             if (placement == .append) {
                 const before = original.blocks[predecessor.?].instructions;
                 const operations = try a.alloc(ir.Instruction, before.len + moved.len);
@@ -263,18 +359,44 @@ pub fn construct(allocator: std.mem.Allocator, original: ir.Program, options: Op
                 blocks[predecessor.?].instructions = operations;
             } else {
                 for (graph.blocks, 0..) |bid, node| if (!members[node]) {
-                    blocks[bid].terminator = try redirect(a, original.blocks[bid].terminator, header, entry);
+                    blocks[bid].terminator = try redirect(
+                        a,
+                        original.blocks[bid].terminator,
+                        header,
+                        entry,
+                    );
                 };
                 if (functions[fid].entry == header) functions[fid].entry = entry;
                 if (placement == .guarded) {
                     blocks[entry] = original.blocks[header];
-                    blocks[entry].terminator = try redirect(a, blocks[entry].terminator, body, entry + 1);
-                    blocks[entry + 1] = .{ .function = fid, .custody = original.blocks[body].custody, .instructions = moved, .terminator = .{ .jump = .{ .block = body } } };
-                } else blocks[entry] = .{ .function = fid, .custody = original.blocks[header].custody, .instructions = moved, .terminator = .{ .jump = .{ .block = header } } };
+                    blocks[entry].terminator = try redirect(
+                        a,
+                        blocks[entry].terminator,
+                        body,
+                        entry + 1,
+                    );
+                    blocks[entry + 1] = .{
+                        .function = fid,
+                        .custody = original.blocks[body].custody,
+                        .instructions = moved,
+                        .terminator = .{ .jump = .{ .block = body } },
+                    };
+                } else blocks[entry] = .{
+                    .function = fid,
+                    .custody = original.blocks[header].custody,
+                    .instructions = moved,
+                    .terminator = .{ .jump = .{ .block = header } },
+                };
             }
-            const retained = try a.alloc(ir.Instruction, original.blocks[body].instructions.len - moved.len);
+            const retained = try a.alloc(
+                ir.Instruction,
+                original.blocks[body].instructions.len - moved.len,
+            );
             var at: usize = 0;
-            for (original.blocks[body].instructions, 0..) |op, index| if (std.mem.indexOfScalar(usize, selected.items, index) == null) {
+            for (
+                original.blocks[body].instructions,
+                0..,
+            ) |op, index| if (std.mem.indexOfScalar(usize, selected.items, index) == null) {
                 retained[at] = op;
                 at += 1;
             };
@@ -284,7 +406,17 @@ pub fn construct(allocator: std.mem.Allocator, original: ir.Program, options: Op
             program.blocks = blocks;
             const selected_indices = try selected.toOwnedSlice(a);
             keep = true;
-            return .{ .arena = arena, .program = program, .witness = .{ .header = header, .body = body, .instructions = selected_indices, .placement = placement, .predecessor = predecessor } };
+            return .{
+                .arena = arena,
+                .program = program,
+                .witness = .{
+                    .header = header,
+                    .body = body,
+                    .instructions = selected_indices,
+                    .placement = placement,
+                    .predecessor = predecessor,
+                },
+            };
         }
     }
     return null;
@@ -295,7 +427,9 @@ fn sameRedirect(old: ir.Terminator, new: ir.Terminator, from: usize, to: usize) 
         .branch => |v| if (v.condition != new.branch.condition) {
             return false;
         },
-        .switch_variant => |v| if (v.value != new.switch_variant.value or v.cases.len != new.switch_variant.cases.len) {
+        .switch_variant => |v| if (v.value != new.switch_variant.value or
+            v.cases.len != new.switch_variant.cases.len)
+        {
             return false;
         },
         .return_value, .fail => return equal(ir.Terminator, old, new),
@@ -305,13 +439,23 @@ fn sameRedirect(old: ir.Terminator, new: ir.Terminator, from: usize, to: usize) 
     var ordinal: usize = 0;
     while (loops.edge(old, ordinal)) |before| : (ordinal += 1) {
         const after = loops.edge(new, ordinal) orelse return false;
-        if (after.block != (if (before.block == from) to else before.block) or !equal([]const ir.Assignment, before.assignments, after.assignments)) return false;
+        if (after.block != (if (before.block == from) to else before.block) or !equal(
+            []const ir.Assignment,
+            before.assignments,
+            after.assignments,
+        )) return false;
     }
     return true;
 }
 /// Independent acceptance uses a reachability cut (not the discovery dominator
 /// matrix), then forward fixed-version propagation over the requested batch.
-pub fn validate(allocator: std.mem.Allocator, original: ir.Program, candidate: ir.Program, witness: Witness, options: Options) Error!void {
+pub fn validate(
+    allocator: std.mem.Allocator,
+    original: ir.Program,
+    candidate: ir.Program,
+    witness: Witness,
+    options: Options,
+) Error!void {
     var before = try own.analyze(allocator, original);
     defer before.deinit();
     var after = try own.analyze(allocator, candidate);
@@ -322,27 +466,58 @@ pub fn validate(allocator: std.mem.Allocator, original: ir.Program, candidate: i
     var budget: loops.Budget = .{ .remaining = options.work_limit };
     try budget.record(ir.Program, original);
     try budget.record(ir.Program, candidate);
-    if (witness.header >= original.blocks.len or witness.body >= original.blocks.len or witness.instructions.len == 0 or candidate.blocks.len != original.blocks.len + @as(usize, switch (witness.placement) {
-        .guarded => 2,
-        .preheader => 1,
-        .append => 0,
-    }) or candidate.functions.len != original.functions.len) return error.InvalidLoopMotion;
+    if (witness.header >= original.blocks.len or
+        witness.body >= original.blocks.len or
+        witness.instructions.len == 0 or
+        candidate.blocks.len != original.blocks.len + @as(
+            usize,
+            switch (witness.placement) {
+                .guarded => 2,
+                .preheader => 1,
+                .append => 0,
+            },
+        ) or
+        candidate.functions.len != original.functions.len)
+        return error.InvalidLoopMotion;
     const fid: usize = @intCast(original.blocks[witness.header].function);
     const permissions = try traits.derive(a, original.schemas);
     const schemas = try admission.schemas(a, original.schemas);
-    if (!try functionAllowed(original, fid, permissions, schemas.exportable, &budget)) return error.InvalidLoopMotion;
-    const graph = (try loops.Graph.init(a, original, fid, &budget)) orelse return error.InvalidLoopMotion;
+    if (!try functionAllowed(
+        original,
+        fid,
+        permissions,
+        schemas.exportable,
+        &budget,
+    )) return error.InvalidLoopMotion;
+    const graph = (try loops.Graph.init(
+        a,
+        original,
+        fid,
+        &budget,
+    )) orelse return error.InvalidLoopMotion;
     const h = graph.local[witness.header];
     const outside = try graph.reachAvoid(h, &budget);
     const dominated = try a.alloc(bool, graph.blocks.len);
     for (dominated, 0..) |*v, node| v.* = graph.reachable[node] and !outside[node];
     const members = (try graph.region(h, dominated, &budget)) orelse return error.InvalidLoopMotion;
-    if (bodyFor(original, graph, members, witness.header) != witness.body) return error.InvalidLoopMotion;
+    if (bodyFor(
+        original,
+        graph,
+        members,
+        witness.header,
+    ) != witness.body) return error.InvalidLoopMotion;
     if (witness.placement == .append) {
         const pred = witness.predecessor orelse return error.InvalidLoopMotion;
-        if (pred >= original.blocks.len or original.blocks[pred].function != fid or members[graph.local[pred]] or original.functions[fid].entry == witness.header) return error.InvalidLoopMotion;
+        if (pred >= original.blocks.len or
+            original.blocks[pred].function != fid or
+            members[graph.local[pred]] or
+            original.functions[fid].entry == witness.header)
+            return error.InvalidLoopMotion;
         const term = original.blocks[pred].terminator;
-        if (term != .jump or term.jump.block != witness.header or term.jump.assignments.len != 0) return error.InvalidLoopMotion;
+        if (term != .jump or
+            term.jump.block != witness.header or
+            term.jump.assignments.len != 0)
+            return error.InvalidLoopMotion;
         var incoming: usize = 0;
         for (graph.predecessors[h].items) |node| if (!members[node]) {
             try budget.take(1);
@@ -358,7 +533,14 @@ pub fn validate(allocator: std.mem.Allocator, original: ir.Program, candidate: i
     const edge_writes = try a.alloc(bool, fixed.len);
     @memset(edge_writes, false);
     if (before.positions[witness.header].len == 0) return error.InvalidLoopMotion;
-    for (fixed, 0..) |*v, slot| v.* = before.pool.contains(before.positions[witness.header][original.blocks[witness.header].instructions.len].available, slot);
+    for (
+        fixed,
+        0..,
+    ) |*v, slot|
+        v.* = before.pool.contains(
+            before.positions[witness.header][original.blocks[witness.header].instructions.len].available,
+            slot,
+        );
     for (members, graph.blocks) |inside, bid| if (inside) {
         for (original.blocks[bid].instructions) |op| {
             try budget.take(1);
@@ -366,7 +548,10 @@ pub fn validate(allocator: std.mem.Allocator, original: ir.Program, candidate: i
             definitions[@intCast(op.destination)] += 1;
         }
         var ordinal: usize = 0;
-        while (loops.edge(original.blocks[bid].terminator, ordinal)) |e| : (ordinal += 1) for (e.assignments) |assignment| {
+        while (loops.edge(
+            original.blocks[bid].terminator,
+            ordinal,
+        )) |e| : (ordinal += 1) for (e.assignments) |assignment| {
             try budget.take(1);
             if (assignment.source != .slot or assignment.source.slot != assignment.destination) {
                 fixed[@intCast(assignment.destination)] = false;
@@ -377,14 +562,28 @@ pub fn validate(allocator: std.mem.Allocator, original: ir.Program, candidate: i
     const body = original.blocks[witness.body];
     for (witness.instructions, 0..) |index, position| {
         try budget.take(1);
-        if (index >= body.instructions.len or (position != 0 and witness.instructions[position - 1] >= index)) return error.InvalidLoopMotion;
+        if (index >= body.instructions.len or
+            (position != 0 and
+                witness.instructions[position - 1] >= index))
+            return error.InvalidLoopMotion;
         const op = body.instructions[index];
-        if (witness.placement != .guarded and before.pool.contains(before.live[witness.header][0], op.destination)) return error.InvalidLoopMotion;
-        if (!eligible(original, fid, op) or definitions[@intCast(op.destination)] != 1 or edge_writes[@intCast(op.destination)]) return error.InvalidLoopMotion;
+        if (witness.placement != .guarded and before.pool.contains(
+            before.live[witness.header][0],
+            op.destination,
+        )) return error.InvalidLoopMotion;
+        if (!eligible(original, fid, op) or definitions[
+            @intCast(op.destination)
+        ] != 1 or edge_writes[
+            @intCast(op.destination)
+        ]) return error.InvalidLoopMotion;
         for (op.operands) |operand| if (!fixed[@intCast(operand)]) return error.InvalidLoopMotion;
         for (body.instructions[0..index]) |earlier| {
             try budget.take(1);
-            if (std.mem.indexOfScalar(p.Id, earlier.operands, op.destination) != null) return error.InvalidLoopMotion;
+            if (std.mem.indexOfScalar(
+                p.Id,
+                earlier.operands,
+                op.destination,
+            ) != null) return error.InvalidLoopMotion;
         }
         fixed[@intCast(op.destination)] = true;
     }
@@ -404,40 +603,106 @@ pub fn validate(allocator: std.mem.Allocator, original: ir.Program, candidate: i
     }
     for (original.blocks, candidate.blocks[0..original.blocks.len], 0..) |old, new, bid| {
         try budget.take(1);
-        if (old.function != new.function or old.custody != new.custody) return error.InvalidLoopMotion;
+        if (old.function != new.function or
+            old.custody != new.custody)
+            return error.InvalidLoopMotion;
         if (bid == witness.body) {
-            if (new.instructions.len != old.instructions.len - witness.instructions.len) return error.InvalidLoopMotion;
+            if (new.instructions.len != old.instructions.len - witness.instructions.len)
+                return error.InvalidLoopMotion;
             var at: usize = 0;
-            for (old.instructions, 0..) |op, index| if (std.mem.indexOfScalar(usize, witness.instructions, index) == null) {
-                if (!equal(ir.Instruction, op, new.instructions[at])) return error.InvalidLoopMotion;
+            for (
+                old.instructions,
+                0..,
+            ) |op, index| if (std.mem.indexOfScalar(
+                usize,
+                witness.instructions,
+                index,
+            ) == null) {
+                if (!equal(
+                    ir.Instruction,
+                    op,
+                    new.instructions[at],
+                )) return error.InvalidLoopMotion;
                 at += 1;
             };
         } else if (witness.placement == .append and bid == witness.predecessor.?) {
-            if (new.instructions.len != old.instructions.len + witness.instructions.len or !equal([]const ir.Instruction, old.instructions, new.instructions[0..old.instructions.len])) return error.InvalidLoopMotion;
-            for (witness.instructions, 0..) |index, i| if (!equal(ir.Instruction, body.instructions[index], new.instructions[old.instructions.len + i])) return error.InvalidLoopMotion;
-        } else if (!equal([]const ir.Instruction, old.instructions, new.instructions)) return error.InvalidLoopMotion;
+            if (new.instructions.len != old.instructions.len + witness.instructions.len or !equal(
+                []const ir.Instruction,
+                old.instructions,
+                new.instructions[0..old.instructions.len],
+            )) return error.InvalidLoopMotion;
+            for (
+                witness.instructions,
+                0..,
+            ) |index, i| if (!equal(
+                ir.Instruction,
+                body.instructions[index],
+                new.instructions[old.instructions.len + i],
+            )) return error.InvalidLoopMotion;
+        } else if (!equal(
+            []const ir.Instruction,
+            old.instructions,
+            new.instructions,
+        )) return error.InvalidLoopMotion;
         if (witness.placement != .append and old.function == fid and !members[graph.local[bid]]) {
-            if (!sameRedirect(old.terminator, new.terminator, witness.header, entry)) return error.InvalidLoopMotion;
-        } else if (!equal(ir.Terminator, old.terminator, new.terminator)) return error.InvalidLoopMotion;
+            if (!sameRedirect(
+                old.terminator,
+                new.terminator,
+                witness.header,
+                entry,
+            )) return error.InvalidLoopMotion;
+        } else if (!equal(
+            ir.Terminator,
+            old.terminator,
+            new.terminator,
+        )) return error.InvalidLoopMotion;
     }
     if (witness.placement != .append) {
         const preheader = candidate.blocks[entry];
         const moved = candidate.blocks[if (witness.placement == .guarded) hoist else entry];
         const old_header = original.blocks[witness.header];
-        if (witness.placement == .guarded and (preheader.function != fid or preheader.custody != old_header.custody or !equal([]const ir.Instruction, preheader.instructions, old_header.instructions) or !sameRedirect(old_header.terminator, preheader.terminator, witness.body, hoist))) return error.InvalidLoopMotion;
+        if (witness.placement == .guarded and
+            (preheader.function != fid or
+                preheader.custody != old_header.custody or
+                !equal(
+                    []const ir.Instruction,
+                    preheader.instructions,
+                    old_header.instructions,
+                ) or
+                !sameRedirect(old_header.terminator, preheader.terminator, witness.body, hoist)))
+            return error.InvalidLoopMotion;
         const destination = if (witness.placement == .guarded) witness.body else witness.header;
-        if (moved.function != fid or moved.custody != body.custody or moved.instructions.len != witness.instructions.len or !equal(ir.Terminator, .{ .jump = .{ .block = destination } }, moved.terminator)) return error.InvalidLoopMotion;
-        for (moved.instructions, witness.instructions) |op, index| if (!equal(ir.Instruction, op, body.instructions[index])) return error.InvalidLoopMotion;
+        if (moved.function != fid or
+            moved.custody != body.custody or
+            moved.instructions.len != witness.instructions.len or
+            !equal(ir.Terminator, .{ .jump = .{ .block = destination } }, moved.terminator))
+            return error.InvalidLoopMotion;
+        for (
+            moved.instructions,
+            witness.instructions,
+        ) |op, index| if (!equal(
+            ir.Instruction,
+            op,
+            body.instructions[index],
+        )) return error.InvalidLoopMotion;
     }
 }
 pub fn possible(program: ir.Program) bool {
     for (program.blocks, 0..) |block, id| {
         var ordinal: usize = 0;
-        while (loops.edge(block.terminator, ordinal)) |e| : (ordinal += 1) if (e.block <= id) return true;
+        while (loops.edge(
+            block.terminator,
+            ordinal,
+        )) |e| : (ordinal += 1) if (e.block <= id) return true;
     }
     return false;
 }
-pub fn run(allocator: std.mem.Allocator, original: ir.Program, statistics: ?*Statistics, options: Options) Error!p01.Owned {
+pub fn run(
+    allocator: std.mem.Allocator,
+    original: ir.Program,
+    statistics: ?*Statistics,
+    options: Options,
+) Error!p01.Owned {
     var stats: Statistics = .{};
     defer if (statistics) |out| {
         out.* = stats;
@@ -450,7 +715,13 @@ pub fn run(allocator: std.mem.Allocator, original: ir.Program, statistics: ?*Sta
         else => return err,
     }) orelse return p01.run(allocator, original, options.coalescing);
     defer candidate.deinit();
-    validate(allocator, original, candidate.program, candidate.witness, options) catch |err| switch (err) {
+    validate(
+        allocator,
+        original,
+        candidate.program,
+        candidate.witness,
+        options,
+    ) catch |err| switch (err) {
         error.LoopWorkLimit => {
             stats.work_limit = true;
             return p01.run(allocator, original, options.coalescing);

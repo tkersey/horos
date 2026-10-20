@@ -9,7 +9,12 @@ const original: ir.Program = .{
     .schemas = &.{ .u64, .unit, .{ .product = &.{ 0, 0 } } },
     .constants = &.{.{ .schema = 0, .bytes = &.{ 99, 0, 0, 0, 0, 0, 0, 0 } }},
     .effects = &.{},
-    .functions = &.{.{ .entry = 0, .inputs = &.{ 0, 1 }, .layout = .{ .slots = &.{ 0, 0, 2, 0, 0, 0, 2 } }, .result = 0 }},
+    .functions = &.{.{
+        .entry = 0,
+        .inputs = &.{ 0, 1 },
+        .layout = .{ .slots = &.{ 0, 0, 2, 0, 0, 0, 2 } },
+        .result = 0,
+    }},
     .blocks = &.{.{ .function = 0, .instructions = &.{
         .{ .destination = 2, .opcode = .product, .operands = &.{ 0, 1 } },
         .{ .destination = 3, .opcode = .field, .operands = &.{2}, .immediate = 0 },
@@ -28,7 +33,13 @@ test "product projections forward exact operands and eliminate materialization" 
     for (eliminated.program.blocks) |block| for (block.instructions) |instruction| {
         try std.testing.expect(instruction.opcode != .product and instruction.opcode != .field);
     };
-    std.debug.print("product scalar replacement: {d} -> {d} bytes\n", .{ try @import("program_image.zig").encodedLength(original), try @import("program_image.zig").encodedLength(eliminated.program) });
+    std.debug.print(
+        "product scalar replacement: {d} -> {d} bytes\n",
+        .{
+            try @import("program_image.zig").encodedLength(original),
+            try @import("program_image.zig").encodedLength(eliminated.program),
+        },
+    );
 }
 
 test "independent product checker rejects a same-type wrong field" {
@@ -41,12 +52,25 @@ test "independent product checker rejects a same-type wrong field" {
     const witnesses = &.{reduce.Witness{ .block = 0, .projection = 1, .construction = 0 }};
     try reduce.validate(a, original, candidate, witnesses);
     instructions[1].operands = &.{1};
-    try std.testing.expectError(error.InvalidAggregateReduction, reduce.validate(a, original, candidate, witnesses));
+    try std.testing.expectError(
+        error.InvalidAggregateReduction,
+        reduce.validate(a, original, candidate, witnesses),
+    );
 }
 
 test "overwritten source retains its stored product value" {
     var program = original;
-    program.blocks = &.{.{ .function = 0, .instructions = &.{ original.blocks[0].instructions[0], .{ .destination = 0, .opcode = .constant, .immediate = 0 }, original.blocks[0].instructions[1], original.blocks[0].instructions[2], original.blocks[0].instructions[3] }, .terminator = original.blocks[0].terminator }};
+    program.blocks = &.{.{
+        .function = 0,
+        .instructions = &.{
+            original.blocks[0].instructions[0],
+            .{ .destination = 0, .opcode = .constant, .immediate = 0 },
+            original.blocks[0].instructions[1],
+            original.blocks[0].instructions[2],
+            original.blocks[0].instructions[3],
+        },
+        .terminator = original.blocks[0].terminator,
+    }};
     var stats: reduce.Statistics = .{};
     var result = try reduce.run(a, program, &stats, .{});
     defer result.deinit();
@@ -58,12 +82,30 @@ test "overwritten source retains its stored product value" {
     blocks[0].instructions = &instructions;
     var forged = program;
     forged.blocks = &blocks;
-    try std.testing.expectError(error.InvalidAggregateReduction, reduce.validate(a, program, forged, &.{.{ .block = 0, .projection = 2, .construction = 0 }}));
+    try std.testing.expectError(
+        error.InvalidAggregateReduction,
+        reduce.validate(
+            a,
+            program,
+            forged,
+            &.{.{ .block = 0, .projection = 2, .construction = 0 }},
+        ),
+    );
 }
 
 test "product aliases retain definition provenance" {
     var program = original;
-    program.blocks = &.{.{ .function = 0, .instructions = &.{ original.blocks[0].instructions[0], .{ .destination = 6, .opcode = .move, .operands = &.{2} }, .{ .destination = 3, .opcode = .field, .operands = &.{6}, .immediate = 0 }, original.blocks[0].instructions[2], original.blocks[0].instructions[3] }, .terminator = original.blocks[0].terminator }};
+    program.blocks = &.{.{
+        .function = 0,
+        .instructions = &.{
+            original.blocks[0].instructions[0],
+            .{ .destination = 6, .opcode = .move, .operands = &.{2} },
+            .{ .destination = 3, .opcode = .field, .operands = &.{6}, .immediate = 0 },
+            original.blocks[0].instructions[2],
+            original.blocks[0].instructions[3],
+        },
+        .terminator = original.blocks[0].terminator,
+    }};
     var stats: reduce.Statistics = .{};
     var result = try reduce.run(a, program, &stats, .{});
     defer result.deinit();

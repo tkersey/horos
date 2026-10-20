@@ -30,22 +30,39 @@ test "native enum tags and union case ordinals have distinct normalization laws"
     try std.testing.expectEqualSlices(u32, &.{ 2, 9 }, &native.enumTags(A));
     const Wide = enum(u32) { maximum = 4294967295, zero = 0, decimal = 1234567890 };
     try std.testing.expectEqualSlices(u32, &.{ 0, 1234567890, 4294967295 }, &native.enumTags(Wide));
-    inline for (.{ "0", "1234567890", "4294967295" }, @typeInfo(native.info(Wide).enumeration).@"enum".field_names) |expected, actual|
+    inline for (
+        .{ "0", "1234567890", "4294967295" },
+        @typeInfo(native.info(Wide).enumeration).@"enum".field_names,
+    ) |expected, actual|
         try std.testing.expectEqualStrings(expected, actual);
     const U = union(A) { red: u64, blue: void };
     const V = union(enum) { red: u64, blue: void };
     try std.testing.expect(native.Shape(U) == native.Shape(V));
-    try std.testing.expect(native.Shape(?u64) == native.Shape(union(enum) { none: void, some: u64 }));
+    try std.testing.expect(native.Shape(?u64) == native.Shape(union(enum) {
+        none: void,
+        some: u64,
+    }));
     try std.testing.expect(native.info(struct {}).product == native.Fields(&.{}, &.{}));
     try std.testing.expectEqual(@as(usize, 0), native.enumTags(enum(noreturn) {}).len);
 }
 
 test "native logical contracts preserve previously accepted aggregate forms" {
-    try std.testing.expect(native.Shape(packed struct { a: u8, b: u8 }) == native.Shape(struct { a: u8, b: u8 }));
-    try std.testing.expect(native.Shape(extern struct { a: u32 }) == native.Shape(struct { a: u32 }));
+    try std.testing.expect(native.Shape(packed struct {
+        a: u8,
+        b: u8,
+    }) == native.Shape(struct {
+        a: u8,
+        b: u8,
+    }));
+    try std.testing.expect(
+        native.Shape(extern struct { a: u32 }) == native.Shape(struct { a: u32 }),
+    );
     try std.testing.expect(native.Shape([2:0]u8) == native.Shape([2]u8));
     const Tuple = @Tuple(&.{ u64, bool });
-    try std.testing.expectEqualStrings("0", @typeInfo(native.info(Tuple).product).@"struct".field_names[0]);
+    try std.testing.expectEqualStrings(
+        "0",
+        @typeInfo(native.info(Tuple).product).@"struct".field_names[0],
+    );
     try std.testing.expect(native.Shape(usize) == native.Shape(@Int(.unsigned, @bitSizeOf(usize))));
     const Pretend = struct {
         pub const protean_value_kind = .text;

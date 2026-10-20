@@ -36,7 +36,10 @@ pub fn overlaps(comptime T: type, value: T, output: []const u8) bool {
                 if (overlaps(info.child, element, output)) return true;
             };
         },
-        .@"struct" => |info| inline for (info.field_names, info.field_types) |field_name, FieldType| {
+        .@"struct" => |info| inline for (
+            info.field_names,
+            info.field_types,
+        ) |field_name, FieldType| {
             if (overlaps(FieldType, @field(value, field_name), output)) return true;
         },
         .@"union" => switch (value) {
@@ -68,7 +71,11 @@ pub fn write(comptime T: type, value: T, writer: *wire.Writer) wire.Error!void {
             try writer.natural(value.len);
             if (info.child == u64) {
                 if (writer.output == null and writer.expected == null and writer.hasher == null) {
-                    writer.position = std.math.add(usize, writer.position, try measuredSequence(info.child, value)) catch return error.InvalidLength;
+                    writer.position = std.math.add(
+                        usize,
+                        writer.position,
+                        try measuredSequence(info.child, value),
+                    ) catch return error.InvalidLength;
                     return;
                 }
             }
@@ -80,7 +87,10 @@ pub fn write(comptime T: type, value: T, writer: *wire.Writer) wire.Error!void {
             for (value) |element| try write(info.child, element, writer);
         },
         .@"struct" => |info| {
-            inline for (info.field_names, info.field_types) |field_name, FieldType| try write(FieldType, @field(value, field_name), writer);
+            inline for (
+                info.field_names,
+                info.field_types,
+            ) |field_name, FieldType| try write(FieldType, @field(value, field_name), writer);
         },
         .@"union" => {
             try writer.natural(@backingInt(std.meta.activeTag(value)));
@@ -99,7 +109,12 @@ pub fn read(comptime T: type, reader: *wire.Reader, allocator: std.mem.Allocator
     return readBounded(T, reader, allocator, &remaining);
 }
 
-pub fn readBounded(comptime T: type, reader: *wire.Reader, allocator: std.mem.Allocator, remaining: *usize) Error!T {
+pub fn readBounded(
+    comptime T: type,
+    reader: *wire.Reader,
+    allocator: std.mem.Allocator,
+    remaining: *usize,
+) Error!T {
     return switch (@typeInfo(T)) {
         .void => {},
         .bool => switch (try reader.byte()) {
@@ -125,11 +140,20 @@ pub fn readBounded(comptime T: type, reader: *wire.Reader, allocator: std.mem.Al
             const count = try reader.count();
             if (count > reader.input.len - reader.position) return error.Truncated;
             if (info.child == u8) break :blk try reader.take(count);
-            const bytes = std.math.mul(usize, @sizeOf(info.child), count) catch return error.InvalidLength;
+            const bytes = std.math.mul(
+                usize,
+                @sizeOf(info.child),
+                count,
+            ) catch return error.InvalidLength;
             if (bytes > remaining.*) return error.Capacity;
             remaining.* -= bytes;
             const result = try allocator.alloc(info.child, count);
-            for (result) |*element| element.* = try readBounded(info.child, reader, allocator, remaining);
+            for (result) |*element| element.* = try readBounded(
+                info.child,
+                reader,
+                allocator,
+                remaining,
+            );
             break :blk result;
         },
         .array => |info| blk: {
@@ -138,7 +162,12 @@ pub fn readBounded(comptime T: type, reader: *wire.Reader, allocator: std.mem.Al
                 @memcpy(&result, try reader.take(info.len));
                 break :blk result;
             }
-            for (&result) |*element| element.* = try readBounded(info.child, reader, allocator, remaining);
+            for (&result) |*element| element.* = try readBounded(
+                info.child,
+                reader,
+                allocator,
+                remaining,
+            );
             break :blk result;
         },
         .@"struct" => |info| blk: {
@@ -152,7 +181,16 @@ pub fn readBounded(comptime T: type, reader: *wire.Reader, allocator: std.mem.Al
             const raw_tag = try reader.natural();
             const tag = std.enums.fromInt(info.tag_type.?, raw_tag) orelse return error.InvalidTag;
             break :blk switch (tag) {
-                inline else => |known| @unionInit(T, @tagName(known), try readBounded(@FieldType(T, @tagName(known)), reader, allocator, remaining)),
+                inline else => |known| @unionInit(
+                    T,
+                    @tagName(known),
+                    try readBounded(
+                        @FieldType(T, @tagName(known)),
+                        reader,
+                        allocator,
+                        remaining,
+                    ),
+                ),
             };
         },
         else => @compileError("not a logical portable record: " ++ @typeName(T)),
@@ -179,7 +217,10 @@ test "numeric sequence sizing agrees with emitted and hashed current record byte
     const Argument = @import("activation.zig").Source;
     const Row = struct { ids: []const u64, arguments: []const Argument };
     for ([_]u64{ 0, 127, 128, 16383, 16384, std.math.maxInt(u64) }) |number| {
-        const value: Row = .{ .ids = &.{ number, 0, 128 }, .arguments = &.{ .{ .slot = number }, .returned, .{ .slot = 0 } } };
+        const value: Row = .{
+            .ids = &.{ number, 0, 128 },
+            .arguments = &.{ .{ .slot = number }, .returned, .{ .slot = 0 } },
+        };
         var measured: wire.Writer = .{};
         try write(Row, value, &measured);
         var buffer: [128]u8 = undefined;
@@ -224,20 +265,35 @@ pub fn equal(comptime T: type, a: T, b: T) bool {
             break :blk true;
         },
         .@"struct" => |info| blk: {
-            inline for (info.field_names, info.field_types) |field_name, FieldType| if (!equal(FieldType, @field(a, field_name), @field(b, field_name))) break :blk false;
+            inline for (
+                info.field_names,
+                info.field_types,
+            ) |field_name, FieldType| if (!equal(
+                FieldType,
+                @field(a, field_name),
+                @field(b, field_name),
+            )) break :blk false;
             break :blk true;
         },
         .@"union" => blk: {
             if (std.meta.activeTag(a) != std.meta.activeTag(b)) break :blk false;
             break :blk switch (a) {
-                inline else => |payload, tag| equal(@TypeOf(payload), payload, @field(b, @tagName(tag))),
+                inline else => |payload, tag| equal(
+                    @TypeOf(payload),
+                    payload,
+                    @field(b, @tagName(tag)),
+                ),
             };
         },
         .array => |info| blk: {
             for (a, b) |left, right| if (!equal(info.child, left, right)) break :blk false;
             break :blk true;
         },
-        .optional => |info| if (a) |left| (if (b) |right| equal(info.child, left, right) else false) else b == null,
+        .optional => |info| if (a) |left| (if (b) |right| equal(
+            info.child,
+            left,
+            right,
+        ) else false) else b == null,
         .void => true,
         else => a == b,
     };

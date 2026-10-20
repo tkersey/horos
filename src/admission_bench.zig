@@ -23,7 +23,10 @@ pub fn main(init: std.process.Init) !void {
             4 => horos.source.examples.stateShared(&builder),
             5 => horos.source.examples.choicesAll(&builder),
             6 => horos.source.examples.queensDfs(&builder),
-            else => horos.source.examples.installations(&builder, fixtures.installations[index - 7]),
+            else => horos.source.examples.installations(
+                &builder,
+                fixtures.installations[index - 7],
+            ),
         };
         var identity: ?[32]u8 = null;
         for (0..fixtures.samples) |sample| {
@@ -33,7 +36,10 @@ pub fn main(init: std.process.Init) !void {
             const elapsed = start.durationTo(std.Io.Clock.awake.now(init.io)).nanoseconds;
             const retained = meter.live;
             const peak = meter.peak;
-            const bytes = try init.gpa.alloc(u8, try horos.data.program_image.encodedLength(compiled.program));
+            const bytes = try init.gpa.alloc(
+                u8,
+                try horos.data.program_image.encodedLength(compiled.program),
+            );
             defer init.gpa.free(bytes);
             _ = try compiled.encode(init.gpa, bytes);
             var hash: [32]u8 = undefined;
@@ -48,14 +54,41 @@ pub fn main(init: std.process.Init) !void {
             }
             compiled.deinit();
             if (meter.live != 0) return error.LeakedCompilation;
-            try std.json.Stringify.value(.{ .fixture = name, .operation = "compile", .sample = sample, .ns = elapsed, .retained_bytes = retained, .peak_bytes = peak, .image_bytes = bytes.len, .sha256 = std.fmt.bytesToHex(hash, .lower) }, .{}, &output.interface);
+            try std.json.Stringify.value(
+                .{
+                    .fixture = name,
+                    .operation = "compile",
+                    .sample = sample,
+                    .ns = elapsed,
+                    .retained_bytes = retained,
+                    .peak_bytes = peak,
+                    .image_bytes = bytes.len,
+                    .sha256 = std.fmt.bytesToHex(hash, .lower),
+                },
+                .{},
+                &output.interface,
+            );
             try output.interface.writeByte('\n');
 
             meter = .{ .parent = init.gpa };
             const admit_start = std.Io.Clock.awake.now(init.io);
             const admitted = try horos.data.program_image.Admitted.decode(meter.allocator(), bytes);
-            const admit_elapsed = admit_start.durationTo(std.Io.Clock.awake.now(init.io)).nanoseconds;
-            try std.json.Stringify.value(.{ .fixture = name, .operation = "admit", .sample = sample, .ns = admit_elapsed, .retained_bytes = meter.live, .peak_bytes = meter.peak, .owner_storage_bytes = admitted.storageBytes() }, .{}, &output.interface);
+            const admit_elapsed = admit_start.durationTo(
+                std.Io.Clock.awake.now(init.io),
+            ).nanoseconds;
+            try std.json.Stringify.value(
+                .{
+                    .fixture = name,
+                    .operation = "admit",
+                    .sample = sample,
+                    .ns = admit_elapsed,
+                    .retained_bytes = meter.live,
+                    .peak_bytes = meter.peak,
+                    .owner_storage_bytes = admitted.storageBytes(),
+                },
+                .{},
+                &output.interface,
+            );
             try output.interface.writeByte('\n');
             admitted.deinit();
             if (meter.live != 0) return error.LeakedAdmission;

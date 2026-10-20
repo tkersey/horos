@@ -20,7 +20,11 @@ pub fn width(schema: p.Schema) ?usize {
 pub fn fromBytes(schema: p.Schema, bytes: []const u8) Error![8]u8 {
     if (bytes.len != (width(schema) orelse return error.InvalidScalar)) return error.InvalidScalar;
     if (schema == .boolean and bytes[0] > 1) return error.InvalidScalar;
-    if (schema == .enumeration and std.mem.indexOfScalar(u32, schema.enumeration, std.mem.readInt(u32, bytes[0..4], .little)) == null) return error.InvalidScalar;
+    if (schema == .enumeration and std.mem.indexOfScalar(
+        u32,
+        schema.enumeration,
+        std.mem.readInt(u32, bytes[0..4], .little),
+    ) == null) return error.InvalidScalar;
     var result = @as([8]u8, @splat(0));
     @memcpy(result[0..bytes.len], bytes);
     return result;
@@ -29,7 +33,11 @@ pub fn fromBytes(schema: p.Schema, bytes: []const u8) Error![8]u8 {
 pub fn validate(schema: p.Schema, bytes: [8]u8) Error!void {
     const length = width(schema) orelse return error.InvalidScalar;
     if (schema == .boolean and bytes[0] > 1) return error.InvalidScalar;
-    if (schema == .enumeration and std.mem.indexOfScalar(u32, schema.enumeration, std.mem.readInt(u32, bytes[0..4], .little)) == null) return error.InvalidScalar;
+    if (schema == .enumeration and std.mem.indexOfScalar(
+        u32,
+        schema.enumeration,
+        std.mem.readInt(u32, bytes[0..4], .little),
+    ) == null) return error.InvalidScalar;
     for (bytes[length..]) |byte| if (byte != 0) return error.InvalidScalar;
 }
 
@@ -71,7 +79,10 @@ pub fn fromInteger(schema: p.Schema, value: i128) ?[8]u8 {
 
 const integer_schemas = [_]p.Schema{ .i8, .i16, .i32, .i64, .u8, .u16, .u32, .u64 };
 fn conversionIndex(schema: p.Schema) ?usize {
-    inline for (integer_schemas, 0..) |known, index| if (std.meta.activeTag(schema) == std.meta.activeTag(known)) return index;
+    inline for (
+        integer_schemas,
+        0..,
+    ) |known, index| if (std.meta.activeTag(schema) == std.meta.activeTag(known)) return index;
     return null;
 }
 const conversion_fallibility = table: {
@@ -130,12 +141,18 @@ pub fn binary(op: p.Opcode, schema: p.Schema, left: [8]u8, right: [8]u8) Error!R
         .integer_div, .integer_rem => blk: {
             if (b == 0) return .{ .fault = .division_by_zero };
             // Both operations reject the signed minimum divided by -1.
-            if (b == -1 and fromInteger(schema, -a) == null) return .{ .fault = .arithmetic_overflow };
+            if (b == -1 and fromInteger(
+                schema,
+                -a,
+            ) == null) return .{ .fault = .arithmetic_overflow };
             break :blk if (op == .integer_div) @divTrunc(a, b) else @rem(a, b);
         },
         else => return error.NotInteger,
     };
-    return .{ .value = fromInteger(schema, value) orelse return .{ .fault = .arithmetic_overflow } };
+    return .{ .value = fromInteger(
+        schema,
+        value,
+    ) orelse return .{ .fault = .arithmetic_overflow } };
 }
 
 pub fn unary(op: p.Opcode, source: p.Schema, target: p.Schema, input: [8]u8) Error!Result {
@@ -145,7 +162,10 @@ pub fn unary(op: p.Opcode, source: p.Schema, target: p.Schema, input: [8]u8) Err
         return .{ .value = input };
     }
     const value = try integer(source, input);
-    if (op == .integer_convert) return .{ .value = fromInteger(target, value) orelse return .{ .fault = .arithmetic_overflow } };
+    if (op == .integer_convert) return .{ .value = fromInteger(
+        target,
+        value,
+    ) orelse return .{ .fault = .arithmetic_overflow } };
     if (op != .integer_bit_not) return error.NotInteger;
     var output = @as([8]u8, @splat(0));
     for (output[0..width(source).?], 0..) |*byte, index| byte.* = ~input[index];
@@ -155,12 +175,21 @@ pub fn unary(op: p.Opcode, source: p.Schema, target: p.Schema, input: [8]u8) Err
 test "scalar operations preserve fixed widths and report authored arithmetic faults" {
     const max = fromInteger(.u64, std.math.maxInt(u64)).?;
     const one = fromInteger(.u64, 1).?;
-    try std.testing.expectEqual(Fault.arithmetic_overflow, (try binary(.integer_add, .u64, max, one)).fault);
+    try std.testing.expectEqual(
+        Fault.arithmetic_overflow,
+        (try binary(.integer_add, .u64, max, one)).fault,
+    );
     const zero = fromInteger(.u64, 0).?;
-    try std.testing.expectEqual(Fault.division_by_zero, (try binary(.integer_div, .u64, one, zero)).fault);
+    try std.testing.expectEqual(
+        Fault.division_by_zero,
+        (try binary(.integer_div, .u64, one, zero)).fault,
+    );
     const minimum = fromInteger(.i64, std.math.minInt(i64)).?;
     const negative_one = fromInteger(.i64, -1).?;
-    try std.testing.expectEqual(Fault.arithmetic_overflow, (try binary(.integer_div, .i64, minimum, negative_one)).fault);
+    try std.testing.expectEqual(
+        Fault.arithmetic_overflow,
+        (try binary(.integer_div, .i64, minimum, negative_one)).fault,
+    );
     const negative = fromInteger(.i8, -3).?;
     try std.testing.expectEqual(@as(i128, -3), try integer(.i8, negative));
 }
@@ -170,27 +199,73 @@ test "remainder overflow, bit widths, and checked conversions preserve scalar do
         const bits = width(shape).? * 8;
         const minimum: i128 = -(@as(i128, 1) << @intCast(bits - 1));
         const negative_one = fromInteger(shape, -1).?;
-        try std.testing.expectEqual(Fault.arithmetic_overflow, (try binary(.integer_rem, shape, fromInteger(shape, minimum).?, negative_one)).fault);
-        try std.testing.expectEqual(@as(i128, 0), try integer(shape, (try binary(.integer_rem, shape, fromInteger(shape, minimum + 1).?, negative_one)).value));
-        try std.testing.expectEqual(@as(i128, -1), try integer(shape, (try binary(.integer_rem, shape, fromInteger(shape, -5).?, fromInteger(shape, 2).?)).value));
+        try std.testing.expectEqual(
+            Fault.arithmetic_overflow,
+            (try binary(.integer_rem, shape, fromInteger(shape, minimum).?, negative_one)).fault,
+        );
+        try std.testing.expectEqual(
+            @as(i128, 0),
+            try integer(
+                shape,
+                (try binary(
+                    .integer_rem,
+                    shape,
+                    fromInteger(shape, minimum + 1).?,
+                    negative_one,
+                )).value,
+            ),
+        );
+        try std.testing.expectEqual(
+            @as(i128, -1),
+            try integer(
+                shape,
+                (try binary(
+                    .integer_rem,
+                    shape,
+                    fromInteger(shape, -5).?,
+                    fromInteger(shape, 2).?,
+                )).value,
+            ),
+        );
     }
     inline for (.{ p.Schema.u8, .u16, .u32, .u64, .i8, .i16, .i32, .i64 }) |shape| {
         const zero = fromInteger(shape, 0).?;
         const inverse = (try unary(.integer_bit_not, shape, shape, zero)).value;
         try validate(shape, inverse);
-        try std.testing.expectEqualSlices(u8, &zero, &(try binary(.integer_bit_xor, shape, inverse, inverse)).value);
+        try std.testing.expectEqualSlices(
+            u8,
+            &zero,
+            &(try binary(.integer_bit_xor, shape, inverse, inverse)).value,
+        );
     }
     try std.testing.expect(!conversionCanFail(.u32, .u64));
     try std.testing.expect(!conversionCanFail(.i32, .i64));
     try std.testing.expect(conversionCanFail(.u64, .i64));
     try std.testing.expect(conversionCanFail(.i64, .u64));
-    try std.testing.expectEqual(Fault.arithmetic_overflow, (try unary(.integer_convert, .u64, .i64, fromInteger(.u64, std.math.maxInt(u64)).?)).fault);
-    try std.testing.expectEqual(Fault.arithmetic_overflow, (try unary(.integer_convert, .i64, .u64, fromInteger(.i64, -1).?)).fault);
+    try std.testing.expectEqual(
+        Fault.arithmetic_overflow,
+        (try unary(
+            .integer_convert,
+            .u64,
+            .i64,
+            fromInteger(.u64, std.math.maxInt(u64)).?,
+        )).fault,
+    );
+    try std.testing.expectEqual(
+        Fault.arithmetic_overflow,
+        (try unary(.integer_convert, .i64, .u64, fromInteger(.i64, -1).?)).fault,
+    );
 }
 
 test "conversion table matches independently expressed mathematical ranges for all 64 pairs" {
     const types = .{ i8, i16, i32, i64, u8, u16, u32, u64 };
-    inline for (types, integer_schemas) |Source, from| inline for (types, integer_schemas) |Target, to| {
+    inline for (
+        types,
+        integer_schemas,
+    ) |Source, from| inline for (
+        types,
+        integer_schemas,
+    ) |Target, to| {
         const expected = @as(i128, std.math.minInt(Source)) < @as(i128, std.math.minInt(Target)) or @as(i128, std.math.maxInt(Source)) > @as(i128, std.math.maxInt(Target));
         try std.testing.expectEqual(expected, conversionCanFail(from, to));
     };

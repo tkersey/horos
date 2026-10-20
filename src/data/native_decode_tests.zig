@@ -17,8 +17,17 @@ test "native BPI3 BMO1 and invocation decoders admit allocator-backed large valu
         .schemas = &.{ .bytes, .unit },
         .constants = &.{.{ .schema = 0, .bytes = value }},
         .effects = &.{},
-        .functions = &.{.{ .entry = 0, .inputs = &.{}, .layout = .{ .slots = &.{0} }, .result = 0 }},
-        .blocks = &.{.{ .function = 0, .instructions = &.{.{ .destination = 0, .opcode = .constant }}, .terminator = .{ .return_value = 0 } }},
+        .functions = &.{.{
+            .entry = 0,
+            .inputs = &.{},
+            .layout = .{ .slots = &.{0} },
+            .result = 0,
+        }},
+        .blocks = &.{.{
+            .function = 0,
+            .instructions = &.{.{ .destination = 0, .opcode = .constant }},
+            .terminator = .{ .return_value = 0 },
+        }},
     };
     {
         const image = try a.alloc(u8, try data.program_image.encodedLength(program));
@@ -31,7 +40,10 @@ test "native BPI3 BMO1 and invocation decoders admit allocator-backed large valu
         const admitted = try data.program_image.Admitted.decode(a, image);
         defer admitted.deinit();
         try std.testing.expectEqualSlices(u8, value, admitted.program().constants[0].bytes);
-        try std.testing.expectError(error.Capacity, data.program_image.decodeLimited(a, image, .{ .max_decoded_bytes = 64 << 20 }));
+        try std.testing.expectError(
+            error.Capacity,
+            data.program_image.decodeLimited(a, image, .{ .max_decoded_bytes = 64 << 20 }),
+        );
     }
     {
         const object: data.component.Object = .{
@@ -58,7 +70,10 @@ test "native BPI3 BMO1 and invocation decoders admit allocator-backed large valu
         .payload = value,
     });
     try envelope(data.invocation.Request, request);
-    const result: data.invocation.Result = .{ .request_identity = request.request_identity, .value = value };
+    const result: data.invocation.Result = .{
+        .request_identity = request.request_identity,
+        .value = value,
+    };
     try data.invocation.validateResult(a, request, result);
     try envelope(data.invocation.Result, result);
     try envelope(data.invocation.Input, .{ .image = &.{}, .instance = .{ .initial_args = value } });
@@ -71,7 +86,10 @@ fn envelope(comptime T: type, value: T) !void {
     var decoded = try data.invocation.decode(T, a, bytes);
     defer decoded.deinit();
     try std.testing.expectEqualDeep(value, decoded.value);
-    try std.testing.expectError(error.Capacity, data.invocation.decodeLimited(T, a, bytes, .{ .max_bytes = 64 << 20 }));
+    try std.testing.expectError(
+        error.Capacity,
+        data.invocation.decodeLimited(T, a, bytes, .{ .max_bytes = 64 << 20 }),
+    );
 }
 
 test "native schema decoding admits records above the former allocation budget" {
