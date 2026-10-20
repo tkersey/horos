@@ -12,6 +12,8 @@ pub const Module = ast.Module;
 pub const Compiled = @import("source/activation_lower.zig").Construction;
 pub const RecoveryBinding = @import("source/activation_lower.zig").RecoveryBinding;
 pub const recovery = @import("source/recovery.zig");
+pub const relation = @import("source/relation.zig");
+pub const slice = @import("source/slice.zig");
 pub const examples = @import("source/examples.zig");
 pub const lower = @import("source/activation_lower.zig").lower;
 /// Direct stable-slot construction with BPI3 encoding and pure admission.

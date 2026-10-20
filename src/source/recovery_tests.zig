@@ -432,3 +432,158 @@ fn checkQualifiedOwnership(allocator: std.mem.Allocator) !void {
 test "source ownership preserves qualified slices and underaligned fields" {
     try std.testing.checkAllAllocationFailures(a, checkQualifiedOwnership, .{});
 }
+
+const slicing = @import("slice.zig");
+
+fn slicingModule(b: *source.Builder) !struct {
+    module: source.Module,
+    pure_entry: source.Id,
+} {
+    const unit = try b.scalar(void);
+    const word = try b.scalar(u64);
+    const service = try b.effect(.{ .identity = "live-service", .payload = word, .result = word });
+    const live = try b.declare(&.{word}, word, &.{service}, &.{});
+    const leaf = try b.declare(&.{word}, word, &.{}, &.{});
+    const pure_entry = try b.declare(&.{word}, word, &.{}, &.{});
+    try b.define(live, try b.term(.{ .perform = .{
+        .effect = service,
+        .payload = try b.reference(b.parameter(live, 0)),
+    } }));
+    try b.define(leaf, try b.pure(try b.reference(b.parameter(leaf, 0))));
+    try b.define(pure_entry, try b.term(.{ .call = .{
+        .function = leaf,
+        .arguments = &.{try b.reference(b.parameter(pure_entry, 0))},
+    } }));
+    return .{ .module = b.module(live, unit), .pure_entry = pure_entry };
+}
+
+test "source slices own executable closure and remove unreachable bridge catalogs" {
+    var b = source.Builder.init(a);
+    const fixture = slicingModule(&b) catch |err| {
+        b.deinit();
+        return err;
+    };
+    var selected = slicing.extract(a, fixture.module, .{
+        .entry = fixture.pure_entry,
+        .require_pure = true,
+    }) catch |err| {
+        b.deinit();
+        return err;
+    };
+    b.deinit();
+    defer selected.deinit();
+    const module = selected.module();
+    try std.testing.expectEqual(@as(source.Id, 0), selected.original_entry);
+    try std.testing.expectEqual(@as(source.Id, 2), selected.selected_entry);
+    try std.testing.expectEqual(@as(usize, 0), module.effects.len);
+    try std.testing.expectEqual(@as(usize, 2), module.functions.len);
+    try std.testing.expectEqual(@as(usize, 2), module.variables.len);
+    try std.testing.expectEqual(@as(?source.Id, null), selected.maps.functions[0]);
+    try std.testing.expectEqual(@as(?source.Id, null), selected.maps.effects[0]);
+    const entry = module.functions[@intCast(module.entry)];
+    const body = module.terms[@intCast(entry.body.?)].call;
+    try std.testing.expectEqual(selected.maps.functions[1].?, body.function);
+    try std.testing.expectEqual(
+        entry.parameters[0],
+        module.values[@intCast(body.arguments[0])].expression.variable,
+    );
+    var compiled = try source.lower(a, module);
+    defer compiled.deinit();
+}
+
+test "source slicing admits the full original before selecting a pure export" {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const fixture = try slicingModule(&b);
+    b.functions.items[0].body = null;
+    try std.testing.expectError(error.UndefinedFunction, slicing.extract(a, b.module(
+        fixture.module.entry,
+        fixture.module.failure,
+    ), .{ .entry = fixture.pure_entry, .require_pure = true }));
+}
+
+test "source slices cannot erase malformed unused effect declarations" {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const fixture = try slicingModule(&b);
+    b.effects.items[0].payload = b.schemas.items.len;
+    try std.testing.expectError(error.InvalidSchema, slicing.extract(a, fixture.module, .{
+        .entry = fixture.pure_entry,
+        .require_pure = true,
+    }));
+}
+
+test "source slicing rejects reachable external effects without hiding their declarations" {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const fixture = try slicingModule(&b);
+    try std.testing.expectError(error.ImpureSlice, slicing.extract(a, fixture.module, .{
+        .entry = fixture.module.entry,
+        .require_pure = true,
+    }));
+    var selected = try slicing.extract(a, fixture.module, .{ .entry = fixture.module.entry });
+    defer selected.deinit();
+    try std.testing.expectEqual(@as(usize, 1), selected.module().effects.len);
+    try std.testing.expect(selected.module().effects[0].external);
+}
+
+test "source slices preserve handlers captures recursive calls and nominal resources" {
+    for ([_]*const fn (*source.Builder) source.Error!source.Module{
+        source.examples.deep,
+        source.examples.lexical,
+        source.examples.recursive,
+        source.examples.resourceScalar,
+    }) |build| {
+        var b = source.Builder.init(a);
+        defer b.deinit();
+        const module = try build(&b);
+        var selected = try slicing.extract(a, module, .{ .entry = module.entry });
+        defer selected.deinit();
+        const retained = selected.module();
+        try std.testing.expectEqual(module.handlers.len, retained.handlers.len);
+        try std.testing.expectEqual(module.resources.len, retained.resources.len);
+        try std.testing.expectEqual(module.region_count, retained.region_count);
+        try std.testing.expectEqual(
+            selected.maps.functions[@intCast(module.entry)].?,
+            retained.entry,
+        );
+    }
+}
+
+fn checkSliceAllocation(allocator: std.mem.Allocator, module: source.Module) !void {
+    var selected = try slicing.extract(allocator, module, .{ .entry = module.entry });
+    defer selected.deinit();
+}
+
+test "source slicing releases partial owners on allocation failure" {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const unit = try b.scalar(void);
+    const entry = try b.declare(&.{}, unit, &.{}, &.{});
+    try b.define(entry, try b.pure(try b.constant(void, {})));
+    const module = b.module(entry, unit);
+    var counting = std.testing.FailingAllocator.init(a, .{});
+    try checkSliceAllocation(counting.allocator(), module);
+    for (0..counting.alloc_index) |index| {
+        var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = index });
+        checkSliceAllocation(failing.allocator(), module) catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+        };
+        try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    }
+}
+
+test "source slices retain sparse nominal region identities without count-sized allocation" {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const fixture = try slicingModule(&b);
+    var module = fixture.module;
+    module.region_count = std.math.maxInt(source.Id);
+    var selected = try slicing.extract(a, module, .{
+        .entry = fixture.pure_entry,
+        .require_pure = true,
+    });
+    defer selected.deinit();
+    try std.testing.expectEqual(module.region_count, selected.module().region_count);
+    try std.testing.expectEqual(@as(usize, 0), selected.maps.regions.len);
+}

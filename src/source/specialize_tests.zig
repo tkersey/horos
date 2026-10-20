@@ -790,3 +790,429 @@ test "constant lookup of huge zero-width sequence does not enumerate its length"
     );
     _ = word;
 }
+
+test "finite source relation checks scalar composition and rejects unexplained changes" {
+    const relation = @import("relation.zig");
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const unit = try b.scalar(void);
+    const word = try b.scalar(u64);
+    const f = try b.declare(&.{word}, word, &.{}, &.{});
+    const x = try b.reference(b.parameter(f, 0));
+    const moved = try b.primitive(word, .move, &.{x}, 0);
+    try b.define(f, try b.pure(moved));
+    const before = b.module(f, unit);
+    const after = try source.own(source.ast.Module, b.allocator(), before);
+    @constCast(after.values)[@intCast(moved)] = before.values[@intCast(x)];
+    const steps = [_]relation.Step{.{
+        .successor = after,
+        .rule = .{ .scalar = .{ .value = moved, .rule = .identity } },
+    }};
+    try relation.validate(a, before, after, &steps, .{});
+    try std.testing.expectError(
+        error.InvalidRelation,
+        relation.validate(a, before, after, &.{}, .{}),
+    );
+    @constCast(after.values)[@intCast(moved)].expression = .{ .primitive = .{
+        .opcode = .integer_bit_not,
+        .operands = &.{x},
+    } };
+    try std.testing.expectError(
+        error.InvalidRelation,
+        relation.validate(a, before, after, &steps, .{}),
+    );
+}
+
+test "private product relation transports literals constructors projections and unpack bindings" {
+    const relation = @import("relation.zig");
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const unit = try b.scalar(void);
+    const word = try b.scalar(u64);
+    const boolean = try b.scalar(bool);
+    const product = try b.schema(.{ .product = &.{ word, boolean } });
+    const f = try b.declare(&.{ word, boolean }, word, &.{}, &.{});
+    const x = try b.reference(b.parameter(f, 0));
+    const y = try b.reference(b.parameter(f, 1));
+    const pair = try b.primitive(product, .product, &.{ x, y }, 0);
+    const projected = try b.primitive(word, .field, &.{pair}, 0);
+    _ = try b.literal(.{ .schema = product, .bytes = &.{ 7, 0, 0, 0, 0, 0, 0, 0, 1 } });
+    const first = try b.variable(word);
+    const second = try b.variable(boolean);
+    const body = try b.pure(projected);
+    try b.define(f, try b.term(.{ .unpack_product = .{
+        .value = pair,
+        .variables = &.{ first, second },
+        .body = body,
+    } }));
+    const before = b.module(f, unit);
+    const after = try source.own(source.ast.Module, b.allocator(), before);
+    @constCast(after.schemas)[@intCast(product)].product = &.{ boolean, word };
+    @constCast(after.values)[@intCast(pair)].expression.primitive.operands = &.{ y, x };
+    @constCast(after.values)[@intCast(projected)].expression.primitive.immediate = 1;
+    @constCast(after.constants)[0].bytes = &.{ 1, 7, 0, 0, 0, 0, 0, 0, 0 };
+    @constCast(after.terms)[after.terms.len - 1].unpack_product.variables = &.{ second, first };
+    const steps = [_]relation.Step{.{ .successor = after, .rule = .{ .product_layout = &.{.{
+        .schema = product,
+        .coordinates = &.{ 1, 0 },
+    }} } }};
+    const policy: relation.Policy = .{ .private_schemas = &.{product} };
+    try relation.validate(a, before, after, &steps, policy);
+    try std.testing.expectError(error.InvalidRelation, relation.validate(
+        a,
+        before,
+        after,
+        &steps,
+        .{
+            .private_schemas = &.{product},
+            .fixed_schemas = &.{product},
+        },
+    ));
+    @constCast(after.values)[@intCast(projected)].expression.primitive.immediate = 0;
+    try std.testing.expectError(
+        error.InvalidRelation,
+        relation.validate(a, before, after, &steps, policy),
+    );
+}
+
+test "closed pure inlining evaluates arguments once and protects source recovery roots" {
+    const relation = @import("relation.zig");
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const unit = try b.scalar(void);
+    const word = try b.scalar(u64);
+    const helper = try b.declare(&.{word}, word, &.{}, &.{});
+    try b.define(helper, try b.pure(try b.reference(b.parameter(helper, 0))));
+    const entry = try b.declare(&.{word}, word, &.{}, &.{});
+    const argument = try b.reference(b.parameter(entry, 0));
+    const call = try b.term(.{ .call = .{
+        .function = helper,
+        .arguments = &.{argument},
+    } });
+    try b.define(entry, call);
+    const before = b.module(entry, unit);
+    const fresh = try b.variable(word);
+    const value = try b.reference(fresh);
+    const after = try source.own(source.ast.Module, b.allocator(), b.module(entry, unit));
+    const terms = [_]source.ast.Term{
+        before.terms[0],
+        .{ .value = value },
+        .{ .value = argument },
+        .{ .bind = .{ .variable = fresh, .value = 2, .next = 1 } },
+    };
+    var candidate = after;
+    candidate.terms = &terms;
+    @constCast(candidate.functions)[@intCast(entry)].body = 3;
+    const steps = [_]relation.Step{.{ .successor = candidate, .rule = .{ .inline_call = call } }};
+    try relation.validate(a, before, candidate, &steps, .{});
+    try std.testing.expectError(error.UnsupportedRelation, relation.validate(
+        a,
+        before,
+        candidate,
+        &steps,
+        .{ .protected_functions = &.{helper} },
+    ));
+    try std.testing.expectError(error.RelationLimit, relation.validate(
+        a,
+        before,
+        candidate,
+        &steps,
+        .{ .work = 0 },
+    ));
+}
+
+test "source relation specialization binds owner selected immutable static inputs" {
+    const relation = @import("relation.zig");
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const unit = try b.scalar(void);
+    const word = try b.scalar(u64);
+    const f = try b.declare(&.{word}, word, &.{}, &.{});
+    try b.define(f, try b.pure(try b.reference(b.parameter(f, 0))));
+    const before = b.module(f, unit);
+    var bytes: [8]u8 = undefined;
+    const request: pe.Request = .{
+        .context = context,
+        .function = f,
+        .arguments = &.{known(5, &bytes, word)},
+        .policy = .{ .work = 1000 },
+    };
+    var output = try pe.specialize(a, before, request);
+    defer output.deinit();
+    const after = output.module();
+    const steps = [_]relation.Step{.{ .successor = after, .rule = .{ .specialization = .{
+        .request = request,
+        .entry = output.entry,
+        .functions = output.functions.items,
+        .values = output.value_proofs.items,
+        .terms = output.term_proofs.items,
+    } } }};
+    try std.testing.expectError(error.InvalidRelation, relation.validate(
+        a,
+        before,
+        after,
+        &steps,
+        .{},
+    ));
+    const policy: relation.Policy = .{ .static_scopes = &.{.{
+        .predecessor = try relation.identity(before),
+        .request = request,
+    }} };
+    try relation.validate(a, before, after, &steps, policy);
+    const decoded = try roundTripRelationStep(b.allocator(), steps[0]);
+    try relation.validate(a, before, after, &.{decoded}, policy);
+    var unproved = after;
+    unproved.terms = try std.mem.concat(
+        b.allocator(),
+        source.ast.Term,
+        &.{ after.terms, &.{after.terms[0]} },
+    );
+    var changed_steps = steps;
+    changed_steps[0].successor = unproved;
+    try std.testing.expectError(error.InvalidRelation, relation.validate(
+        a,
+        before,
+        unproved,
+        &changed_steps,
+        policy,
+    ));
+}
+
+test "private layout transports recursive literal graphs without changing scalar identities" {
+    const relation = @import("relation.zig");
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const unit = try b.scalar(void);
+    const word = try b.scalar(u64);
+    const node = try b.reserveSchema();
+    const pair = try b.schema(.{ .product = &.{ word, node } });
+    try b.defineSchema(node, .{ .sum = &.{ unit, pair } });
+    const original_bytes = [_]u8{ 1, 2, 0, 0, 0, 0, 0, 0, 0, 1, 3, 0, 0, 0, 0, 0, 0, 0, 0 };
+    const transported_bytes = [_]u8{ 1, 1, 0, 3, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0 };
+    const value = try b.literal(.{ .schema = node, .bytes = &original_bytes });
+    const entry = try b.declare(&.{}, node, &.{}, &.{});
+    try b.define(entry, try b.pure(value));
+    const before = b.module(entry, unit);
+    const after = try source.own(source.ast.Module, b.allocator(), before);
+    @constCast(after.schemas)[@intCast(pair)].product = &.{ node, word };
+    @constCast(after.constants)[0].bytes = &transported_bytes;
+    const steps = [_]relation.Step{.{ .successor = after, .rule = .{ .product_layout = &.{.{
+        .schema = pair,
+        .coordinates = &.{ 1, 0 },
+    }} } }};
+    const policy: relation.Policy = .{ .private_schemas = &.{pair} };
+    try relation.validate(a, before, after, &steps, policy);
+    @constCast(after.constants)[0].bytes = &original_bytes;
+    try std.testing.expectError(error.InvalidRelation, relation.validate(
+        a,
+        before,
+        after,
+        &steps,
+        policy,
+    ));
+}
+
+test "source relocation preserves fixed schema endpoints and exact function correspondence" {
+    const relation = @import("relation.zig");
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const unit = try b.scalar(void);
+    const word = try b.scalar(u64);
+    const f = try b.declare(&.{word}, word, &.{}, &.{});
+    try b.define(f, try b.pure(try b.reference(b.parameter(f, 0))));
+    const other = try b.declare(&.{word}, word, &.{}, &.{});
+    try b.define(other, try b.pure(try b.reference(b.parameter(other, 0))));
+    const before = b.module(f, unit);
+    const maps: relation.Relocation.Maps = .{
+        .schemas = &.{ 1, 0 },
+        .variables = &.{ 1, 0 },
+        .values = &.{ 1, 0 },
+        .terms = &.{ 1, 0 },
+        .functions = &.{ 1, 0 },
+    };
+    const after = try relation.Relocation.relocate(b.allocator(), before, maps);
+    try std.testing.expectEqual(@as(u64, 1), after.entry);
+    try std.testing.expectEqual(@as(u64, 0), after.functions[1].result);
+    const steps = [_]relation.Step{.{ .successor = after, .rule = .{ .relocation = maps } }};
+    try relation.validate(a, before, after, &steps, .{});
+    var nominal = before;
+    nominal.region_count = 2;
+    var collapsed = maps;
+    collapsed.region_count = 2;
+    collapsed.regions = &.{.{ .old = 1, .new = 0 }};
+    try std.testing.expectError(
+        error.InvalidRelation,
+        relation.Relocation.validateMaps(a, nominal, collapsed, false),
+    );
+    const roots = try relation.transportFunctions(a, &.{f}, &steps);
+    defer a.free(roots);
+    try std.testing.expectEqualSlices(u64, &.{1}, roots);
+    try std.testing.expectError(error.InvalidRelation, relation.validate(
+        a,
+        before,
+        after,
+        &steps,
+        .{ .fixed_schemas = &.{word} },
+    ));
+}
+
+test "specialization verification exhaustion remains distinct from an invalid derivation" {
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const unit = try b.scalar(void);
+    const f = try b.declare(&.{}, unit, &.{}, &.{});
+    try b.define(f, try b.pure(try b.constant(void, {})));
+    const before = b.module(f, unit);
+    const request: pe.Request = .{ .context = context, .function = f, .arguments = &.{} };
+    var output = try pe.specialize(a, before, request);
+    defer output.deinit();
+    output.request.policy.work = 0;
+    output.key = try pe.identity(a, before, output.request);
+    try std.testing.expectError(
+        error.SpecializationLimit,
+        pe.validate(a, before, output.request, &output),
+    );
+    output.request = request;
+    output.key = try pe.identity(a, before, request);
+    output.term_proofs.items[0].before = std.math.maxInt(u64);
+    try std.testing.expectError(
+        error.InvalidSpecialization,
+        pe.validate(a, before, request, &output),
+    );
+}
+
+test "private layout preserves nonstable evaluation order and shared pure prefixes" {
+    const relation = @import("relation.zig");
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const unit = try b.scalar(void);
+    const word = try b.scalar(u64);
+    const pair = try b.schema(.{ .product = &.{ word, word } });
+    const triple = try b.schema(.{ .product = &.{ word, word, word } });
+    const f = try b.declare(&.{ word, word }, triple, &.{}, &.{});
+    const x = try b.reference(b.parameter(f, 0));
+    const y = try b.reference(b.parameter(f, 1));
+    const first = try b.primitive(pair, .product, &.{ x, y }, 0);
+    const second = try b.primitive(pair, .product, &.{ y, x }, 0);
+    const left = try b.primitive(word, .field, &.{first}, 0);
+    const right = try b.primitive(word, .field, &.{first}, 1);
+    const other = try b.primitive(word, .field, &.{second}, 0);
+    const result = try b.primitive(triple, .product, &.{ left, right, x }, 0);
+    try b.define(f, try b.pure(result));
+    const before = b.module(f, unit);
+    const after = try source.own(source.ast.Module, b.allocator(), before);
+    @constCast(after.values)[@intCast(result)].expression.primitive.operands = &.{ x, left, right };
+    var steps = [_]relation.Step{.{ .successor = after, .rule = .{ .product_layout = &.{.{
+        .schema = triple,
+        .coordinates = &.{ 2, 0, 1 },
+    }} } }};
+    const policy: relation.Policy = .{ .private_schemas = &.{triple} };
+    try relation.validate(a, before, after, &steps, policy);
+    @constCast(after.values)[@intCast(result)].expression.primitive.operands = &.{ right, left, x };
+    steps[0].rule.product_layout = &.{.{ .schema = triple, .coordinates = &.{ 1, 0, 2 } }};
+    try relation.validate(a, before, after, &steps, policy);
+    b.values.items[@intCast(result)].expression.primitive.operands = &.{ left, other, x };
+    @constCast(after.values)[@intCast(result)].expression.primitive.operands = &.{ other, left, x };
+    try std.testing.expectError(error.UnsupportedRelation, relation.validate(
+        a,
+        before,
+        after,
+        &steps,
+        policy,
+    ));
+}
+
+test "scalar relation removes xor zero while retaining dynamic operand evaluation" {
+    const relation = @import("relation.zig");
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const unit = try b.scalar(void);
+    const word = try b.scalar(u64);
+    const f = try b.declare(&.{word}, word, &.{}, &.{});
+    const x = try b.reference(b.parameter(f, 0));
+    const zero = try b.constant(u64, 0);
+    const xor = try b.primitive(word, .integer_bit_xor, &.{ x, zero }, 0);
+    try b.define(f, try b.pure(xor));
+    const before = b.module(f, unit);
+    const after = try source.own(source.ast.Module, b.allocator(), before);
+    @constCast(after.values)[@intCast(xor)] = before.values[@intCast(x)];
+    const steps = [_]relation.Step{.{ .successor = after, .rule = .{ .scalar = .{
+        .value = xor,
+        .rule = .identity,
+    } } }};
+    try relation.validate(a, before, after, &steps, .{});
+}
+
+fn roundTripRelationStep(
+    a: std.mem.Allocator,
+    step: @import("relation.zig").Step,
+) !@import("relation.zig").Step {
+    const relation = @import("relation.zig");
+    const data = @import("horos_data");
+    var record = try relation.encodeRecordStep(a, step);
+    var measure: data.wire.Writer = .{};
+    try data.record.write(relation.RecordStep, record, &measure);
+    var remaining: usize = 100_000;
+    const decoded = try relation.decodeRecordStep(a, record, &remaining);
+    record.rule.specialization = try std.mem.concat(a, u8, &.{
+        record.rule.specialization, &.{0},
+    });
+    try std.testing.expectError(
+        error.NonCanonical,
+        relation.decodeRecordStep(a, record, &remaining),
+    );
+    return decoded;
+}
+
+test "projection discards total nested products but preserves potentially failing operands" {
+    const relation = @import("relation.zig");
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const unit = try b.scalar(void);
+    const word = try b.scalar(u64);
+    const pair = try b.schema(.{ .product = &.{ word, word } });
+    const f = try b.declare(&.{word}, word, &.{}, &.{});
+    const x = try b.reference(b.parameter(f, 0));
+    const one = try b.constant(u64, 1);
+    const failure = try b.failureLiteral(try b.constant(void, {}));
+    const failing = try b.value(.{ .schema = word, .expression = .{ .primitive = .{
+        .opcode = .integer_add,
+        .operands = &.{ x, one },
+        .failures = &.{.{ .kind = .arithmetic_overflow, .value = failure }},
+    } } });
+    const nested = try b.primitive(pair, .product, &.{ x, x }, 0);
+    const field = try b.primitive(word, .field, &.{nested}, 1);
+    const product = try b.primitive(pair, .product, &.{ x, field }, 0);
+    const projection = try b.primitive(word, .field, &.{product}, 0);
+    try b.define(f, try b.pure(projection));
+    const before = b.module(f, unit);
+    const after = try source.own(source.ast.Module, b.allocator(), before);
+    @constCast(after.values)[@intCast(projection)] = before.values[@intCast(x)];
+    const steps = [_]relation.Step{.{ .successor = after, .rule = .{ .scalar = .{
+        .value = projection,
+        .rule = .projection,
+    } } }};
+    try relation.validate(a, before, after, &steps, .{});
+    b.values.items[@intCast(product)].expression.primitive.operands = &.{ x, failing };
+    @constCast(after.values)[@intCast(product)] = before.values[@intCast(product)];
+    try std.testing.expectError(error.InvalidRelation, relation.validate(
+        a,
+        before,
+        after,
+        &steps,
+        .{},
+    ));
+    b.values.items[@intCast(projection)].expression.primitive.immediate = 1;
+    @constCast(after.values)[@intCast(projection)] = before.values[@intCast(failing)];
+    try relation.validate(a, before, after, &steps, .{});
+}

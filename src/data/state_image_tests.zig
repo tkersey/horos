@@ -207,6 +207,39 @@ test "PST3 allocation failures release partial graph owners" {
     try @import("allocation_testing.zig").check(testing.allocator, allocationFailure, .{});
 }
 
+test "borrowed PST3 inspection retains input bytes without allocating the payload" {
+    const payload: [8192]u8 = @splat(0x5a);
+    const state: s.State = .{
+        .program_identity = @splat(9),
+        .status = .active,
+        .roots = .{ .current = .{ .id = 0 } },
+        .nodes = &.{.{
+            .record = .{ .control = .{ .block = 0 } },
+            .activation = .{
+                .position = 0,
+                .scope = 0,
+                .bindings = &.{.{
+                    .slot = 0,
+                    .value = .{ .schema = 0, .body = .{ .blob = .{ .id = 0 } } },
+                }},
+                .owners = &.{},
+            },
+        }},
+        .blobs = &.{.{ .schema = 0, .bytes = &payload }},
+    };
+    const bytes = try codec.emit(testing.allocator, state);
+    defer testing.allocator.free(bytes);
+    var storage: [4096]u8 = undefined;
+    var buffer = std.heap.FixedBufferAllocator.init(&storage);
+    var decoded = try codec.decodeGraphBorrowed(buffer.allocator(), bytes, .{});
+    defer decoded.deinit();
+    try testing.expectEqualSlices(u8, &payload, decoded.state.blobs[0].bytes);
+    const start = @intFromPtr(bytes.ptr);
+    const blob = @intFromPtr(decoded.state.blobs[0].bytes.ptr);
+    try testing.expect(blob >= start and blob + payload.len <= start + bytes.len);
+    try testing.expectEqualSlices(u8, bytes, decoded.input);
+}
+
 test "PST3 framing and decoded allocation budget reject malformed input" {
     const bytes = try codec.emit(testing.allocator, fixture);
     defer testing.allocator.free(bytes);
@@ -215,6 +248,11 @@ test "PST3 framing and decoded allocation budget reject malformed input" {
             var owner = result;
             owner.deinit();
             return error.AcceptedTruncation;
+        } else |_| {}
+        if (codec.decodeGraphBorrowed(testing.allocator, bytes[0..length], .{})) |result| {
+            var owner = result;
+            owner.deinit();
+            return error.AcceptedTruncatedState;
         } else |_| {}
     }
     try testing.expectError(

@@ -167,7 +167,7 @@ const Checker = struct {
     max_depth: usize,
 
     fn spend(self: *Checker, depth: usize) Error!void {
-        try require(self.left > 0 and depth <= self.max_depth);
+        if (self.left == 0 or depth > self.max_depth) return error.SpecializationLimit;
         self.left -= 1;
     }
     fn function(self: *Checker, f: pe.FunctionProof, i: usize) Error!void {

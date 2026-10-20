@@ -565,6 +565,7 @@ pub const Context = opaque {
         self: *Context,
         comptime description: @import("horos_data").schema.native.Info,
     ) Error!*const Schema {
+        @setEvalBranchQuota(100_000);
         try self.ready();
         var returned_error: anyerror = undefined;
         errdefer self.poison(returned_error);
