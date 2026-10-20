@@ -141,3 +141,5 @@ release artifacts are unchanged. The next coordinated consumers use the actual
 successor source/package hash, not a relabeled release.
 
 See [.github/CI.md](.github/CI.md) for source preflight, package checks and caching.
+The [TigerStyle engineering contract](https://github.com/tkersey/horos/blob/main/docs/tiger-style.md) governs new and
+materially changed Zig code and its CI adoption gate.

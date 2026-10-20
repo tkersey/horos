@@ -18,6 +18,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
         with:
           version: '0.17.0'
@@ -26,6 +28,18 @@ jobs:
         run: |
           git ls-files '*.zig' | LC_ALL=C sort | diff -u repo_zig_paths.txt -
           xargs zig fmt --check < repo_zig_paths.txt
+      - name: Enforce TigerStyle on the committed change
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_REF: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "$BASE_REF" ] || [ "$BASE_REF" = 0000000000000000000000000000000000000000 ]; then
+            BASE_REF=6c3a7e9a225e5733f5971f6da907a14e0997a318
+          fi
+          bash tools/tiger-style.sh "$BASE_REF" "$HEAD_REF"
+      - name: Verify TigerStyle selection and failure behavior
+        run: bash tools/test-tiger-style.sh
   qualify:
     name: Qualification / ${{ matrix.lane }}
     needs: source
@@ -39,6 +53,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
         if: matrix.lane == 'contracts'
         with:
