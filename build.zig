@@ -224,6 +224,7 @@ fn dataChecks(
     });
     const data_step = b.step("check-data", "Check canonical records and pure admission");
     const run_data_tests = b.addRunArtifact(tests);
+    run_data_tests.has_side_effects = true;
     data_step.dependOn(&run_data_tests.step);
     data_step.dependOn(static_contracts);
     return data_step;
@@ -406,6 +407,7 @@ fn authoringChecks(
     // Both complete test roots already include the component cases. Share their
     // runners instead of compiling and executing two subset-only test binaries.
     const run_authoring_tests = b.addRunArtifact(authoring);
+    run_authoring_tests.has_side_effects = true;
 
     const authoring_step = b.step(
         "check-authoring",
