@@ -822,9 +822,8 @@ const Function = struct {
     fn term(self: *Function, block: *Block, task: Task) Error!ir.Terminator {
         var current = task;
         var traversed: usize = 0;
-        while (true) {
+        while (self.compiler.source.terms[@intCast(current.term)] == .bind) {
             const expression = self.compiler.source.terms[@intCast(current.term)];
-            if (expression != .bind) break;
             const binding = expression.bind;
             const value_term = self.compiler.source.terms[@intCast(binding.value)];
             const schema = self.compiler.source.variables[@intCast(binding.variable)];

@@ -266,17 +266,21 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, name, "check-components")) {
         const linker = args.next() orelse return error.MissingLinker;
         const output = try scratch(r, args.next() orelse return error.MissingOutput);
-        defer Dir.cwd().deleteTree(r.io, output) catch {};
+        errdefer Dir.cwd().deleteTree(r.io, output) catch |err|
+            std.log.err("component scratch cleanup failed: {s}", .{@errorName(err)});
         if (args.next() != null) return error.UnexpectedArgument;
-        return components(r, linker, output);
+        try components(r, linker, output);
+        return Dir.cwd().deleteTree(r.io, output);
     }
     if (std.mem.eql(u8, name, "check-package")) {
         const zig = args.next() orelse return error.MissingCompiler;
         const repository = args.next() orelse return error.MissingRepository;
         const output = try scratch(r, args.next() orelse return error.MissingOutput);
-        defer Dir.cwd().deleteTree(r.io, output) catch {};
+        errdefer Dir.cwd().deleteTree(r.io, output) catch |err|
+            std.log.err("package scratch cleanup failed: {s}", .{@errorName(err)});
         if (args.next() != null) return error.UnexpectedArgument;
-        return package(r, zig, repository, output);
+        try package(r, zig, repository, output);
+        return Dir.cwd().deleteTree(r.io, output);
     }
     if (args.next() != null) return error.UnexpectedArgument;
     const kind = std.meta.stringToEnum(

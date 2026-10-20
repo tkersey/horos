@@ -1291,7 +1291,7 @@ fn FlowFor(comptime open: bool) type {
             const code = self.program.blocks[@intCast(trace.block)];
             var position = trace.position orelse code.instructions.len;
             const cut = self.queries.items[query_index].position;
-            while (true) {
+            while (position != 0) {
                 if (trace.block == query_start and cut != null and position == cut.?) {
                     try self.addSource(
                         query_index,
@@ -1299,7 +1299,6 @@ fn FlowFor(comptime open: bool) type {
                     );
                     if (!self.reenters(query_start, live)) return;
                 }
-                if (position == 0) break;
                 position -= 1;
                 const op = code.instructions[position];
                 if (op.destination != trace.slot) continue;
@@ -1320,6 +1319,13 @@ fn FlowFor(comptime open: bool) type {
                     for (sources) |source| try self.addSource(query_index, source);
                 }
                 return;
+            }
+            if (trace.block == query_start and cut != null and cut.? == 0) {
+                try self.addSource(
+                    query_index,
+                    .{ .stable_slot = true, .parameter = trace.slot, .path = trace.path },
+                );
+                if (!self.reenters(query_start, live)) return;
             }
             if (trace.block == query_start and cut == null) {
                 const function = self.program.functions[@intCast(code.function)];

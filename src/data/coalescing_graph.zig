@@ -107,18 +107,18 @@ pub fn discover(
     // at least one class, so at most n further passes (including stability) occur.
     var initial = true;
     var remaining = nodes.len;
-    while (true) {
+    while (initial or remaining != 0) {
         try refine(allocator, nodes, singletons, classes, next, initial, work);
         work.rounds = std.math.add(u64, work.rounds, 1) catch return error.WorkLimit;
         if (!initial and std.mem.eql(usize, classes, next)) return classes;
         @memcpy(classes, next);
         if (nodes.len == 0) return classes;
         if (!initial) {
-            if (remaining == 0) return error.InvalidRestriction;
             remaining -= 1;
         }
         initial = false;
     }
+    return error.InvalidRestriction;
 }
 
 fn refine(

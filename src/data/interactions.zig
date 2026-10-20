@@ -244,11 +244,13 @@ const Engine = struct {
     }
     fn closure(self: Engine, states: Mask, alphabet: Mask) Mask {
         var result = states;
-        while (true) {
-            const next = result | self.symbols(result, alphabet);
-            if (next == result) return result;
-            result = next;
+        var pending = states;
+        while (pending != 0) {
+            const reached = self.symbols(pending, alphabet);
+            pending = reached & ~result;
+            result |= reached;
         }
+        return result;
     }
     fn widened(self: *Engine, block: p.Id, states: Mask) Summary {
         if (block < self.opaque_blocks.len) self.opaque_blocks[@intCast(block)] = true;
@@ -330,16 +332,18 @@ const Engine = struct {
         incoming: Mask,
     ) Error!Mask {
         var states = incoming;
-        while (true) {
+        var changed = true;
+        while (changed) {
             const cancelled = try self.abrupt(block, context, states, .cancellation);
             _ = out.join(cancelled);
             if (!self.cleanup) return states;
             // Repeated cancellation can be observed while cleanup keeps running.
             // Close those observations before continuing the same instruction.
             const continued = states | cancelled.cancellation;
-            if (continued == states) return states;
+            changed = continued != states;
             states = continued;
         }
+        return states;
     }
     fn propagate(self: *Engine, out: *Summary, result: Summary, edge: ir.Edge) Error!void {
         var exceptional = result;

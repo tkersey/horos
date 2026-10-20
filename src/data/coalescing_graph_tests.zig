@@ -21,8 +21,9 @@ fn oracle(a: std.mem.Allocator, nodes: []const Node) ![]bool {
     for (nodes, 0..) |left, i| for (nodes, 0..) |right, j| {
         pairs[i * n + j] = possible(left, right, i == j);
     };
-    while (true) {
-        var changed = false;
+    var changed = true;
+    while (changed) {
+        changed = false;
         for (nodes, 0..) |left, i| for (nodes, 0..) |right, j| {
             if (!pairs[i * n + j]) continue;
             for (left.edges, right.edges) |x, y| if (!pairs[x.target * n + y.target]) {
@@ -31,8 +32,8 @@ fn oracle(a: std.mem.Allocator, nodes: []const Node) ![]bool {
                 break;
             };
         };
-        if (!changed) return pairs;
     }
+    return pairs;
 }
 
 fn check(nodes: []const Node) !void {

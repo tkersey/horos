@@ -59,7 +59,8 @@ fn computeImpl(
     var next = try a.alloc(Id, classes.len);
     @memset(classes, 0);
     var maps = try relocate.identityMaps(a, try relocate.sizes(program));
-    while (true) {
+    var changed = true;
+    while (changed) {
         stats.rounds += 1;
         var pass = std.heap.ArenaAllocator.init(a);
         defer pass.deinit();
@@ -106,8 +107,8 @@ fn computeImpl(
                 pass.allocator().free(encoded);
             } else entry.value_ptr.* = i;
         }
-        if (std.mem.eql(Id, classes, next)) break;
-        std.mem.swap([]Id, &classes, &next);
+        changed = !std.mem.eql(Id, classes, next);
+        if (changed) std.mem.swap([]Id, &classes, &next);
     }
     const representatives = try a.alloc(Id, classes.len);
     var count: Id = 0;
@@ -125,7 +126,8 @@ fn reference(a: std.mem.Allocator, program: ir.Program) Error![]const Id {
     var next = try a.alloc(Id, classes.len);
     @memset(classes, 0);
     var maps = try relocate.identityMaps(a, try relocate.sizes(program));
-    while (true) {
+    var changed = true;
+    while (changed) {
         var pass = std.heap.ArenaAllocator.init(a);
         defer pass.deinit();
         maps[@backingInt(Kind.schema)] = classes;
@@ -139,8 +141,8 @@ fn reference(a: std.mem.Allocator, program: ir.Program) Error![]const Id {
                 break;
             };
         }
-        if (std.mem.eql(Id, classes, next)) break;
-        std.mem.swap([]Id, &classes, &next);
+        changed = !std.mem.eql(Id, classes, next);
+        if (changed) std.mem.swap([]Id, &classes, &next);
     }
     const representatives = try a.alloc(Id, classes.len);
     var count: Id = 0;

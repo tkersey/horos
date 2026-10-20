@@ -1657,11 +1657,11 @@ const Values = struct {
         }
         // The initial suffix is distinct from a later backedge to its block:
         // a loop executes that block's full instruction sequence.
-        while (true) {
+        reader.changed = true;
+        while (reader.changed) {
             reader.changed = false;
             for (self.image.blocks, 0..) |block, id| if (query.reachable[id])
                 try reader.transferBlock(id, block);
-            if (!reader.changed) break;
         }
         return query;
     }
@@ -1829,10 +1829,10 @@ const Values = struct {
         return false;
     }
     fn converge(self: *Values) Error!void {
-        while (true) {
+        self.changed = true;
+        while (self.changed) {
             self.changed = false;
             for (self.image.blocks, 0..) |block, id| try self.transferBlock(id, block);
-            if (!self.changed) break;
         }
     }
     fn body(

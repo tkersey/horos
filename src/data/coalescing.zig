@@ -242,7 +242,7 @@ fn attempt(
     errdefer if (selected) |*value| value.deinit();
     stats.outcome = .no_change;
     var remaining = stats.baseline.entries;
-    while (true) {
+    while (remaining != 0) {
         if (diagnostic) |d| d.* = .{ .stage = .mapping };
         var scratch = std.heap.ArenaAllocator.init(allocator);
         defer scratch.deinit();
@@ -304,7 +304,6 @@ fn attempt(
                 descriptions.entries < stats.selected.entries)) stats.outcome = .size_guard;
             return selected;
         }
-        if (remaining == 0) return error.InvalidCorrespondence;
         remaining -= 1;
         if (diagnostic) |d| d.* = .{ .stage = .mapping };
         if (trace) |t| try t.advance(if (selected_profile.? == .full)
@@ -328,6 +327,7 @@ fn attempt(
         stats.attempted_extraction_rounds += 1;
         if (stats.first_selected_work == 0) stats.first_selected_work = stats.work.units;
     }
+    return error.InvalidCorrespondence;
 }
 
 fn hasMerge(maps: r.Maps) bool {

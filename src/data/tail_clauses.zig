@@ -593,8 +593,7 @@ fn administrativeResult(
     for (first.assignments) |assignment|
         aliases[@intCast(assignment.destination)] = assignment.source == .returned;
     var id = first.block;
-    while (true) {
-        if (seen[@intCast(id)]) return false;
+    while (!seen[@intCast(id)]) {
         seen[@intCast(id)] = true;
         const block = image.blocks[@intCast(id)];
         try charge(ir.Block, block, budget);
@@ -620,6 +619,7 @@ fn administrativeResult(
             else => return false,
         }
     }
+    return false;
 }
 
 // Certification uses a different direction: trace the final return backward
@@ -641,8 +641,7 @@ fn certifyAdministrativeResult(
     defer chain.deinit(a);
     var id = first.block;
     var wanted: p.Id = undefined;
-    while (true) {
-        if (seen[@intCast(id)]) return false;
+    while (!seen[@intCast(id)]) {
         seen[@intCast(id)] = true;
         const block = image.blocks[@intCast(id)];
         if (block.function != function or block.custody != custody) return false;
@@ -660,7 +659,7 @@ fn certifyAdministrativeResult(
             },
             else => return false,
         }
-    }
+    } else return false;
     var cursor = chain.items.len;
     while (cursor != 0) {
         cursor -= 1;

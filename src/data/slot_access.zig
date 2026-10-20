@@ -15,10 +15,13 @@ const Counter = struct {
         value: anytype,
     ) VisitError!void {
         if (comptime cardinality == .list) {
-            for (value) |item| try self.reference(role, .one, item);
+            for (value) |item| try self.referenceOne(role, item);
         } else if (comptime cardinality == .optional) {
-            if (value) |item| try self.reference(role, .one, item);
-        } else switch (role) {
+            if (value) |item| try self.referenceOne(role, item);
+        } else try self.referenceOne(role, value);
+    }
+    fn referenceOne(self: *Counter, comptime role: roles.Role, value: anytype) VisitError!void {
+        switch (role) {
             .slot_read => self.result.reads += @intFromBool(value == self.slot),
             .slot_write => self.result.writes += @intFromBool(value == self.slot),
             .edge => try roles.visitEdge(value, self),
@@ -30,6 +33,6 @@ const Counter = struct {
 };
 pub fn terminator(term: ir.Terminator, slot: p.Id) Access {
     var counter: Counter = .{ .slot = slot };
-    roles.visitTerminator(term, &counter) catch unreachable;
+    roles.visitTerminator(term, &counter) catch |err| switch (err) {};
     return counter.result;
 }

@@ -26,15 +26,12 @@ fn at(comptime T: type, start: u64, index: usize) T {
 }
 
 fn size(comptime T: type, value: T) usize {
-    var writer: wire.Writer = .{};
-    record.write(T, value, &writer) catch unreachable; // At most eleven bytes.
-    return writer.position;
+    comptime std.debug.assert(T == p.Id);
+    return wire.naturalLength(value);
 }
 
 fn naturalSize(value: usize) usize {
-    var writer: wire.Writer = .{};
-    writer.natural(value) catch unreachable; // At most ten bytes.
-    return writer.position;
+    return wire.naturalLength(value);
 }
 
 /// Each scan consumes its run. The literal scan only peeks at two neighbours.

@@ -64,7 +64,8 @@ pub fn canonicalize(allocator: std.mem.Allocator, types: []const p.Schema, root:
     var classes = try storage.alloc(usize, types.len);
     var next = try storage.alloc(usize, types.len);
     @memset(classes, 0);
-    while (true) {
+    var changed = true;
+    while (changed) {
         for (types, 0..) |schema, index| {
             next[index] = index;
             for (types[0..index], 0..) |prior, candidate| {
@@ -74,8 +75,8 @@ pub fn canonicalize(allocator: std.mem.Allocator, types: []const p.Schema, root:
                 }
             }
         }
-        if (std.mem.eql(usize, classes, next)) break;
-        std.mem.swap([]usize, &classes, &next);
+        changed = !std.mem.eql(usize, classes, next);
+        if (changed) std.mem.swap([]usize, &classes, &next);
     }
     const map = try storage.alloc(p.Id, types.len);
     @memset(map, std.math.maxInt(p.Id));

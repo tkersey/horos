@@ -11,14 +11,10 @@ fn measuredSequence(comptime T: type, values: []const T) wire.Error!usize {
     var total: usize = 0;
     for (values) |value| {
         comptime std.debug.assert(T == u64);
-        const length = naturalLength(value);
+        const length = wire.naturalLength(value);
         total = std.math.add(usize, total, length) catch return error.InvalidLength;
     }
     return total;
-}
-
-fn naturalLength(value: u64) usize {
-    return (@as(usize, 64 - @clz(value | 1)) + 6) / 7;
 }
 
 /// Traverses borrowed record storage, including nested arrays of slices, before

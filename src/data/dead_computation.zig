@@ -37,14 +37,7 @@ pub fn run(
     var retained = std.heap.ArenaAllocator.init(allocator);
     defer retained.deinit();
     var current = original;
-    while (true) {
-        if (stats.round_attempts == options.round_limit) {
-            stats.work_limit = true;
-            stats.instructions_removed = 0;
-            stats.constructions_removed = 0;
-            stats.rounds = 0;
-            return coalescing.run(allocator, original, options.coalescing);
-        }
+    while (stats.round_attempts < options.round_limit) {
         stats.round_attempts += 1;
         var admitted = try ownership.analyze(allocator, current);
         defer admitted.deinit();
@@ -100,7 +93,7 @@ pub fn run(
                 .{ .block = id, .removed = try removed.toOwnedSlice(a) },
             );
         }
-        if (removed_count == 0) break;
+        if (removed_count == 0) return coalescing.run(allocator, current, options.coalescing);
         var candidate = current;
         candidate.blocks = blocks;
         try validate(allocator, current, candidate, witnesses.items);
@@ -114,7 +107,11 @@ pub fn run(
         next_arena = std.heap.ArenaAllocator.init(allocator);
         current = candidate;
     }
-    return coalescing.run(allocator, current, options.coalescing);
+    stats.work_limit = true;
+    stats.instructions_removed = 0;
+    stats.constructions_removed = 0;
+    stats.rounds = 0;
+    return coalescing.run(allocator, original, options.coalescing);
 }
 
 fn totalDroppable(
