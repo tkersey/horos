@@ -420,7 +420,7 @@ fn enqueueOwn(
     comptime T: type,
     allocator: std.mem.Allocator,
     pending: *std.ArrayList(OwnTask),
-    output: *T,
+    output: *align(1) T,
 ) std.mem.Allocator.Error!void {
     if (comptime ownershipRequired(T)) try pending.append(allocator, .{
         .output = @ptrCast(output),
@@ -435,10 +435,11 @@ fn OwnValue(comptime T: type) type {
             pending: *std.ArrayList(OwnTask),
             address: *anyopaque,
         ) std.mem.Allocator.Error!void {
-            const output: *T = @ptrCast(@alignCast(address));
+            const output: *align(1) T = @ptrCast(address);
             switch (@typeInfo(T)) {
                 .pointer => |pointer| {
-                    const elements = try allocator.dupe(pointer.child, output.*);
+                    const elements = try allocator.alloc(pointer.child, output.len);
+                    for (elements, output.*) |*element, input| element.* = input;
                     output.* = elements;
                     for (elements) |*element|
                         try enqueueOwn(pointer.child, allocator, pending, element);

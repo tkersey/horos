@@ -1,5 +1,6 @@
 const std = @import("std");
 const wire = @import("wire.zig");
+const record = @import("record.zig");
 const Error = wire.Error || std.mem.Allocator.Error;
 pub const Mode = enum { write, read, equal, overlaps };
 
@@ -39,8 +40,8 @@ pub fn Walk(comptime mode: Mode) type {
         else
             Error;
         const Frame = struct {
-            first: *const anyopaque,
-            second: ?*const anyopaque = null,
+            first: *align(1) const volatile anyopaque,
+            second: ?*align(1) const volatile anyopaque = null,
             index: usize = 0,
             step: *const fn (*Self, Frame) Failure!void,
         };
@@ -54,10 +55,10 @@ pub fn Walk(comptime mode: Mode) type {
 
         pub fn run(self: *Self, comptime T: type, first: *const T, second: ?*const T) Failure!bool {
             defer self.frames.deinit(self.allocator);
-            try Node(T).step(self, .{
+            try Node(@TypeOf(first)).step(self, .{
                 .first = @ptrCast(first),
                 .second = @ptrCast(second),
-                .step = Node(T).step,
+                .step = Node(@TypeOf(first)).step,
             });
             while (self.frames.items.len != 0 and !self.stopped) {
                 const frame = self.frames.pop().?;
@@ -69,9 +70,8 @@ pub fn Walk(comptime mode: Mode) type {
         fn child(
             self: *Self,
             frame: Frame,
-            comptime T: type,
-            first: *const T,
-            second: ?*const T,
+            first: anytype,
+            second: ?@TypeOf(first),
             more: bool,
         ) Failure!void {
             if (more) {
@@ -82,27 +82,46 @@ pub fn Walk(comptime mode: Mode) type {
             try self.frames.append(self.allocator, .{
                 .first = @ptrCast(first),
                 .second = @ptrCast(second),
-                .step = Node(T).step,
+                .step = Node(@TypeOf(first)).step,
             });
         }
 
-        fn Node(comptime T: type) type {
+        fn Node(comptime Pointer: type) type {
+            const T = @typeInfo(Pointer).pointer.child;
             return struct {
+                fn restore(address: *align(1) const volatile anyopaque) Pointer {
+                    return @ptrCast(@alignCast(@constCast(@volatileCast(address))));
+                }
+
+                fn finite(self: *Self, first: Pointer, second: Pointer) Failure!void {
+                    switch (mode) {
+                        .write => try record.write(T, first.*, self.writer),
+                        .read => @constCast(first).* = try record.readBounded(
+                            T,
+                            self.reader,
+                            self.allocator,
+                            self.remaining,
+                        ),
+                        .equal => self.stopped = !record.equal(T, first.*, second.*),
+                        .overlaps => self.stopped = record.overlaps(T, first.*, self.output),
+                    }
+                }
+
                 fn step(self: *Self, frame: Frame) Failure!void {
-                    const first: *const T = @ptrCast(@alignCast(frame.first));
-                    const second: *const T = if (mode == .equal)
-                        @ptrCast(@alignCast(frame.second.?))
+                    const first = restore(frame.first);
+                    const second: Pointer = if (mode == .equal)
+                        restore(frame.second.?)
                     else
                         undefined;
+                    if (comptime !Shape(T, &.{}).recursive)
+                        return finite(self, first, second);
                     switch (@typeInfo(T)) {
                         .@"struct" => |info| inline for (
                             info.field_names,
-                            info.field_types,
                             0..,
-                        ) |name, Field, index| {
+                        ) |name, index| {
                             if (frame.index == index) return self.child(
                                 frame,
-                                Field,
                                 &@field(first.*, name),
                                 if (mode == .equal) &@field(second.*, name) else null,
                                 index + 1 < info.field_names.len,
@@ -112,59 +131,18 @@ pub fn Walk(comptime mode: Mode) type {
                         .array => try array(self, frame, first, second),
                         .optional => try optional(self, frame, first, second),
                         .@"union" => try tagged(self, frame, first, second),
-                        else => try scalar(self, first, second),
-                    }
-                }
-
-                fn scalar(self: *Self, first: *const T, second: *const T) Failure!void {
-                    if (mode == .equal) {
-                        if (T != void and first.* != second.*) self.stopped = true;
-                    } else if (mode == .write) {
-                        switch (@typeInfo(T)) {
-                            .void => {},
-                            .bool => try self.writer.byte(@intFromBool(first.*)),
-                            .int => |info| {
-                                comptime std.debug.assert(
-                                    info.signedness == .unsigned and info.bits <= 64,
-                                );
-                                try self.writer.natural(first.*);
-                            },
-                            .@"enum" => try self.writer.natural(@backingInt(first.*)),
-                            else => @compileError(
-                                "not a logical portable record: " ++ @typeName(T),
-                            ),
-                        }
-                    } else if (mode == .read) {
-                        @constCast(first).* = switch (@typeInfo(T)) {
-                            .void => {},
-                            .bool => switch (try self.reader.byte()) {
-                                0 => false,
-                                1 => true,
-                                else => return error.InvalidTag,
-                            },
-                            .int => std.math.cast(T, try self.reader.natural()) orelse
-                                return error.InvalidLength,
-                            .@"enum" => |info| decoded: {
-                                const tag = try self.reader.natural();
-                                inline for (info.field_values) |value|
-                                    if (tag == value) break :decoded @fromBackingInt(value);
-                                return error.InvalidTag;
-                            },
-                            else => @compileError(
-                                "not a logical portable record: " ++ @typeName(T),
-                            ),
-                        };
+                        else => unreachable,
                     }
                 }
 
                 fn slice(
                     self: *Self,
                     frame: Frame,
-                    first: *const T,
-                    second: *const T,
+                    first: Pointer,
+                    second: Pointer,
                 ) Failure!void {
                     const info = @typeInfo(T).pointer;
-                    comptime std.debug.assert(info.size == .slice and info.sentinel_ptr == null);
+                    comptime std.debug.assert(info.size == .slice);
                     if (frame.index == 0) {
                         if (mode == .read) try readSlice(self, first);
                         if (mode == .write) try self.writer.natural(first.len);
@@ -179,43 +157,19 @@ pub fn Walk(comptime mode: Mode) type {
                             return;
                         }
                     }
-                    if (mode == .write and info.child == u64) {
-                        const writer = self.writer;
-                        if (writer.output == null and writer.expected == null and
-                            writer.hasher == null)
-                        {
-                            writer.position = std.math.add(
-                                usize,
-                                writer.position,
-                                try measuredSequence(u64, first.*),
-                            ) catch return error.InvalidLength;
-                            return;
-                        }
-                    }
-                    if (info.child == u8) {
-                        if (mode == .write) try self.writer.put(first.*);
-                        if (mode == .equal and !std.mem.eql(u8, first.*, second.*))
-                            self.stopped = true;
-                        return;
-                    }
                     if (frame.index < first.len) try self.child(
                         frame,
-                        info.child,
                         &first.*[frame.index],
                         if (mode == .equal) &second.*[frame.index] else null,
                         frame.index + 1 < first.len,
                     );
                 }
 
-                fn readSlice(self: *Self, first: *const T) Failure!void {
+                fn readSlice(self: *Self, first: Pointer) Failure!void {
                     const Child = @typeInfo(T).pointer.child;
                     const count = try self.reader.count();
                     if (count > self.reader.input.len - self.reader.position)
                         return error.Truncated;
-                    if (Child == u8) {
-                        @constCast(first).* = try self.reader.take(count);
-                        return;
-                    }
                     const bytes = std.math.mul(usize, @sizeOf(Child), count) catch
                         return error.InvalidLength;
                     if (bytes > self.remaining.*) return error.Capacity;
@@ -226,20 +180,12 @@ pub fn Walk(comptime mode: Mode) type {
                 fn array(
                     self: *Self,
                     frame: Frame,
-                    first: *const T,
-                    second: *const T,
+                    first: Pointer,
+                    second: Pointer,
                 ) Failure!void {
                     const info = @typeInfo(T).array;
-                    if (info.child == u8) {
-                        if (mode == .read)
-                            @memcpy(@constCast(first), try self.reader.take(info.len));
-                        if (mode == .write) try self.writer.put(first);
-                        if (mode == .equal and !std.mem.eql(u8, first, second)) self.stopped = true;
-                        return;
-                    }
                     if (frame.index < info.len) try self.child(
                         frame,
-                        info.child,
                         &first[frame.index],
                         if (mode == .equal) &second[frame.index] else null,
                         frame.index + 1 < info.len,
@@ -249,8 +195,8 @@ pub fn Walk(comptime mode: Mode) type {
                 fn optional(
                     self: *Self,
                     frame: Frame,
-                    first: *const T,
-                    second: *const T,
+                    first: Pointer,
+                    second: Pointer,
                 ) Failure!void {
                     const Child = @typeInfo(T).optional.child;
                     if (mode == .read) @constCast(first).* = switch (try self.reader.byte()) {
@@ -265,7 +211,6 @@ pub fn Walk(comptime mode: Mode) type {
                     }
                     if (first.*) |*present| try self.child(
                         frame,
-                        Child,
                         present,
                         if (mode == .equal) &second.*.? else null,
                         false,
@@ -275,8 +220,8 @@ pub fn Walk(comptime mode: Mode) type {
                 fn tagged(
                     self: *Self,
                     frame: Frame,
-                    first: *const T,
-                    second: *const T,
+                    first: Pointer,
+                    second: Pointer,
                 ) Failure!void {
                     const Tag = @typeInfo(T).@"union".tag_type.?;
                     if (mode == .read) {
@@ -299,7 +244,6 @@ pub fn Walk(comptime mode: Mode) type {
                     switch (tag) {
                         inline else => |known| try self.child(
                             frame,
-                            @FieldType(T, @tagName(known)),
                             &@field(first.*, @tagName(known)),
                             if (mode == .equal) &@field(second.*, @tagName(known)) else null,
                             false,

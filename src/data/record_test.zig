@@ -246,3 +246,105 @@ test "finite allocator entrypoints retain allocation free operations" {
     try std.testing.expect(try record.overlapsAlloc(Finite, failing.allocator(), value, "name"));
     try std.testing.expectEqual(0, failing.alloc_index);
 }
+
+test "recursive record delegates packed finite fields without bitfield pointers" {
+    const Packed = struct {
+        flags: packed struct { a: u4, b: u4 },
+        rows: []const @This(),
+    };
+    const value: Packed = .{
+        .flags = .{ .a = 1, .b = 2 },
+        .rows = &.{.{ .flags = .{ .a = 3, .b = 4 }, .rows = &.{} }},
+    };
+    var bytes: [6]u8 = undefined;
+    var writer: wire.Writer = .{ .output = &bytes };
+    try record.writeAlloc(Packed, std.testing.allocator, value, &writer);
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2, 1, 3, 4, 0 }, &bytes);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var reader: wire.Reader = .{ .input = &bytes };
+    const decoded = try record.read(Packed, &reader, arena.allocator());
+    try reader.finish();
+    try std.testing.expect(try record.equalAlloc(Packed, std.testing.allocator, value, decoded));
+    try std.testing.expectEqual(@as(u4, 4), decoded.rows[0].flags.b);
+    try std.testing.expect(!try record.overlapsAlloc(Packed, std.testing.allocator, value, &bytes));
+}
+
+test "recursive record preserves finite sentinel slice observation modes" {
+    const Labeled = struct { label: [:0]const u8, rows: []const @This() };
+    const label: [2:0]u8 = .{ 'a', 'b' };
+    const value: Labeled = .{
+        .label = &label,
+        .rows = &.{.{ .label = "c", .rows = &.{} }},
+    };
+    var bytes: [7]u8 = undefined;
+    var writer: wire.Writer = .{ .output = &bytes };
+    try record.writeAlloc(Labeled, std.testing.allocator, value, &writer);
+    try std.testing.expectEqualSlices(u8, &.{ 2, 'a', 'b', 1, 1, 'c', 0 }, &bytes);
+    try std.testing.expect(try record.equalAlloc(Labeled, std.testing.allocator, value, value));
+    try std.testing.expect(try record.overlapsAlloc(Labeled, std.testing.allocator, value, &label));
+    try std.testing.expect(!try record.overlapsAlloc(
+        Labeled,
+        std.testing.allocator,
+        value,
+        label[2..3],
+    ));
+}
+
+test "recursive record callbacks retain underaligned elements and fields" {
+    const Row = struct { value: u64, rows: []align(1) const @This() align(1) };
+    var backing: [@sizeOf(Row) + 1]u8 align(@alignOf(Row)) = undefined;
+    const child: *align(1) Row = @ptrCast(&backing[1]);
+    child.* = .{ .value = 7, .rows = &.{} };
+    const value: Row = .{
+        .value = 3,
+        .rows = @as([*]align(1) const Row, @ptrCast(child))[0..1],
+    };
+    var bytes: [4]u8 = undefined;
+    var writer: wire.Writer = .{ .output = &bytes };
+    try record.writeAlloc(Row, std.testing.allocator, value, &writer);
+    try std.testing.expectEqualSlices(u8, &.{ 3, 1, 7, 0 }, &bytes);
+    try std.testing.expect(try record.equalAlloc(Row, std.testing.allocator, value, value));
+    try std.testing.expect(try record.overlapsAlloc(
+        Row,
+        std.testing.allocator,
+        value,
+        backing[1..],
+    ));
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var reader: wire.Reader = .{ .input = &bytes };
+    const decoded = try record.read(Row, &reader, arena.allocator());
+    try reader.finish();
+    try std.testing.expect(try record.equalAlloc(Row, std.testing.allocator, value, decoded));
+}
+
+test "recursive record callbacks retain volatile recursive elements" {
+    const Row = struct { value: u32, rows: []const volatile @This() };
+    var children: [1]Row = .{.{ .value = 7, .rows = &.{} }};
+    const value: Row = .{ .value = 3, .rows = &children };
+    var bytes: [4]u8 = undefined;
+    var writer: wire.Writer = .{ .output = &bytes };
+    try record.writeAlloc(Row, std.testing.allocator, value, &writer);
+    try std.testing.expectEqualSlices(u8, &.{ 3, 1, 7, 0 }, &bytes);
+    try std.testing.expect(try record.equalAlloc(Row, std.testing.allocator, value, value));
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var reader: wire.Reader = .{ .input = &bytes };
+    const decoded = try record.read(Row, &reader, arena.allocator());
+    try reader.finish();
+    try std.testing.expect(try record.equalAlloc(Row, std.testing.allocator, value, decoded));
+    children[0].value = 8;
+    try std.testing.expect(!try record.equalAlloc(Row, std.testing.allocator, value, decoded));
+}
+
+test "recursive record equality retains volatile finite byte slice semantics" {
+    const Row = struct { label: []const volatile u8, rows: []const @This() };
+    var left: [2]u8 = .{ 'a', 'b' };
+    var right = left;
+    const first: Row = .{ .label = &.{}, .rows = &.{.{ .label = &left, .rows = &.{} }} };
+    const second: Row = .{ .label = &.{}, .rows = &.{.{ .label = &right, .rows = &.{} }} };
+    try std.testing.expect(try record.equalAlloc(Row, std.testing.allocator, first, second));
+    right[1] = 'c';
+    try std.testing.expect(!try record.equalAlloc(Row, std.testing.allocator, first, second));
+}

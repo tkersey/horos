@@ -392,3 +392,43 @@ fn checkOwnedBytes(allocator: std.mem.Allocator) !void {
 test "source ownership releases temporary traversal storage on every outcome" {
     try std.testing.checkAllAllocationFailures(a, checkOwnedBytes, .{});
 }
+
+const QualifiedOwned = struct {
+    bytes: []const u8 align(1),
+    words: []align(1) const volatile u32 align(1),
+    children: []align(1) const @This() align(1),
+    flags: packed struct { low: u3, high: u5 },
+};
+
+fn checkQualifiedOwnership(allocator: std.mem.Allocator) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var storage: [9]u8 align(4) = undefined;
+    const words: *align(1) [2]u32 = @ptrCast(&storage[1]);
+    words.* = .{ 3, 7 };
+    var bytes = [_]u8{ 'a', 'b', 'c' };
+    const leaf: QualifiedOwned = .{
+        .bytes = &bytes,
+        .words = words,
+        .children = &.{},
+        .flags = .{ .low = 3, .high = 9 },
+    };
+    var root = leaf;
+    root.children = &.{leaf};
+    const copied = try source.own(QualifiedOwned, arena.allocator(), root);
+    bytes[0] = 'z';
+    words[0] = 99;
+    for ([_]QualifiedOwned{ copied, copied.children[0] }) |node| {
+        try std.testing.expectEqualSlices(u8, "abc", node.bytes);
+        try std.testing.expectEqual(@as(u32, 3), node.words[0]);
+        try std.testing.expectEqual(@as(u32, 7), node.words[1]);
+        try std.testing.expectEqual(@as(u3, 3), node.flags.low);
+        try std.testing.expectEqual(@as(u5, 9), node.flags.high);
+    }
+    try std.testing.expect(copied.bytes.ptr != copied.children[0].bytes.ptr);
+    try std.testing.expect(copied.words.ptr != copied.children[0].words.ptr);
+}
+
+test "source ownership preserves qualified slices and underaligned fields" {
+    try std.testing.checkAllAllocationFailures(a, checkQualifiedOwnership, .{});
+}
