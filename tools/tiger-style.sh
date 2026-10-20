@@ -6,7 +6,7 @@ if [[ $# -lt 1 || $# -gt 2 ]]; then
     exit 64
 fi
 
-auditor_revision=d91552e788863ab43306164001c35ae99d2fbf53
+auditor_revision=b09a924ab873509f60db2ffe27df63d2b6634797
 repository=$(git rev-parse --show-toplevel)
 cd "$repository"
 
