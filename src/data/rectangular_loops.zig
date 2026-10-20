@@ -113,7 +113,11 @@ pub fn analyze(a: std.mem.Allocator, program: ir.Program, budget: *loops.Budget)
         if (std.mem.indexOfScalar(p.Id, f.inputs, slot) != null) return null;
     }
     const init = program.blocks[entry];
-    if (init.instructions.len != 5 or initial(program, init, i) != 0 or initial(program, init, accumulator) != 0 or initial(program, init, one) != 1) return null;
+    if (init.instructions.len != 5 or
+        initial(program, init, i) != 0 or
+        initial(program, init, accumulator) != 0 or
+        initial(program, init, one) != 1)
+        return null;
     const rows = initial(program, init, n) orelse return null;
     const columns = initial(program, init, m) orelse return null;
     const resets = program.blocks[reset].instructions;
@@ -122,7 +126,10 @@ pub fn analyze(a: std.mem.Allocator, program: ir.Program, budget: *loops.Budget)
         resets[0],
     ) != 0) return null;
     const work = program.blocks[body].instructions;
-    if (work.len < 2 or !increment(work[work.len - 1], j, one) or !increment(tail[0], i, one)) return null;
+    if (work.len < 2 or
+        !increment(work[work.len - 1], j, one) or
+        !increment(tail[0], i, one))
+        return null;
     const reduction = work[work.len - 2];
     if (reduction.opcode != .integer_bit_xor or
         reduction.destination != accumulator or

@@ -1642,7 +1642,9 @@ fn FlowFor(comptime open: bool) type {
                 .text_scalar,
                 .text_integer,
                 .blob_from_byte,
-                => {}, // Scalar results and owned resources with exportable representations have no borrows.
+                // Scalar results and owned resources with exportable representations
+                // have no borrows.
+                => {},
             }
         }
 
@@ -2101,7 +2103,7 @@ fn sparseReachabilityAttempt(allocator: std.mem.Allocator) !void {
     }
 }
 
-test "borrow reachability lists exactly its members in block order through cycles and allocation failure" {
+test "borrow reachability lists exact members in block order with cycles and allocation failures" {
     try @import("allocation_testing.zig").check(
         std.testing.allocator,
         sparseReachabilityAttempt,

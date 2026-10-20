@@ -352,7 +352,8 @@ test "two installations of one handler descriptor do not establish equal evidenc
         program.blocks[2].terminator.handle.handler,
     );
     try std.testing.expect(
-        program.blocks[11].terminator.call.arguments[0] != program.blocks[11].terminator.call.arguments[1],
+        program.blocks[11].terminator.call.arguments[0] !=
+            program.blocks[11].terminator.call.arguments[1],
     );
     const control = try @import("control_provenance.zig").derive(
         arena.allocator(),

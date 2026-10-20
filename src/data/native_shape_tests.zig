@@ -12,7 +12,9 @@ test "native contracts normalize structure and preserve names, order, and bounds
     try std.testing.expect(native.Shape(A) != native.Shape(D));
     try std.testing.expect(native.Shape([2]A) == native.Shape([2]B));
     try std.testing.expect(native.Shape([2]A) != native.Shape([3]A));
-    try std.testing.expect(native.Shape(native.Vector(A, null)) != native.Shape(native.Vector(C, null)));
+    try std.testing.expect(
+        native.Shape(native.Vector(A, null)) != native.Shape(native.Vector(C, null)),
+    );
     try std.testing.expect(native.Shape(native.Text(null)) == native.Shape(native.Utf8));
     try std.testing.expect(native.Shape(native.Bytes(null)) == native.Shape([]const u8));
     try std.testing.expect(native.Shape(native.Bytes(null)) == native.Shape([]u8));

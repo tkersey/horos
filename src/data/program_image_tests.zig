@@ -398,7 +398,10 @@ test "large outer block catalogs own exact storage and release partial decode fa
     for (&blocks, 0..) |*block, index| block.* = .{
         .function = 0,
         .instructions = if (index == 0) example.blocks[0].instructions else &.{},
-        .terminator = if (index + 1 == blocks.len) .{ .return_value = 0 } else .{ .jump = .{ .block = index + 1 } },
+        .terminator = if (index + 1 == blocks.len)
+            .{ .return_value = 0 }
+        else
+            .{ .jump = .{ .block = index + 1 } },
     };
     var program = example;
     program.blocks = &blocks;

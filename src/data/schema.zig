@@ -103,7 +103,10 @@ pub fn canonicalize(allocator: std.mem.Allocator, types: []const p.Schema, root:
             .product, .sum => |references| {
                 const mapped = try storage.alloc(p.Id, references.len);
                 for (mapped, references) |*id, old| id.* = map[classes[@intCast(old)]];
-                if (target.* == .product) target.* = .{ .product = mapped } else target.* = .{ .sum = mapped };
+                if (target.* == .product)
+                    target.* = .{ .product = mapped }
+                else
+                    target.* = .{ .sum = mapped };
             },
             .seq => |old| target.* = .{ .seq = map[classes[@intCast(old)]] },
             .vector => |vector| target.* = .{ .vector = .{
@@ -209,7 +212,10 @@ pub fn validateReachableValue(
             .product, .sum => |refs| {
                 const remapped = try storage.alloc(p.Id, refs.len);
                 for (remapped, refs) |*out, old| out.* = map[@intCast(old)];
-                target.* = if (target.* == .product) .{ .product = remapped } else .{ .sum = remapped };
+                target.* = if (target.* == .product)
+                    .{ .product = remapped }
+                else
+                    .{ .sum = remapped };
             },
             .seq => |old| target.* = .{ .seq = map[@intCast(old)] },
             .vector => |v| target.* = .{ .vector = .{

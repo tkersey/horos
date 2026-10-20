@@ -217,7 +217,7 @@ fn booleanAllocationAttempt(allocator: std.mem.Allocator) !void {
 test "Boolean scalar summary cleans up every allocation failure" {
     try @import("allocation_testing.zig").check(a, booleanAllocationAttempt, .{});
 }
-test "context construction cleans allocation failures and bounds work without hiding invalid originals" {
+test "context construction cleans allocation failures, bounds work and rejects invalid originals" {
     try @import("allocation_testing.zig").check(a, allocationAttempt, .{});
     var baseline = try @import("coalescing.zig").run(a, xor_chain, .{});
     defer baseline.deinit();

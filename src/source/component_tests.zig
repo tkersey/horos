@@ -195,7 +195,7 @@ const bindings = [_]data.linker.Binding{
     },
 };
 
-test "BMO1 links effectful bodies after source owners are gone and ignores instance enumeration order" {
+test "BMO1 links effectful bodies without source owners and ignores instance enumeration order" {
     const provider = try object(true, false);
     defer testing.allocator.free(provider);
     const client = try object(false, false);
@@ -503,10 +503,7 @@ test "one reusable combinator specializes for two residual effect contexts" {
     const integer = try c.schema(u64);
     const read = try c.external("polymorphic/read", unit, integer);
     const write = try c.external("polymorphic/write", integer, unit);
-    const first = try c.callable(.{}, integer, &.{read}, .{
-        .use = .reusable,
-        .captures = &.{},
-    });
+    const first = try c.callable(.{}, integer, &.{read}, .{ .use = .reusable, .captures = &.{} });
     const second = try c.callable(.{}, integer, &.{ read, write }, .{
         .use = .reusable,
         .captures = &.{},

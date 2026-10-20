@@ -7,7 +7,9 @@ const a = std.testing.allocator;
 const private_cell: ir.Program = .{
     .roots = .{ .entry = 0, .result = 0, .failure = 1 },
     .schemas = &.{
-        .u64,                                                         .unit, .{ .internal = .{ .region = 0 } },
+        .u64,
+        .unit,
+        .{ .internal = .{ .region = 0 } },
         .{ .internal = .{ .cell = .{ .element = 0, .region = 0 } } },
         .{ .internal = .{ .computation = .{
             .parameters = &.{ 2, 0, 0 },

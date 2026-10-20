@@ -21,11 +21,7 @@ test "coalescing selects exact economical candidate to an idempotent fixed point
     try testing.expectEqual(@as(usize, 2), full.program.functions.len);
     try testing.expect(stats.selected.bytes < stats.baseline.bytes);
     var again_stats: pass.Statistics = .{};
-    var again = try pass.run(
-        testing.allocator,
-        full.program,
-        .{ .statistics = &again_stats },
-    );
+    var again = try pass.run(testing.allocator, full.program, .{ .statistics = &again_stats });
     defer again.deinit();
     try testing.expectEqual(pass.Outcome.no_change, again_stats.outcome);
     try testing.expectEqual(@as(usize, 0), again_stats.validator_calls);
@@ -39,11 +35,7 @@ test "coalescing selects exact economical candidate to an idempotent fixed point
 
 test "coalescing work limit after an intermediate selection returns original baseline" {
     var stats: pass.Statistics = .{};
-    var measured = try pass.run(
-        testing.allocator,
-        fixture,
-        .{ .statistics = &stats },
-    );
+    var measured = try pass.run(testing.allocator, fixture, .{ .statistics = &stats });
     defer measured.deinit();
     try testing.expect(stats.first_selected_work > 0);
     var arena = std.heap.ArenaAllocator.init(testing.allocator);

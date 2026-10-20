@@ -194,9 +194,14 @@ fn package(r: Runner, zig: []const u8, repository: []const u8, output: []const u
     try Dir.cwd().createDirPath(r.io, consumed);
     _ = try selected.run(
         &.{
-            "tar",                                                              "-xzf",
-            try std.fmt.allocPrint(r.a, "{s}/p/{s}.tar.gz", .{ global, hash }), "--strip-components=1",
-            "-C",                                                               consumed,
+            "tar",                  "-xzf",
+            try std.fmt.allocPrint(
+                r.a,
+                "{s}/p/{s}.tar.gz",
+                .{ global, hash },
+            ),
+            "--strip-components=1", "-C",
+            consumed,
         },
         output,
         true,
@@ -205,7 +210,8 @@ fn package(r: Runner, zig: []const u8, repository: []const u8, output: []const u
     try Dir.cwd().createDirPath(r.io, consumer);
     try r.write(
         try r.path(&.{ consumer, "build.zig.zon" }),
-        ".{ .name=.consumer, .version=\"0.0.0\", .fingerprint=0x705b3727bb03dcc2, .dependencies=.{ .horos=.{.path=\"../package\"}}, .paths=.{\"\"} }",
+        ".{ .name=.consumer, .version=\"0.0.0\", .fingerprint=0x705b3727bb03dcc2, " ++
+            ".dependencies=.{ .horos=.{.path=\"../package\"}}, .paths=.{\"\"} }",
     );
     inline for (.{
         "build.zig",
@@ -241,11 +247,13 @@ fn package(r: Runner, zig: []const u8, repository: []const u8, output: []const u
             consumer,
             false,
         );
-        try require(std.mem.indexOf(
-            u8,
-            rejected.stderr,
-            item[0] ++ ".zig:",
-        ) != null and std.mem.indexOf(u8, rejected.stderr, item[1]) != null and std.mem.indexOf(u8, rejected.stderr, item[2]) != null);
+        try require(
+            std.mem.indexOf(u8, rejected.stderr, item[0] ++ ".zig:") != null and std.mem.indexOf(
+                u8,
+                rejected.stderr,
+                item[1],
+            ) != null and std.mem.indexOf(u8, rejected.stderr, item[2]) != null,
+        );
     }
 }
 fn scratch(r: Runner, parent: []const u8) ![]const u8 {

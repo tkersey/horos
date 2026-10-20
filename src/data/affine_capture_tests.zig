@@ -1045,7 +1045,10 @@ test "independent acceptance rejects an admissible wrong successor worker" {
 test "full product inspection of the rotating state preserves all three words" {
     var program = rotating;
     var schemas = [_]@import("program.zig").Schema{
-        rotating.schemas[0],           rotating.schemas[1], rotating.schemas[2], rotating.schemas[3],
+        rotating.schemas[0],
+        rotating.schemas[1],
+        rotating.schemas[2],
+        rotating.schemas[3],
         .{ .product = &.{ 0, 0, 0 } },
     };
     schemas[3].internal.computation.result = 4;

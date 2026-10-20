@@ -226,7 +226,10 @@ test "unswitching retains exact P01 on exhausted work or insufficient final code
 pub const cells: ir.Program = .{
     .roots = selectable.roots,
     .schemas = &.{
-        .u64,                                                         .unit, .boolean, .{ .internal = .{ .region = 0 } },
+        .u64,                                                         .unit, .boolean,
+        .{
+            .internal = .{ .region = 0 },
+        },
         .{ .internal = .{ .cell = .{ .element = 0, .region = 0 } } },
         .{ .internal = .{ .computation = .{
             .parameters = &.{ 3, 0, 2, 0 },
@@ -369,6 +372,8 @@ test "branch-local allocations provide a removable dispatch without moving a pre
     defer candidate.deinit();
     try unswitch.validate(a, original, candidate.program, candidate.witness, .{});
     const cost = @import("loop_motion.zig").repeatedWorkEstimate;
-    try std.testing.expect((try cost(a, candidate.program)).?.branch_tests < (try cost(a, original)).?.branch_tests);
+    try std.testing.expect(
+        (try cost(a, candidate.program)).?.branch_tests < (try cost(a, original)).?.branch_tests,
+    );
     try std.testing.expectEqual(@as(u64, 0), (try cost(a, cells)).?.branch_tests);
 }

@@ -177,7 +177,8 @@ const Engine = struct {
             // Preserve the complete closed caller when a call needs that
             // environment, instead of renaming away its captured bindings.
             .call => |v| self.captures[@intCast(v.function)].items.len == 0,
-            .bind => |v| try self.supported(v.value, depth + 1) and try self.supported(v.next, depth + 1),
+            .bind => |v| try self.supported(v.value, depth + 1) and
+                try self.supported(v.next, depth + 1),
             .conditional => |v| try self.supported(
                 v.when_true,
                 depth + 1,

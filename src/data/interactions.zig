@@ -220,10 +220,13 @@ const Engine = struct {
         return self.selections[@intCast(block)].?;
     }
     fn index(self: Engine, function_id: usize, context: usize, state: usize) usize {
-        return ((@as(
-            usize,
-            @intFromBool(self.cleanup),
-        ) * self.image.functions.len + function_id) * self.monitor.contexts + context) * self.monitor.states + state;
+        return ((@as(usize, @intFromBool(self.cleanup)) *
+            self.image.functions.len +
+            function_id) *
+            self.monitor.contexts +
+            context) *
+            self.monitor.states +
+            state;
     }
     fn event(self: Engine, site: Site, context: usize, states: Mask) Error!Mask {
         const projected = self.monitor.project(self.monitor.binding, self.image, site, context);

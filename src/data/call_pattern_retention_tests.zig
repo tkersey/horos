@@ -378,7 +378,10 @@ test "retained call-pattern representations preserve admitted inputs" {
 test "retained call-pattern compatible replacement schemas still specialize" {
     for ([_]ir.Program{ callable, variant }, 0..) |original, kind| {
         var schemas = original.schemas[0..7].*;
-        schemas[5].internal.resumption.capture_bound = if (kind == 0) &.{ 0, 1, 2, 3, 4 } else &.{ 0, 1, 3, 4 };
+        schemas[5].internal.resumption.capture_bound = if (kind == 0)
+            &.{ 0, 1, 2, 3, 4 }
+        else
+            &.{ 0, 1, 3, 4 };
         var compatible = original;
         compatible.schemas = &schemas;
         var candidate = (try patterns.construct(a, compatible, .{})).?;
@@ -462,7 +465,8 @@ test "retained call-pattern candidate admission still rejects incompatible captu
     var invalid = candidate.program;
     var changed = try a.dupe(@import("program.zig").Schema, candidate.program.schemas);
     defer a.free(changed);
-    changed[5].internal.resumption.capture_bound = callable.schemas[5].internal.resumption.capture_bound;
+    changed[5].internal.resumption.capture_bound =
+        callable.schemas[5].internal.resumption.capture_bound;
     invalid.schemas = changed;
     try std.testing.expectError(
         error.InvalidOwnership,

@@ -176,7 +176,10 @@ fn tableApply(table: u2, value: u1) u1 {
     return @truncate(table >> value);
 }
 fn tableCompose(outer: u2, inner: u2) u2 {
-    return @as(u2, tableApply(outer, tableApply(inner, 0))) | (@as(u2, tableApply(outer, tableApply(inner, 1))) << 1);
+    return @as(u2, tableApply(outer, tableApply(inner, 0))) | (@as(
+        u2,
+        tableApply(outer, tableApply(inner, 1)),
+    ) << 1);
 }
 test "Boolean actions exhaustively obey identity composition and noncommuting orientation" {
     for (0..4) |a| for (0..4) |b| for (0..4) |c| {

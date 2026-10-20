@@ -105,10 +105,7 @@ fn authored(
     const private_type = try c.regionBodySchema(region, .{}, integer, &.{
         service.effect(),
         release,
-    }, .{
-        .use = .reusable,
-        .captures = &.{service.capability()},
-    });
+    }, .{ .use = .reusable, .captures = &.{service.capability()} });
     const private_fn = try c.functionFor("service state", private_type);
     const private = try producer.closureBody(private_fn);
     const cell = try private.newCell(

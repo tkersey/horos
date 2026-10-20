@@ -161,7 +161,13 @@ pub fn read(
             inline for (info.field_names, info.field_types) |field_name, FieldType| {
                 if (T == ir.Handler and comptime std.mem.eql(u8, field_name, "state"))
                     if (try reader.byte() != 0) return error.InvalidFlags;
-                @field(result, field_name) = try read(FieldType, reader, allocator, budget, context);
+                @field(result, field_name) = try read(
+                    FieldType,
+                    reader,
+                    allocator,
+                    budget,
+                    context,
+                );
             }
             break :blk result;
         },

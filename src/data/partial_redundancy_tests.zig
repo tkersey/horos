@@ -57,7 +57,12 @@ pub fn critical() ir.Program {
                 .when_false = .{ .block = 4 },
             } },
         },
-        diamond.blocks[3], .{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 0 } },
+        diamond.blocks[3],
+        .{
+            .function = 0,
+            .instructions = &.{},
+            .terminator = .{ .return_value = 0 },
+        },
     };
     return program;
 }
@@ -290,11 +295,14 @@ test "PRE rejects an admissible speculative evaluation on an early-return predec
     );
 }
 
-test "PRE cannot move a region-owned read before its owner exists on a predecessor" {
+const PredecessorRegionFixture = struct {
     const original: ir.Program = .{
         .roots = .{ .entry = 0, .result = 0, .failure = 5 },
         .schemas = &.{
-            .u64,                                                         .boolean, .{ .internal = .{ .region = 0 } },
+            .u64,                                                         .boolean,
+            .{
+                .internal = .{ .region = 0 },
+            },
             .{ .internal = .{ .cell = .{ .element = 0, .region = 0 } } },
             .{ .internal = .{ .computation = .{
                 .parameters = &.{ 2, 0, 0, 1 },
@@ -366,6 +374,10 @@ test "PRE cannot move a region-owned read before its owner exists on a predecess
         .scopes = .{ .region_count = 1, .captures = &.{.{ .fields = &.{}, .use = .reusable }} },
         .constructors = &.{.{ .function = 1, .capture = 0, .schema = 4 }},
     };
+};
+
+test "PRE cannot move a region-owned read before its owner exists on a predecessor" {
+    const original = PredecessorRegionFixture.original;
     var admitted = try @import("activation_ownership.zig").analyze(a, original);
     defer admitted.deinit();
     var candidate = try pre.construct(a, original, 100000);

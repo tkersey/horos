@@ -109,7 +109,9 @@ pub fn Exchange(comptime S: type) type {
     };
 }
 pub fn ExchangeShape(comptime T: type) type {
-    if (@typeInfo(T) != .pointer or @typeInfo(T).pointer.size != .one) @compileError("Horos Generator: expected canonical exchange");
+    if (@typeInfo(T) != .pointer or
+        @typeInfo(T).pointer.size != .one)
+        @compileError("Horos Generator: expected canonical exchange");
     const Child = @typeInfo(T).pointer.child;
     if (!@hasDecl(
         Child,
@@ -120,7 +122,10 @@ pub fn ExchangeShape(comptime T: type) type {
     return S;
 }
 fn OptionsParameters(comptime T: type) type {
-    return bridge.namedShape(if (@hasField(T, "parameters")) @FieldType(T, "parameters") else @TypeOf(.{}));
+    return bridge.namedShape(if (@hasField(T, "parameters"))
+        @FieldType(T, "parameters")
+    else
+        @TypeOf(.{}));
 }
 pub fn create(
     c: *a.Context,

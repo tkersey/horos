@@ -22,7 +22,10 @@ pub inline fn option(
     options: anytype,
     comptime name: []const u8,
     default: anytype,
-) (if (@hasField(@TypeOf(options), name)) @FieldType(@TypeOf(options), name) else @TypeOf(default)) {
+) (if (@hasField(@TypeOf(options), name))
+    @FieldType(@TypeOf(options), name)
+else
+    @TypeOf(default)) {
     return if (@hasField(@TypeOf(options), name)) @field(options, name) else default;
 }
 fn count(comptime T: type) ?usize {
@@ -47,7 +50,8 @@ fn checked(comptime family: Family, value: anytype) *const Handle(family) {
         .operation => a.Operation(S),
         .region => a.Region,
     };
-    if (@TypeOf(value) != *const Canonical) @compileError("Horos library: wrong canonical handle family");
+    if (@TypeOf(value) != *const Canonical)
+        @compileError("Horos library: wrong canonical handle family");
     return @ptrCast(value);
 }
 pub fn List(comptime family: Family, comptime T: type) type {

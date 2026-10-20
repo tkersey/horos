@@ -353,7 +353,8 @@ test "component guarantees bind cell writes and outlives requirements" {
         .program = .{
             .roots = .{ .entry = 0, .result = 0, .failure = 0 },
             .schemas = &.{
-                .unit,                                                        .{ .internal = .{ .capability = 0 } },
+                .unit,
+                .{ .internal = .{ .capability = 0 } },
                 .{ .internal = .{ .cell = .{ .element = 1, .region = 0 } } },
             },
             .constants = &.{},

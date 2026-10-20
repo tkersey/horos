@@ -51,7 +51,10 @@ fn describe(solver: anytype, source: flow.Source) a.Error!Projection {
         cursor = item.tail;
     }
     return .{
-        .source = if (source.ambient) |ambient| .{ .ambient = ambient } else .{ .input = source.parameter },
+        .source = if (source.ambient) |ambient|
+            .{ .ambient = ambient }
+        else
+            .{ .input = source.parameter },
         .path = try path.toOwnedSlice(solver.allocator),
     };
 }

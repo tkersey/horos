@@ -493,7 +493,10 @@ fn transfer(
             };
         },
         .sequence => .{ .length = instruction.operands.len, .length_bound = result.length_bound },
-        .sequence_length => if (left.length) |length| number(length) else .{ .maximum = left.length_bound },
+        .sequence_length => if (left.length) |length|
+            number(length)
+        else
+            .{ .maximum = left.length_bound },
         .select => if (left.boolean) |condition|
             definitions[
                 operands[

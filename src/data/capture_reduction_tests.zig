@@ -85,7 +85,9 @@ test "reused closure loses a dead capture while preserving explicit arguments" {
 test "capture becomes dead only after the known branch is removed" {
     var original = reused;
     original.blocks = &.{
-        reused.blocks[0], reused.blocks[1],                                                               reused.blocks[2],
+        reused.blocks[0],
+        reused.blocks[1],
+        reused.blocks[2],
         .{
             .function = 1,
             .instructions = &.{.{ .destination = 2, .opcode = .constant, .immediate = 0 }},
@@ -95,7 +97,8 @@ test "capture becomes dead only after the known branch is removed" {
                 .when_false = .{ .block = 5 },
             } },
         },
-        reused.blocks[3], .{ .function = 1, .instructions = &.{}, .terminator = .{ .return_value = 0 } },
+        reused.blocks[3],
+        .{ .function = 1, .instructions = &.{}, .terminator = .{ .return_value = 0 } },
     };
     var stats: reduce.Statistics = .{};
     var retained = try reduce.run(a, original, &stats, .{});

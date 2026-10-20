@@ -135,7 +135,8 @@ test "an individual capture observer prevents sufficient-summary reduction" {
     var original = reused;
     var blocks = reused.blocks[0..4].*;
     blocks[3].instructions = &.{
-        reused.blocks[3].instructions[0],                                          reused.blocks[3].instructions[1],
+        reused.blocks[3].instructions[0],
+        reused.blocks[3].instructions[1],
         .{ .destination = 4, .opcode = .integer_bit_xor, .operands = &.{ 4, 0 } },
     };
     original.blocks = &blocks;

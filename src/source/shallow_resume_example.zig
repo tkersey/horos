@@ -14,7 +14,10 @@ pub fn build(b: *source.Builder) source.Error!source.Module {
     var effects: [8]p.Id = undefined;
     var index: usize = 0;
     inline for (.{ p.Mode.deep, p.Mode.shallow }) |mode| {
-        inline for (.{ p.Use.linear, p.Use.multi }) |use| inline for (.{ false, true }) |injecting| {
+        inline for (.{ p.Use.linear, p.Use.multi }) |use| inline for (.{
+            false,
+            true,
+        }) |injecting| {
             const name = try b.allocator().print(
                 "example/resume-{s}-{s}-{s}",
                 .{ @tagName(mode), @tagName(use), if (injecting) "computation" else "value" },

@@ -189,7 +189,11 @@ fn mapFields(
 ) ErrorOf(@TypeOf(mapper))!@TypeOf(value) {
     comptime validateFields(@TypeOf(value), description);
     var result: @TypeOf(value) = undefined;
-    inline for (description) |rule| @field(result, rule.name) = try mapper.reference(rule.role, rule.cardinality, @field(value, rule.name));
+    inline for (description) |rule| @field(result, rule.name) = try mapper.reference(
+        rule.role,
+        rule.cardinality,
+        @field(value, rule.name),
+    );
     return result;
 }
 pub fn mapTerminator(value: ir.Terminator, mapper: anytype) ErrorOf(@TypeOf(mapper))!ir.Terminator {

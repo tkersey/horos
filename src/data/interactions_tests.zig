@@ -336,20 +336,7 @@ test "administrative resume uses the clause parameter interpretation" {
     try std.testing.expectEqual(.potential, (try observedSummary(image, monitor)).status(monitor));
 }
 
-test "implicit disposal may yield without an escaping effect" {
-    const Projection = struct {
-        fn project(
-            _: *const anyopaque,
-            _: ir.Program,
-            site: interaction.Site,
-            _: usize,
-        ) interaction.Mask {
-            return if (site.phase == .yield) 1 else 0;
-        }
-    };
-    // An admitted helper receives a generator answer retaining a protected
-    // continuation. Its failure discards that answer; a pure yielding cleanup
-    // is permitted even though neither the helper nor token has an effect row.
+const YieldingDisposalFixture = struct {
     const image: ir.Program = .{
         .roots = .{ .entry = 0, .result = 0, .failure = 0 },
         .schemas = &.{
@@ -391,6 +378,23 @@ test "implicit disposal may yield without an escaping effect" {
             },
         },
     };
+};
+
+test "implicit disposal may yield without an escaping effect" {
+    const Projection = struct {
+        fn project(
+            _: *const anyopaque,
+            _: ir.Program,
+            site: interaction.Site,
+            _: usize,
+        ) interaction.Mask {
+            return if (site.phase == .yield) 1 else 0;
+        }
+    };
+    // An admitted helper receives a generator answer retaining a protected
+    // continuation. Its failure discards that answer; a pure yielding cleanup
+    // is permitted even though neither the helper nor token has an effect row.
+    const image = YieldingDisposalFixture.image;
     const binding: u8 = 0;
     const monitor: interaction.Monitor = .{
         .binding = &binding,
@@ -714,11 +718,7 @@ test "effect free divergence has no invented successful return" {
     try std.testing.expectEqual(.established, result.status(binding.monitor()));
 }
 
-test "exclusive controlled waits derive a cycle candidate from both actual branch operations" {
-    // Test-local environment contract for these exact declarations: operation
-    // zero waits for completion while the driver holds its turn; operation one
-    // waits for that turn while completion is held. The input selects one host
-    // scenario. No claim is made about arbitrary external operations.
+const ControlledWaitsFixture = struct {
     const image: ir.Program = .{
         .roots = .{ .entry = 0, .result = 0, .failure = 0 },
         .schemas = &.{ .unit, .boolean },
@@ -765,6 +765,14 @@ test "exclusive controlled waits derive a cycle candidate from both actual branc
             .{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 1 } },
         },
     };
+};
+
+test "exclusive controlled waits derive a cycle candidate from both actual branch operations" {
+    // Test-local environment contract for these exact declarations: operation
+    // zero waits for completion while the driver holds its turn; operation one
+    // waits for that turn while completion is held. The input selects one host
+    // scenario. No claim is made about arbitrary external operations.
+    const image = ControlledWaitsFixture.image;
     var admitted = try @import("activation_ownership.zig").analyze(a, image);
     admitted.deinit();
     var arena = std.heap.ArenaAllocator.init(a);
@@ -1069,13 +1077,16 @@ test "captured suffix includes nested handler return before clause suffix" {
     try std.testing.expectEqual(.potential, root.status(monitor));
 }
 
-test "cancellation during cleanup retains pending reply and primary failure" {
-    var image: ir.Program = .{
+const CleanupCancellationFixture = struct {
+    const image: ir.Program = .{
         .roots = .{ .entry = 0, .result = 0, .failure = 0 },
         .schemas = &.{
             .unit,                  .text,                         .bytes,
             .{ .sum = &.{ 1, 2 } }, .{ .sum = &.{ 0, 0, 3, 0 } },  .{ .sum = &.{ 0, 3 } },
-            .{ .seq = 0 },          .{ .product = &.{ 4, 5, 6 } }, .{ .internal = .{ .computation = .{ .parameters = &.{}, .result = 0 } } },
+            .{ .seq = 0 },          .{ .product = &.{ 4, 5, 6 } },
+            .{
+                .internal = .{ .computation = .{ .parameters = &.{}, .result = 0 } },
+            },
             .{ .internal = .{ .computation = .{
                 .parameters = &.{7},
                 .result = 0,
@@ -1144,6 +1155,10 @@ test "cancellation during cleanup retains pending reply and primary failure" {
         },
         .scopes = .{ .captures = &.{.{ .fields = &.{}, .use = .reusable }} },
     };
+};
+
+test "cancellation during cleanup retains pending reply and primary failure" {
+    var image = CleanupCancellationFixture.image;
     const Projection = struct {
         fn project(
             _: *const anyopaque,

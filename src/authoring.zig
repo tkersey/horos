@@ -836,7 +836,10 @@ fn joinFields(comptime A: type, comptime B: type) type {
 fn knownMode(comptime T: type) ?p.Mode {
     const f = fieldsInfo(T, "handler options");
     for (f.field_names, f.field_types, f.field_attrs) |name, Field, attributes| {
-        if (std.mem.eql(u8, name, "mode") and attributes.@"comptime") return @as(p.Mode, attributes.defaultValue(Field).?);
+        if (std.mem.eql(u8, name, "mode") and attributes.@"comptime") return @as(
+            p.Mode,
+            attributes.defaultValue(Field).?,
+        );
     }
     return null;
 }
@@ -1389,7 +1392,10 @@ pub const Context = opaque {
             index(.schema, @TypeOf(input)),
             index(.schema, @TypeOf(answer)),
         );
-        const raw = try rawContext(self).handlerSet(ops.slice(), erased(.schema, input), erased(.schema, answer), .{
+        const raw = try rawContext(self).handlerSet(ops.slice(), erased(.schema, input), erased(
+            .schema,
+            answer,
+        ), .{
             .mode = options.mode,
             .use = options.use,
             .resumption_slots = if (@hasField(
@@ -2064,7 +2070,8 @@ pub fn Body(comptime Parameters: type) type {
                         const fields = @typeInfo(Cleanup.parameters).@"struct";
                         if (fields.field_types.len != 2)
                             @compileError(
-                                "Horos bracket: cleanup requires exit-information and resource parameters",
+                                "Horos bracket: cleanup requires exit-information and " ++
+                                    "resource parameters",
                             );
                         compatible(S, fields.field_types[1], "bracket cleanup owner");
                     }
@@ -2313,14 +2320,18 @@ pub fn Body(comptime Parameters: type) type {
                     );
                     if (needed != @hasField(@TypeOf(options), "overflow"))
                         @compileError(
-                            "Horos convertInteger: overflow failure required exactly for a narrowing conversion",
+                            "Horos convertInteger: overflow failure required exactly for a " ++
+                                "narrowing conversion",
                         );
                 }
             }
             return @ptrCast(try self.raw().convertInteger(
                 erased(.schema, target),
                 erased(.value, value),
-                if (@hasField(@TypeOf(options), "overflow")) erased(.failure_literal, options.overflow) else null,
+                if (@hasField(@TypeOf(options), "overflow")) erased(
+                    .failure_literal,
+                    options.overflow,
+                ) else null,
             ));
         }
         pub fn booleanNot(self: *Self, value: anytype) Error!*const Value(Shape(bool)) {
@@ -2430,7 +2441,10 @@ pub fn Body(comptime Parameters: type) type {
                 erased(.value, start),
                 erased(.value, length),
                 erased(.failure_literal, options.capacity),
-                if (@hasField(@TypeOf(options), "invalid_utf8")) erased(.failure_literal, options.invalid_utf8) else null,
+                if (@hasField(@TypeOf(options), "invalid_utf8")) erased(
+                    .failure_literal,
+                    options.invalid_utf8,
+                ) else null,
             ));
         }
         pub fn blobLength(self: *Self, blob: anytype) Error!*const Value(Shape(u64)) {
@@ -2511,7 +2525,10 @@ pub fn Body(comptime Parameters: type) type {
                 index(.value, @TypeOf(right)),
                 "checked arithmetic operands",
             );
-            return @ptrCast(try self.raw().checked(operation, erased(.value, left), erased(.value, right), .{
+            return @ptrCast(try self.raw().checked(operation, erased(.value, left), erased(
+                .value,
+                right,
+            ), .{
                 .overflow = erased(.failure_literal, failures.overflow),
                 .division_by_zero = if (@hasField(
                     @TypeOf(failures),
@@ -2940,7 +2957,9 @@ pub const interop = struct {
     pub fn schemaId(c: *Context, schema_handle: anytype) Error!p.Id {
         return runtime.interop.schemaId(rawContext(c), erased(.schema, schema_handle));
     }
-    pub fn erase(value: anytype) (if (metadata(@TypeOf(value)).family == .body) *Body(Dynamic) else *const canonical(metadata(@TypeOf(value)).family, Dynamic)) {
+    pub fn erase(value: anytype) (if (metadata(@TypeOf(value)).family == .body) *Body(
+        Dynamic,
+    ) else *const canonical(metadata(@TypeOf(value)).family, Dynamic)) {
         const info = comptime metadata(@TypeOf(value));
         if (comptime info.family == .declaration and
             info.shape != Dynamic and
@@ -3056,7 +3075,10 @@ fn capacityFailure(
             );
         }
     }
-    return if (@hasField(@TypeOf(options), "capacity")) erased(.failure_literal, options.capacity) else null;
+    return if (@hasField(@TypeOf(options), "capacity")) erased(
+        .failure_literal,
+        options.capacity,
+    ) else null;
 }
 fn checkElements(comptime S: type, comptime T: type, comptime operation: []const u8) void {
     switch (@typeInfo(T)) {

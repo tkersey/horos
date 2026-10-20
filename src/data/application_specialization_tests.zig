@@ -736,11 +736,15 @@ test "singleton incoming callable specializes its worker while opaque captured e
 fn polymorphicIncomingProgram() ir.Program {
     var program = comptime closedBranchProgram(false);
     program.functions = &.{
-        program.functions[0],                                                                      program.functions[1], program.functions[2],
+        program.functions[0],
+        program.functions[1],
+        program.functions[2],
         .{ .entry = 7, .inputs = &.{ 2, 1 }, .layout = program.functions[0].layout, .result = 3 },
     };
     program.blocks = &.{
-        program.blocks[0],                                                              program.blocks[1], program.blocks[2],
+        program.blocks[0],
+        program.blocks[1],
+        program.blocks[2],
         .{
             .function = 0,
             .instructions = &.{},
@@ -750,7 +754,9 @@ fn polymorphicIncomingProgram() ir.Program {
                 .next = program.blocks[3].terminator.apply.next,
             } },
         },
-        program.blocks[4],                                                              program.blocks[5], program.blocks[6],
+        program.blocks[4],
+        program.blocks[5],
+        program.blocks[6],
         .{
             .function = 3,
             .instructions = &.{},
@@ -978,7 +984,8 @@ test "a computation reused as a handler body retains its construction" {
     };
     program.scopes = .{ .captures = &.{.{ .fields = &.{0}, .use = .reusable }} };
     program.functions = &.{
-        captured.functions[0],                                                        captured.functions[1],
+        captured.functions[0],
+        captured.functions[1],
         .{ .entry = 4, .inputs = &.{0}, .layout = .{ .slots = &.{3} }, .result = 3 },
     };
     program.handlers = &.{.{

@@ -765,7 +765,9 @@ test "replacement recursive library results preserve known schemas" {
         @TypeOf((try pipeline.generator.answer().fields()).done) == @TypeOf(unit),
     );
     try std.testing.expect(
-        @TypeOf(try pipeline.generator.resumption().resultSchema()) == @TypeOf(pipeline.generator.answer()),
+        @TypeOf(try pipeline.generator.resumption().resultSchema()) == @TypeOf(
+            pipeline.generator.answer(),
+        ),
     );
     const tasks = try Generator.create(c, "tasks", unit, unit, unit, options);
     const fifo = try Scheduler.fifo(c, tasks, .{}, .{region});

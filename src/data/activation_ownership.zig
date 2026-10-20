@@ -208,7 +208,8 @@ const Check = struct {
             signature.effects,
         );
         for (body_effects) |effect| {
-            if (contracts.containsEffect(signature.effects, effect) and effect_scope.discharged(self.image, self.effects, handler, signature, effect))
+            if (contracts.containsEffect(signature.effects, effect) and
+                effect_scope.discharged(self.image, self.effects, handler, signature, effect))
                 continue;
             try self.controlEffects(slots, &.{effect}, operation.next, .body);
             const selected = try self.provenance.select(

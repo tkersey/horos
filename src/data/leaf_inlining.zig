@@ -344,6 +344,8 @@ pub fn run(
     };
     stats.calls_removed = candidate.sites.len;
     for (candidate.sites) |bid|
-        stats.instructions_copied += candidate.program.blocks[bid].instructions.len - original.blocks[bid].instructions.len;
+        stats.instructions_copied +=
+            candidate.program.blocks[bid].instructions.len -
+            original.blocks[bid].instructions.len;
     return p01.run(allocator, candidate.program, options.coalescing);
 }

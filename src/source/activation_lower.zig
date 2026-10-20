@@ -396,9 +396,7 @@ fn coalesce(
     const evidence: ?RecoveryEvidence = if (options.recovery) try source.own(
         RecoveryEvidence,
         result.arena.allocator(),
-        .{
-            .correspondence = compiler.correspondence orelse return error.InvalidCorrespondence,
-        },
+        .{ .correspondence = compiler.correspondence orelse return error.InvalidCorrespondence },
     ) else null;
     if (evidence) |proof| {
         try data.coalescing.validateCorrespondence(
@@ -1186,10 +1184,7 @@ const Block = struct {
         const definition = compiler.source.values[@intCast(id)];
         const operation: Operation = switch (definition.expression) {
             .variable => |name| return self.function.resolve(self.environment, name),
-            .literal => |literal| .{
-                .opcode = .constant,
-                .immediate = literal,
-            },
+            .literal => |literal| .{ .opcode = .constant, .immediate = literal },
             .primitive => |primitive| .{
                 .opcode = primitive.opcode,
                 .operands = operands,

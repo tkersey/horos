@@ -21,7 +21,8 @@ pub const Statistics = struct {
 };
 
 fn observesPair(op: ir.Instruction, left: p.Id, right: p.Id) bool {
-    return std.mem.indexOfScalar(p.Id, op.operands, left) != null or std.mem.indexOfScalar(p.Id, op.operands, right) != null;
+    return std.mem.indexOfScalar(p.Id, op.operands, left) != null or
+        std.mem.indexOfScalar(p.Id, op.operands, right) != null;
 }
 fn exactXor(op: ir.Instruction, left: p.Id, right: p.Id) bool {
     return op.opcode == .integer_bit_xor and
@@ -42,7 +43,9 @@ fn lawDomain(program: ir.Program, constructor_id: usize) bool {
         capture.borrowed_regions.len != 0 or
         capture.use != .reusable)
         return false;
-    if (!privacy.privateWorker(program, constructor_id) or !privacy.privateConstructions(program, constructor_id)) return false;
+    if (!privacy.privateWorker(program, constructor_id) or
+        !privacy.privateConstructions(program, constructor_id))
+        return false;
     const worker = program.functions[@intCast(constructor.function)];
     const left = worker.inputs[0];
     const right = worker.inputs[1];

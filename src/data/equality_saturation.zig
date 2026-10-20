@@ -128,7 +128,8 @@ fn same(parents: []usize, left: Node, right: Node) bool {
     if (left.schema != right.schema or left.kind != right.kind) return false;
     return switch (left.kind) {
         .input, .literal => left.value == right.value,
-        .xor => equivalent(parents, left.left, right.left) and equivalent(parents, left.right, right.right),
+        .xor => equivalent(parents, left.left, right.left) and
+            equivalent(parents, left.right, right.right),
         .field => left.value == right.value and equivalent(parents, left.left, right.left),
         .product => blk: {
             if (left.fields.len != right.fields.len) break :blk false;
@@ -180,7 +181,8 @@ fn justified(nodes: []const Node, parents: []usize, step: Step) bool {
                 zero.schema == left.schema and
                 ((equivalent(parents, left.left, step.auxiliary) and
                     equivalent(parents, left.right, step.right)) or
-                    (equivalent(parents, left.right, step.auxiliary) and equivalent(parents, left.left, step.right)));
+                    (equivalent(parents, left.right, step.auxiliary) and
+                        equivalent(parents, left.left, step.right)));
         },
         .associate => blk: {
             const inner = nodes[step.auxiliary];
@@ -195,7 +197,9 @@ fn justified(nodes: []const Node, parents: []usize, step: Step) bool {
                 parents,
                 right.left,
                 inner.left,
-            ) and equivalent(parents, tail.left, inner.right) and equivalent(parents, tail.right, left.right);
+            ) and
+                equivalent(parents, tail.left, inner.right) and
+                equivalent(parents, tail.right, left.right);
         },
     };
 }
@@ -326,7 +330,8 @@ fn saturate(graph: *Graph, stats: *Statistics, rounds: usize) Error!void {
             };
             if (node.kind != .xor) continue;
             const zero = try graph.add(.{ .kind = .literal, .schema = node.schema, .value = 0 });
-            if (equivalent(graph.parents.items, node.left, node.right)) try graph.merge(.{ .law = .cancel, .left = id, .right = zero });
+            if (equivalent(graph.parents.items, node.left, node.right))
+                try graph.merge(.{ .law = .cancel, .left = id, .right = zero });
             if (equivalent(graph.parents.items, node.left, zero)) try graph.merge(.{
                 .law = .zero,
                 .left = id,
@@ -877,7 +882,8 @@ pub fn run(
         .{ .work_limit = options.coalescing.work_limit },
     );
     defer baseline.deinit();
-    if (try image.encodedLength(selected.program) > try image.encodedLength(baseline.program)) return p01.run(allocator, original, options.coalescing);
+    if (try image.encodedLength(selected.program) > try image.encodedLength(baseline.program))
+        return p01.run(allocator, original, options.coalescing);
     stats.selected = true;
     keep = true;
     return selected;

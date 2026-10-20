@@ -28,71 +28,98 @@ pub fn main(init: std.process.Init) !void {
                 fixtures.installations[index - 7],
             ),
         };
-        var identity: ?[32]u8 = null;
-        for (0..fixtures.samples) |sample| {
-            var meter: Meter = .{ .parent = init.gpa };
-            const start = std.Io.Clock.awake.now(init.io);
-            var compiled = try horos.program.compile(meter.allocator(), module);
-            const elapsed = start.durationTo(std.Io.Clock.awake.now(init.io)).nanoseconds;
-            const retained = meter.live;
-            const peak = meter.peak;
-            const bytes = try init.gpa.alloc(
-                u8,
-                try horos.data.program_image.encodedLength(compiled.program),
-            );
-            defer init.gpa.free(bytes);
-            _ = try compiled.encode(init.gpa, bytes);
-            var hash: [32]u8 = undefined;
-            std.crypto.hash.sha2.Sha256.hash(bytes, &hash, .{});
-            if (identity) |expected| {
-                if (!std.mem.eql(u8, &expected, &hash)) return error.ImageChanged;
-            } else identity = hash;
-            if (sample == 0) {
-                const path = try std.fmt.allocPrint(init.gpa, "{s}/{s}.bpi3", .{ directory, name });
-                defer init.gpa.free(path);
-                try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = path, .data = bytes });
-            }
-            compiled.deinit();
-            if (meter.live != 0) return error.LeakedCompilation;
-            try std.json.Stringify.value(
-                .{
-                    .fixture = name,
-                    .operation = "compile",
-                    .sample = sample,
-                    .ns = elapsed,
-                    .retained_bytes = retained,
-                    .peak_bytes = peak,
-                    .image_bytes = bytes.len,
-                    .sha256 = std.fmt.bytesToHex(hash, .lower),
-                },
-                .{},
-                &output.interface,
-            );
-            try output.interface.writeByte('\n');
-
-            meter = .{ .parent = init.gpa };
-            const admit_start = std.Io.Clock.awake.now(init.io);
-            const admitted = try horos.data.program_image.Admitted.decode(meter.allocator(), bytes);
-            const admit_elapsed = admit_start.durationTo(
-                std.Io.Clock.awake.now(init.io),
-            ).nanoseconds;
-            try std.json.Stringify.value(
-                .{
-                    .fixture = name,
-                    .operation = "admit",
-                    .sample = sample,
-                    .ns = admit_elapsed,
-                    .retained_bytes = meter.live,
-                    .peak_bytes = meter.peak,
-                    .owner_storage_bytes = admitted.storageBytes(),
-                },
-                .{},
-                &output.interface,
-            );
-            try output.interface.writeByte('\n');
-            admitted.deinit();
-            if (meter.live != 0) return error.LeakedAdmission;
-        }
+        var measurement: Measurement = .{
+            .allocator = init.gpa,
+            .io = init.io,
+            .writer = &output.interface,
+            .module = module,
+            .name = name,
+            .directory = directory,
+        };
+        for (0..fixtures.samples) |sample| try measurement.run(sample);
         try output.interface.flush();
     }
 }
+
+const Measurement = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    writer: *std.Io.Writer,
+    module: horos.source.ast.Module,
+    name: []const u8,
+    directory: []const u8,
+    identity: ?[32]u8 = null,
+
+    fn run(self: *Measurement, sample: usize) !void {
+        var meter: Meter = .{ .parent = self.allocator };
+        const start = std.Io.Clock.awake.now(self.io);
+        var compiled = try horos.program.compile(meter.allocator(), self.module);
+        const elapsed = start.durationTo(std.Io.Clock.awake.now(self.io)).nanoseconds;
+        const retained = meter.live;
+        const peak = meter.peak;
+        const bytes = try self.allocator.alloc(
+            u8,
+            try horos.data.program_image.encodedLength(compiled.program),
+        );
+        defer self.allocator.free(bytes);
+        _ = try compiled.encode(self.allocator, bytes);
+        var hash: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(bytes, &hash, .{});
+        if (self.identity) |expected| {
+            if (!std.mem.eql(u8, &expected, &hash)) return error.ImageChanged;
+        } else self.identity = hash;
+        if (sample == 0) {
+            const path = try std.fmt.allocPrint(
+                self.allocator,
+                "{s}/{s}.bpi3",
+                .{ self.directory, self.name },
+            );
+            defer self.allocator.free(path);
+            try std.Io.Dir.cwd().writeFile(self.io, .{ .sub_path = path, .data = bytes });
+        }
+        compiled.deinit();
+        if (meter.live != 0) return error.LeakedCompilation;
+        try std.json.Stringify.value(
+            .{
+                .fixture = self.name,
+                .operation = "compile",
+                .sample = sample,
+                .ns = elapsed,
+                .retained_bytes = retained,
+                .peak_bytes = peak,
+                .image_bytes = bytes.len,
+                .sha256 = std.fmt.bytesToHex(hash, .lower),
+            },
+            .{},
+            self.writer,
+        );
+        try self.writer.writeByte('\n');
+
+        try self.admit(sample, bytes);
+    }
+
+    fn admit(self: Measurement, sample: usize, bytes: []const u8) !void {
+        var meter: Meter = .{ .parent = self.allocator };
+        const admit_start = std.Io.Clock.awake.now(self.io);
+        const admitted = try horos.data.program_image.Admitted.decode(meter.allocator(), bytes);
+        const admit_elapsed = admit_start.durationTo(
+            std.Io.Clock.awake.now(self.io),
+        ).nanoseconds;
+        try std.json.Stringify.value(
+            .{
+                .fixture = self.name,
+                .operation = "admit",
+                .sample = sample,
+                .ns = admit_elapsed,
+                .retained_bytes = meter.live,
+                .peak_bytes = meter.peak,
+                .owner_storage_bytes = admitted.storageBytes(),
+            },
+            .{},
+            self.writer,
+        );
+        try self.writer.writeByte('\n');
+        admitted.deinit();
+        if (meter.live != 0) return error.LeakedAdmission;
+    }
+};

@@ -8,7 +8,7 @@ const Case = struct {
     terms: []const Id = &.{},
     bound: []const Id = &.{},
 };
-test "source reference collection preserves explicit order multiplicity and catalog separation" {
+const SourceRolesFixture = struct {
     const cases = [_]Case{
         .{ .term = .{ .value = 2 }, .values = &.{2} },
         .{ .term = .{ .dispose = 2 }, .values = &.{2} },
@@ -96,6 +96,10 @@ test "source reference collection preserves explicit order multiplicity and cata
             .bound = &.{ 2, 3 },
         },
     };
+};
+
+test "source reference collection preserves explicit order multiplicity and catalog separation" {
+    const cases = SourceRolesFixture.cases;
     for (std.meta.tags(std.meta.Tag(ast.Term))) |tag| {
         var covered = false;
         for (cases) |case| if (std.meta.activeTag(case.term) == tag) {

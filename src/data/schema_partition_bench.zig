@@ -7,7 +7,11 @@ pub fn main(init: std.process.Init) !void {
     _ = args.next();
     const count = try std.fmt.parseInt(usize, args.next() orelse return error.Count, 10);
     const mode = args.next() orelse return error.Mode;
-    if (count > 8192 or (!std.mem.eql(u8, mode, "unique") and !std.mem.eql(u8, mode, "duplicate")) or args.next() != null) return error.Arguments;
+    if (count > 8192 or
+        (!std.mem.eql(u8, mode, "unique") and
+            !std.mem.eql(u8, mode, "duplicate")) or
+        args.next() != null)
+        return error.Arguments;
     const schemas = try init.gpa.alloc(p.Schema, count + 1);
     defer init.gpa.free(schemas);
     schemas[0] = .u8;

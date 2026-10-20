@@ -207,9 +207,11 @@ pub const Admitted = opaque {
     pub fn storageBytes(self: *const Admitted) usize {
         const owner = self.storage();
         const catalogs = owner.decoded.block_catalog.len * @sizeOf(ir.Block);
-        return @sizeOf(
-            AdmittedStorage,
-        ) + owner.decoded.arena.queryCapacity() + catalogs + owner.analysis.arena.queryCapacity() + owner.analysis.pool.storageBytes();
+        return @sizeOf(AdmittedStorage) +
+            owner.decoded.arena.queryCapacity() +
+            catalogs +
+            owner.analysis.arena.queryCapacity() +
+            owner.analysis.pool.storageBytes();
     }
     /// Per-consumer mutable set nodes; all original maps remain shared read-only.
     /// This analysis borrows the admitted owner for its entire lifetime.

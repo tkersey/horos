@@ -64,7 +64,9 @@ pub const guarded: ir.Program = .{
         .result = 0,
     }},
     .blocks = &.{
-        counted.blocks[0],                                                              counted.blocks[1], counted.blocks[2],
+        counted.blocks[0],
+        counted.blocks[1],
+        counted.blocks[2],
         .{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 6 } },
     },
 };
@@ -318,7 +320,10 @@ test "a loop headed at function entry redirects the actual entry" {
 pub const mutable: ir.Program = .{
     .roots = counted.roots,
     .schemas = &.{
-        .u64,                                                         .unit, .boolean, .{ .internal = .{ .region = 0 } },
+        .u64,
+        .unit,
+        .boolean,
+        .{ .internal = .{ .region = 0 } },
         .{ .internal = .{ .cell = .{ .element = 0, .region = 0 } } },
         .{ .internal = .{ .computation = .{
             .parameters = &.{ 3, 0, 0 },

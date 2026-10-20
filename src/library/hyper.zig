@@ -389,11 +389,7 @@ pub fn group(b: *source.Builder, endpoints: []const Id, captures: []const Id) so
         ids[2 * count + index],
         .{
             .internal = .{
-                .computation = .{
-                    .parameters = &.{},
-                    .result = endpoint,
-                    .capture_bound = bound,
-                },
+                .computation = .{ .parameters = &.{}, .result = endpoint, .capture_bound = bound },
             },
         },
     );

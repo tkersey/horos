@@ -234,8 +234,7 @@ fn control(a: std.mem.Allocator, value: ir.Terminator, mapping: []const Id) Erro
     };
 }
 
-test "slot ordering is an immutable idempotent renaming of schemas and simultaneous edges" {
-    const testing = std.testing;
+const SlotOrderFixture = struct {
     const layout = [_]Id{ 0, 1, 0, 0, 0, 3 } ++ @as([60]Id, @splat(0));
     const input: ir.Program = .{
         .roots = .{ .entry = 0, .result = 3, .failure = 2 },
@@ -277,6 +276,12 @@ test "slot ordering is an immutable idempotent renaming of schemas and simultane
             },
         },
     };
+};
+
+test "slot ordering is an immutable idempotent renaming of schemas and simultaneous edges" {
+    const testing = std.testing;
+    const layout = SlotOrderFixture.layout;
+    const input = SlotOrderFixture.input;
     var admitted = try data.activation_ownership.analyze(testing.allocator, input);
     defer admitted.deinit();
     var arena = std.heap.ArenaAllocator.init(testing.allocator);

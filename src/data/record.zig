@@ -169,7 +169,12 @@ pub fn readBounded(
         .@"struct" => |info| blk: {
             var result: T = undefined;
             inline for (info.field_names, info.field_types) |field_name, FieldType| {
-                @field(result, field_name) = try readBounded(FieldType, reader, allocator, remaining);
+                @field(result, field_name) = try readBounded(
+                    FieldType,
+                    reader,
+                    allocator,
+                    remaining,
+                );
             }
             break :blk result;
         },

@@ -1152,7 +1152,10 @@ fn recordUpdateBytes(
             if (empty) &.{} else &.{.{ .name = "count", .handle = a.interop.erase(count) }},
         );
         break :blk try body.update(original, replacements);
-    } else if (empty) try body.update(original, .{}) else try body.update(original, .{ .count = count });
+    } else if (empty) try body.update(original, .{}) else try body.update(
+        original,
+        .{ .count = count },
+    );
     const parts = try body.destructure(updated);
     const result = try body.apply(try parts.get("task"), .{});
     if (duplicate) {
@@ -1598,7 +1601,9 @@ fn forwardScope(allocator: std.mem.Allocator, scenario: ForwardScope, lambda: bo
         try use.lambda(helper, shape),
         .{},
     ) else try use.call(helper, .{});
-    const definition = if (scenario == .global) try c.body(helper) else try left.closureBody(helper);
+    const definition = if (scenario == .global) try c.body(helper) else try left.closureBody(
+        helper,
+    );
     try c.define(helper, try definition.ret(try definition.constant(u64, 7)));
     const left_result = try left.ret(if (scenario == .same) pending else try left.constant(
         u64,
@@ -2175,7 +2180,9 @@ fn stateSharing(allocator: std.mem.Allocator) !void {
         .with_state,
     )).with_state;
     try testing.expect(
-        a.interop.erase(value.handler) != a.interop.erase(optional.handler) and a.interop.erase(optional.handler) != a.interop.erase(paired.handler),
+        a.interop.erase(value.handler) != a.interop.erase(optional.handler) and a.interop.erase(
+            optional.handler,
+        ) != a.interop.erase(paired.handler),
     );
     const body_schema = raw.schemas.items[
         @intCast(try a.interop.schemaId(c, try c.handledSchema(value.handler)))
@@ -2252,7 +2259,9 @@ fn choiceSharing(allocator: std.mem.Allocator) !void {
     const first = try choice.first(c, family, left, options);
     const other_names = try choice.all(c, family, right, options);
     try testing.expect(
-        a.interop.erase(all.handler) != a.interop.erase(first.handler) and a.interop.erase(all.handler) != a.interop.erase(other_names.handler),
+        a.interop.erase(all.handler) != a.interop.erase(first.handler) and a.interop.erase(
+            all.handler,
+        ) != a.interop.erase(other_names.handler),
     );
     const count = raw.functions.items.len;
     for (0..64) |_| {
@@ -2322,7 +2331,11 @@ fn resourceConstruction(allocator: std.mem.Allocator, comptime mode: ResourceCas
     try c.resourceAuthority(
         owned,
         if (mode == .unauthorized_pack) &.{} else &.{ acquire, acquire },
-        if (mode == .unauthorized_unpack) &.{ release, entry_fn } else &.{ entry_fn, work_fn, release },
+        if (mode == .unauthorized_unpack) &.{ release, entry_fn } else &.{
+            entry_fn,
+            work_fn,
+            release,
+        },
     );
     const acquire_body = try c.body(acquire);
     const payload_schema = if (mode == .wrong_names) try c.record(
@@ -2478,7 +2491,7 @@ fn schemaDeclarations(allocator: std.mem.Allocator, negatives: bool) !void {
         defer compiled.deinit();
     }
 }
-test "recursive declarations are single assignment and cannot alias empty sums or publish incomplete" {
+test "recursive declarations reject reassignment, empty sum aliases, and incomplete publication" {
     try schemaDeclarations(testing.allocator, true);
     try schemaDeclarations(testing.allocator, false);
 }
@@ -2910,7 +2923,9 @@ fn searchSharing(allocator: std.mem.Allocator) !void {
     options.order = .breadth_first;
     const bfs = try search.interpret(c, family, left, options);
     try testing.expect(
-        a.interop.erase(dfs.handler) != a.interop.erase(renamed.handler) and dfs.explore != bfs.explore,
+        a.interop.erase(dfs.handler) != a.interop.erase(
+            renamed.handler,
+        ) and dfs.explore != bfs.explore,
     );
     const count = raw.functions.items.len;
     for (0..64) |_| try testing.expectEqual(
@@ -3023,8 +3038,12 @@ test "typed byte and indexed container queries preserve categories and optional 
     const integer = try c.schema(u64);
     const byte_id = try raw.scalar(u8);
     const shapes = [_]@import("horos_data").program.Schema{
-        .bytes,                                             .text,                                                .{ .bounded_bytes = 16 }, .{ .bounded_text = 16 },
-        .{ .array = .{ .element = byte_id, .length = 2 } }, .{ .vector = .{ .element = byte_id, .maximum = 2 } },
+        .bytes,                                             .text,
+        .{ .bounded_bytes = 16 },                           .{ .bounded_text = 16 },
+        .{ .array = .{ .element = byte_id, .length = 2 } },
+        .{
+            .vector = .{ .element = byte_id, .maximum = 2 },
+        },
     };
     const optional = try c.alternatives(.{ .none = unit, .some = try c.schema(u8) });
     for (shapes, 0..) |shape, index| {
@@ -3151,7 +3170,10 @@ test "typed eager selection checks the condition and both value contracts" {
 
 test "typed and direct compilation share explicit contracts and mandatory P01" {
     const data = @import("horos_data");
-    for ([_]bool{ false, true }) |typed| for ([_]data.closed_compilation.Contract{ .structural, .semantic }) |contract| {
+    for ([_]bool{ false, true }) |typed| for ([_]data.closed_compilation.Contract{
+        .structural,
+        .semantic,
+    }) |contract| {
         var raw = source.Builder.init(testing.allocator);
         defer raw.deinit();
         const c = try a.Context.init(&raw);

@@ -98,7 +98,9 @@ fn recognize(a: std.mem.Allocator, program: ir.Program, budget: *Budget) Error!?
         .constructions = 0,
         .applications = 0,
     };
-    if (affected(shape, program.roots.result) or affected(shape, program.roots.failure)) return null;
+    if (affected(shape, program.roots.result) or
+        affected(shape, program.roots.failure))
+        return null;
     for (
         program.schemas,
         0..,

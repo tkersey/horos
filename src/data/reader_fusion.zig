@@ -554,7 +554,10 @@ pub fn construct(
     blocks[base_b + 1].function = base_f;
     const return_slots = try a.dupe(
         p.Id,
-        if (identity_returns) &.{ states[0], states[1], oh.input } else &.{ states[0], states[1], oh.input, oh.input, oh.input },
+        if (identity_returns)
+            &.{ states[0], states[1], oh.input }
+        else
+            &.{ states[0], states[1], oh.input, oh.input, oh.input },
     );
     functions[base_f + 1] = .{
         .entry = base_b + 2,

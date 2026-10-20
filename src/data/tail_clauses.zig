@@ -685,13 +685,12 @@ fn certifyAdministrativeResult(
     return false;
 }
 
-test "independent administrative-return proofs preserve parallel writes and reject changed answers" {
-    const a = std.testing.allocator;
+const ParallelReturnsFixture = struct {
     const incoming: ir.Edge = .{ .block = 1, .assignments = &.{
         .{ .destination = 2, .source = .returned },
         .{ .destination = 3, .source = .{ .slot = 1 } },
     } };
-    var blocks = [_]ir.Block{
+    const blocks = [_]ir.Block{
         .{
             .function = 0,
             .instructions = &.{},
@@ -716,6 +715,12 @@ test "independent administrative-return proofs preserve parallel writes and reje
             .terminator = .{ .return_value = 1 },
         },
     };
+};
+
+test "administrative-return proofs preserve parallel writes and reject changed answers" {
+    const a = std.testing.allocator;
+    const incoming = ParallelReturnsFixture.incoming;
+    var blocks = ParallelReturnsFixture.blocks;
     const image: ir.Program = .{
         .roots = .{ .entry = 0, .result = 0, .failure = 1 },
         .schemas = &.{ .u64, .unit },
@@ -795,8 +800,7 @@ fn remap(
     };
 }
 
-test "a general resumption with an administrative join becomes a checked tail clause" {
-    const a = std.testing.allocator;
+const AdministrativeJoinFixture = struct {
     const original: ir.Program = .{
         .roots = .{ .entry = 0, .result = 0, .failure = 1 },
         .schemas = &.{
@@ -924,6 +928,11 @@ test "a general resumption with an administrative join becomes a checked tail cl
         .constructors = &.{.{ .function = 1, .capture = 0, .schema = 3 }},
         .scopes = .{ .captures = &.{.{ .fields = &.{0}, .use = .reusable }} },
     };
+};
+
+test "a general resumption with an administrative join becomes a checked tail clause" {
+    const a = std.testing.allocator;
+    const original = AdministrativeJoinFixture.original;
     var admitted = try @import("activation_ownership.zig").analyze(a, original);
     admitted.deinit();
     const AllocationProbe = struct {

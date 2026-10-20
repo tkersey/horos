@@ -533,12 +533,13 @@ pub fn validate(
     const edge_writes = try a.alloc(bool, fixed.len);
     @memset(edge_writes, false);
     if (before.positions[witness.header].len == 0) return error.InvalidLoopMotion;
+    const header_end = original.blocks[witness.header].instructions.len;
     for (
         fixed,
         0..,
     ) |*v, slot|
         v.* = before.pool.contains(
-            before.positions[witness.header][original.blocks[witness.header].instructions.len].available,
+            before.positions[witness.header][header_end].available,
             slot,
         );
     for (members, graph.blocks) |inside, bid| if (inside) {

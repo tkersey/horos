@@ -121,7 +121,11 @@ pub fn sequenceGuard(allocator: std.mem.Allocator, use_capacity: bool) !ir.Progr
     };
     program.constants = &.{
         guarded.constants[0],                                     guarded.constants[1],
-        .{ .schema = 0, .bytes = &.{ 99, 0, 0, 0, 0, 0, 0, 0 } }, .{ .schema = 0, .bytes = &.{ 73, 0, 0, 0, 0, 0, 0, 0 } },
+        .{ .schema = 0, .bytes = &.{ 99, 0, 0, 0, 0, 0, 0, 0 } },
+        .{
+            .schema = 0,
+            .bytes = &.{ 73, 0, 0, 0, 0, 0, 0, 0 },
+        },
         .{ .schema = 0, .bytes = &.{ 50, 0, 0, 0, 0, 0, 0, 0 } },
     };
     const functions = try allocator.dupe(ir.Function, program.functions);

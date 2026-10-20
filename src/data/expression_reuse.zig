@@ -149,7 +149,9 @@ fn indexPredecessors(
 fn successor(term: ir.Terminator, index: usize) ?Incoming {
     return switch (term) {
         .return_value, .fail => null,
-        .branch => |v| if (index == 0) .{ .edge = v.when_true } else if (index == 1) .{ .edge = v.when_false } else null,
+        .branch => |v| if (index == 0) .{ .edge = v.when_true } else if (index == 1) .{
+            .edge = v.when_false,
+        } else null,
         .switch_variant => |v| if (index < v.cases.len) .{ .edge = v.cases[index] } else null,
         .jump => |v| if (index == 0) .{ .edge = v } else null,
         .yield_value => |v| if (index == 0) .{ .edge = v, .capture_boundary = true } else null,
@@ -589,7 +591,8 @@ fn validateWithBudget(
                 const proved = try proves(allocator, original, item, predecessors, budget);
                 if (budget.exhausted) return error.ExpressionWorkLimit;
                 if (!proved) return error.InvalidExpressionReuse;
-                const source = original.blocks[item.source.block].instructions[item.source.instruction];
+                const source_block = original.blocks[item.source.block];
+                const source = source_block.instructions[item.source.instruction];
                 if (flow.positions[bid].len == 0 or !flow.pool.contains(
                     flow.positions[bid][index].available,
                     source.destination,

@@ -433,8 +433,11 @@ fn ContextFor() type {
             for (
                 self.state.nodes,
                 0..,
-            ) |record, id| if ((isFrame(record) or record == .region) and treeParent(record) == null)
-                try pending.append(self.allocator, .{ .id = id, .leaving = false });
+            ) |record, id|
+                if ((isFrame(record) or
+                    record == .region) and
+                    treeParent(record) == null)
+                    try pending.append(self.allocator, .{ .id = id, .leaving = false });
             var clock: usize = 0;
             while (pending.pop()) |task| {
                 if (task.leaving) {
@@ -558,7 +561,8 @@ fn ContextFor() type {
                         },
                         .computation => {
                             if (record_value != .computation or
-                                record_value.computation.constructor >= self.program.constructors.len)
+                                record_value.computation.constructor >=
+                                    self.program.constructors.len)
                                 return error.TypeMismatch;
                             if (self.program.constructors[
                                 @intCast(record_value.computation.constructor)

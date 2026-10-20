@@ -178,7 +178,10 @@ fn recognize(
     const mb = program.blocks[@intCast(mbid)];
     if (mb.instructions.len != 3 or mb.terminator != .call) return null;
     const pair = mb.instructions[0].destination;
-    if (!operation(mb.instructions[0], .variant_payload, &.{ms.value}, 1) or !operation(mb.instructions[1], .field, &.{pair}, 0) or !operation(mb.instructions[2], .field, &.{pair}, 1)) return null;
+    if (!operation(mb.instructions[0], .variant_payload, &.{ms.value}, 1) or
+        !operation(mb.instructions[1], .field, &.{pair}, 0) or
+        !operation(mb.instructions[2], .field, &.{pair}, 1))
+        return null;
     const map_call = mb.terminator.call;
     if (!std.mem.eql(p.Id, map_call.arguments, &.{mb.instructions[1].destination}) or
         map_call.next.assignments.len != 1 or
@@ -204,7 +207,9 @@ fn recognize(
         fi.terminator != .jump or
         fi.terminator.jump.assignments.len != 0)
         return null;
-    if (!operation(fi.instructions[0], .move, &.{intermediate}, 0) or !operation(fi.instructions[1], .move, &.{seed}, 0)) return null;
+    if (!operation(fi.instructions[0], .move, &.{intermediate}, 0) or
+        !operation(fi.instructions[1], .move, &.{seed}, 0))
+        return null;
     const rest = fi.instructions[0].destination;
     const accumulator = fi.instructions[1].destination;
     const fhid = fi.terminator.jump.block;
@@ -225,7 +230,10 @@ fn recognize(
     const fb = program.blocks[@intCast(fbid)];
     if (fb.instructions.len != 3 or fb.terminator != .call) return null;
     const fold_pair = fb.instructions[0].destination;
-    if (!operation(fb.instructions[0], .variant_payload, &.{fs.value}, 1) or !operation(fb.instructions[1], .field, &.{fold_pair}, 0) or !operation(fb.instructions[2], .field, &.{fold_pair}, 1)) return null;
+    if (!operation(fb.instructions[0], .variant_payload, &.{fs.value}, 1) or
+        !operation(fb.instructions[1], .field, &.{fold_pair}, 0) or
+        !operation(fb.instructions[2], .field, &.{fold_pair}, 1))
+        return null;
     const fold_call = fb.terminator.call;
     if (!std.mem.eql(
         p.Id,
@@ -272,7 +280,9 @@ fn recognize(
         fb.instructions[2].destination,
         accumulator,
     })) return null;
-    if (!try pure(a, program, map_call.function, permissions, exportable, budget) or !try pure(a, program, fold_call.function, permissions, exportable, budget)) return null;
+    if (!try pure(a, program, map_call.function, permissions, exportable, budget) or
+        !try pure(a, program, fold_call.function, permissions, exportable, budget))
+        return null;
     return .{
         .entry = function.entry,
         .map_head = mhid,

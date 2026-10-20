@@ -156,7 +156,10 @@ pub fn variant(
         state,
         .product,
         &.{
-            if (carries_capability) try b.reference(b.parameter(outer, 0)) else try b.constant(void, {}),
+            if (carries_capability)
+                try b.reference(b.parameter(outer, 0))
+            else
+                try b.constant(void, {}),
             if (carries_cell) allocated else try b.constant(void, {}),
         },
         0,

@@ -67,7 +67,9 @@ pub fn Join(comptime S: type) type {
     };
 }
 fn joinShape(comptime T: type) type {
-    if (@typeInfo(T) != .pointer or @typeInfo(T).pointer.size != .one) @compileError("Horos Scheduler: expected canonical join");
+    if (@typeInfo(T) != .pointer or
+        @typeInfo(T).pointer.size != .one)
+        @compileError("Horos Scheduler: expected canonical join");
     const Child = @typeInfo(T).pointer.child;
     if (!@hasDecl(Child, "join_shape")) @compileError("Horos Scheduler: expected canonical join");
     const S = Child.join_shape;

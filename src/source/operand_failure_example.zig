@@ -123,10 +123,7 @@ fn capture(
     const sink = try b.declare(&.{ f.package, f.package }, integer, &.{f.release}, &.{});
     try b.define(sink, failed);
     const closure = try b.declare(&.{}, integer, &.{f.release}, &.{});
-    const later = try b.term(.{ .call = .{
-        .function = sink,
-        .arguments = &.{ second, first },
-    } });
+    const later = try b.term(.{ .call = .{ .function = sink, .arguments = &.{ second, first } } });
     try b.define(closure, try b.bind(try b.variable(integer), failed, later));
     const signature = try b.schema(.{ .internal = .{ .computation = .{
         .parameters = &.{},

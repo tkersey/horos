@@ -25,24 +25,41 @@ pub const Scopes = struct {
         return self.insert(root, 0, self.name_count, @intCast(name), value);
     }
 
+    const Path = struct { node: Node, right: bool };
+
     fn insert(self: *Scopes, root: Id, low: usize, high: usize, name: usize, value: Id) Error!Id {
-        // Each recursion halves a nonempty interval: at most usize bits + 1.
-        var node: Node = if (root == empty)
-            .{ .left = empty, .right = empty }
-        else
-            self.nodes.items[@intCast(root)];
-        if (high - low == 1) {
-            node = .{ .left = value, .right = empty };
-        } else {
-            const middle = low + (high - low) / 2;
-            if (name < middle) {
-                node.left = try self.insert(node.left, low, middle, name, value);
+        var path: [@bitSizeOf(usize)]Path = undefined;
+        var depth: usize = 0;
+        var current = root;
+        var lower = low;
+        var upper = high;
+        while (upper - lower > 1) {
+            const node: Node = if (current == empty)
+                .{ .left = empty, .right = empty }
+            else
+                self.nodes.items[@intCast(current)];
+            const middle = lower + (upper - lower) / 2;
+            const right = name >= middle;
+            std.debug.assert(depth < path.len);
+            path[depth] = .{ .node = node, .right = right };
+            depth += 1;
+            if (right) {
+                current = node.right;
+                lower = middle;
             } else {
-                node.right = try self.insert(node.right, middle, high, name, value);
+                current = node.left;
+                upper = middle;
             }
         }
-        const id = self.nodes.items.len;
-        try self.nodes.append(self.allocator, node);
+        var id = self.nodes.items.len;
+        try self.nodes.append(self.allocator, .{ .left = value, .right = empty });
+        while (depth != 0) {
+            depth -= 1;
+            var entry = path[depth];
+            if (entry.right) entry.node.right = id else entry.node.left = id;
+            id = self.nodes.items.len;
+            try self.nodes.append(self.allocator, entry.node);
+        }
         return id;
     }
 

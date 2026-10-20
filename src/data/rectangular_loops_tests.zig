@@ -99,7 +99,10 @@ pub fn rectangle(allocator: std.mem.Allocator, rows: u64, columns: u64) !ir.Prog
 pub fn aliasedRectangle(allocator: std.mem.Allocator) !ir.Program {
     var result = base;
     result.schemas = &.{
-        .u64,                                                         .unit, .boolean, .{ .internal = .{ .region = 0 } },
+        .u64,
+        .unit,
+        .boolean,
+        .{ .internal = .{ .region = 0 } },
         .{ .internal = .{ .cell = .{ .element = 0, .region = 0 } } },
         .{ .internal = .{ .computation = .{
             .parameters = &.{3},

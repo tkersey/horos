@@ -456,7 +456,8 @@ pub const Analysis = opaque {
         effects: []const p.Id,
         region: p.Id,
     ) Error!void {
-        for (try self.effectRow(boundary, effects)) |effect| try self.captureRegion(boundary, effect, region);
+        for (try self.effectRow(boundary, effects)) |effect|
+            try self.captureRegion(boundary, effect, region);
     }
     fn captureRegion(
         self: *const Analysis,
@@ -479,7 +480,8 @@ pub const Analysis = opaque {
         boundary: Boundary,
         effects: []const p.Id,
     ) Error!void {
-        for (try self.effectRow(boundary, effects)) |effect| try self.captureCleanup(boundary, effect);
+        for (try self.effectRow(boundary, effects)) |effect|
+            try self.captureCleanup(boundary, effect);
     }
     fn captureCleanup(self: *const Analysis, boundary: Boundary, effect: p.Id) Error!void {
         // Intrinsic multi-shot prohibition is independent of relevance.
@@ -702,7 +704,8 @@ pub fn deriveObserved(
                 }
                 var selected: std.ArrayList(Target) = .empty;
                 for (stored.conservative[@intCast(effect)]) |target|
-                    if (flow.receives(actual, target.handler)) try selected.append(allocator, target);
+                    if (flow.receives(actual, target.handler))
+                        try selected.append(allocator, target);
                 try rows.append(
                     allocator,
                     .{
@@ -836,7 +839,9 @@ fn resumptionTargets(
     const schema = stored.image.functions[@intCast(block.function)].layout.slots[@intCast(slot)];
     const signature = try contracts.resumption(stored.image, schema);
     for (stored.image.effects, 0..) |_, effect| {
-        if (contracts.containsEffect(signature.effects, effect) or !relative.disposal.?.contains(schema, effect)) continue;
+        if (contracts.containsEffect(signature.effects, effect) or
+            !relative.disposal.?.contains(schema, effect))
+            continue;
         var present = false;
         for (rows.items) |*row| {
             if (row.role != .resumed or row.effect != effect) continue;
@@ -953,7 +958,8 @@ fn closureTargets(
         if (actual == empty and !contracts.containsEffect(signature.effects, effect)) continue;
         var selected: std.ArrayList(Target) = .empty;
         for (stored.conservative[@intCast(effect)]) |target|
-            if (flow.receives(actual, target.handler)) try selected.append(stored.allocator, target);
+            if (flow.receives(actual, target.handler))
+                try selected.append(stored.allocator, target);
         try rows.append(
             stored.allocator,
             .{
@@ -1096,6 +1102,8 @@ const Row = struct {
         }
         return view.uniform;
     }
+    const UpdateFrame = struct { pair: Pair, right: bool };
+
     fn updated(
         allocator: std.mem.Allocator,
         view: View,
@@ -1103,16 +1111,43 @@ const Row = struct {
         index: usize,
         value: Set,
     ) Error!View {
-        if (view == .uniform and view.uniform == value) return view;
-        if (length == 1) return .{ .uniform = value };
-        const middle = length / 2;
-        var left = if (view == .split) view.split.left else view;
-        var right = if (view == .split) view.split.right else view;
-        if (index < middle) {
-            left = try updated(allocator, left, middle, index, value);
-        } else {
-            right = try updated(allocator, right, length - middle, index - middle, value);
+        var path: [@bitSizeOf(usize)]UpdateFrame = undefined;
+        var depth: usize = 0;
+        var current = view;
+        var size = length;
+        var offset = index;
+        while (size > 1) {
+            if (current == .uniform and current.uniform == value) break;
+            const pair = if (current ==
+                .split)
+                current.split.*
+            else
+                Pair{ .left = current, .right = current };
+            const middle = size / 2;
+            const right = offset >= middle;
+            std.debug.assert(depth < path.len);
+            path[depth] = .{ .pair = pair, .right = right };
+            depth += 1;
+            if (right) {
+                current = pair.right;
+                size -= middle;
+                offset -= middle;
+            } else {
+                current = pair.left;
+                size = middle;
+            }
         }
+        var result: View = .{ .uniform = value };
+        while (depth != 0) {
+            depth -= 1;
+            var frame = path[depth];
+            if (frame.right) frame.pair.right = result else frame.pair.left = result;
+            result = try paired(allocator, frame.pair.left, frame.pair.right);
+        }
+        return result;
+    }
+
+    fn paired(allocator: std.mem.Allocator, left: View, right: View) Error!View {
         if (left == .uniform and right == .uniform and left.uniform == right.uniform) return left;
         const pair = try allocator.create(Pair);
         pair.* = .{ .left = left, .right = right };
@@ -1130,39 +1165,87 @@ const Row = struct {
             .split => |pair| pair == right.split,
         };
     }
+    const MergeFrame = struct {
+        left: View,
+        right: View,
+        lower: View = undefined,
+        phase: enum { enter, lower, upper } = .enter,
+    };
+
     fn merged(
         allocator: std.mem.Allocator,
         pool: *set_pool.Pool,
         left: View,
         right: View,
     ) Error!View {
+        var pending: [@bitSizeOf(usize) + 1]MergeFrame = undefined;
+        pending[0] = .{ .left = left, .right = right };
+        var length: usize = 1;
+        var result: View = undefined;
+        while (length != 0) {
+            const frame = &pending[length - 1];
+            switch (frame.phase) {
+                .enter => {
+                    if (try mergedLeaf(pool, frame.left, frame.right)) |leaf| {
+                        result = leaf;
+                        length -= 1;
+                        continue;
+                    }
+                    frame.phase = .lower;
+                    std.debug.assert(length < pending.len);
+                    pending[length] = .{
+                        .left = half(frame.left, false),
+                        .right = half(frame.right, false),
+                    };
+                    length += 1;
+                },
+                .lower => {
+                    frame.lower = result;
+                    frame.phase = .upper;
+                    std.debug.assert(length < pending.len);
+                    pending[length] = .{
+                        .left = half(frame.left, true),
+                        .right = half(frame.right, true),
+                    };
+                    length += 1;
+                },
+                .upper => {
+                    result = try mergedPair(allocator, frame.*, result);
+                    length -= 1;
+                },
+            }
+        }
+        return result;
+    }
+
+    fn half(view: View, right: bool) View {
+        return if (view == .uniform) view else if (right) view.split.right else view.split.left;
+    }
+
+    fn mergedLeaf(pool: *set_pool.Pool, left: View, right: View) Error!?View {
         if (same(left, right) or (right == .uniform and right.uniform == empty)) return left;
         if (left == .uniform and left.uniform == empty) return right;
         if (left == .uniform and right == .uniform) return .{ .uniform = try pool.unite(
             left.uniform,
             right.uniform,
         ) };
-        const lower = try merged(
-            allocator,
-            pool,
-            if (left == .split) left.split.left else left,
-            if (right == .split) right.split.left else right,
-        );
-        const upper = try merged(
-            allocator,
-            pool,
-            if (left == .split) left.split.right else left,
-            if (right == .split) right.split.right else right,
-        );
-        if (lower == .uniform and
-            upper == .uniform and
-            lower.uniform == upper.uniform)
+        return null;
+    }
+
+    fn mergedPair(allocator: std.mem.Allocator, frame: MergeFrame, upper: View) Error!View {
+        const lower = frame.lower;
+        if (lower ==
+            .uniform and
+            upper ==
+                .uniform and
+            lower.uniform ==
+                upper.uniform)
             return lower;
-        if (left == .split and same(lower, left.split.left) and same(upper, left.split.right)) return left;
-        if (right == .split and same(lower, right.split.left) and same(upper, right.split.right)) return right;
-        const pair = try allocator.create(Pair);
-        pair.* = .{ .left = lower, .right = upper };
-        return .{ .split = pair };
+        if (frame.left == .split and same(lower, frame.left.split.left) and
+            same(upper, frame.left.split.right)) return frame.left;
+        if (frame.right == .split and same(lower, frame.right.split.left) and
+            same(upper, frame.right.split.right)) return frame.right;
+        return paired(allocator, lower, upper);
     }
     fn join(
         self: *Row,
@@ -1248,10 +1331,7 @@ test "control provenance row joins agree with dense unions and retain prior view
     }
 }
 
-test "position suspension sources distinguish a suffix from its full-block backedge" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
+const PositionDeliveryFixture = struct {
     const image: ir.Program = .{
         .roots = .{ .entry = 0, .result = 0, .failure = 0 },
         .schemas = &.{ .unit, .boolean, .{ .internal = .{ .capability = 0 } } },
@@ -1287,6 +1367,13 @@ test "position suspension sources distinguish a suffix from its full-block backe
             .{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 3 } },
         },
     };
+};
+
+test "position suspension sources distinguish a suffix from its full-block backedge" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const image = PositionDeliveryFixture.image;
     const origins = try Origins.init(allocator, image);
     var relative = try Values.init(allocator, image, origins, true);
     try relative.solve();
@@ -2221,7 +2308,8 @@ const ExplanationBuilder = struct {
         return id;
     }
     fn push(self: *ExplanationBuilder, list: *List, id: usize) Error!void {
-        if (std.mem.indexOfScalar(usize, list.items, id) == null) try list.append(self.stored.allocator, id);
+        if (std.mem.indexOfScalar(usize, list.items, id) == null)
+            try list.append(self.stored.allocator, id);
     }
     fn leaf(
         self: *ExplanationBuilder,
@@ -2370,7 +2458,8 @@ const ExplanationBuilder = struct {
                         .unpack,
                         => {
                             reason.rule = .aggregate_projection;
-                            reason.approximation = true; // The solver keeps the full aggregate union.
+                            // The solver keeps the full aggregate union.
+                            reason.approximation = true;
                             for (instruction.operands) |operand| try self.push(
                                 &inputs,
                                 try self.slot(key.relative, key.a, key.b - 1, operand),

@@ -157,7 +157,10 @@ test "unknown effect stays residual with its nominal identity payload and contin
         candidate.sites,
         10_000_000,
     );
-    const copied = candidate.program.blocks[candidate.variants[0].first_block + 2].terminator.perform;
+    const copied = candidate.program.blocks[
+        candidate.variants[0].first_block +
+            2
+    ].terminator.perform;
     try std.testing.expectEqual(@as(u64, 0), copied.effect);
     try std.testing.expectEqual(@as(u64, 2), copied.payload);
     var stats: patterns.Statistics = .{};
@@ -178,7 +181,7 @@ test "unknown effect stays residual with its nominal identity payload and contin
     );
 }
 
-test "equivalent recursive configurations reuse one worker while distinct initial counters remain dynamic" {
+test "equivalent recursive configurations reuse workers while distinct counters stay dynamic" {
     var original = countdown;
     var functions = countdown.functions[0..3].*;
     functions[0].inputs = &.{ 0, 1, 5 };
@@ -227,7 +230,7 @@ fn allocationAttempt(allocator: std.mem.Allocator) !void {
 test "recursive worker generation and certificate clean allocation failures" {
     try @import("allocation_testing.zig").check(a, allocationAttempt, .{});
 }
-test "recursive specialization folds an invariant constructor and generalizes a growing known argument" {
+test "recursive specialization folds invariant constructors and generalizes growing arguments" {
     var candidate = (try patterns.construct(a, countdown, .{})).?;
     defer candidate.deinit();
     try patterns.validate(

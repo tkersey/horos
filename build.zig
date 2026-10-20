@@ -20,10 +20,112 @@ pub fn build(b: *std.Build) void {
         .target = b.graph.host,
         .optimize = optimize,
     });
+    _ = b.addModule("horos", .{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "horos_data", .module = public_data }},
+    });
+    const horos = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "horos_data", .module = data }},
+    });
+    benchmarks(b, data, optimize);
+    const static_contracts = staticContracts(b, data, optimize);
+    const data_step = dataChecks(b, static_contracts, optimize);
+    const static_authoring = staticAuthoring(b, horos, data);
+    const native_linker = compiler(b, target, public_data, data, optimize);
+    const component_step = componentChecks(b, horos, native_linker, optimize);
+    const authoring_checks = authoringChecks(b, data, static_authoring, optimize);
+    const native = b.step(
+        "check-native",
+        "Check native authoring, data and linker contracts without an interpreter",
+    );
+    native.dependOn(data_step);
+    native.dependOn(authoring_checks.step);
+    native.dependOn(component_step);
+    const wasm_checks = wasmChecks(b, compactProbe(b), compactEmitter(b, horos, optimize));
+    const semantics = semanticsChecks(b, data, horos, authoring_checks.run, optimize);
+    const aggregate = b.step(
+        "check",
+        "Check native contracts and independent source/wasm observations",
+    );
+    aggregate.dependOn(native);
+    aggregate.dependOn(semantics);
+    aggregate.dependOn(wasm_checks.program);
+    aggregate.dependOn(wasm_checks.state);
+    aggregate.dependOn(wasm_checks.invocation);
+    publicExamples(b, horos, native, optimize);
+    b.default_step = aggregate;
+}
+
+const source_examples = [_][]const u8{
+    "lexical",
+    "deep",
+    "recursive",
+    "choices-all",
+    "choices-first",
+    "generator",
+    "state-local",
+    "state-shared",
+    "resource-scalar",
+    "resource-pair",
+    "answers",
+    "scoped-reader",
+    "writer-raise",
+    "scheduler",
+    "queens-dfs",
+    "queens-bfs",
+    "cell-order",
+    "nested",
+    "shallow",
+    "injection",
+    "indexed",
+    "abort-custody",
+    "unwind",
+    "reentrant",
+    "cloned",
+    "clause-abort",
+    "bounded-values",
+    "scalar-contracts",
+    "ownership",
+    "shallow-resumptions",
+    "shallow-injection",
+    "handle-operand-order",
+    "protect-operand-order",
+    "successor-state",
+    "clause-payload",
+    "yielding-cleanup",
+    "borrow-operands",
+    "cleanup-disposal",
+    "cleanup-disposal-running",
+    "cleanup-disposal-failure",
+    "cleanup-disposal-owned",
+    "product-projection",
+};
+
+fn staticContracts(
+    b: *std.Build,
+    data: *std.Build.Module,
+    optimize: std.lang.Optimize,
+) *std.Build.Step {
     const static_contracts = b.step(
         "check-static-contracts",
         "Reject unclassified opcode and reference-contract mutations",
     );
+    portableRoleChecks(b, static_contracts, optimize);
+    sourceRoleChecks(b, data, static_contracts, optimize);
+    opcodeCheck(b, static_contracts, optimize);
+    return static_contracts;
+}
+
+fn portableRoleChecks(
+    b: *std.Build,
+    static_contracts: *std.Build.Step,
+    optimize: std.lang.Optimize,
+) void {
     inline for (.{ "field", "type", "edge", "assignment", "source" }) |mode| {
         const options = b.addOptions();
         options.addOption([]const u8, "value", mode);
@@ -48,6 +150,14 @@ pub fn build(b: *std.Build) void {
         };
         static_contracts.dependOn(&check.step);
     }
+}
+
+fn sourceRoleChecks(
+    b: *std.Build,
+    data: *std.Build.Module,
+    static_contracts: *std.Build.Step,
+    optimize: std.lang.Optimize,
+) void {
     inline for (.{ "field", "type", "case" }) |mode| {
         const options = b.addOptions();
         options.addOption([]const u8, "value", mode);
@@ -69,6 +179,9 @@ pub fn build(b: *std.Build) void {
         };
         static_contracts.dependOn(&check.step);
     }
+}
+
+fn opcodeCheck(b: *std.Build, static_contracts: *std.Build.Step, optimize: std.lang.Optimize) void {
     const mutation = b.addWriteFiles();
     _ = mutation.add(
         "program.zig",
@@ -95,6 +208,13 @@ pub fn build(b: *std.Build) void {
     });
     mutated_opcode.expect_errors = .{ .contains = "switch must handle all possibilities" };
     static_contracts.dependOn(&mutated_opcode.step);
+}
+
+fn dataChecks(
+    b: *std.Build,
+    static_contracts: *std.Build.Step,
+    optimize: std.lang.Optimize,
+) *std.Build.Step {
     const tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/data/test_root.zig"),
@@ -106,18 +226,10 @@ pub fn build(b: *std.Build) void {
     const run_data_tests = b.addRunArtifact(tests);
     data_step.dependOn(&run_data_tests.step);
     data_step.dependOn(static_contracts);
-    _ = b.addModule("horos", .{
-        .root_source_file = b.path("src/root.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{.{ .name = "horos_data", .module = public_data }},
-    });
-    const horos = b.createModule(.{
-        .root_source_file = b.path("src/root.zig"),
-        .target = b.graph.host,
-        .optimize = optimize,
-        .imports = &.{.{ .name = "horos_data", .module = data }},
-    });
+    return data_step;
+}
+
+fn benchmarks(b: *std.Build, data: *std.Build.Module, optimize: std.lang.Optimize) void {
     // Optional measurements use the ordinary structural compiler and admission.
     // Timing is deliberately not a correctness threshold or part of `check`.
     const admission_bench = b.addExecutable(
@@ -163,6 +275,13 @@ pub fn build(b: *std.Build) void {
         run_control_bench.captureStdOut(.{}),
         "admission-derive.jsonl",
     ).step);
+}
+
+fn staticAuthoring(
+    b: *std.Build,
+    horos: *std.Build.Module,
+    data: *std.Build.Module,
+) *std.Build.Step {
     const static_authoring = b.step(
         "check-static-authoring",
         "Reject incompatible authoring shapes through the public module",
@@ -200,6 +319,16 @@ pub fn build(b: *std.Build) void {
         };
         static_authoring.dependOn(&rejected_key.step);
     }
+    return static_authoring;
+}
+
+fn compiler(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    public_data: *std.Build.Module,
+    data: *std.Build.Module,
+    optimize: std.lang.Optimize,
+) *std.Build.Step.Compile {
     const linker = b.addExecutable(.{ .name = "horos-link", .root_module = b.createModule(.{
         .root_source_file = b.path("tools/component_link.zig"),
         .target = target,
@@ -222,6 +351,15 @@ pub fn build(b: *std.Build) void {
         "build-compiler",
         "Build the source-independent BMO1 linker",
     ).dependOn(&installed_linker.step);
+    return native_linker;
+}
+
+fn componentChecks(
+    b: *std.Build,
+    horos: *std.Build.Module,
+    native_linker: *std.Build.Step.Compile,
+    optimize: std.lang.Optimize,
+) *std.Build.Step {
     const helper = b.addExecutable(.{ .name = "horos-checks", .root_module = b.createModule(.{
         .root_source_file = b.path("tools/component_example.zig"),
         .target = b.graph.host,
@@ -248,6 +386,17 @@ pub fn build(b: *std.Build) void {
         "check-package",
         "Build a clean public source package through Zig",
     ).dependOn(&package.step);
+    return component_step;
+}
+
+const AuthoringChecks = struct { step: *std.Build.Step, run: *std.Build.Step.Run };
+
+fn authoringChecks(
+    b: *std.Build,
+    data: *std.Build.Module,
+    static_authoring: *std.Build.Step,
+    optimize: std.lang.Optimize,
+) AuthoringChecks {
     const authoring = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("src/test_root.zig"),
         .target = b.graph.host,
@@ -264,13 +413,14 @@ pub fn build(b: *std.Build) void {
     );
     authoring_step.dependOn(&run_authoring_tests.step);
     authoring_step.dependOn(static_authoring);
-    const native = b.step(
-        "check-native",
-        "Check native authoring, data and linker contracts without an interpreter",
-    );
-    native.dependOn(data_step);
-    native.dependOn(authoring_step);
-    native.dependOn(component_step);
+    return .{ .step = authoring_step, .run = run_authoring_tests };
+}
+
+fn compactEmitter(
+    b: *std.Build,
+    horos: *std.Build.Module,
+    optimize: std.lang.Optimize,
+) *std.Build.Step.Compile {
     const compact_emit = b.addExecutable(
         .{
             .name = "emit-compact-fixture",
@@ -284,6 +434,10 @@ pub fn build(b: *std.Build) void {
             ),
         },
     );
+    return compact_emit;
+}
+
+fn compactProbe(b: *std.Build) *std.Build.Step.Compile {
     const compact_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .freestanding });
     const compact_wasm_data = b.createModule(.{
         .root_source_file = b.path("src/data/root.zig"),
@@ -307,6 +461,20 @@ pub fn build(b: *std.Build) void {
     compact_wasm.rdynamic = true;
     compact_wasm.export_memory = true;
     compact_wasm.stack_size = 65536;
+    return compact_wasm;
+}
+
+const WasmChecks = struct {
+    program: *std.Build.Step,
+    state: *std.Build.Step,
+    invocation: *std.Build.Step,
+};
+
+fn wasmChecks(
+    b: *std.Build,
+    compact_wasm: *std.Build.Step.Compile,
+    compact_emit: *std.Build.Step.Compile,
+) WasmChecks {
     const program_wasm_run = b.addSystemCommand(&.{"node"});
     program_wasm_run.addFileArg2(b.path("test/v2/program_wasm.mjs"), .{});
     program_wasm_run.addFileArg2(compact_wasm.getEmittedBin(), .{});
@@ -323,6 +491,20 @@ pub fn build(b: *std.Build) void {
     invocation_wasm_run.addFileArg2(compact_wasm.getEmittedBin(), .{});
     b.step("check-invocation-wasm", "Check current envelope bytes and request identity on wasm32")
         .dependOn(&invocation_wasm_run.step);
+    return .{
+        .program = &program_wasm_run.step,
+        .state = &state_wasm_run.step,
+        .invocation = &invocation_wasm_run.step,
+    };
+}
+
+fn semanticsChecks(
+    b: *std.Build,
+    data: *std.Build.Module,
+    horos: *std.Build.Module,
+    run_authoring_tests: *std.Build.Step.Run,
+    optimize: std.lang.Optimize,
+) *std.Build.Step {
     const authoring_cases = b.addExecutable(
         .{
             .name = "authoring-cases",
@@ -359,51 +541,35 @@ pub fn build(b: *std.Build) void {
         "check-authoring-bytes",
         "Compare all 42 source images against the pre-migration baseline",
     );
+    baselineFixtures(b, source_emitter, source_fixtures, oracle, portable_baseline);
+    const interaction_traces = interactionFixtures(b, source_emitter, source_fixtures, oracle);
+    oracle.has_side_effects = true;
+    const semantics = b.step(
+        "check-semantics",
+        "Check higher-order source semantics without Kosmos",
+    );
+    semantics.dependOn(&oracle.step);
+    semantics.dependOn(&interaction_traces.step);
+    semantics.dependOn(portable_baseline);
+    semantics.dependOn(&oracleScopeChecks(b, horos, optimize, authoring_cases).step);
+    semantics.dependOn(&borrowReturnChecks(b, horos, optimize).step);
+    semantics.dependOn(&run_authoring_tests.step);
+    const exact_json = b.addSystemCommand(&.{ "node", "--test" });
+    exact_json.addFileArg2(b.path("test/v2/exact_json.test.mjs"), .{});
+    semantics.dependOn(&exact_json.step);
+
+    return semantics;
+}
+
+fn baselineFixtures(
+    b: *std.Build,
+    source_emitter: *std.Build.Step.Compile,
+    source_fixtures: *std.Build.Step,
+    oracle: *std.Build.Step.Run,
+    portable_baseline: *std.Build.Step,
+) void {
     inline for (
-        [_][]const u8{
-            "lexical",
-            "deep",
-            "recursive",
-            "choices-all",
-            "choices-first",
-            "generator",
-            "state-local",
-            "state-shared",
-            "resource-scalar",
-            "resource-pair",
-            "answers",
-            "scoped-reader",
-            "writer-raise",
-            "scheduler",
-            "queens-dfs",
-            "queens-bfs",
-            "cell-order",
-            "nested",
-            "shallow",
-            "injection",
-            "indexed",
-            "abort-custody",
-            "unwind",
-            "reentrant",
-            "cloned",
-            "clause-abort",
-            "bounded-values",
-            "scalar-contracts",
-            "ownership",
-            "shallow-resumptions",
-            "shallow-injection",
-            "handle-operand-order",
-            "protect-operand-order",
-            "successor-state",
-            "clause-payload",
-            "yielding-cleanup",
-            "borrow-operands",
-            "cleanup-disposal",
-            "cleanup-disposal-running",
-            "cleanup-disposal-failure",
-            "cleanup-disposal-owned",
-            "product-projection",
-        },
+        source_examples,
         0..,
     ) |name, index| {
         for ([_][]const u8{ "json", "bpi3" }) |format| {
@@ -431,6 +597,14 @@ pub fn build(b: *std.Build) void {
             }
         }
     }
+}
+
+fn interactionFixtures(
+    b: *std.Build,
+    source_emitter: *std.Build.Step.Compile,
+    source_fixtures: *std.Build.Step,
+    oracle: *std.Build.Step.Run,
+) *std.Build.Step.Run {
     const interaction_traces = b.addSystemCommand(&.{"node"});
     interaction_traces.addFileArg2(b.path("test/v2/service_interactions.mjs"), .{});
     inline for (
@@ -469,30 +643,15 @@ pub fn build(b: *std.Build) void {
             interaction_traces.addFileArg2(file, .{});
         }
     }
-    oracle.has_side_effects = true;
-    const semantics = b.step(
-        "check-semantics",
-        "Check higher-order source semantics without Kosmos",
-    );
-    semantics.dependOn(&oracle.step);
-    semantics.dependOn(&interaction_traces.step);
-    semantics.dependOn(portable_baseline);
-    semantics.dependOn(&oracleScopeChecks(b, horos, optimize, authoring_cases).step);
-    semantics.dependOn(&borrowReturnChecks(b, horos, optimize).step);
-    semantics.dependOn(&run_authoring_tests.step);
-    const exact_json = b.addSystemCommand(&.{ "node", "--test" });
-    exact_json.addFileArg2(b.path("test/v2/exact_json.test.mjs"), .{});
-    semantics.dependOn(&exact_json.step);
+    return interaction_traces;
+}
 
-    const aggregate = b.step(
-        "check",
-        "Check native contracts and independent source/wasm observations",
-    );
-    aggregate.dependOn(native);
-    aggregate.dependOn(semantics);
-    aggregate.dependOn(&program_wasm_run.step);
-    aggregate.dependOn(&state_wasm_run.step);
-    aggregate.dependOn(&invocation_wasm_run.step);
+fn publicExamples(
+    b: *std.Build,
+    horos: *std.Build.Module,
+    native: *std.Build.Step,
+    optimize: std.lang.Optimize,
+) void {
     const client = b.addExecutable(.{ .name = "authoring-client", .root_module = b.createModule(.{
         .root_source_file = b.path("examples/authoring_client.zig"),
         .target = b.graph.host,
@@ -524,7 +683,6 @@ pub fn build(b: *std.Build) void {
             "Emit a public typed-authoring example",
         ).dependOn(&b.addRunArtifact(example).step);
     }
-    b.default_step = aggregate;
 }
 
 fn oracleScopeChecks(

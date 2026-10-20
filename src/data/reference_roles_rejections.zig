@@ -27,10 +27,13 @@ fn changedType(comptime T: type, comptime index: usize) type {
 }
 const ir = @import("activation.zig");
 comptime {
-    if (std.mem.eql(u8, mode, "field")) roles.validateTerminatorPayload(.perform, extend(ir.Perform));
-    if (std.mem.eql(u8, mode, "type")) roles.validateTerminatorPayload(.perform, changedType(ir.Perform, 1));
+    if (std.mem.eql(u8, mode, "field"))
+        roles.validateTerminatorPayload(.perform, extend(ir.Perform));
+    if (std.mem.eql(u8, mode, "type"))
+        roles.validateTerminatorPayload(.perform, changedType(ir.Perform, 1));
     if (std.mem.eql(u8, mode, "edge")) roles.validateEdge(extend(ir.Edge));
-    if (std.mem.eql(u8, mode, "assignment")) roles.validateAssignment(changedType(ir.Assignment, 0));
+    if (std.mem.eql(u8, mode, "assignment"))
+        roles.validateAssignment(changedType(ir.Assignment, 0));
     if (std.mem.eql(u8, mode, "source")) roles.validateSource(union(enum) {
         slot: u64,
         returned,

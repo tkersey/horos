@@ -69,7 +69,9 @@ pub fn run(
                     stats.work += 1;
                     index -= 1;
                     const instruction = block.instructions[index];
-                    if (!flow.pool.contains(demand, instruction.destination) and totalDroppable(current, block.function, instruction, permissions)) {
+                    if (!flow.pool.contains(demand, instruction.destination) and
+                        totalDroppable(current, block.function, instruction, permissions))
+                    {
                         remove[index] = true;
                         removed_count += 1;
                         if (instruction.opcode == .computation) removed_constructions += 1;
@@ -85,7 +87,10 @@ pub fn run(
             var instructions: std.ArrayList(ir.Instruction) = .empty;
             var removed: std.ArrayList(usize) = .empty;
             for (block.instructions, remove, 0..) |instruction, discard, index| {
-                if (discard) try removed.append(a, index) else try instructions.append(a, instruction);
+                if (discard)
+                    try removed.append(a, index)
+                else
+                    try instructions.append(a, instruction);
             }
             out.instructions = try instructions.toOwnedSlice(a);
             if (removed.items.len != 0) try witnesses.append(

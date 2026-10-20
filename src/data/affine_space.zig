@@ -229,7 +229,7 @@ test "rotating three-word future observations close at rank two" {
     try std.testing.expectError(error.InvalidAffineSpace, equation(0b001, 1, basis, 3, &budget));
 }
 
-test "future reset distinguishes currently equal parity and budgets do not publish partial closure" {
+test "future reset distinguishes equal parity and budgets reject partial closure" {
     var budget: Budget = .{ .remaining = 10000 };
     var seed = try Space.init(2);
     _ = try seed.insert(0b11, &budget);

@@ -439,7 +439,10 @@ fn typedChoices(
         .captures = .{ .continuation = &.{ boolean, family.capability() } },
         .residual = &.{},
     };
-    const answer = if (every) try library.all(c, family, pair, options) else try library.first(c, family, pair, options);
+    const answer = if (every)
+        try library.all(c, family, pair, options)
+    else
+        try library.first(c, family, pair, options);
     const schema = try c.handledSchema(answer.handler);
     const body_fn = try c.functionFor("two choices", schema);
     const body = try c.body(body_fn);

@@ -272,7 +272,13 @@ pub fn remap(
             inline for (
                 info.field_names,
                 info.field_types,
-            ) |field_name, FieldType| @field(result, field_name) = try remap(FieldType, @field(value, field_name), nodes, blobs, allocator);
+            ) |field_name, FieldType| @field(result, field_name) = try remap(
+                FieldType,
+                @field(value, field_name),
+                nodes,
+                blobs,
+                allocator,
+            );
             break :blk result;
         },
         .@"union" => |info| blk: {

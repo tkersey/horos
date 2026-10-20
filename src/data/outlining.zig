@@ -142,7 +142,9 @@ fn same(left: Form, right: Form) bool {
         p.Id,
         left.parameters,
         right.parameters,
-    ) and std.mem.eql(p.Id, left.slots, right.slots) and equal([]const ir.Instruction, left.instructions, right.instructions);
+    ) and
+        std.mem.eql(p.Id, left.slots, right.slots) and
+        equal([]const ir.Instruction, left.instructions, right.instructions);
 }
 pub fn possible(program: ir.Program) bool {
     var count: usize = 0;
@@ -424,7 +426,10 @@ pub fn run(
     }
     stats.sites = candidate.sites.len;
     stats.calls_added = candidate.sites.len;
-    stats.instructions_shared = original.blocks[candidate.sites[0].block].instructions.len * (candidate.sites.len - 1);
+    stats.instructions_shared =
+        original.blocks[candidate.sites[0].block].instructions.len *
+        (candidate.sites.len -
+            1);
     keep_result = true;
     return result;
 }

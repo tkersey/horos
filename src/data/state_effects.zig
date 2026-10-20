@@ -195,7 +195,8 @@ pub fn CheckFor(comptime Program: type, comptime State: type) type {
                         }
                         @memset(scratch, 0);
                         _ = try executed.child(self, frame_id, scratch, null);
-                        if (Origins.contains(scratch, bit)) try visit(context, frame_id, clause.resumption);
+                        if (Origins.contains(scratch, bit))
+                            try visit(context, frame_id, clause.resumption);
                     }
                 }
             }
@@ -858,6 +859,7 @@ test "latent disposal follows owned containers but never invokes copied capabili
     var origins: Check.Origins = .{ .effect = 0, .indices = &.{}, .width = 1, .bits = bits };
     try origins.capabilities.append(allocator, .{ .id = 0 });
     const disposal = try origins.disposals(&check);
-    for ([_]usize{ 0, 2, 3, 4, 6 }) |id| try std.testing.expectEqual(@as(usize, 0), disposal.row(id)[0]);
+    for ([_]usize{ 0, 2, 3, 4, 6 }) |id|
+        try std.testing.expectEqual(@as(usize, 0), disposal.row(id)[0]);
     for ([_]usize{ 1, 5, 7 }) |id| try std.testing.expectEqual(@as(usize, 1), disposal.row(id)[0]);
 }

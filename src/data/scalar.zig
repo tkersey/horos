@@ -94,7 +94,9 @@ const conversion_fallibility = table: {
     break :table result;
 };
 pub fn conversionCanFail(source: p.Schema, target: p.Schema) bool {
-    if (conversionIndex(source)) |from| if (conversionIndex(target)) |to| return conversion_fallibility[from][to];
+    if (conversionIndex(source)) |from|
+        if (conversionIndex(target)) |to|
+            return conversion_fallibility[from][to];
     return intervalConversionCanFail(source, target);
 }
 fn intervalConversionCanFail(source: p.Schema, target: p.Schema) bool {
@@ -266,7 +268,8 @@ test "conversion table matches independently expressed mathematical ranges for a
         types,
         integer_schemas,
     ) |Target, to| {
-        const expected = @as(i128, std.math.minInt(Source)) < @as(i128, std.math.minInt(Target)) or @as(i128, std.math.maxInt(Source)) > @as(i128, std.math.maxInt(Target));
+        const expected = @as(i128, std.math.minInt(Source)) < @as(i128, std.math.minInt(Target)) or
+            @as(i128, std.math.maxInt(Source)) > @as(i128, std.math.maxInt(Target));
         try std.testing.expectEqual(expected, conversionCanFail(from, to));
     };
     // Preserve the public predicate's historical noninteger domain exactly.

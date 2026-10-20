@@ -83,11 +83,7 @@ test "coalescing typed authoring shares independently emitted captured closure f
         var off = try frozen.closures(testing.allocator, count);
         defer off.deinit();
         var statistics: data.coalescing.Statistics = .{};
-        var safe = try closures(
-            testing.allocator,
-            count,
-            .{ .statistics = &statistics },
-        );
+        var safe = try closures(testing.allocator, count, .{ .statistics = &statistics });
         defer safe.deinit();
         try testing.expectEqual(count + 1, off.program.functions.len);
         try testing.expectEqual(count, off.program.constructors.len);
@@ -553,7 +549,7 @@ fn richAllocationCase(allocator: std.mem.Allocator, program: data.activation.Pro
     try testing.expectEqual(@as(?anyerror, null), stats.failed_check);
 }
 
-test "coalescing allocation failures cover handlers constructors regions resources and recursive custody" {
+test "coalescing allocation failures cover handlers, constructors, regions and recursive custody" {
     const cases = @import("authoring_cases.zig");
     for ([_]cases.Kind{ .shared_cleanup, .state_recursive_local, .borrow_contexts }) |kind| {
         var builder = source.Builder.init(testing.allocator);

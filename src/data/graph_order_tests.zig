@@ -40,10 +40,7 @@ fn scratchLifetimeCase(allocator: std.mem.Allocator) !void {
         .status = .active,
         .roots = .{ .current = .{ .id = 0 } },
         .nodes = &nodes,
-        .blobs = &.{
-            .{ .schema = 0, .bytes = &payload },
-            .{ .schema = 0, .bytes = &payload },
-        },
+        .blobs = &.{ .{ .schema = 0, .bytes = &payload }, .{ .schema = 0, .bytes = &payload } },
     }, null);
     defer normalized.deinit();
     @memset(&payload, 0xa5);

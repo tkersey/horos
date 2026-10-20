@@ -11,7 +11,10 @@ pub const map_fold: ir.Program = .{
     .schemas = &.{
         .boolean,                                       .unit,
         .{ .vector = .{ .element = 0, .maximum = 8 } }, .{ .product = &.{ 0, 2 } },
-        .{ .sum = &.{ 1, 3 } },                         .{ .vector = .{ .element = 0, .maximum = 8 } },
+        .{ .sum = &.{ 1, 3 } },
+        .{
+            .vector = .{ .element = 0, .maximum = 8 },
+        },
         .{ .product = &.{ 0, 5 } },                     .{ .sum = &.{ 1, 6 } },
     },
     .constants = &.{.{ .schema = 1, .bytes = &.{} }},
@@ -132,7 +135,7 @@ pub const map_fold: ir.Program = .{
     },
 };
 
-test "map/fold source and its potentially failing smaller-capacity sibling are independently admitted" {
+test "map/fold source and its failing smaller-capacity sibling are independently admitted" {
     var valid = try own.analyze(a, map_fold);
     valid.deinit();
     var small = map_fold;

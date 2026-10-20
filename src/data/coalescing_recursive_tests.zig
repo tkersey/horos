@@ -38,12 +38,7 @@ fn program(a: std.mem.Allocator, changed: bool) !ir.Program {
             .terminator = .{ .return_value = 0 },
         };
     }
-    functions[4] = .{
-        .entry = 8,
-        .inputs = &.{0},
-        .layout = .{ .slots = &.{0} },
-        .result = 0,
-    };
+    functions[4] = .{ .entry = 8, .inputs = &.{0}, .layout = .{ .slots = &.{0} }, .result = 0 };
     for (0..2) |id| blocks[8 + id] = .{
         .function = 4,
         .instructions = &.{},
@@ -53,11 +48,7 @@ fn program(a: std.mem.Allocator, changed: bool) !ir.Program {
             .next = .{ .block = 9 + id },
         } },
     };
-    blocks[10] = .{
-        .function = 4,
-        .instructions = &.{},
-        .terminator = .{ .return_value = 0 },
-    };
+    blocks[10] = .{ .function = 4, .instructions = &.{}, .terminator = .{ .return_value = 0 } };
     return .{
         .roots = .{ .entry = 4, .result = 0, .failure = 1 },
         .schemas = &.{ .u64, .unit },

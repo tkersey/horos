@@ -177,7 +177,8 @@ test "source reference roles cover every term operation and match-arm field" {
         for (std.meta.tags(Tag)) |tag| {
             validateTermPayload(tag, @FieldType(ast.Term, @tagName(tag)));
             const order = visitation(tag);
-            if (order.len != fields(tag).len) @compileError("source reference roles: incomplete visitation sequence");
+            if (order.len != fields(tag).len)
+                @compileError("source reference roles: incomplete visitation sequence");
             for (order, 0..) |i, offset| {
                 if (i >= order.len) @compileError(
                     "source reference roles: invalid visitation index",

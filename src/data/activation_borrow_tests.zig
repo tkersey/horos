@@ -22,7 +22,8 @@ test "stable borrow requirements use the value and owner versions at a store" {
         const program: ir.Program = .{
             .roots = .{ .entry = 1, .result = 0, .failure = 0 },
             .schemas = &.{
-                .unit,                                                        .{ .internal = .{ .capability = 0 } },
+                .unit,
+                .{ .internal = .{ .capability = 0 } },
                 .{ .internal = .{ .cell = .{ .element = 1, .region = 0 } } },
             },
             .constants = &.{.{ .schema = 0, .bytes = &.{} }},

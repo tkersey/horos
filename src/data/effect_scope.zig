@@ -78,7 +78,9 @@ fn dependency(image: anytype, facts: Facts, schema: p.Schema, effect: p.Id) bool
             .cell => |cell| facts.contains(cell.element, effect),
             .suspension_package => |token| facts.contains(token, effect),
             .computation => |signature| blk: {
-                if (any(facts, signature.capture_bound, effect) or facts.contains(signature.result, effect)) break :blk true;
+                if (any(facts, signature.capture_bound, effect) or
+                    facts.contains(signature.result, effect))
+                    break :blk true;
                 if (std.mem.indexOfScalar(
                     p.Id,
                     signature.effects,

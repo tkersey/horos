@@ -25,7 +25,11 @@ pub fn main(init: std.process.Init) !void {
     var output = std.Io.File.stdout().writer(init.io, &buffer);
     if (std.mem.eql(u8, path, "--help")) {
         try output.interface.writeAll(
-            "Usage: horos-link MANIFEST.json > PROGRAM.bpi3\nBMO1 instance paths are relative to the current directory.\nOptional manifest contract: structural (default) or semantic. Both invoke checked P01.\nOptional objective, work_limit, round_limit, image_growth_bytes, max_image_bytes and profile use shared compilation policy.\n",
+            "Usage: horos-link MANIFEST.json > PROGRAM.bpi3\nBMO1 instance paths are " ++
+            "relative to the current directory.\nOptional manifest contract: structural " ++
+            "(default) or semantic. Both invoke checked P01.\nOptional objective, " ++
+            "work_limit, round_limit, image_growth_bytes, max_image_bytes and profile use " ++
+            "shared compilation policy.\n",
         );
         try output.interface.flush();
         return;

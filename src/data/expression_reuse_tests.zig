@@ -240,7 +240,7 @@ test "potentially failing expressions with different payloads are never reused" 
     try std.testing.expectEqual(@as(usize, 0), stats.expressions_reused);
 }
 
-test "same closure code with distinct captures retains both constructions" {
+const DistinctCapturesFixture = struct {
     const program: ir.Program = .{
         .roots = .{ .entry = 0, .result = 3, .failure = 1 },
         .schemas = &.{
@@ -309,6 +309,10 @@ test "same closure code with distinct captures retains both constructions" {
         .scopes = .{ .captures = &.{.{ .fields = &.{0}, .use = .reusable }} },
         .constructors = &.{.{ .function = 1, .capture = 0, .schema = 2 }},
     };
+};
+
+test "same closure code with distinct captures retains both constructions" {
+    const program = DistinctCapturesFixture.program;
     var stats: reuse.Statistics = .{};
     var result = try reuse.run(a, program, &stats, .{});
     defer result.deinit();
@@ -337,7 +341,9 @@ test "same closure code with distinct captures retains both constructions" {
 const private_cell: ir.Program = .{
     .roots = .{ .entry = 0, .result = 0, .failure = 1 },
     .schemas = &.{
-        .u64,                                                         .unit, .{ .internal = .{ .region = 0 } },
+        .u64,
+        .unit,
+        .{ .internal = .{ .region = 0 } },
         .{ .internal = .{ .cell = .{ .element = 0, .region = 0 } } },
         .{ .internal = .{ .computation = .{
             .parameters = &.{ 2, 0, 0 },
@@ -483,7 +489,10 @@ test "equal expressions separated by capture boundaries do not share availabilit
     for (blocks, 0..) |*block, id| block.* = .{
         .function = 0,
         .instructions = &.{.{ .destination = 0, .opcode = .constant, .immediate = 0 }},
-        .terminator = if (id == blocks.len - 1) .{ .return_value = 0 } else .{ .yield_value = .{ .block = id + 1 } },
+        .terminator = if (id == blocks.len - 1)
+            .{ .return_value = 0 }
+        else
+            .{ .yield_value = .{ .block = id + 1 } },
     };
     const original: ir.Program = .{
         .roots = .{ .entry = 0, .result = 0, .failure = 1 },

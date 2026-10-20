@@ -87,8 +87,14 @@ test "coalescing rejects changed region and resource contracts independently" {
         .roots = .{ .entry = 0, .result = 0, .failure = 1 },
         .schemas = &.{
             .u64,                                                         .unit,
-            .{ .internal = .{ .cell = .{ .element = 0, .region = 0 } } }, .{ .internal = .{ .cell = .{ .element = 0, .region = 1 } } },
-            .{ .internal = .{ .abstract_resource = 0 } },                 .{ .internal = .{ .abstract_resource = 1 } },
+            .{ .internal = .{ .cell = .{ .element = 0, .region = 0 } } },
+            .{
+                .internal = .{ .cell = .{ .element = 0, .region = 1 } },
+            },
+            .{ .internal = .{ .abstract_resource = 0 } },
+            .{
+                .internal = .{ .abstract_resource = 1 },
+            },
         },
         .constants = &.{},
         .effects = &.{},
@@ -165,18 +171,12 @@ const arithmetic: ir.Program = .{
         .{ .function = 2, .instructions = &.{}, .terminator = .{ .call = .{
             .function = 0,
             .arguments = &.{ 0, 1 },
-            .next = .{
-                .block = 3,
-                .assignments = &.{.{ .destination = 2, .source = .returned }},
-            },
+            .next = .{ .block = 3, .assignments = &.{.{ .destination = 2, .source = .returned }} },
         } } },
         .{ .function = 2, .instructions = &.{}, .terminator = .{ .call = .{
             .function = 1,
             .arguments = &.{ 0, 1 },
-            .next = .{
-                .block = 4,
-                .assignments = &.{.{ .destination = 3, .source = .returned }},
-            },
+            .next = .{ .block = 4, .assignments = &.{.{ .destination = 3, .source = .returned }} },
         } } },
         .{ .function = 2, .instructions = &.{.{
             .destination = 4,
@@ -517,20 +517,14 @@ const handler_strategies: ir.Program = .{
             .body = 0,
             .arguments = &.{},
             .state = &.{},
-            .next = .{
-                .block = 7,
-                .assignments = &.{.{ .destination = 1, .source = .returned }},
-            },
+            .next = .{ .block = 7, .assignments = &.{.{ .destination = 1, .source = .returned }} },
         } } },
         .{ .function = 4, .instructions = &.{}, .terminator = .{ .handle = .{
             .handler = 1,
             .body = 0,
             .arguments = &.{},
             .state = &.{},
-            .next = .{
-                .block = 8,
-                .assignments = &.{.{ .destination = 2, .source = .returned }},
-            },
+            .next = .{ .block = 8, .assignments = &.{.{ .destination = 2, .source = .returned }} },
         } } },
         .{ .function = 4, .instructions = &.{.{
             .opcode = .product,

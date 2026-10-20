@@ -1075,7 +1075,7 @@ test "latent multi use rejects an exclusive caller capture but permits capture b
     }
 }
 
-test "installing the same family cannot hide a captured older capability from a caller's effect row" {
+test "reinstalling a family cannot hide captured older capabilities from caller effects" {
     var b = source.Builder.init(std.testing.allocator);
     defer b.deinit();
     const unit = try b.scalar(void);
@@ -1376,7 +1376,8 @@ test "resource authority sets survive every three-function root permutation" {
         var authorities: std.ArrayList(p.Id) = .empty;
         for (&functions, 0..) |*function, index| {
             function.* = try b.declare(&.{}, integer, &.{}, &.{});
-            if (mask & (@as(u3, 1) << @intCast(index)) != 0) try authorities.append(b.allocator(), function.*);
+            if (mask & (@as(u3, 1) << @intCast(index)) != 0)
+                try authorities.append(b.allocator(), function.*);
         }
         try b.resourceAuthority(resource, authorities.items, authorities.items);
         for (functions, 0..) |function, index| {

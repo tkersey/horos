@@ -108,7 +108,11 @@ fn admissiblePair(
         if (block.terminator == .perform) {
             const op = block.terminator.perform;
             try budget.take(op.use_site_capabilities.len);
-            allowed = @as(usize, @intFromBool(op.capability == remove)) + std.mem.count(p.Id, op.use_site_capabilities, &.{remove});
+            allowed = @as(usize, @intFromBool(op.capability == remove)) + std.mem.count(
+                p.Id,
+                op.use_site_capabilities,
+                &.{remove},
+            );
         }
         if (removed.reads != allowed) return false;
         removed_reads += allowed;

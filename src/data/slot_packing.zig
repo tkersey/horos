@@ -148,7 +148,8 @@ fn interference(
             for (facts.live[bid]) |live| try liveClique(matrix, n, facts, live, budget);
             for (block.instructions, 0..) |op, index| for (0..n) |live| {
                 try budget.tick();
-                if (facts.pool.contains(facts.live[bid][index + 1], live)) interfere(matrix, n, @intCast(op.destination), live);
+                if (facts.pool.contains(facts.live[bid][index + 1], live))
+                    interfere(matrix, n, @intCast(op.destination), live);
             };
         }
         var next: usize = 0;
@@ -362,7 +363,9 @@ pub fn validate(
         var metadata = new;
         metadata.layout = old.layout;
         metadata.inputs = old.inputs;
-        if (!equal(ir.Function, old, metadata) or !sameIds(old.inputs, new.inputs, map)) return error.InvalidSlotPacking;
+        if (!equal(ir.Function, old, metadata) or
+            !sameIds(old.inputs, new.inputs, map))
+            return error.InvalidSlotPacking;
         const seen = try a.alloc(bool, new.layout.slots.len);
         @memset(seen, false);
         for (map, old.layout.slots) |color, schema| {
@@ -404,7 +407,8 @@ pub fn validate(
             };
             for (old.instructions, 0..) |op, index| for (0..map.len) |live| {
                 try budget.tick();
-                if (facts.pool.contains(facts.live[bid][index + 1], live)) try distinct(map, op.destination, live);
+                if (facts.pool.contains(facts.live[bid][index + 1], live))
+                    try distinct(map, op.destination, live);
             };
             var index: usize = 0;
             while (successor(

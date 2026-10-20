@@ -143,7 +143,8 @@ pub fn awaiting(
     const b = a.interop.builder(c);
     const j = joinData(join);
     if (j.owner != c) return error.ForeignHandle;
-    if (try a.interop.schemaId(c, tasks.element()) != try a.interop.schemaId(c, try c.scalar(void))) return error.TypeMismatch;
+    if (try a.interop.schemaId(c, tasks.element()) != try a.interop.schemaId(c, try c.scalar(void)))
+        return error.TypeMismatch;
     const instance = try b.specialization(
         p.Id,
         "boundary.library.scheduler/await/typed-v1",

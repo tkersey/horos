@@ -57,7 +57,10 @@ fn domain(program: ir.Program, id: usize, exportable: []const bool) bool {
         @intCast(schema)
     ] == .product and exportable[
         @intCast(schema)
-    ] and privacy.privateWorker(program, id) and privacy.privateConstructions(program, id) and quietProducers(program, id);
+    ] and
+        privacy.privateWorker(program, id) and
+        privacy.privateConstructions(program, id) and
+        quietProducers(program, id);
 }
 fn observedField(program: ir.Program, id: usize) ?p.Id {
     const worker_id = program.constructors[id].function;

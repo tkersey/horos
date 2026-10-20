@@ -97,9 +97,7 @@ test "coalescing diagnostics preserve original aliases across projection and suc
 }
 
 fn allocationCase(a: std.mem.Allocator) !void {
-    var diagnostic: pass.Diagnostic = .{
-        .target = .{ .function = 999, .slot = 999 },
-    };
+    var diagnostic: pass.Diagnostic = .{ .target = .{ .function = 999, .slot = 999 } };
     var stats: pass.Statistics = .{};
     var result = pass.run(a, fixture, .{
         .diagnostic = &diagnostic,
@@ -122,11 +120,7 @@ test "coalescing diagnostic tracking owns partial storage and clears successful 
 
 test "coalescing diagnostics do not change the selected image" {
     var diagnostic: pass.Diagnostic = .{};
-    var observed = try pass.run(
-        testing.allocator,
-        fixture,
-        .{ .diagnostic = &diagnostic },
-    );
+    var observed = try pass.run(testing.allocator, fixture, .{ .diagnostic = &diagnostic });
     defer observed.deinit();
     var ordinary = try pass.run(testing.allocator, fixture, .{});
     defer ordinary.deinit();
@@ -290,7 +284,7 @@ fn sharedBodyMutant(
     try testing.expect(diagnostic.origins.ambiguous);
 }
 
-test "coalescing origin composition retains sparse nominal regions without dense allocation" {
+const SparseOriginsFixture = struct {
     const large = std.math.maxInt(p.Id) - 1;
     const original: ir.Program = .{
         .roots = .{ .entry = 0, .result = 1, .failure = 0 },
@@ -299,11 +293,7 @@ test "coalescing origin composition retains sparse nominal regions without dense
             .{ .internal = .{ .region = large } },
             .{
                 .internal = .{
-                    .computation = .{
-                        .parameters = &.{2},
-                        .result = 1,
-                        .regions = &.{large},
-                    },
+                    .computation = .{ .parameters = &.{2}, .result = 1, .regions = &.{large} },
                 },
             },
         },
@@ -345,6 +335,11 @@ test "coalescing origin composition retains sparse nominal regions without dense
             .captures = &.{.{ .fields = &.{}, .use = .reusable }},
         },
     };
+};
+
+test "coalescing origin composition retains sparse nominal regions without dense allocation" {
+    const large = SparseOriginsFixture.large;
+    const original = SparseOriginsFixture.original;
     var checked = try @import("activation_ownership.zig").analyze(testing.allocator, original);
     checked.deinit();
     var scratch = std.heap.ArenaAllocator.init(testing.allocator);

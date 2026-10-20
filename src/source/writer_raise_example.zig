@@ -64,11 +64,7 @@ fn authored(b: *source.Builder) a.Error!source.Module {
         .{ .exit = try c.cleanupInfo(unit) },
         unit,
         &.{w.effect()},
-        .{
-            .use = .linear,
-            .captures = &.{w.capability()},
-            .regions = &.{region},
-        },
+        .{ .use = .linear, .captures = &.{w.capability()}, .regions = &.{region} },
     );
     const cleanup_fn = try c.functionFor("log cleanup", cleanup_type);
     const cleanup_body = try written_body.closureBody(cleanup_fn);

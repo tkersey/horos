@@ -133,7 +133,10 @@ pub fn main(init: std.process.Init) !void {
         );
     } else if (comptime selected("missing") or selected("extra")) {
         const record = try c.record(.{ .count = integer });
-        if (comptime selected("missing")) _ = try b.product(record, .{}) else _ = try b.product(record, .{ .count = value, .extra = value });
+        if (comptime selected("missing"))
+            _ = try b.product(record, .{})
+        else
+            _ = try b.product(record, .{ .count = value, .extra = value });
     } else if (comptime selected("name")) {
         const record = try c.record(.{ .count = integer });
         _ = try b.field(try b.product(record, .{ .count = value }), "absent");
@@ -161,7 +164,10 @@ pub fn main(init: std.process.Init) !void {
         );
     } else if (comptime selected("text_bound") or selected("text_bytes")) {
         const text = try c.schema(native.Text(null));
-        const other = if (comptime selected("text_bound")) try c.schema(native.Text(0)) else try c.schema(native.Bytes(null));
+        const other = if (comptime selected("text_bound"))
+            try c.schema(native.Text(0))
+        else
+            try c.schema(native.Bytes(null));
         const target = try c.function("target", .{ .input = text }, integer, .{});
         _ = try b.call(target, .{ .input = try a.interop.encodedLiteral(c, other, &.{0}) });
     } else if (comptime selected("enum_tags")) {

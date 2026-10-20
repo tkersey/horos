@@ -139,7 +139,9 @@ fn sharedLayout(program: ir.Program, helpers: []const p.Id) bool {
     return true;
 }
 fn slotBase(program: ir.Program, witness: Witness, helper: p.Id) Error!usize {
-    if (sharedLayout(program, witness.helpers) and member(witness.helpers, helper)) return witness.first_slot;
+    if (sharedLayout(program, witness.helpers) and
+        member(witness.helpers, helper))
+        return witness.first_slot;
     var base = witness.first_slot;
     for (witness.helpers) |id| {
         if (id == helper) return base;
@@ -629,7 +631,8 @@ pub fn validate(
                 } else {
                     if (copied.terminator != .jump or
                         copied.terminator.jump.block != context.continuation.block or
-                        copied.terminator.jump.assignments.len != context.continuation.assignments.len)
+                        copied.terminator.jump.assignments.len !=
+                            context.continuation.assignments.len)
                         return error.InvalidContification;
                     for (
                         context.continuation.assignments,

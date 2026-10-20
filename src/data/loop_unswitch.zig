@@ -384,10 +384,11 @@ pub fn validate(
         witness.header,
     ) != witness.dispatch) return error.InvalidLoopUnswitch;
     const branch = original.blocks[witness.dispatch].terminator.branch;
+    const dispatch_end = original.blocks[witness.dispatch].instructions.len;
     // The selector is a definite Boolean version at every original dispatch.
     if (before.positions[witness.dispatch].len == 0 or
         !before.pool.contains(
-            before.positions[witness.dispatch][original.blocks[witness.dispatch].instructions.len].available,
+            before.positions[witness.dispatch][dispatch_end].available,
             branch.condition,
         ))
         return error.InvalidLoopUnswitch;

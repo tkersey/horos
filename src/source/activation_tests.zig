@@ -814,7 +814,8 @@ test "service interaction observation checks actual construction and labeled rep
             self.failed = self.failed or
                 report.external_completion != .unresolved or
                 report.scheduler_fairness != .explicit_runtime_premise or
-                report.end_to_end != .conditional_on_finite_batch_fairness_external_completion_and_resources;
+                report.end_to_end !=
+                    .conditional_on_finite_batch_fairness_external_completion_and_resources;
             const event: Report.TraceEvent = if (self.expected == .established)
                 .matching_reply
             else

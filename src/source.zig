@@ -388,7 +388,11 @@ pub fn own(
             inline for (
                 @typeInfo(T).@"struct".field_names,
                 @typeInfo(T).@"struct".field_types,
-            ) |field_name, FieldType| @field(output, field_name) = try own(FieldType, allocator, @field(value_item, field_name));
+            ) |field_name, FieldType| @field(output, field_name) = try own(
+                FieldType,
+                allocator,
+                @field(value_item, field_name),
+            );
             break :blk output;
         },
         .@"union" => blk: {

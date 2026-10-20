@@ -997,7 +997,8 @@ pub fn validate(
         if (site.variant >= variants.len or
             site.block >= original.blocks.len or
             original.blocks[site.block].terminator != .call or
-            original.blocks[site.block].terminator.call.function != variants[site.variant].key.function)
+            original.blocks[site.block].terminator.call.function !=
+                variants[site.variant].key.function)
             return error.InvalidCallPattern;
     for (
         original.functions,

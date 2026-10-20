@@ -57,7 +57,9 @@ pub fn Family(comptime E: type, comptime R: type) type {
     };
 }
 fn familyShape(comptime T: type) type {
-    if (@typeInfo(T) != .pointer or @typeInfo(T).pointer.size != .one) @compileError("Horos Reader: expected canonical family");
+    if (@typeInfo(T) != .pointer or
+        @typeInfo(T).pointer.size != .one)
+        @compileError("Horos Reader: expected canonical family");
     const Child = @typeInfo(T).pointer.child;
     if (!@hasDecl(Child, "family_shape")) @compileError("Horos Reader: expected canonical family");
     const S = Child.family_shape;

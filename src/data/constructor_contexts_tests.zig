@@ -11,7 +11,10 @@ pub const mapped: ir.Program = .{
     .schemas = &.{
         .boolean,                                          .unit,
         .{ .vector = .{ .element = 0, .maximum = 4096 } }, .{ .product = &.{ 0, 2 } },
-        .{ .sum = &.{ 1, 3 } },                            .{ .vector = .{ .element = 0, .maximum = 4096 } },
+        .{ .sum = &.{ 1, 3 } },
+        .{
+            .vector = .{ .element = 0, .maximum = 4096 },
+        },
     },
     .constants = &.{.{ .schema = 1, .bytes = &.{} }},
     .effects = &.{},

@@ -11,12 +11,7 @@ fn program(
     inputs: []const p.Id,
     function: *ir.Function,
 ) ir.Program {
-    function.* = .{
-        .entry = 0,
-        .inputs = inputs,
-        .layout = .{ .slots = layout },
-        .result = 0,
-    };
+    function.* = .{ .entry = 0, .inputs = inputs, .layout = .{ .slots = layout }, .result = 0 };
     return .{
         .roots = .{ .entry = 0, .result = 0, .failure = 1 },
         .schemas = &.{ .u64, .unit, .boolean, .{ .internal = .{ .resumption = .{

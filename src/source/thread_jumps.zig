@@ -76,7 +76,12 @@ fn redirect(
             inline for (
                 info.field_names,
                 info.field_types,
-            ) |field_name, FieldType| @field(result, field_name) = try redirect(FieldType, allocator, @field(input, field_name), targets);
+            ) |field_name, FieldType| @field(result, field_name) = try redirect(
+                FieldType,
+                allocator,
+                @field(input, field_name),
+                targets,
+            );
             break :blk result;
         },
         .@"union" => switch (input) {

@@ -2,7 +2,7 @@ const std = @import("std");
 const ir = @import("activation.zig");
 const p = @import("program.zig");
 const access = @import("slot_access.zig");
-test "portable roles count repeated slot reads and writes without confusing global IDs" {
+const RepeatedRolesFixture = struct {
     const edge: ir.Edge = .{
         .block = 7,
         .assignments = &.{
@@ -117,6 +117,10 @@ test "portable roles count repeated slot reads and writes without confusing glob
             .writes = 2,
         },
     };
+};
+
+test "portable roles count repeated slot reads and writes without confusing global IDs" {
+    const cases = RepeatedRolesFixture.cases;
     try std.testing.expectEqual(std.meta.tags(p.TerminatorTag).len, cases.len);
     for (cases) |case| {
         const found = access.terminator(case.term, 7);

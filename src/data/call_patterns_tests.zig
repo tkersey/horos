@@ -307,7 +307,8 @@ test "call patterns create two direct workers and share repeated static keys" {
         candidate.program.blocks[3].terminator.call.function,
     );
     try std.testing.expect(
-        candidate.program.blocks[1].terminator.call.function != candidate.program.blocks[4].terminator.call.function,
+        candidate.program.blocks[1].terminator.call.function !=
+            candidate.program.blocks[4].terminator.call.function,
     );
     for (candidate.variants) |variant| {
         try std.testing.expectEqual(

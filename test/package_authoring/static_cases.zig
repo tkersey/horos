@@ -30,7 +30,8 @@ pub const cases = .{
     .{ "array_length", "Horos sequenceValue: wrong array length" },
     .{
         "pending_unknown",
-        "Horos defineAlternatives.some: refine the unknown input before fulfilling a known declaration shape",
+        "Horos defineAlternatives.some: refine the unknown input before fulfilling a known " ++
+        "declaration shape",
     },
     .{
         "declaration_erasure",
@@ -48,7 +49,8 @@ pub const cases = .{
     .{ "native_pointer", "Horos native schema: value: pointer must be an unsentinelled slice" },
     .{
         "native_recursive",
-        "Horos native schema: value.children.element: recursive native type requires an explicit runtime declaration",
+        "Horos native schema: value.children.element: recursive native type requires an " ++
+        "explicit runtime declaration",
     },
     .{ "match_arm", "Horos match.no: case belongs to a different arm" },
     .{ "failure_category", "Horos authoring: wrong handle family; expected failure_literal" },

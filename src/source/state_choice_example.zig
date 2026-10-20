@@ -84,10 +84,7 @@ fn authored(
         .{},
         if (choice_outside) integer else sequence,
         if (choice_outside) &.{branch.effect()} else &.{},
-        .{
-            .use = .linear,
-            .captures = if (choice_outside) &.{branch.capability()} else &.{},
-        },
+        .{ .use = .linear, .captures = if (choice_outside) &.{branch.capability()} else &.{} },
     );
     const scope_fn = try c.functionFor("state region", scope_schema);
     const state_schema = try c.handledSchema(interpreted.handler);

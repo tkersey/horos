@@ -7,9 +7,18 @@ const ir = @import("activation.zig");
 const g = @import("graph.zig");
 const invocation = @import("invocation.zig");
 const families = .{
-    p.Schema,                    p.Internal,                   ir.Source,                                              ir.Terminator,     g.Node,
-    @FieldType(g.Value, "body"), @FieldType(g.Exit, "reason"), @FieldType(@FieldType(g.Node, "obligation"), "status"), invocation.Reason, invocation.Instance,
-    invocation.Control,          invocation.Outcome,
+    p.Schema,
+    p.Internal,
+    ir.Source,
+    ir.Terminator,
+    g.Node,
+    @FieldType(g.Value, "body"),
+    @FieldType(g.Exit, "reason"),
+    @FieldType(@FieldType(g.Node, "obligation"), "status"),
+    invocation.Reason,
+    invocation.Instance,
+    invocation.Control,
+    invocation.Outcome,
 };
 fn sample(comptime T: type, allocator: std.mem.Allocator, mode: usize) std.mem.Allocator.Error!T {
     return switch (@typeInfo(T)) {

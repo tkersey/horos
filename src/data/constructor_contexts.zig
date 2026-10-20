@@ -119,12 +119,10 @@ fn recognize(
         step.instructions[0].destination;
     const head = step.instructions[first].destination;
     const tail = step.instructions[first + 1].destination;
-    if ((!bound_payload and !operation(
-        step.instructions[0],
-        .variant_payload,
-        &.{pop},
-        1,
-    )) or !operation(step.instructions[first], .field, &.{pair}, 0) or !operation(step.instructions[first + 1], .field, &.{pair}, 1)) return null;
+    if ((!bound_payload and !operation(step.instructions[0], .variant_payload, &.{pop}, 1)) or
+        !operation(step.instructions[first], .field, &.{pair}, 0) or
+        !operation(step.instructions[first + 1], .field, &.{pair}, 1))
+        return null;
     const call = step.terminator.call;
     if (call.function != id or
         !std.mem.eql(p.Id, call.arguments, &.{tail}) or

@@ -27,8 +27,10 @@ fn changedType(comptime T: type, comptime index: usize) type {
 }
 const ast = @import("ast.zig");
 comptime {
-    if (std.mem.eql(u8, mode, "field")) roles.validateTermPayload(.call, extend(@FieldType(ast.Term, "call")));
-    if (std.mem.eql(u8, mode, "type")) roles.validateTermPayload(.perform, changedType(ast.Operation, 1));
+    if (std.mem.eql(u8, mode, "field"))
+        roles.validateTermPayload(.call, extend(@FieldType(ast.Term, "call")));
+    if (std.mem.eql(u8, mode, "type"))
+        roles.validateTermPayload(.perform, changedType(ast.Operation, 1));
     if (std.mem.eql(u8, mode, "case")) roles.validateMatchCase(extend(@typeInfo(@FieldType(
         @FieldType(ast.Term, "match_sum"),
         "cases",

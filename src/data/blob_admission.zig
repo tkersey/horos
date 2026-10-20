@@ -40,13 +40,20 @@ pub fn instruction(image: anytype, op: anytype, slots: []const p.Id) a.Error!voi
             if (!isText(source) and !isBytes(source)) return error.TypeMismatch;
             switch (op.opcode) {
                 .blob_length => {
-                    if (result != .u64 and !(result == .u32 and maximum(source) <= @import("std").math.maxInt(u32))) return error.TypeMismatch;
+                    if (result != .u64 and
+                        !(result == .u32 and
+                            maximum(source) <= @import("std").math.maxInt(u32)))
+                        return error.TypeMismatch;
                 },
                 .blob_concat, .blob_slice => {
-                    if (isText(source) != isText(result) or isBytes(source) != isBytes(result)) return error.TypeMismatch;
+                    if (isText(source) != isText(result) or
+                        isBytes(source) != isBytes(result))
+                        return error.TypeMismatch;
                     if (op.opcode == .blob_concat) {
                         const right = image.schemas[@intCast(slots[@intCast(op.operands[1])])];
-                        if (isText(right) != isText(source) or isBytes(right) != isBytes(source)) return error.TypeMismatch;
+                        if (isText(right) != isText(source) or
+                            isBytes(right) != isBytes(source))
+                            return error.TypeMismatch;
                     } else for (op.operands[1..]) |slot| {
                         if (image.schemas[
                             @intCast(slots[
@@ -57,7 +64,10 @@ pub fn instruction(image: anytype, op: anytype, slots: []const p.Id) a.Error!voi
                 },
                 .blob_compare => {
                     const right = image.schemas[@intCast(slots[@intCast(op.operands[1])])];
-                    if (result != .i8 or isText(right) != isText(source) or isBytes(right) != isBytes(source)) return error.TypeMismatch;
+                    if (result != .i8 or
+                        isText(right) != isText(source) or
+                        isBytes(right) != isBytes(source))
+                        return error.TypeMismatch;
                 },
                 .blob_byte => {
                     if (image.schemas[

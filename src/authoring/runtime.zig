@@ -476,7 +476,10 @@ pub const Context = opaque {
             &returned_error,
             names.ensureTotalCapacity(
                 scratch,
-                std.math.cast(u32, input.len) orelse return captureError(&returned_error, error.OutOfMemory),
+                std.math.cast(u32, input.len) orelse return captureError(
+                    &returned_error,
+                    error.OutOfMemory,
+                ),
             ),
         );
         for (input, 0..) |field, i| {
@@ -1783,10 +1786,7 @@ pub const Context = opaque {
         try self.define(hd.returns, try returns.ret(try returns.parameter("result")));
         const clause = try self.body(hd.clauses[0].function);
         const reply = try clause.call(responder_function, &.{
-            .{
-                .name = f.parameters[0].name,
-                .value = try clause.parameter("payload"),
-            },
+            .{ .name = f.parameters[0].name, .value = try clause.parameter("payload") },
         });
         const resumed = try clause.resumeValue(try clause.parameter("resumption"), reply);
         try self.define(hd.clauses[0].function, try clause.ret(resumed));
@@ -1828,7 +1828,10 @@ pub const Context = opaque {
         const h = data(HandlerData, handler_handle);
         try self.origin(h.owner);
         try self.origin(data(OperationData, operation_handle).owner);
-        for (h.clauses) |*clause| if (data(OperationData, clause.operation).id == data(OperationData, operation_handle).id) return clause;
+        for (h.clauses) |*clause| if (data(OperationData, clause.operation).id == data(
+            OperationData,
+            operation_handle,
+        ).id) return clause;
         return self.reject(error.InvalidEffect, "clause", "operation is not handled here");
     }
     pub fn handledSchema(self: *Context, handler_handle: *const Handler) Error!*const Schema {
@@ -1955,7 +1958,9 @@ pub const Context = opaque {
                 .semantic_round_limit = compilation.round_limit,
                 .semantic_statistics = compilation.statistics,
                 .compilation_observer = compilation.observer,
-                .captures = if (contextData(self).lambda_schemas.count() != 0 or contextData(self).handlers.items.len != 0) .{
+                .captures = if (contextData(self).lambda_schemas.count() != 0 or contextData(
+                    self,
+                ).handlers.items.len != 0) .{
                     .context = self,
                     .capture = observeCapture,
                     .closure = observeClosure,
@@ -2071,9 +2076,8 @@ pub const Context = opaque {
                         contextData(
                             self,
                         ).diagnostic.entity = if (is_cleanup) "cleanup" else "authored failure";
-                        contextData(
-                            self,
-                        ).diagnostic.relationship = "named failure layout differs from module failure contract";
+                        contextData(self).diagnostic.relationship =
+                            "named failure layout differs from module failure contract";
                         return err;
                     };
                 },
@@ -2135,7 +2139,9 @@ pub const Context = opaque {
         };
     }
     fn capturePublication(self: *Context, module_value: source.Module) Error!void {
-        if (contextData(self).lambda_schemas.count() == 0 and contextData(self).handlers.items.len == 0) return;
+        if (contextData(self).lambda_schemas.count() == 0 and contextData(
+            self,
+        ).handlers.items.len == 0) return;
         var checked = try self.lowerNamed(
             contextData(self).raw.arena.child_allocator,
             module_value,
@@ -2295,9 +2301,7 @@ pub const Body = opaque {
             &returned_error,
             bodyData(self).bindings.append(
                 contextData(c).raw.allocator(),
-                .{
-                    .bind = .{ .variable = variable, .term = term },
-                },
+                .{ .bind = .{ .variable = variable, .term = term } },
             ),
         );
         return captureError(&returned_error, result);
@@ -2376,7 +2380,10 @@ pub const Body = opaque {
             &returned_error,
             matches.ensureTotalCapacity(
                 scratch,
-                std.math.cast(u32, args.len) orelse return captureError(&returned_error, error.OutOfMemory),
+                std.math.cast(u32, args.len) orelse return captureError(
+                    &returned_error,
+                    error.OutOfMemory,
+                ),
             ),
         );
         for (args) |arg| {
@@ -2406,9 +2413,8 @@ pub const Body = opaque {
             const v = try captureError(&returned_error, self.useValue(found.value));
             c.same(named.schema, v.schema) catch |err| {
                 contextData(c).diagnostic.entity = named.name;
-                contextData(
-                    c,
-                ).diagnostic.relationship = "argument or product field differs from its declared schema";
+                contextData(c).diagnostic.relationship =
+                    "argument or product field differs from its declared schema";
                 return captureError(&returned_error, @as(Error![]const p.Id, err));
             };
             id.* = v.id;
@@ -2986,10 +2992,7 @@ pub const Body = opaque {
             ProductParts,
             try captureError(
                 &returned_error,
-                c.save(ProductPartsData, .{
-                    .body = self,
-                    .fields = fields,
-                }),
+                c.save(ProductPartsData, .{ .body = self, .fields = fields }),
             ),
         );
         try captureError(&returned_error, bodyData(self).bindings.append(allocator, .{
@@ -4487,7 +4490,9 @@ pub const Body = opaque {
         const b = data(ComputationData, when_false);
         try c.origin(a.owner);
         try c.origin(b.owner);
-        if (a.scope.parent != bodyData(self).scope or b.scope.parent != bodyData(self).scope or a.scope == b.scope)
+        if (a.scope.parent != bodyData(self).scope or b.scope.parent != bodyData(
+            self,
+        ).scope or a.scope == b.scope)
             return c.reject(
                 error.InvalidBranch,
                 "conditional",
@@ -4605,12 +4610,7 @@ pub const Body = opaque {
                 &returned_error,
                 c.save(
                     ComputationData,
-                    .{
-                        .owner = c,
-                        .id = term,
-                        .schema = schema,
-                        .scope = bodyData(self).scope,
-                    },
+                    .{ .owner = c, .id = term, .schema = schema, .scope = bodyData(self).scope },
                 ),
             ),
         );
@@ -4878,11 +4878,7 @@ pub const interop = struct {
                     &returned_error,
                     c.save(
                         FailureLiteralData,
-                        .{
-                            .owner = c,
-                            .value = value,
-                            .literal = literal,
-                        },
+                        .{ .owner = c, .value = value, .literal = literal },
                     ),
                 ),
             ),
@@ -5122,7 +5118,9 @@ pub const interop = struct {
         if (id >= raw.effects.items.len) return error.InvalidEffect;
         const op = raw.effects.items[@intCast(id)];
         if (!op.external or op.bodies.len != 0) return error.InvalidCategory;
-        if (op.payload != try c.schemaId(payload) or op.result != try c.schemaId(result)) return error.SchemaMismatch;
+        if (op.payload != try c.schemaId(payload) or op.result != try c.schemaId(
+            result,
+        )) return error.SchemaMismatch;
         return handle(
             Operation,
             try c.save(
