@@ -180,6 +180,47 @@ fn build(
     const a = scratch.allocator();
     const functions = try a.alloc(ir.Function, 3);
     const blocks = try a.alloc(ir.Block, 7);
+    try definePermutedBodies(a, functions, blocks, order, renamed, mutation);
+    functions[2] = .{
+        .entry = 4,
+        .inputs = &.{ 0, 1, 2 },
+        .layout = .{ .slots = &.{ 0, 0, 0, 1, 1, 3 } },
+        .result = 3,
+    };
+    for (0..2) |id| {
+        const assignments = try a.alloc(ir.Assignment, 1);
+        assignments[0] = .{ .destination = 3 + id, .source = .returned };
+        blocks[4 + id] = .{ .function = 2, .instructions = &.{}, .terminator = .{ .call = .{
+            .function = id,
+            .arguments = &.{ 0, 1, 2 },
+            .next = .{ .block = 5 + id, .assignments = assignments },
+        } } };
+    }
+    blocks[6] = .{
+        .function = 2,
+        .instructions = &.{.{ .destination = 5, .opcode = .product, .operands = &.{ 3, 4 } }},
+        .terminator = .{ .return_value = 5 },
+    };
+    const program: ir.Program = .{
+        .roots = .{ .entry = 2, .result = 3, .failure = 2 },
+        .schemas = &.{ .u64, .{ .product = &.{ 0, 0, 0 } }, .unit, .{ .product = &.{ 1, 1 } } },
+        .constants = &.{},
+        .effects = &.{},
+        .functions = functions,
+        .blocks = blocks,
+    };
+    const result = try data.coalescing.run(allocator, program, options);
+    return .{ .arena = result.arena, .program = result.program, .flow = result.flow };
+}
+
+fn definePermutedBodies(
+    a: std.mem.Allocator,
+    functions: []ir.Function,
+    blocks: []ir.Block,
+    order: []const ir.Id,
+    renamed: []const ir.Id,
+    mutation: Mutation,
+) !void {
     for (0..2) |id| {
         const inputs: []const ir.Id = if (id == 0) &.{ 0, 1, 2 } else renamed;
         functions[id] = .{
@@ -212,34 +253,4 @@ fn build(
             .terminator = .{ .return_value = 3 },
         };
     }
-    functions[2] = .{
-        .entry = 4,
-        .inputs = &.{ 0, 1, 2 },
-        .layout = .{ .slots = &.{ 0, 0, 0, 1, 1, 3 } },
-        .result = 3,
-    };
-    for (0..2) |id| {
-        const assignments = try a.alloc(ir.Assignment, 1);
-        assignments[0] = .{ .destination = 3 + id, .source = .returned };
-        blocks[4 + id] = .{ .function = 2, .instructions = &.{}, .terminator = .{ .call = .{
-            .function = id,
-            .arguments = &.{ 0, 1, 2 },
-            .next = .{ .block = 5 + id, .assignments = assignments },
-        } } };
-    }
-    blocks[6] = .{
-        .function = 2,
-        .instructions = &.{.{ .destination = 5, .opcode = .product, .operands = &.{ 3, 4 } }},
-        .terminator = .{ .return_value = 5 },
-    };
-    const program: ir.Program = .{
-        .roots = .{ .entry = 2, .result = 3, .failure = 2 },
-        .schemas = &.{ .u64, .{ .product = &.{ 0, 0, 0 } }, .unit, .{ .product = &.{ 1, 1 } } },
-        .constants = &.{},
-        .effects = &.{},
-        .functions = functions,
-        .blocks = blocks,
-    };
-    const result = try data.coalescing.run(allocator, program, options);
-    return .{ .arena = result.arena, .program = result.program, .flow = result.flow };
 }

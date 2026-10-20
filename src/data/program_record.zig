@@ -86,7 +86,12 @@ fn fields(comptime T: type, comptime names: []const []const u8) void {
     for (declared, names) |field_name, name| std.debug.assert(std.mem.eql(u8, field_name, name));
 }
 
-pub fn write(comptime T: type, value: T, writer: *wire.Writer, context: *Context) Error!void {
+pub inline fn write(
+    comptime T: type,
+    value: T,
+    writer: *wire.Writer,
+    context: *Context,
+) Error!void {
     if (T == ir.Function) return writeFunction(value, writer, context);
     if (T == ir.Block) return writeBlock(value, writer, context);
     if (T == ir.Instruction) return writeInstruction(value, writer);
@@ -122,7 +127,7 @@ pub fn write(comptime T: type, value: T, writer: *wire.Writer, context: *Context
     }
 }
 
-pub fn read(
+pub inline fn read(
     comptime T: type,
     reader: *wire.Reader,
     allocator: std.mem.Allocator,
@@ -192,7 +197,11 @@ pub fn read(
     };
 }
 
-fn writeFunction(value: ir.Function, writer: *wire.Writer, context: *Context) Error!void {
+fn writeFunction(
+    value: ir.Function,
+    writer: *wire.Writer,
+    context: *Context,
+) Error!void {
     const scopes = value.custody.len != 1 or value.custody[0].parent != null;
     const flags: u8 = @as(u8, @intFromBool(value.effects.len != 0)) |
         (@as(u8, @intFromBool(value.regions.len != 0)) << 1) |
@@ -240,7 +249,11 @@ fn readFunction(
     };
 }
 
-fn writeBlock(value: ir.Block, writer: *wire.Writer, context: *Context) Error!void {
+fn writeBlock(
+    value: ir.Block,
+    writer: *wire.Writer,
+    context: *Context,
+) Error!void {
     const flags: u8 = @as(u8, @intFromBool(value.function != context.previous_function)) |
         (@as(u8, @intFromBool(value.custody != 0)) << 1);
     try writer.byte(flags);

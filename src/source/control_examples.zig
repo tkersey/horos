@@ -47,6 +47,88 @@ pub fn nested(b: *source.Builder) source.Error!source.Module {
             .use = .linear,
         } } },
     );
+    const handlers = try defineNestedHandlers(b, unit, integer, effect, outer_k, inner_k);
+    return defineNestedBodies(
+        b,
+        unit,
+        integer,
+        cap,
+        effect,
+        handlers,
+    );
+}
+
+pub fn shallow(b: *source.Builder) source.Error!source.Module {
+    const unit = try b.scalar(void);
+    const boolean = try b.scalar(bool);
+    const effect = try b.effect(.{
+        .identity = "example/shallow-send-receive",
+        .payload = boolean,
+        .result = boolean,
+        .external = false,
+    });
+    const cap = try b.schema(.{ .internal = .{ .capability = effect } });
+    const token = try b.schema(.{ .internal = .{ .resumption = .{
+        .effect = effect,
+        .input = boolean,
+        .answer = boolean,
+        .effects = &.{effect},
+        .capture_bound = &.{ boolean, cap },
+        .handled = &.{effect},
+        .mode = .shallow,
+        .use = .linear,
+    } } });
+    const main = try b.declare(&.{boolean}, boolean, &.{}, &.{});
+    const body = try b.declare(&.{cap}, boolean, &.{effect}, &.{});
+    const returns = try b.declare(&.{ boolean, boolean }, boolean, &.{}, &.{});
+    const clause = try b.declare(&.{ boolean, boolean, token }, boolean, &.{}, &.{});
+    try b.define(returns, try b.pure(try b.reference(b.parameter(returns, 1))));
+    const handler = try b.handler(.{
+        .mode = .shallow,
+        .input = boolean,
+        .answer = boolean,
+        .return_function = returns,
+        .state = &.{boolean},
+        .clauses = &.{.{ .effect = effect, .function = clause, .resumption = token }},
+    });
+    try defineProtocolClause(b, boolean, clause, handler);
+    const capability = try b.reference(b.parameter(body, 0));
+    const first = try b.term(.{ .perform = .{
+        .effect = effect,
+        .capability = capability,
+        .payload = try b.reference(b.parameter(main, 0)),
+    } });
+    const second = try b.term(.{ .perform = .{
+        .effect = effect,
+        .capability = capability,
+        .payload = try b.constant(bool, true),
+    } });
+    try b.define(body, try b.bind(try b.variable(boolean), first, second));
+    const body_type = try b.schema(.{ .internal = .{ .computation = .{
+        .parameters = &.{cap},
+        .result = boolean,
+        .effects = &.{effect},
+        .capture_bound = &.{boolean},
+    } } });
+    try b.define(
+        main,
+        try b.term(.{ .handle = .{
+            .handler = handler,
+            .body = try b.lambda(body, body_type),
+            .state = &.{try b.constant(bool, false)},
+        } }),
+    );
+    return b.module(main, unit);
+}
+
+fn defineNestedHandlers(
+    b: *source.Builder,
+    unit: p.Id,
+    integer: p.Id,
+    effect: p.Id,
+    outer_k: p.Id,
+    inner_k: p.Id,
+) source.Error![2]p.Id {
     const returns = try b.declare(&.{integer}, integer, &.{}, &.{});
     try b.define(
         returns,
@@ -83,6 +165,17 @@ pub fn nested(b: *source.Builder) source.Error!source.Module {
             .clauses = &.{.{ .effect = effect, .function = clause, .resumption = token }},
         });
     }
+    return handlers;
+}
+
+fn defineNestedBodies(
+    b: *source.Builder,
+    unit: p.Id,
+    integer: p.Id,
+    cap: p.Id,
+    effect: p.Id,
+    handlers: [2]p.Id,
+) source.Error!source.Module {
     const main = try b.declare(&.{}, integer, &.{}, &.{});
     const outer = try b.declare(&.{cap}, integer, &.{effect}, &.{});
     const inner = try b.declare(&.{cap}, integer, &.{effect}, &.{});
@@ -137,39 +230,12 @@ pub fn nested(b: *source.Builder) source.Error!source.Module {
     return b.module(main, unit);
 }
 
-pub fn shallow(b: *source.Builder) source.Error!source.Module {
-    const unit = try b.scalar(void);
-    const boolean = try b.scalar(bool);
-    const effect = try b.effect(.{
-        .identity = "example/shallow-send-receive",
-        .payload = boolean,
-        .result = boolean,
-        .external = false,
-    });
-    const cap = try b.schema(.{ .internal = .{ .capability = effect } });
-    const token = try b.schema(.{ .internal = .{ .resumption = .{
-        .effect = effect,
-        .input = boolean,
-        .answer = boolean,
-        .effects = &.{effect},
-        .capture_bound = &.{ boolean, cap },
-        .handled = &.{effect},
-        .mode = .shallow,
-        .use = .linear,
-    } } });
-    const main = try b.declare(&.{boolean}, boolean, &.{}, &.{});
-    const body = try b.declare(&.{cap}, boolean, &.{effect}, &.{});
-    const returns = try b.declare(&.{ boolean, boolean }, boolean, &.{}, &.{});
-    const clause = try b.declare(&.{ boolean, boolean, token }, boolean, &.{}, &.{});
-    try b.define(returns, try b.pure(try b.reference(b.parameter(returns, 1))));
-    const handler = try b.handler(.{
-        .mode = .shallow,
-        .input = boolean,
-        .answer = boolean,
-        .return_function = returns,
-        .state = &.{boolean},
-        .clauses = &.{.{ .effect = effect, .function = clause, .resumption = token }},
-    });
+fn defineProtocolClause(
+    b: *source.Builder,
+    boolean: p.Id,
+    clause: p.Id,
+    handler: p.Id,
+) source.Error!void {
     const phase = try b.reference(b.parameter(clause, 0));
     const operation = try b.reference(b.parameter(clause, 1));
     const valid = try b.primitive(boolean, .equal, &.{ phase, operation }, 0);
@@ -187,31 +253,4 @@ pub fn shallow(b: *source.Builder) source.Error!source.Module {
             .when_false = try b.term(.{ .fail = try b.constant(void, {}) }),
         } }),
     );
-    const capability = try b.reference(b.parameter(body, 0));
-    const first = try b.term(.{ .perform = .{
-        .effect = effect,
-        .capability = capability,
-        .payload = try b.reference(b.parameter(main, 0)),
-    } });
-    const second = try b.term(.{ .perform = .{
-        .effect = effect,
-        .capability = capability,
-        .payload = try b.constant(bool, true),
-    } });
-    try b.define(body, try b.bind(try b.variable(boolean), first, second));
-    const body_type = try b.schema(.{ .internal = .{ .computation = .{
-        .parameters = &.{cap},
-        .result = boolean,
-        .effects = &.{effect},
-        .capture_bound = &.{boolean},
-    } } });
-    try b.define(
-        main,
-        try b.term(.{ .handle = .{
-            .handler = handler,
-            .body = try b.lambda(body, body_type),
-            .state = &.{try b.constant(bool, false)},
-        } }),
-    );
-    return b.module(main, unit);
 }

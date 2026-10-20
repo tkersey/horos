@@ -463,6 +463,31 @@ test "interaction validation success precedes same object version write" {
     try analyze(image, &.{ .mutation_block = 2 }, .potential);
 }
 test "interaction mutually recursive helpers use matched least fixed point summaries" {
+    var blocks = mutuallyRecursiveBlocks();
+    var functions = [_]ir.Function{ base.functions[0], base.functions[0], base.functions[0] };
+    functions[1].entry = 4;
+    functions[2].entry = 8;
+    var image = base;
+    image.blocks = &blocks;
+    image.functions = &functions;
+    try analyze(image, &.{ .success_block = 5 }, .established);
+    blocks[0].terminator.call.arguments = &.{ 1, 0 };
+    try analyze(image, &.{ .success_block = 5 }, .potential);
+    blocks[0].terminator.call.arguments = &.{ 0, 1 };
+    // No base return: root cannot return, but the bad prefix in the helper is
+    // still observable. A depth bound or optimistic return seed is unnecessary.
+    blocks[6].terminator = .{ .call = .{
+        .function = 2,
+        .arguments = &.{ 0, 1 },
+        .next = .{ .block = 7, .assignments = &.{.{ .destination = 3, .source = .returned }} },
+    } };
+    blocks[4].terminator.perform.effect = 1;
+    blocks[4].terminator.perform.next.assignments = &.{.{ .destination = 3, .source = .returned }};
+    blocks[5].terminator = .{ .jump = .{ .block = 6 } };
+    try analyze(image, &.{ .success_block = 5 }, .potential);
+}
+
+fn mutuallyRecursiveBlocks() [9]ir.Block {
     var blocks: [9]ir.Block = undefined;
     @memcpy(blocks[0..4], base.blocks);
     blocks[4] = .{
@@ -512,27 +537,7 @@ test "interaction mutually recursive helpers use matched least fixed point summa
         .arguments = &.{ 0, 1 },
         .next = .{ .block = 2, .assignments = &.{.{ .destination = 3, .source = .returned }} },
     } };
-    var functions = [_]ir.Function{ base.functions[0], base.functions[0], base.functions[0] };
-    functions[1].entry = 4;
-    functions[2].entry = 8;
-    var image = base;
-    image.blocks = &blocks;
-    image.functions = &functions;
-    try analyze(image, &.{ .success_block = 5 }, .established);
-    blocks[0].terminator.call.arguments = &.{ 1, 0 };
-    try analyze(image, &.{ .success_block = 5 }, .potential);
-    blocks[0].terminator.call.arguments = &.{ 0, 1 };
-    // No base return: root cannot return, but the bad prefix in the helper is
-    // still observable. A depth bound or optimistic return seed is unnecessary.
-    blocks[6].terminator = .{ .call = .{
-        .function = 2,
-        .arguments = &.{ 0, 1 },
-        .next = .{ .block = 7, .assignments = &.{.{ .destination = 3, .source = .returned }} },
-    } };
-    blocks[4].terminator.perform.effect = 1;
-    blocks[4].terminator.perform.next.assignments = &.{.{ .destination = 3, .source = .returned }};
-    blocks[5].terminator = .{ .jump = .{ .block = 6 } };
-    try analyze(image, &.{ .success_block = 5 }, .potential);
+    return blocks;
 }
 
 test "existing cloned source fixture retains multi shot suffix and one initialization" {
@@ -659,6 +664,17 @@ test "opaque imports include multiple events and relinking or property change de
         (try session.analyze(independent)).get(0, 0, 0).status(independent),
     );
     try std.testing.expectEqual(@as(usize, 2), session.cached.items.len);
+    try checkRelinkedImport(arena.allocator(), image, blocks, functions, monitor);
+}
+
+fn checkRelinkedImport(
+    allocator: std.mem.Allocator,
+    original: ir.Program,
+    blocks: [4]ir.Block,
+    functions: [2]ir.Function,
+    monitor: interaction.Monitor,
+) !void {
+    var image = original;
     // Resolve the previously opaque implementation to an actual silent return.
     var linked_blocks: [5]ir.Block = undefined;
     @memcpy(linked_blocks[0..4], &blocks);
@@ -673,7 +689,7 @@ test "opaque imports include multiple events and relinking or property change de
     image.functions = &linked_functions;
     image.blocks = &linked_blocks;
     const linked_owner = try @import("control_provenance.zig").derive(
-        arena.allocator(),
+        allocator,
         image,
         &.{},
         false,
@@ -899,6 +915,40 @@ test "captured suffix includes nested handler return before clause suffix" {
     defer arena.deinit();
     const allocator = arena.allocator();
     var image = try @import("evidence_forwarding_tests.zig").fixture(allocator);
+    const schemas = try nestedSuffixSchemas(allocator, image);
+    image.schemas = schemas;
+    image.effects = &.{
+        image.effects[0],
+        .{ .identity = "inner", .payload = 0, .result = 0, .external = false },
+        .{ .identity = "X", .payload = 0, .result = 0 },
+        .{ .identity = "Y", .payload = 0, .result = 0 },
+    };
+    const functions = try nestedSuffixFunctions(allocator, image);
+    image.functions = functions;
+    const blocks = try nestedSuffixBlocks(allocator, image);
+    image.blocks = blocks;
+    var outer = image.handlers[0];
+    outer.effects = &.{ 2, 3 };
+    image.handlers = &.{
+        outer,
+        .{
+            .mode = .deep,
+            .input = 0,
+            .answer = 0,
+            .effects = &.{ 0, 2, 3 },
+            .return_function = 6,
+            .clauses = &.{.{ .effect = 1, .function = 7, .resumption = 8 }},
+        },
+    };
+    image.constructors = &.{ image.constructors[0], .{ .function = 5, .capture = 1, .schema = 7 } };
+    image.scopes.captures = &.{
+        image.scopes.captures[0],
+        .{ .fields = &.{ 0, 5 }, .use = .reusable },
+    };
+    try checkNestedSuffix(allocator, image);
+}
+
+fn nestedSuffixSchemas(allocator: std.mem.Allocator, image: ir.Program) ![]p.Schema {
     const schemas = try allocator.alloc(p.Schema, 9);
     @memcpy(schemas[0..6], image.schemas);
     schemas[3].internal.computation.effects = &.{ 0, 2, 3 };
@@ -920,13 +970,10 @@ test "captured suffix includes nested handler return before clause suffix" {
         .mode = .deep,
         .use = .linear,
     } } };
-    image.schemas = schemas;
-    image.effects = &.{
-        image.effects[0],
-        .{ .identity = "inner", .payload = 0, .result = 0, .external = false },
-        .{ .identity = "X", .payload = 0, .result = 0 },
-        .{ .identity = "Y", .payload = 0, .result = 0 },
-    };
+    return schemas;
+}
+
+fn nestedSuffixFunctions(allocator: std.mem.Allocator, image: ir.Program) ![]ir.Function {
     const functions = try allocator.alloc(ir.Function, 8);
     @memcpy(functions[0..5], image.functions);
     functions[0].effects = &.{ 2, 3 };
@@ -955,7 +1002,10 @@ test "captured suffix includes nested handler return before clause suffix" {
         .result = 0,
         .effects = &.{ 0, 2, 3 },
     };
-    image.functions = functions;
+    return functions;
+}
+
+fn nestedSuffixBlocks(allocator: std.mem.Allocator, image: ir.Program) ![]ir.Block {
     const blocks = try allocator.alloc(ir.Block, 17);
     @memcpy(blocks[0..11], image.blocks);
     blocks[2].instructions = &.{.{
@@ -1016,25 +1066,10 @@ test "captured suffix includes nested handler return before clause suffix" {
         } },
     };
     blocks[16] = .{ .function = 7, .instructions = &.{}, .terminator = .{ .return_value = 2 } };
-    image.blocks = blocks;
-    var outer = image.handlers[0];
-    outer.effects = &.{ 2, 3 };
-    image.handlers = &.{
-        outer,
-        .{
-            .mode = .deep,
-            .input = 0,
-            .answer = 0,
-            .effects = &.{ 0, 2, 3 },
-            .return_function = 6,
-            .clauses = &.{.{ .effect = 1, .function = 7, .resumption = 8 }},
-        },
-    };
-    image.constructors = &.{ image.constructors[0], .{ .function = 5, .capture = 1, .schema = 7 } };
-    image.scopes.captures = &.{
-        image.scopes.captures[0],
-        .{ .fields = &.{ 0, 5 }, .use = .reusable },
-    };
+    return blocks;
+}
+
+fn checkNestedSuffix(allocator: std.mem.Allocator, image: ir.Program) !void {
     var diagnostic: @import("admission.zig").Diagnostic = .{};
     var admitted = @import("activation_ownership.zig").analyzeObserved(
         allocator,

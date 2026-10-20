@@ -37,6 +37,52 @@ fn buildMode(b: *source.Builder, mode: p.Mode) source.Error!source.Module {
     const inner_k = try b.reserveSchema();
     const ask_k = try b.reserveSchema();
     const captures = &.{ integer, boolean, failure_cap, ask_cap, outer_k, inner_k, ask_k };
+    try defineInjectionTokens(
+        b,
+        outer_k,
+        inner_k,
+        ask_k,
+        raised,
+        asking,
+        unit,
+        integer,
+        outer_row,
+        ask_row,
+        captures,
+        mode,
+    );
+    return defineInjectionProgram(
+        b,
+        integer,
+        unit,
+        outer_k,
+        inner_k,
+        outer_row,
+        asking,
+        raised,
+        failure_cap,
+        boolean,
+        ask_k,
+        ask_row,
+        mode,
+        ask_cap,
+    );
+}
+
+fn defineInjectionTokens(
+    b: *source.Builder,
+    outer_k: p.Id,
+    inner_k: p.Id,
+    ask_k: p.Id,
+    raised: p.Id,
+    asking: p.Id,
+    unit: p.Id,
+    integer: p.Id,
+    outer_row: []const p.Id,
+    ask_row: []const p.Id,
+    captures: []const p.Id,
+    mode: p.Mode,
+) source.Error!void {
     try b.defineSchema(
         outer_k,
         .{ .internal = .{ .resumption = .{
@@ -77,6 +123,18 @@ fn buildMode(b: *source.Builder, mode: p.Mode) source.Error!source.Module {
             .use = .linear,
         } } },
     );
+}
+
+fn defineCatchers(
+    b: *source.Builder,
+    integer: p.Id,
+    unit: p.Id,
+    outer_k: p.Id,
+    inner_k: p.Id,
+    outer_row: []const p.Id,
+    asking: p.Id,
+    raised: p.Id,
+) source.Error![2]p.Id {
     const returns = try b.declare(&.{integer}, integer, &.{}, &.{});
     try b.define(returns, try b.pure(try b.reference(b.parameter(returns, 0))));
     var catchers: [2]p.Id = undefined;
@@ -101,6 +159,21 @@ fn buildMode(b: *source.Builder, mode: p.Mode) source.Error!source.Module {
             .clauses = &.{.{ .effect = raised, .function = clause, .resumption = token }},
         });
     }
+    return catchers;
+}
+
+fn defineInjectionHandler(
+    b: *source.Builder,
+    failure_cap: p.Id,
+    integer: p.Id,
+    raised: p.Id,
+    boolean: p.Id,
+    ask_k: p.Id,
+    ask_row: []const p.Id,
+    unit: p.Id,
+    mode: p.Mode,
+    asking: p.Id,
+) source.Error!p.Id {
     const thrower = try b.declare(&.{failure_cap}, integer, &.{raised}, &.{});
     const use_site_raise = try b.term(.{ .perform = .{
         .effect = raised,
@@ -154,31 +227,37 @@ fn buildMode(b: *source.Builder, mode: p.Mode) source.Error!source.Module {
         .effects = ask_row,
         .clauses = &.{.{ .effect = asking, .function = clause, .resumption = ask_k }},
     });
+    return interpret;
+}
+
+fn defineInjectionBodies(
+    b: *source.Builder,
+    boolean: p.Id,
+    integer: p.Id,
+    outer_row: []const p.Id,
+    failure_cap: p.Id,
+    ask_row: []const p.Id,
+    ask_cap: p.Id,
+    asking: p.Id,
+    raised: p.Id,
+    catchers: [2]p.Id,
+    interpret: p.Id,
+    unit: p.Id,
+) source.Error!source.Module {
     const main = try b.declare(&.{boolean}, integer, outer_row, &.{});
     const outside = try b.declare(&.{failure_cap}, integer, ask_row, &.{});
     const handled = try b.declare(&.{ask_cap}, integer, &.{asking}, &.{});
     const inside = try b.declare(&.{failure_cap}, integer, &.{ raised, asking }, &.{});
-    try b.define(
+    try defineInjectionInside(
+        b,
         inside,
-        try b.term(.{ .perform = .{
-            .effect = asking,
-            .capability = try b.reference(b.parameter(handled, 0)),
-            .payload = try b.constant(void, {}),
-            .use_site_capabilities = &.{try b.reference(b.parameter(inside, 0))},
-        } }),
-    );
-    const inside_type = try b.schema(.{ .internal = .{ .computation = .{
-        .parameters = &.{failure_cap},
-        .result = integer,
-        .effects = &.{ raised, asking },
-        .capture_bound = &.{ask_cap},
-    } } });
-    try b.define(
+        asking,
         handled,
-        try b.term(.{ .handle = .{
-            .handler = catchers[1],
-            .body = try b.lambda(inside, inside_type),
-        } }),
+        failure_cap,
+        integer,
+        raised,
+        ask_cap,
+        catchers,
     );
     const handled_type = try b.schema(.{ .internal = .{ .computation = .{
         .parameters = &.{ask_cap},
@@ -210,4 +289,93 @@ fn buildMode(b: *source.Builder, mode: p.Mode) source.Error!source.Module {
         } }),
     );
     return b.module(main, unit);
+}
+
+fn defineInjectionInside(
+    b: *source.Builder,
+    inside: p.Id,
+    asking: p.Id,
+    handled: p.Id,
+    failure_cap: p.Id,
+    integer: p.Id,
+    raised: p.Id,
+    ask_cap: p.Id,
+    catchers: [2]p.Id,
+) source.Error!void {
+    try b.define(
+        inside,
+        try b.term(.{ .perform = .{
+            .effect = asking,
+            .capability = try b.reference(b.parameter(handled, 0)),
+            .payload = try b.constant(void, {}),
+            .use_site_capabilities = &.{try b.reference(b.parameter(inside, 0))},
+        } }),
+    );
+    const inside_type = try b.schema(.{ .internal = .{ .computation = .{
+        .parameters = &.{failure_cap},
+        .result = integer,
+        .effects = &.{ raised, asking },
+        .capture_bound = &.{ask_cap},
+    } } });
+    try b.define(
+        handled,
+        try b.term(.{ .handle = .{
+            .handler = catchers[1],
+            .body = try b.lambda(inside, inside_type),
+        } }),
+    );
+}
+
+fn defineInjectionProgram(
+    b: *source.Builder,
+    integer: p.Id,
+    unit: p.Id,
+    outer_k: p.Id,
+    inner_k: p.Id,
+    outer_row: []const p.Id,
+    asking: p.Id,
+    raised: p.Id,
+    failure_cap: p.Id,
+    boolean: p.Id,
+    ask_k: p.Id,
+    ask_row: []const p.Id,
+    mode: p.Mode,
+    ask_cap: p.Id,
+) source.Error!source.Module {
+    const catchers = try defineCatchers(
+        b,
+        integer,
+        unit,
+        outer_k,
+        inner_k,
+        outer_row,
+        asking,
+        raised,
+    );
+    const interpret = try defineInjectionHandler(
+        b,
+        failure_cap,
+        integer,
+        raised,
+        boolean,
+        ask_k,
+        ask_row,
+        unit,
+        mode,
+        asking,
+    );
+    return defineInjectionBodies(
+        b,
+        boolean,
+        integer,
+        outer_row,
+        failure_cap,
+        ask_row,
+        ask_cap,
+        asking,
+        raised,
+        catchers,
+        interpret,
+        unit,
+    );
 }

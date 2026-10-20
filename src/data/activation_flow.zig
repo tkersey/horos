@@ -108,33 +108,7 @@ fn analyzeComponentDemand(
     @memset(analysis.entries, null);
     @memset(analysis.positions, &.{});
     @memset(analysis.queued, false);
-    for (image.functions, 0..) |function, id| {
-        if (std.mem.indexOfScalar(p.Id, imports, id) != null) continue;
-        var inputs = sets.empty;
-        var obligations = sets.empty;
-        for (function.inputs) |input| {
-            inputs = try pool.insert(inputs, input);
-            const schema = function.layout.slots[@intCast(input)];
-            if (!analysis.uses.drop[@intCast(schema)])
-                obligations = try pool.insert(obligations, input);
-        }
-        try analysis.merge(function.entry, .{
-            .initialized = inputs,
-            .available = inputs,
-            .obligations = obligations,
-        });
-    }
-    var index: usize = 0;
-    while (analysis.work.pop()) |block| {
-        index += 1;
-        analysis.queued[@intCast(block)] = false;
-        try analysis.block(block, false);
-    }
-    for (analysis.entries, 0..) |entry, block| {
-        // A source failure can make a syntactically constructed continuation
-        // unreachable. Its references are checked, but it has no entry state.
-        if (entry != null) try analysis.block(block, true);
-    }
+    const index = try analysis.solve(imports);
     const liveness = try Liveness.derive(&analysis, require_edge_sources);
     return .{
         .positions = analysis.positions,
@@ -158,6 +132,37 @@ const Analysis = struct {
     positions: [][]State,
     queued: []bool,
     work: Queue,
+
+    fn solve(self: *Analysis, imports: []const p.Id) Error!usize {
+        for (self.image.functions, 0..) |function, id| {
+            if (std.mem.indexOfScalar(p.Id, imports, id) != null) continue;
+            var inputs = sets.empty;
+            var obligations = sets.empty;
+            for (function.inputs) |input| {
+                inputs = try self.pool.insert(inputs, input);
+                const schema = function.layout.slots[@intCast(input)];
+                if (!self.uses.drop[@intCast(schema)])
+                    obligations = try self.pool.insert(obligations, input);
+            }
+            try self.merge(function.entry, .{
+                .initialized = inputs,
+                .available = inputs,
+                .obligations = obligations,
+            });
+        }
+        var index: usize = 0;
+        while (self.work.pop()) |block_id| {
+            index += 1;
+            self.queued[@intCast(block_id)] = false;
+            try self.block(block_id, false);
+        }
+        for (self.entries, 0..) |entry, block_id| {
+            // A source failure can make a syntactically constructed continuation
+            // unreachable. Its references are checked, but it has no entry state.
+            if (entry != null) try self.block(block_id, true);
+        }
+        return index;
+    }
 
     fn merge(self: *Analysis, id: p.Id, incoming: State) Error!void {
         const index: usize = @intCast(id);
@@ -390,48 +395,7 @@ const Liveness = struct {
         @memset(result.positions, &.{});
         if (comptime !compact_parents) @memset(result.parents, .empty);
         @memset(result.queued, false);
-        if (comptime compact_parents) {
-            const counts = try a.alloc(usize, image.blocks.len);
-            @memset(counts, 0);
-            var edge_count: usize = 0;
-            for (image.blocks, 0..) |code, id| {
-                if (analysis.entries[id] == null) continue;
-                var successors: Successors = .{ .image = image, .code = code };
-                while (successors.next()) |next| {
-                    const child: usize = @intCast(next.edge.block);
-                    counts[child] = std.math.add(
-                        usize,
-                        counts[child],
-                        1,
-                    ) catch return error.OutOfMemory;
-                    edge_count = std.math.add(usize, edge_count, 1) catch return error.OutOfMemory;
-                }
-            }
-            const parents = try a.alloc(p.Id, edge_count);
-            var offset: usize = 0;
-            for (result.parents, counts) |*row, count| {
-                row.* = parents[offset..][0..count];
-                offset += count;
-            }
-            // Replay the same immutable edge traversal, preserving predecessor order.
-            @memset(counts, 0);
-            for (image.blocks, 0..) |code, id| {
-                if (analysis.entries[id] == null) continue;
-                var successors: Successors = .{ .image = image, .code = code };
-                while (successors.next()) |next| {
-                    const child: usize = @intCast(next.edge.block);
-                    result.parents[child][counts[child]] = id;
-                    counts[child] += 1;
-                }
-            }
-        } else {
-            for (image.blocks, 0..) |code, id| {
-                if (analysis.entries[id] == null) continue;
-                var successors: Successors = .{ .image = image, .code = code };
-                while (successors.next()) |next|
-                    try result.parents[@intCast(next.edge.block)].append(a, id);
-            }
-        }
+        try result.deriveParents();
         var remaining = image.blocks.len;
         while (remaining != 0) {
             remaining -= 1;
@@ -451,6 +415,53 @@ const Liveness = struct {
             for (parents) |parent| try result.enqueue(parent);
         }
         return result;
+    }
+
+    fn deriveParents(self: *Liveness) Error!void {
+        const a = self.analysis.allocator;
+        const image = self.analysis.image;
+        if (comptime compact_parents) {
+            const counts = try a.alloc(usize, image.blocks.len);
+            @memset(counts, 0);
+            var edge_count: usize = 0;
+            for (image.blocks, 0..) |code, id| {
+                if (self.analysis.entries[id] == null) continue;
+                var successors: Successors = .{ .image = image, .code = code };
+                while (successors.next()) |next| {
+                    const child: usize = @intCast(next.edge.block);
+                    counts[child] = std.math.add(
+                        usize,
+                        counts[child],
+                        1,
+                    ) catch return error.OutOfMemory;
+                    edge_count = std.math.add(usize, edge_count, 1) catch return error.OutOfMemory;
+                }
+            }
+            const parents = try a.alloc(p.Id, edge_count);
+            var offset: usize = 0;
+            for (self.parents, counts) |*row, count| {
+                row.* = parents[offset..][0..count];
+                offset += count;
+            }
+            // Replay the same immutable edge traversal, preserving predecessor order.
+            @memset(counts, 0);
+            for (image.blocks, 0..) |code, id| {
+                if (self.analysis.entries[id] == null) continue;
+                var successors: Successors = .{ .image = image, .code = code };
+                while (successors.next()) |next| {
+                    const child: usize = @intCast(next.edge.block);
+                    self.parents[child][counts[child]] = id;
+                    counts[child] += 1;
+                }
+            }
+        } else {
+            for (image.blocks, 0..) |code, id| {
+                if (self.analysis.entries[id] == null) continue;
+                var successors: Successors = .{ .image = image, .code = code };
+                while (successors.next()) |next|
+                    try self.parents[@intCast(next.edge.block)].append(a, id);
+            }
+        }
     }
 
     fn enqueue(self: *Liveness, id: p.Id) Error!void {

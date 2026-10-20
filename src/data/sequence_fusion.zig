@@ -24,19 +24,24 @@ const Budget = struct {
         self.left -= n;
     }
     fn record(self: *@This(), comptime T: type, value: T) Error!void {
+        @setEvalBranchQuota(10000);
+        return self.recordFields(T, value);
+    }
+
+    inline fn recordFields(self: *@This(), comptime T: type, value: T) Error!void {
         try self.take(1);
         switch (@typeInfo(T)) {
             .@"struct" => |info| inline for (
                 info.field_names,
                 info.field_types,
-            ) |field_name, FieldType| try self.record(FieldType, @field(value, field_name)),
+            ) |field_name, FieldType| try self.recordFields(FieldType, @field(value, field_name)),
             .@"union" => switch (value) {
-                inline else => |v| try self.record(@TypeOf(v), v),
+                inline else => |v| try self.recordFields(@TypeOf(v), v),
             },
             .optional => |info| if (value) |v| {
-                try self.record(info.child, v);
+                try self.recordFields(info.child, v);
             },
-            .pointer => |info| for (value) |v| try self.record(info.child, v),
+            .pointer => |info| for (value) |v| try self.recordFields(info.child, v),
             else => {},
         }
     }
@@ -174,11 +179,27 @@ fn recognize(
         ms.cases[0].assignments.len != 0 or
         ms.cases[1].assignments.len != 0)
         return null;
-    const mbid = ms.cases[1].block;
-    const mb = program.blocks[@intCast(mbid)];
+    return recognizeMapBody(.{
+        .a = a,
+        .budget = budget,
+        .exportable = exportable,
+        .function = function,
+        .id = id,
+        .intermediate = intermediate,
+        .mhid = mhid,
+        .ms = ms,
+        .permissions = permissions,
+        .program = program,
+        .seed = seed,
+        .source = source,
+    });
+}
+fn recognizeMapBody(ctx: anytype) Error!?Shape {
+    const mbid = ctx.ms.cases[1].block;
+    const mb = ctx.program.blocks[@intCast(mbid)];
     if (mb.instructions.len != 3 or mb.terminator != .call) return null;
     const pair = mb.instructions[0].destination;
-    if (!operation(mb.instructions[0], .variant_payload, &.{ms.value}, 1) or
+    if (!operation(mb.instructions[0], .variant_payload, &.{ctx.ms.value}, 1) or
         !operation(mb.instructions[1], .field, &.{pair}, 0) or
         !operation(mb.instructions[2], .field, &.{pair}, 1))
         return null;
@@ -190,30 +211,53 @@ fn recognize(
     const mapped = map_call.next.assignments[0].destination;
     const tail = mb.instructions[2].destination;
     const append_id = map_call.next.block;
-    const append = program.blocks[@intCast(append_id)];
+    const append = ctx.program.blocks[@intCast(append_id)];
     if (append.instructions.len != 1 or
-        append.instructions[0].destination != intermediate or
-        !operation(append.instructions[0], .sequence_append, &.{ intermediate, mapped }, 0) or
+        append.instructions[0].destination != ctx.intermediate or
+        !operation(append.instructions[0], .sequence_append, &.{ ctx.intermediate, mapped }, 0) or
         append.terminator != .jump)
         return null;
-    if (append.terminator.jump.block != mhid or !transfer(
+    if (append.terminator.jump.block != ctx.mhid or !transfer(
         append.terminator.jump,
-        source,
+        ctx.source,
         .{ .slot = tail },
     )) return null;
-    const fiid = ms.cases[0].block;
-    const fi = program.blocks[@intCast(fiid)];
+    return recognizeFoldHead(.{
+        .append_id = append_id,
+        .map_call = map_call,
+        .mapped = mapped,
+        .mb = mb,
+        .mbid = mbid,
+        .pair = pair,
+        .tail = tail,
+        .a = ctx.a,
+        .budget = ctx.budget,
+        .exportable = ctx.exportable,
+        .function = ctx.function,
+        .id = ctx.id,
+        .intermediate = ctx.intermediate,
+        .mhid = ctx.mhid,
+        .ms = ctx.ms,
+        .permissions = ctx.permissions,
+        .program = ctx.program,
+        .seed = ctx.seed,
+        .source = ctx.source,
+    });
+}
+fn recognizeFoldHead(ctx: anytype) Error!?Shape {
+    const fiid = ctx.ms.cases[0].block;
+    const fi = ctx.program.blocks[@intCast(fiid)];
     if (fi.instructions.len != 2 or
         fi.terminator != .jump or
         fi.terminator.jump.assignments.len != 0)
         return null;
-    if (!operation(fi.instructions[0], .move, &.{intermediate}, 0) or
-        !operation(fi.instructions[1], .move, &.{seed}, 0))
+    if (!operation(fi.instructions[0], .move, &.{ctx.intermediate}, 0) or
+        !operation(fi.instructions[1], .move, &.{ctx.seed}, 0))
         return null;
     const rest = fi.instructions[0].destination;
     const accumulator = fi.instructions[1].destination;
     const fhid = fi.terminator.jump.block;
-    const fh = program.blocks[@intCast(fhid)];
+    const fh = ctx.program.blocks[@intCast(fhid)];
     if (fh.instructions.len != 1 or !operation(
         fh.instructions[0],
         .sequence_pop,
@@ -226,11 +270,39 @@ fn recognize(
         fs.cases[0].assignments.len != 0 or
         fs.cases[1].assignments.len != 0)
         return null;
-    const fbid = fs.cases[1].block;
-    const fb = program.blocks[@intCast(fbid)];
+    return recognizeFoldBody(.{
+        .accumulator = accumulator,
+        .fhid = fhid,
+        .fiid = fiid,
+        .fs = fs,
+        .rest = rest,
+        .a = ctx.a,
+        .append_id = ctx.append_id,
+        .budget = ctx.budget,
+        .exportable = ctx.exportable,
+        .function = ctx.function,
+        .id = ctx.id,
+        .intermediate = ctx.intermediate,
+        .map_call = ctx.map_call,
+        .mapped = ctx.mapped,
+        .mb = ctx.mb,
+        .mbid = ctx.mbid,
+        .mhid = ctx.mhid,
+        .ms = ctx.ms,
+        .pair = ctx.pair,
+        .permissions = ctx.permissions,
+        .program = ctx.program,
+        .seed = ctx.seed,
+        .source = ctx.source,
+        .tail = ctx.tail,
+    });
+}
+fn recognizeFoldBody(ctx: anytype) Error!?Shape {
+    const fbid = ctx.fs.cases[1].block;
+    const fb = ctx.program.blocks[@intCast(fbid)];
     if (fb.instructions.len != 3 or fb.terminator != .call) return null;
     const fold_pair = fb.instructions[0].destination;
-    if (!operation(fb.instructions[0], .variant_payload, &.{fs.value}, 1) or
+    if (!operation(fb.instructions[0], .variant_payload, &.{ctx.fs.value}, 1) or
         !operation(fb.instructions[1], .field, &.{fold_pair}, 0) or
         !operation(fb.instructions[2], .field, &.{fold_pair}, 1))
         return null;
@@ -238,69 +310,135 @@ fn recognize(
     if (!std.mem.eql(
         p.Id,
         fold_call.arguments,
-        &.{ accumulator, fb.instructions[1].destination },
-    ) or !transfer(fold_call.next, accumulator, .returned)) return null;
+        &.{ ctx.accumulator, fb.instructions[1].destination },
+    ) or !transfer(fold_call.next, ctx.accumulator, .returned)) return null;
     const backid = fold_call.next.block;
-    const back = program.blocks[@intCast(backid)];
+    const back = ctx.program.blocks[@intCast(backid)];
     if (back.instructions.len != 0 or
         back.terminator != .jump or
-        back.terminator.jump.block != fhid or
-        !transfer(back.terminator.jump, rest, .{ .slot = fb.instructions[2].destination }))
+        back.terminator.jump.block != ctx.fhid or
+        !transfer(back.terminator.jump, ctx.rest, .{ .slot = fb.instructions[2].destination }))
         return null;
-    const doneid = fs.cases[0].block;
-    const done = program.blocks[@intCast(doneid)];
+    const doneid = ctx.fs.cases[0].block;
+    const done = ctx.program.blocks[@intCast(doneid)];
     if (done.instructions.len != 0 or
         done.terminator != .return_value or
-        done.terminator.return_value != accumulator)
+        done.terminator.return_value != ctx.accumulator)
         return null;
-    const ids = [_]p.Id{ function.entry, mhid, mbid, append_id, fiid, fhid, fbid, backid, doneid };
+    return recognizeLoopBoundary(.{
+        .backid = backid,
+        .doneid = doneid,
+        .fb = fb,
+        .fbid = fbid,
+        .fold_call = fold_call,
+        .fold_pair = fold_pair,
+        .a = ctx.a,
+        .accumulator = ctx.accumulator,
+        .append_id = ctx.append_id,
+        .budget = ctx.budget,
+        .exportable = ctx.exportable,
+        .fhid = ctx.fhid,
+        .fiid = ctx.fiid,
+        .fs = ctx.fs,
+        .function = ctx.function,
+        .id = ctx.id,
+        .intermediate = ctx.intermediate,
+        .map_call = ctx.map_call,
+        .mapped = ctx.mapped,
+        .mb = ctx.mb,
+        .mbid = ctx.mbid,
+        .mhid = ctx.mhid,
+        .ms = ctx.ms,
+        .pair = ctx.pair,
+        .permissions = ctx.permissions,
+        .program = ctx.program,
+        .rest = ctx.rest,
+        .seed = ctx.seed,
+        .source = ctx.source,
+        .tail = ctx.tail,
+    });
+}
+fn recognizeLoopBoundary(ctx: anytype) Error!?Shape {
+    const ids = [_]p.Id{
+        ctx.function.entry,
+        ctx.mhid,
+        ctx.mbid,
+        ctx.append_id,
+        ctx.fiid,
+        ctx.fhid,
+        ctx.fbid,
+        ctx.backid,
+        ctx.doneid,
+    };
     if (!distinct(&ids)) return null;
-    for (ids) |bid| if (program.blocks[
+    for (ids) |bid| if (ctx.program.blocks[
         @intCast(bid)
-    ].function != id or program.blocks[
+    ].function != ctx.id or ctx.program.blocks[
         @intCast(bid)
     ].custody != 0) return null;
-    for (program.blocks, 0..) |block, bid| {
-        try budget.take(1);
-        if (block.function == id and std.mem.indexOfScalar(p.Id, &ids, bid) == null) return null;
+    for (ctx.program.blocks, 0..) |block, bid| {
+        try ctx.budget.take(1);
+        if (block.function == ctx.id and std.mem.indexOfScalar(
+            p.Id,
+            &ids,
+            bid,
+        ) == null) return null;
     }
     if (!distinct(&.{
-        source,
-        seed,
-        intermediate,
-        ms.value,
-        pair,
-        mb.instructions[1].destination,
-        tail,
-        mapped,
-        rest,
-        fs.value,
-        fold_pair,
-        fb.instructions[1].destination,
-        fb.instructions[2].destination,
-        accumulator,
+        ctx.source,
+        ctx.seed,
+        ctx.intermediate,
+        ctx.ms.value,
+        ctx.pair,
+        ctx.mb.instructions[1].destination,
+        ctx.tail,
+        ctx.mapped,
+        ctx.rest,
+        ctx.fs.value,
+        ctx.fold_pair,
+        ctx.fb.instructions[1].destination,
+        ctx.fb.instructions[2].destination,
+        ctx.accumulator,
     })) return null;
-    if (!try pure(a, program, map_call.function, permissions, exportable, budget) or
-        !try pure(a, program, fold_call.function, permissions, exportable, budget))
+    return recognizePureLoop(ctx);
+}
+fn recognizePureLoop(ctx: anytype) Error!?Shape {
+    if (!try pure(
+        ctx.a,
+        ctx.program,
+        ctx.map_call.function,
+        ctx.permissions,
+        ctx.exportable,
+        ctx.budget,
+    ) or
+        !try pure(
+            ctx.a,
+            ctx.program,
+            ctx.fold_call.function,
+            ctx.permissions,
+            ctx.exportable,
+            ctx.budget,
+        ))
         return null;
     return .{
-        .entry = function.entry,
-        .map_head = mhid,
-        .map_body = mbid,
-        .append = append_id,
-        .fold_init = fiid,
-        .fold_head = fhid,
-        .fold_body = fbid,
-        .fold_back = backid,
-        .done = doneid,
-        .source = source,
-        .seed = seed,
-        .accumulator = accumulator,
-        .mapped_value = mapped,
-        .source_tail = tail,
-        .folder = fold_call.function,
+        .entry = ctx.function.entry,
+        .map_head = ctx.mhid,
+        .map_body = ctx.mbid,
+        .append = ctx.append_id,
+        .fold_init = ctx.fiid,
+        .fold_head = ctx.fhid,
+        .fold_body = ctx.fbid,
+        .fold_back = ctx.backid,
+        .done = ctx.doneid,
+        .source = ctx.source,
+        .seed = ctx.seed,
+        .accumulator = ctx.accumulator,
+        .mapped_value = ctx.mapped,
+        .source_tail = ctx.tail,
+        .folder = ctx.fold_call.function,
     };
 }
+
 pub const Candidate = struct {
     arena: std.heap.ArenaAllocator,
     program: ir.Program,
@@ -431,58 +569,60 @@ pub fn validate(
             if (!equal(ir.Block, old, actual)) return error.InvalidSequenceFusion;
             continue;
         };
-        const s = shapes[index];
-        if (bid == s.entry) {
-            const expected: ir.Instruction = .{
-                .destination = s.accumulator,
-                .opcode = .move,
-                .operands = &.{s.seed},
-            };
-            if (actual.instructions.len != 1 or !equal(
-                ir.Instruction,
-                expected,
-                actual.instructions[0],
-            ) or !equal(
-                ir.Terminator,
-                old.terminator,
-                actual.terminator,
-            )) return error.InvalidSequenceFusion;
-        } else if (bid == s.map_head) {
-            if (!equal(
-                []const ir.Instruction,
-                old.instructions,
-                actual.instructions,
-            ) or actual.terminator != .switch_variant) return error.InvalidSequenceFusion;
-            const original_switch = old.terminator.switch_variant;
-            const changed = actual.terminator.switch_variant;
-            if (changed.value != original_switch.value or
-                changed.cases.len != 2 or
-                changed.cases[0].block != s.done or
-                changed.cases[0].assignments.len != 0 or
-                !equal(ir.Edge, original_switch.cases[1], changed.cases[1]))
-                return error.InvalidSequenceFusion;
-        } else if (bid == s.append) {
-            if (actual.instructions.len != 0 or
-                actual.terminator != .call)
-                return error.InvalidSequenceFusion;
-            const call = actual.terminator.call;
-            if (call.function != s.folder or !std.mem.eql(
-                p.Id,
-                call.arguments,
-                &.{ s.accumulator, s.mapped_value },
-            ) or call.next.block != s.fold_back or !transfer(
-                call.next,
-                s.accumulator,
-                .returned,
-            )) return error.InvalidSequenceFusion;
-        } else if (bid == s.fold_back) {
-            if (actual.instructions.len != 0 or
-                actual.terminator != .jump or
-                actual.terminator.jump.block != s.map_head or
-                !transfer(actual.terminator.jump, s.source, .{ .slot = s.source_tail }))
-                return error.InvalidSequenceFusion;
-        } else if (!equal(ir.Block, old, actual)) return error.InvalidSequenceFusion;
+        try validateBlock(old, actual, bid, shapes[index]);
     }
+}
+fn validateBlock(old: ir.Block, actual: ir.Block, bid: usize, s: Shape) Error!void {
+    if (bid == s.entry) {
+        const expected: ir.Instruction = .{
+            .destination = s.accumulator,
+            .opcode = .move,
+            .operands = &.{s.seed},
+        };
+        if (actual.instructions.len != 1 or !equal(
+            ir.Instruction,
+            expected,
+            actual.instructions[0],
+        ) or !equal(
+            ir.Terminator,
+            old.terminator,
+            actual.terminator,
+        )) return error.InvalidSequenceFusion;
+    } else if (bid == s.map_head) {
+        if (!equal(
+            []const ir.Instruction,
+            old.instructions,
+            actual.instructions,
+        ) or actual.terminator != .switch_variant) return error.InvalidSequenceFusion;
+        const original_switch = old.terminator.switch_variant;
+        const changed = actual.terminator.switch_variant;
+        if (changed.value != original_switch.value or
+            changed.cases.len != 2 or
+            changed.cases[0].block != s.done or
+            changed.cases[0].assignments.len != 0 or
+            !equal(ir.Edge, original_switch.cases[1], changed.cases[1]))
+            return error.InvalidSequenceFusion;
+    } else if (bid == s.append) {
+        if (actual.instructions.len != 0 or
+            actual.terminator != .call)
+            return error.InvalidSequenceFusion;
+        const call = actual.terminator.call;
+        if (call.function != s.folder or !std.mem.eql(
+            p.Id,
+            call.arguments,
+            &.{ s.accumulator, s.mapped_value },
+        ) or call.next.block != s.fold_back or !transfer(
+            call.next,
+            s.accumulator,
+            .returned,
+        )) return error.InvalidSequenceFusion;
+    } else if (bid == s.fold_back) {
+        if (actual.instructions.len != 0 or
+            actual.terminator != .jump or
+            actual.terminator.jump.block != s.map_head or
+            !transfer(actual.terminator.jump, s.source, .{ .slot = s.source_tail }))
+            return error.InvalidSequenceFusion;
+    } else if (!equal(ir.Block, old, actual)) return error.InvalidSequenceFusion;
 }
 pub fn possible(program: ir.Program) bool {
     for (program.blocks) |block|

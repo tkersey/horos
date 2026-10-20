@@ -2,16 +2,20 @@
 set -euo pipefail
 
 if [[ $# -lt 1 || $# -gt 2 ]]; then
-    printf 'Usage: bash tools/tiger-style.sh BASE [HEAD]\n' >&2
+    printf 'Usage: bash tools/tiger-style.sh BASE|--all [HEAD]\n' >&2
     exit 64
 fi
 
-auditor_revision=23d1fa5715ef50e2db1e9fa79b5b3fd6223ee4ca
+auditor_revision=d91552e788863ab43306164001c35ae99d2fbf53
 repository=$(git rev-parse --show-toplevel)
 cd "$repository"
 
-base=$(git rev-parse --verify --end-of-options "$1^{commit}")
 head=$(git rev-parse --verify --end-of-options "${2:-HEAD}^{commit}")
+if [[ "$1" == --all ]]; then
+    base=$head
+else
+    base=$(git rev-parse --verify --end-of-options "$1^{commit}")
+fi
 if [[ "$head" != "$(git rev-parse --verify HEAD)" ]]; then
     printf 'TigerStyle requires HEAD to be the requested candidate.\n' >&2
     exit 1
@@ -53,5 +57,26 @@ fi
 
 printf 'TigerStyle: base=%s head=%s auditor=%s\n' "$base" "$head" "$auditor_revision"
 zig test "$scratch/auditor/tools/tiger_style/main.zig"
+if [[ "$1" == --all ]]; then
+    paths=()
+    git ls-files --stage -z -- '*.zig' > "$scratch/sources"
+    while IFS= read -r -d '' entry; do
+        metadata=${entry%%$'\t'*}
+        path=${entry#*$'\t'}
+        mode=${metadata%% *}
+        if [[ "$mode" != 100644 && "$mode" != 100755 ]] ||
+            [[ ! -f "$path" || -L "$path" ]]; then
+            printf 'TigerStyle requires regular tracked Zig files: %s\n' "$path" >&2
+            exit 1
+        fi
+        paths+=("$path")
+    done < "$scratch/sources"
+    if [[ ${#paths[@]} -eq 0 ]]; then
+        printf 'TigerStyle requires at least one tracked Zig file.\n' >&2
+        exit 1
+    fi
+    zig run "$scratch/auditor/tools/tiger_style/main.zig" -- audit-files "${paths[@]}"
+    exit
+fi
 zig run "$scratch/auditor/tools/tiger_style/main.zig" -- \
     audit-diff --base "$base" --head "$head"

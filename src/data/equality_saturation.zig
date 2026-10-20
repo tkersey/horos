@@ -78,12 +78,33 @@ fn width(schema: p.Schema) ?usize {
     };
 }
 fn allowed(program: ir.Program, schema: p.Id, depth: usize, budget: *Budget) Error!bool {
-    try budget.tick();
-    if (depth >= 32) return false;
-    const value = program.schemas[@intCast(schema)];
-    if (width(value) != null) return true;
-    if (value != .product) return false;
-    for (value.product) |field| if (!try allowed(program, field, depth + 1, budget)) return false;
+    const Frame = struct { schema: p.Id, next: ?usize = null };
+    var frames: [33]Frame = undefined;
+    frames[0] = .{ .schema = schema };
+    var count: usize = 1;
+    while (count != 0) {
+        const frame = &frames[count - 1];
+        if (frame.next == null) {
+            try budget.tick();
+            if (depth >= 32 or count - 1 >= 32 - depth) return false;
+            const value = program.schemas[@intCast(frame.schema)];
+            if (width(value) != null) {
+                count -= 1;
+                continue;
+            }
+            if (value != .product) return false;
+            frame.next = 0;
+        }
+        const fields = program.schemas[@intCast(frame.schema)].product;
+        if (frame.next.? == fields.len) {
+            count -= 1;
+            continue;
+        }
+        const child = fields[frame.next.?];
+        frame.next.? += 1;
+        frames[count] = .{ .schema = child };
+        count += 1;
+    }
     return true;
 }
 fn arity(node: Node) usize {
@@ -313,71 +334,7 @@ fn saturate(graph: *Graph, stats: *Statistics, rounds: usize) Error!void {
         const old_nodes = graph.nodes.items.len;
         const old_steps = graph.steps.items.len;
         for (0..old_nodes) |id| {
-            const node = graph.nodes.items[id];
-            if (node.kind == .field) for (0..old_nodes) |via| {
-                try graph.budget.tick();
-                const product = graph.nodes.items[via];
-                if (product.kind == .product and node.value < product.fields.len and equivalent(
-                    graph.parents.items,
-                    node.left,
-                    via,
-                )) try graph.merge(.{
-                    .law = .projection,
-                    .left = id,
-                    .right = product.fields[@intCast(node.value)],
-                    .auxiliary = via,
-                });
-            };
-            if (node.kind != .xor) continue;
-            const zero = try graph.add(.{ .kind = .literal, .schema = node.schema, .value = 0 });
-            if (equivalent(graph.parents.items, node.left, node.right))
-                try graph.merge(.{ .law = .cancel, .left = id, .right = zero });
-            if (equivalent(graph.parents.items, node.left, zero)) try graph.merge(.{
-                .law = .zero,
-                .left = id,
-                .right = node.right,
-                .auxiliary = zero,
-            });
-            if (equivalent(graph.parents.items, node.right, zero)) try graph.merge(.{
-                .law = .zero,
-                .left = id,
-                .right = node.left,
-                .auxiliary = zero,
-            });
-            const swapped = try graph.add(.{
-                .kind = .xor,
-                .schema = node.schema,
-                .left = node.right,
-                .right = node.left,
-            });
-            try graph.merge(.{ .law = .commute, .left = id, .right = swapped });
-            for (0..old_nodes) |via| {
-                try graph.budget.tick();
-                const inner = graph.nodes.items[via];
-                if (inner.kind != .xor or !equivalent(
-                    graph.parents.items,
-                    node.left,
-                    via,
-                )) continue;
-                const tail = try graph.add(.{
-                    .kind = .xor,
-                    .schema = node.schema,
-                    .left = inner.right,
-                    .right = node.right,
-                });
-                const outer = try graph.add(.{
-                    .kind = .xor,
-                    .schema = node.schema,
-                    .left = inner.left,
-                    .right = tail,
-                });
-                try graph.merge(.{
-                    .law = .associate,
-                    .left = id,
-                    .right = outer,
-                    .auxiliary = via,
-                });
-            }
+            try saturateNode(graph, id, old_nodes);
         }
         for (0..graph.nodes.items.len) |i| for (0..i) |j| {
             try graph.budget.tick();
@@ -396,12 +353,80 @@ fn saturate(graph: *Graph, stats: *Statistics, rounds: usize) Error!void {
     }
     return error.EqualityWorkLimit;
 }
-fn materialize(
-    graph: *Graph,
-    original: ir.Program,
-    root: usize,
-    stats: *Statistics,
-) Error!ir.Program {
+
+fn saturateNode(graph: *Graph, id: usize, old_nodes: usize) Error!void {
+    const node = graph.nodes.items[id];
+    if (node.kind == .field) for (0..old_nodes) |via| {
+        try graph.budget.tick();
+        const product = graph.nodes.items[via];
+        if (product.kind == .product and node.value < product.fields.len and equivalent(
+            graph.parents.items,
+            node.left,
+            via,
+        )) try graph.merge(.{
+            .law = .projection,
+            .left = id,
+            .right = product.fields[@intCast(node.value)],
+            .auxiliary = via,
+        });
+    };
+    if (node.kind != .xor) return;
+    const zero = try graph.add(.{ .kind = .literal, .schema = node.schema, .value = 0 });
+    if (equivalent(graph.parents.items, node.left, node.right))
+        try graph.merge(.{ .law = .cancel, .left = id, .right = zero });
+    if (equivalent(graph.parents.items, node.left, zero)) try graph.merge(.{
+        .law = .zero,
+        .left = id,
+        .right = node.right,
+        .auxiliary = zero,
+    });
+    if (equivalent(graph.parents.items, node.right, zero)) try graph.merge(.{
+        .law = .zero,
+        .left = id,
+        .right = node.left,
+        .auxiliary = zero,
+    });
+    const swapped = try graph.add(.{
+        .kind = .xor,
+        .schema = node.schema,
+        .left = node.right,
+        .right = node.left,
+    });
+    try graph.merge(.{ .law = .commute, .left = id, .right = swapped });
+    try associateNode(graph, node, id, old_nodes);
+}
+
+fn associateNode(graph: *Graph, node: Node, id: usize, old_nodes: usize) Error!void {
+    for (0..old_nodes) |via| {
+        try graph.budget.tick();
+        const inner = graph.nodes.items[via];
+        if (inner.kind != .xor or !equivalent(
+            graph.parents.items,
+            node.left,
+            via,
+        )) continue;
+        const tail = try graph.add(.{
+            .kind = .xor,
+            .schema = node.schema,
+            .left = inner.right,
+            .right = node.right,
+        });
+        const outer = try graph.add(.{
+            .kind = .xor,
+            .schema = node.schema,
+            .left = inner.left,
+            .right = tail,
+        });
+        try graph.merge(.{
+            .law = .associate,
+            .left = id,
+            .right = outer,
+            .auxiliary = via,
+        });
+    }
+}
+const Selection = struct { costs: []?u64, choices: []?usize };
+fn selectNodes(graph: *Graph) Error!Selection {
     const a = graph.allocator;
     const n = graph.nodes.items.len;
     const costs = try a.alloc(?u64, n);
@@ -439,6 +464,11 @@ fn materialize(
         }
         if (!changed) break;
     }
+    return .{ .costs = costs, .choices = choices };
+}
+fn neededNodes(graph: *Graph, choices: []const ?usize, root: usize) Error![]bool {
+    const a = graph.allocator;
+    const n = graph.nodes.items.len;
     const needed = try a.alloc(bool, n);
     @memset(needed, false);
     needed[find(graph.parents.items, root)] = true;
@@ -457,14 +487,81 @@ fn materialize(
         };
         if (!changed) break;
     }
-    var constants: std.ArrayList(p.Literal) = .empty;
-    try constants.appendSlice(a, original.constants);
-    var layout: std.ArrayList(p.Id) = .empty;
-    try layout.appendSlice(a, original.functions[0].layout.slots);
-    var instructions: std.ArrayList(ir.Instruction) = .empty;
+    return needed;
+}
+const Emission = struct {
+    constants: std.ArrayList(p.Literal) = .empty,
+    layout: std.ArrayList(p.Id) = .empty,
+    instructions: std.ArrayList(ir.Instruction) = .empty,
+};
+fn emitNode(
+    graph: *Graph,
+    original: ir.Program,
+    node: Node,
+    output: []const ?p.Id,
+    used: []bool,
+    emission: *Emission,
+) Error!p.Id {
+    const a = graph.allocator;
+    const operands = try a.alloc(p.Id, arity(node));
+    for (
+        operands,
+        0..,
+    ) |*operand, index| operand.* = output[
+        find(graph.parents.items, childAt(node, index))
+    ].?;
+    var destination: ?p.Id = null;
+    for (used, 0..) |occupied, slot| if (!occupied and emission.layout.items[slot] == node.schema) {
+        used[slot] = true;
+        destination = @intCast(slot);
+        break;
+    };
+    if (destination == null) {
+        destination = @intCast(emission.layout.items.len);
+        try emission.layout.append(a, node.schema);
+    }
+    var op: ir.Instruction = .{
+        .destination = destination.?,
+        .opcode = .integer_bit_xor,
+        .operands = operands,
+    };
+    if (node.kind == .product) op.opcode = .product;
+    if (node.kind == .field) {
+        op.opcode = .field;
+        op.immediate = node.value;
+    }
+    if (node.kind == .literal) {
+        const size = width(original.schemas[@intCast(node.schema)]).?;
+        const bytes = try a.alloc(u8, size);
+        for (
+            bytes,
+            0..,
+        ) |*byte, i| byte.* = @truncate(node.value >> @as(u6, @intCast(i * 8)));
+        op.opcode = .constant;
+        op.immediate = emission.constants.items.len;
+        try emission.constants.append(a, .{ .schema = node.schema, .bytes = bytes });
+    }
+    try emission.instructions.append(a, op);
+    return destination.?;
+}
+fn materialize(
+    graph: *Graph,
+    original: ir.Program,
+    root: usize,
+    stats: *Statistics,
+) Error!ir.Program {
+    const a = graph.allocator;
+    const n = graph.nodes.items.len;
+    const selection = try selectNodes(graph);
+    const costs = selection.costs;
+    const choices = selection.choices;
+    const needed = try neededNodes(graph, choices, root);
+    var emission: Emission = .{};
+    try emission.constants.appendSlice(a, original.constants);
+    try emission.layout.appendSlice(a, original.functions[0].layout.slots);
     const output = try a.alloc(?p.Id, n);
     @memset(output, null);
-    const used = try a.alloc(bool, layout.items.len);
+    const used = try a.alloc(bool, emission.layout.items.len);
     @memset(used, false);
     for (original.functions[0].inputs) |slot| used[@intCast(slot)] = true;
     for (0..n) |_| {
@@ -486,46 +583,7 @@ fn materialize(
                 break;
             };
             if (!ready) continue;
-            const operands = try a.alloc(p.Id, arity(node));
-            for (
-                operands,
-                0..,
-            ) |*operand, index| operand.* = output[
-                find(graph.parents.items, childAt(node, index))
-            ].?;
-            var destination: ?p.Id = null;
-            for (used, 0..) |occupied, slot| if (!occupied and layout.items[slot] == node.schema) {
-                used[slot] = true;
-                destination = @intCast(slot);
-                break;
-            };
-            if (destination == null) {
-                destination = @intCast(layout.items.len);
-                try layout.append(a, node.schema);
-            }
-            var op: ir.Instruction = .{
-                .destination = destination.?,
-                .opcode = .integer_bit_xor,
-                .operands = operands,
-            };
-            if (node.kind == .product) op.opcode = .product;
-            if (node.kind == .field) {
-                op.opcode = .field;
-                op.immediate = node.value;
-            }
-            if (node.kind == .literal) {
-                const size = width(original.schemas[@intCast(node.schema)]).?;
-                const bytes = try a.alloc(u8, size);
-                for (
-                    bytes,
-                    0..,
-                ) |*byte, i| byte.* = @truncate(node.value >> @as(u6, @intCast(i * 8)));
-                op.opcode = .constant;
-                op.immediate = constants.items.len;
-                try constants.append(a, .{ .schema = node.schema, .bytes = bytes });
-            }
-            try instructions.append(a, op);
-            output[owner] = destination;
+            output[owner] = try emitNode(graph, original, node, output, used, &emission);
             progress = true;
         }
         if (!progress) break;
@@ -534,16 +592,16 @@ fn materialize(
         find(graph.parents.items, root)
     ] orelse return error.EqualityWorkLimit;
     stats.heuristic_tree_cost = costs[find(graph.parents.items, root)];
-    stats.materialized_instructions = instructions.items.len;
+    stats.materialized_instructions = emission.instructions.items.len;
     const functions = try a.dupe(ir.Function, original.functions);
-    functions[0].layout.slots = try layout.toOwnedSlice(a);
+    functions[0].layout.slots = try emission.layout.toOwnedSlice(a);
     const blocks = try a.dupe(ir.Block, original.blocks);
-    blocks[0].instructions = try instructions.toOwnedSlice(a);
+    blocks[0].instructions = try emission.instructions.toOwnedSlice(a);
     blocks[0].terminator = .{ .return_value = result_slot };
     var program = original;
     program.functions = functions;
     program.blocks = blocks;
-    program.constants = try constants.toOwnedSlice(a);
+    program.constants = try emission.constants.toOwnedSlice(a);
     return program;
 }
 pub fn construct(
@@ -590,6 +648,252 @@ pub fn construct(
     return .{ .arena = arena, .program = program, .proof = proof };
 }
 
+fn validateNode(original: ir.Program, proof: Proof, id: usize, budget: *Budget) Error!void {
+    const node = proof.nodes[id];
+
+    try budget.tick();
+    if (node.schema >= original.schemas.len) return error.InvalidEqualityProof;
+    if (!try allowed(
+        original,
+        node.schema,
+        0,
+        budget,
+    )) return error.InvalidEqualityProof;
+    switch (node.kind) {
+        .input => try validateInput(original, node),
+        .literal => try validateLiteral(original, node),
+        .xor => try validateXor(original, node, id, proof),
+        .product => try validateProduct(original, node, id, proof),
+        .field => try validateField(original, node, id, proof),
+    }
+}
+fn validateInput(original: ir.Program, node: Node) Error!void {
+    if (node.fields.len != 0 or
+        node.left != 0 or
+        node.right != 0 or
+        std.mem.indexOfScalar(
+            p.Id,
+            original.functions[0].inputs,
+            node.value,
+        ) == null or
+        original.functions[0].layout.slots[
+            @intCast(node.value)
+        ] != node.schema)
+        return error.InvalidEqualityProof;
+}
+fn validateLiteral(original: ir.Program, node: Node) Error!void {
+    const bytes = width(
+        original.schemas[
+            @intCast(node.schema)
+        ],
+    ) orelse return error.InvalidEqualityProof;
+    if (node.fields.len != 0 or
+        node.left != 0 or
+        node.right != 0 or
+        (bytes < 8 and
+            node.value >> @as(u6, @intCast(bytes * 8)) != 0))
+        return error.InvalidEqualityProof;
+}
+fn validateXor(original: ir.Program, node: Node, id: usize, proof: Proof) Error!void {
+    if (width(original.schemas[
+        @intCast(node.schema)
+    ]) == null or
+        node.fields.len != 0 or
+        node.value != 0 or
+        node.left >= id or
+        node.right >= id or
+        proof.nodes[node.left].schema != node.schema or
+        proof.nodes[node.right].schema != node.schema)
+        return error.InvalidEqualityProof;
+}
+fn validateProduct(original: ir.Program, node: Node, id: usize, proof: Proof) Error!void {
+    const schema = original.schemas[@intCast(node.schema)];
+    if (schema != .product or
+        node.value != 0 or
+        node.left != 0 or
+        node.right != 0 or
+        node.fields.len != schema.product.len)
+        return error.InvalidEqualityProof;
+    for (
+        node.fields,
+        schema.product,
+    ) |field, sid|
+        if (field >= id or
+            proof.nodes[field].schema != sid)
+            return error.InvalidEqualityProof;
+}
+fn validateField(original: ir.Program, node: Node, id: usize, proof: Proof) Error!void {
+    if (node.fields.len != 0 or
+        node.right != 0 or
+        node.left >= id)
+        return error.InvalidEqualityProof;
+    const schema = original.schemas[@intCast(proof.nodes[node.left].schema)];
+    if (schema != .product or node.value >= schema.product.len or schema.product[
+        @intCast(node.value)
+    ] != node.schema) return error.InvalidEqualityProof;
+}
+fn replayProof(a: std.mem.Allocator, proof: Proof, budget: *Budget) Error![]usize {
+    const parents = try a.alloc(usize, proof.nodes.len);
+    for (parents, 0..) |*parent, id| parent.* = id;
+    for (proof.steps) |step| {
+        try budget.tick();
+        if (step.left >= proof.nodes.len or
+            step.right >= proof.nodes.len)
+            return error.InvalidEqualityProof;
+        if (step.law == .congruence) try chargeComparison(
+            budget,
+            proof.nodes[step.left],
+            proof.nodes[step.right],
+        );
+        if (!justified(proof.nodes, parents, step)) return error.InvalidEqualityProof;
+        const left = find(parents, step.left);
+        const right = find(parents, step.right);
+        parents[@max(left, right)] = @min(left, right);
+    }
+    return parents;
+}
+fn validateCandidateShape(
+    original: ir.Program,
+    candidate: ir.Program,
+    budget: *Budget,
+) Error!void {
+    if (candidate.functions.len != 1 or
+        candidate.blocks.len != 1 or
+        candidate.constants.len < original.constants.len)
+        return error.InvalidEqualityProof;
+    var rest = candidate;
+    rest.functions = original.functions;
+    rest.blocks = original.blocks;
+    rest.constants = original.constants;
+    if (!equal(ir.Program, original, rest) or !equal(
+        []const p.Literal,
+        original.constants,
+        candidate.constants[0..original.constants.len],
+    )) return error.InvalidEqualityProof;
+    const old = original.functions[0];
+    const f = candidate.functions[0];
+    if (f.layout.slots.len < old.layout.slots.len or !std.mem.eql(
+        p.Id,
+        old.layout.slots,
+        f.layout.slots[0..old.layout.slots.len],
+    )) return error.InvalidEqualityProof;
+    var metadata = f;
+    metadata.layout = old.layout;
+    if (!equal(ir.Function, old, metadata)) return error.InvalidEqualityProof;
+    for (f.layout.slots) |schema| if (!try allowed(
+        candidate,
+        schema,
+        0,
+        budget,
+    )) return error.InvalidEqualityProof;
+    for (original.constants.len..candidate.constants.len) |id| if (literal(
+        candidate,
+        id,
+    ) == null) return error.InvalidEqualityProof;
+    const block = candidate.blocks[0];
+    if (block.function != 0 or
+        block.custody != 0 or
+        block.terminator != .return_value)
+        return error.InvalidEqualityProof;
+}
+fn expectedNode(
+    a: std.mem.Allocator,
+    candidate: ir.Program,
+    op: ir.Instruction,
+    slots: []const ?usize,
+) Error!Node {
+    const f = candidate.functions[0];
+    var expected: Node = .{
+        .kind = .literal,
+        .schema = f.layout.slots[@intCast(op.destination)],
+    };
+    switch (op.opcode) {
+        .constant => expected.value = literal(
+            candidate,
+            op.immediate,
+        ) orelse return error.InvalidEqualityProof,
+        .integer_bit_xor => {
+            if (op.operands.len != 2) return error.InvalidEqualityProof;
+            expected.kind = .xor;
+            expected.left = slots[
+                @intCast(op.operands[0])
+            ] orelse return error.InvalidEqualityProof;
+            expected.right = slots[
+                @intCast(op.operands[1])
+            ] orelse return error.InvalidEqualityProof;
+        },
+        .product => {
+            const fields = try a.alloc(usize, op.operands.len);
+            for (
+                op.operands,
+                fields,
+            ) |slot, *field| field.* = slots[
+                @intCast(slot)
+            ] orelse return error.InvalidEqualityProof;
+            expected.kind = .product;
+            expected.fields = fields;
+        },
+        .field => {
+            if (op.operands.len != 1) return error.InvalidEqualityProof;
+            expected.kind = .field;
+            expected.value = op.immediate;
+            expected.left = slots[
+                @intCast(op.operands[0])
+            ] orelse return error.InvalidEqualityProof;
+        },
+        else => return error.InvalidEqualityProof,
+    }
+    return expected;
+}
+fn validateCandidateResult(
+    a: std.mem.Allocator,
+    candidate: ir.Program,
+    source_nodes: []const Node,
+    proof: Proof,
+    parents: []usize,
+    root: usize,
+    budget: *Budget,
+) Error!void {
+    const f = candidate.functions[0];
+    const block = candidate.blocks[0];
+    const slots = try a.alloc(?usize, f.layout.slots.len);
+    @memset(slots, null);
+    for (f.inputs) |slot| for (
+        source_nodes,
+        0..,
+    ) |node, id| if (node.kind == .input and node.value == slot) {
+        slots[@intCast(slot)] = id;
+        break;
+    };
+    for (block.instructions) |op| {
+        try budget.tick();
+        if (op.failures.len != 0) return error.InvalidEqualityProof;
+        if (op.opcode == .move) {
+            if (op.operands.len != 1) return error.InvalidEqualityProof;
+            slots[
+                @intCast(op.destination)
+            ] = slots[
+                @intCast(op.operands[0])
+            ] orelse return error.InvalidEqualityProof;
+            continue;
+        }
+        const expected = try expectedNode(a, candidate, op, slots);
+        var matched: ?usize = null;
+        for (proof.nodes, 0..) |node, id| {
+            try budget.tick();
+            try chargeComparison(budget, node, expected);
+            if (same(parents, node, expected)) {
+                matched = id;
+                break;
+            }
+        }
+        slots[@intCast(op.destination)] = matched orelse return error.InvalidEqualityProof;
+    }
+    const result = slots[
+        @intCast(block.terminator.return_value)
+    ] orelse return error.InvalidEqualityProof;
+    if (!equivalent(parents, result, root)) return error.InvalidEqualityProof;
+}
 pub fn validate(
     allocator: std.mem.Allocator,
     original: ir.Program,
@@ -623,214 +927,18 @@ pub fn validate(
         source.nodes.items,
         proof.nodes[0..source.nodes.items.len],
     )) return error.InvalidEqualityProof;
-    for (proof.nodes, 0..) |node, id| {
-        try source.budget.tick();
-        if (node.schema >= original.schemas.len) return error.InvalidEqualityProof;
-        if (!try allowed(
-            original,
-            node.schema,
-            0,
-            &source.budget,
-        )) return error.InvalidEqualityProof;
-        switch (node.kind) {
-            .input => {
-                if (node.fields.len != 0 or
-                    node.left != 0 or
-                    node.right != 0 or
-                    std.mem.indexOfScalar(
-                        p.Id,
-                        original.functions[0].inputs,
-                        node.value,
-                    ) == null or
-                    original.functions[0].layout.slots[
-                        @intCast(node.value)
-                    ] != node.schema)
-                    return error.InvalidEqualityProof;
-            },
-            .literal => {
-                const bytes = width(
-                    original.schemas[
-                        @intCast(node.schema)
-                    ],
-                ) orelse return error.InvalidEqualityProof;
-                if (node.fields.len != 0 or
-                    node.left != 0 or
-                    node.right != 0 or
-                    (bytes < 8 and
-                        node.value >> @as(u6, @intCast(bytes * 8)) != 0))
-                    return error.InvalidEqualityProof;
-            },
-            .xor => {
-                if (width(original.schemas[
-                    @intCast(node.schema)
-                ]) == null or
-                    node.fields.len != 0 or
-                    node.value != 0 or
-                    node.left >= id or
-                    node.right >= id or
-                    proof.nodes[node.left].schema != node.schema or
-                    proof.nodes[node.right].schema != node.schema)
-                    return error.InvalidEqualityProof;
-            },
-            .product => {
-                const schema = original.schemas[@intCast(node.schema)];
-                if (schema != .product or
-                    node.value != 0 or
-                    node.left != 0 or
-                    node.right != 0 or
-                    node.fields.len != schema.product.len)
-                    return error.InvalidEqualityProof;
-                for (
-                    node.fields,
-                    schema.product,
-                ) |field, sid|
-                    if (field >= id or
-                        proof.nodes[field].schema != sid)
-                        return error.InvalidEqualityProof;
-            },
-            .field => {
-                if (node.fields.len != 0 or
-                    node.right != 0 or
-                    node.left >= id)
-                    return error.InvalidEqualityProof;
-                const schema = original.schemas[@intCast(proof.nodes[node.left].schema)];
-                if (schema != .product or node.value >= schema.product.len or schema.product[
-                    @intCast(node.value)
-                ] != node.schema) return error.InvalidEqualityProof;
-            },
-        }
-    }
-    const parents = try a.alloc(usize, proof.nodes.len);
-    for (parents, 0..) |*parent, id| parent.* = id;
-    for (proof.steps) |step| {
-        try source.budget.tick();
-        if (step.left >= proof.nodes.len or
-            step.right >= proof.nodes.len)
-            return error.InvalidEqualityProof;
-        if (step.law == .congruence) try chargeComparison(
-            &source.budget,
-            proof.nodes[step.left],
-            proof.nodes[step.right],
-        );
-        if (!justified(proof.nodes, parents, step)) return error.InvalidEqualityProof;
-        const left = find(parents, step.left);
-        const right = find(parents, step.right);
-        parents[@max(left, right)] = @min(left, right);
-    }
-    if (candidate.functions.len != 1 or
-        candidate.blocks.len != 1 or
-        candidate.constants.len < original.constants.len)
-        return error.InvalidEqualityProof;
-    var rest = candidate;
-    rest.functions = original.functions;
-    rest.blocks = original.blocks;
-    rest.constants = original.constants;
-    if (!equal(ir.Program, original, rest) or !equal(
-        []const p.Literal,
-        original.constants,
-        candidate.constants[0..original.constants.len],
-    )) return error.InvalidEqualityProof;
-    const old = original.functions[0];
-    const f = candidate.functions[0];
-    if (f.layout.slots.len < old.layout.slots.len or !std.mem.eql(
-        p.Id,
-        old.layout.slots,
-        f.layout.slots[0..old.layout.slots.len],
-    )) return error.InvalidEqualityProof;
-    var metadata = f;
-    metadata.layout = old.layout;
-    if (!equal(ir.Function, old, metadata)) return error.InvalidEqualityProof;
-    for (f.layout.slots) |schema| if (!try allowed(
+    for (0..proof.nodes.len) |id| try validateNode(original, proof, id, &source.budget);
+    const parents = try replayProof(a, proof, &source.budget);
+    try validateCandidateShape(original, candidate, &source.budget);
+    try validateCandidateResult(
+        a,
         candidate,
-        schema,
-        0,
-        &source.budget,
-    )) return error.InvalidEqualityProof;
-    for (original.constants.len..candidate.constants.len) |id| if (literal(
-        candidate,
-        id,
-    ) == null) return error.InvalidEqualityProof;
-    const block = candidate.blocks[0];
-    if (block.function != 0 or
-        block.custody != 0 or
-        block.terminator != .return_value)
-        return error.InvalidEqualityProof;
-    const slots = try a.alloc(?usize, f.layout.slots.len);
-    @memset(slots, null);
-    for (f.inputs) |slot| for (
         source.nodes.items,
-        0..,
-    ) |node, id| if (node.kind == .input and node.value == slot) {
-        slots[@intCast(slot)] = id;
-        break;
-    };
-    for (block.instructions) |op| {
-        try source.budget.tick();
-        if (op.failures.len != 0) return error.InvalidEqualityProof;
-        if (op.opcode == .move) {
-            if (op.operands.len != 1) return error.InvalidEqualityProof;
-            slots[
-                @intCast(op.destination)
-            ] = slots[
-                @intCast(op.operands[0])
-            ] orelse return error.InvalidEqualityProof;
-            continue;
-        }
-        var expected: Node = .{
-            .kind = .literal,
-            .schema = f.layout.slots[@intCast(op.destination)],
-        };
-        switch (op.opcode) {
-            .constant => expected.value = literal(
-                candidate,
-                op.immediate,
-            ) orelse return error.InvalidEqualityProof,
-            .integer_bit_xor => {
-                if (op.operands.len != 2) return error.InvalidEqualityProof;
-                expected.kind = .xor;
-                expected.left = slots[
-                    @intCast(op.operands[0])
-                ] orelse return error.InvalidEqualityProof;
-                expected.right = slots[
-                    @intCast(op.operands[1])
-                ] orelse return error.InvalidEqualityProof;
-            },
-            .product => {
-                const fields = try a.alloc(usize, op.operands.len);
-                for (
-                    op.operands,
-                    fields,
-                ) |slot, *field| field.* = slots[
-                    @intCast(slot)
-                ] orelse return error.InvalidEqualityProof;
-                expected.kind = .product;
-                expected.fields = fields;
-            },
-            .field => {
-                if (op.operands.len != 1) return error.InvalidEqualityProof;
-                expected.kind = .field;
-                expected.value = op.immediate;
-                expected.left = slots[
-                    @intCast(op.operands[0])
-                ] orelse return error.InvalidEqualityProof;
-            },
-            else => return error.InvalidEqualityProof,
-        }
-        var matched: ?usize = null;
-        for (proof.nodes, 0..) |node, id| {
-            try source.budget.tick();
-            try chargeComparison(&source.budget, node, expected);
-            if (same(parents, node, expected)) {
-                matched = id;
-                break;
-            }
-        }
-        slots[@intCast(op.destination)] = matched orelse return error.InvalidEqualityProof;
-    }
-    const result = slots[
-        @intCast(block.terminator.return_value)
-    ] orelse return error.InvalidEqualityProof;
-    if (!equivalent(parents, result, root)) return error.InvalidEqualityProof;
+        proof,
+        parents,
+        root,
+        &source.budget,
+    );
 }
 pub fn possible(program: ir.Program) bool {
     if (program.functions.len != 1 or program.blocks.len != 1) return false;

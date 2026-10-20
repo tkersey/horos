@@ -72,29 +72,7 @@ pub fn run(
     const permissions = try traits.derive(a, original.schemas);
     const schemas = try admission.schemas(a, original.schemas);
     var witnesses: std.ArrayList(Witness) = .empty;
-    for (original.blocks, 0..) |block, bid| for (block.instructions, 0..) |op, index| {
-        if (op.opcode != .cell_new) continue;
-        const shape = original.schemas[
-            @intCast(
-                original.functions[
-                    @intCast(block.function)
-                ].layout.slots[
-                    @intCast(op.destination)
-                ],
-            )
-        ].internal.cell;
-        if (!local(original, bid) or !privateUses(original, bid, index) or !schemas.exportable[
-            @intCast(shape.element)
-        ] or !permissions.copy[
-            @intCast(shape.element)
-        ] or !permissions.drop[
-            @intCast(shape.element)
-        ]) {
-            stats.retained_cells += 1;
-            continue;
-        }
-        try witnesses.append(a, .{ .block = bid, .construction = index });
-    };
+    try selectWitnesses(a, original, permissions, schemas.exportable, &witnesses, &stats);
     const functions = try a.dupe(ir.Function, original.functions);
     for (functions) |*function| function.layout.slots = try a.dupe(p.Id, function.layout.slots);
     const blocks = try a.dupe(ir.Block, original.blocks);
@@ -112,11 +90,101 @@ pub fn run(
             ])
         ].internal.cell.element;
     }
+    try rewriteBlocks(a, original, blocks, witnesses.items, &constants, &stats);
+    var candidate = original;
+    candidate.functions = functions;
+    candidate.blocks = blocks;
+    candidate.constants = constants.items;
+    try validate(allocator, original, candidate, witnesses.items);
+    stats.cells_removed = witnesses.items.len;
+    return coalescing.run(allocator, candidate, options);
+}
+
+/// Independently match every original read/write to its scalar state transition.
+/// Each changed local slot holds exactly the cell's previous payload at each
+/// corresponding point; extra unit results have no effects or failure behavior.
+pub fn validate(
+    allocator: std.mem.Allocator,
+    original: ir.Program,
+    candidate: ir.Program,
+    witnesses: []const Witness,
+) Error!void {
+    var flow = try ownership.analyze(allocator, original);
+    defer flow.deinit();
+    var checked = try ownership.analyze(allocator, candidate);
+    defer checked.deinit();
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const permissions = try traits.derive(a, original.schemas);
+    const schemas = try admission.schemas(a, original.schemas);
+    try checkShape(original, candidate);
+    const selected = try a.alloc([]bool, original.functions.len);
+    for (original.functions, selected) |function, *slots| {
+        slots.* = try a.alloc(bool, function.layout.slots.len);
+        @memset(slots.*, false);
+    }
+    try checkWitnesses(original, witnesses, selected, permissions, schemas.exportable);
+    for (original.functions, candidate.functions, selected) |before, after, slots| {
+        if (before.layout.slots.len != after.layout.slots.len) return error.InvalidCellReduction;
+        var same = after;
+        same.layout = before.layout;
+        if (!equal(ir.Function, before, same)) return error.InvalidCellReduction;
+        for (before.layout.slots, after.layout.slots, slots) |old, new, changed| {
+            if (new != (if (changed) original.schemas[
+                @intCast(old)
+            ].internal.cell.element else old)) return error.InvalidCellReduction;
+        }
+    }
+    try checkBlocks(original, candidate, selected);
+}
+
+fn selectWitnesses(
+    a: std.mem.Allocator,
+    original: ir.Program,
+    permissions: traits.Facts,
+    exportable: []const bool,
+    witnesses: *std.ArrayList(Witness),
+    stats: *Statistics,
+) Error!void {
+    for (original.blocks, 0..) |block, bid| for (block.instructions, 0..) |op, index| {
+        if (op.opcode != .cell_new) continue;
+        const shape = original.schemas[
+            @intCast(
+                original.functions[
+                    @intCast(block.function)
+                ].layout.slots[
+                    @intCast(op.destination)
+                ],
+            )
+        ].internal.cell;
+        if (!local(original, bid) or !privateUses(original, bid, index) or !exportable[
+            @intCast(shape.element)
+        ] or !permissions.copy[
+            @intCast(shape.element)
+        ] or !permissions.drop[
+            @intCast(shape.element)
+        ]) {
+            stats.retained_cells += 1;
+            continue;
+        }
+        try witnesses.append(a, .{ .block = bid, .construction = index });
+    };
+}
+
+fn rewriteBlocks(
+    a: std.mem.Allocator,
+    original: ir.Program,
+    blocks: []ir.Block,
+    witnesses: []const Witness,
+    constants: *std.ArrayList(p.Literal),
+    stats: *Statistics,
+) Error!void {
     for (original.blocks, blocks, 0..) |block, *out, bid| {
         var instructions: std.ArrayList(ir.Instruction) = .empty;
         for (block.instructions, 0..) |op, index| {
             var selected: ?p.Id = null;
-            for (witnesses.items) |witness| {
+            for (witnesses) |witness| {
                 if (witness.block != bid) continue;
                 const cell = block.instructions[witness.construction].destination;
                 if (index == witness.construction or
@@ -149,39 +217,7 @@ pub fn run(
                     stats.reads_removed += 1;
                 },
                 .cell_set => {
-                    try instructions.append(
-                        a,
-                        .{
-                            .destination = cell,
-                            .opcode = .move,
-                            .operands = try a.dupe(p.Id, &.{op.operands[1]}),
-                        },
-                    );
-                    const schema = original.functions[
-                        @intCast(block.function)
-                    ].layout.slots[
-                        @intCast(op.destination)
-                    ];
-                    var literal: ?p.Id = null;
-                    for (
-                        constants.items,
-                        0..,
-                    ) |value, id| if (value.schema == schema and value.bytes.len == 0) {
-                        literal = id;
-                        break;
-                    };
-                    if (literal == null) {
-                        literal = constants.items.len;
-                        try constants.append(a, .{ .schema = schema, .bytes = &.{} });
-                    }
-                    try instructions.append(
-                        a,
-                        .{
-                            .destination = op.destination,
-                            .opcode = .constant,
-                            .immediate = literal.?,
-                        },
-                    );
+                    try appendStore(a, original, block, op, cell, &instructions, constants);
                     stats.stores_removed += 1;
                 },
                 else => unreachable,
@@ -189,33 +225,56 @@ pub fn run(
         }
         out.instructions = try instructions.toOwnedSlice(a);
     }
-    var candidate = original;
-    candidate.functions = functions;
-    candidate.blocks = blocks;
-    candidate.constants = constants.items;
-    try validate(allocator, original, candidate, witnesses.items);
-    stats.cells_removed = witnesses.items.len;
-    return coalescing.run(allocator, candidate, options);
 }
 
-/// Independently match every original read/write to its scalar state transition.
-/// Each changed local slot holds exactly the cell's previous payload at each
-/// corresponding point; extra unit results have no effects or failure behavior.
-pub fn validate(
-    allocator: std.mem.Allocator,
+fn appendStore(
+    a: std.mem.Allocator,
+    original: ir.Program,
+    block: ir.Block,
+    op: ir.Instruction,
+    cell: p.Id,
+    instructions: *std.ArrayList(ir.Instruction),
+    constants: *std.ArrayList(p.Literal),
+) Error!void {
+    try instructions.append(
+        a,
+        .{
+            .destination = cell,
+            .opcode = .move,
+            .operands = try a.dupe(p.Id, &.{op.operands[1]}),
+        },
+    );
+    const schema = original.functions[
+        @intCast(block.function)
+    ].layout.slots[
+        @intCast(op.destination)
+    ];
+    var literal: ?p.Id = null;
+    for (
+        constants.items,
+        0..,
+    ) |value, id| if (value.schema == schema and value.bytes.len == 0) {
+        literal = id;
+        break;
+    };
+    if (literal == null) {
+        literal = constants.items.len;
+        try constants.append(a, .{ .schema = schema, .bytes = &.{} });
+    }
+    try instructions.append(
+        a,
+        .{
+            .destination = op.destination,
+            .opcode = .constant,
+            .immediate = literal.?,
+        },
+    );
+}
+
+fn checkShape(
     original: ir.Program,
     candidate: ir.Program,
-    witnesses: []const Witness,
 ) Error!void {
-    var flow = try ownership.analyze(allocator, original);
-    defer flow.deinit();
-    var checked = try ownership.analyze(allocator, candidate);
-    defer checked.deinit();
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const permissions = try traits.derive(a, original.schemas);
-    const schemas = try admission.schemas(a, original.schemas);
     var unchanged = candidate;
     unchanged.functions = original.functions;
     unchanged.blocks = original.blocks;
@@ -232,11 +291,15 @@ pub fn validate(
     for (candidate.constants[original.constants.len..]) |value| if (original.schemas[
         @intCast(value.schema)
     ] != .unit or value.bytes.len != 0) return error.InvalidCellReduction;
-    const selected = try a.alloc([]bool, original.functions.len);
-    for (original.functions, selected) |function, *slots| {
-        slots.* = try a.alloc(bool, function.layout.slots.len);
-        @memset(slots.*, false);
-    }
+}
+
+fn checkWitnesses(
+    original: ir.Program,
+    witnesses: []const Witness,
+    selected: []const []bool,
+    permissions: traits.Facts,
+    exportable: []const bool,
+) Error!void {
     for (witnesses) |witness| {
         if (witness.block >= original.blocks.len) return error.InvalidCellReduction;
         const block = original.blocks[witness.block];
@@ -257,7 +320,7 @@ pub fn validate(
                 @intCast(cell)
             ])
         ].internal.cell;
-        if (!schemas.exportable[
+        if (!exportable[
             @intCast(shape.element)
         ] or !permissions.copy[
             @intCast(shape.element)
@@ -287,17 +350,13 @@ pub fn validate(
         }
         selected[@intCast(block.function)][@intCast(cell)] = true;
     }
-    for (original.functions, candidate.functions, selected) |before, after, slots| {
-        if (before.layout.slots.len != after.layout.slots.len) return error.InvalidCellReduction;
-        var same = after;
-        same.layout = before.layout;
-        if (!equal(ir.Function, before, same)) return error.InvalidCellReduction;
-        for (before.layout.slots, after.layout.slots, slots) |old, new, changed| {
-            if (new != (if (changed) original.schemas[
-                @intCast(old)
-            ].internal.cell.element else old)) return error.InvalidCellReduction;
-        }
-    }
+}
+
+fn checkBlocks(
+    original: ir.Program,
+    candidate: ir.Program,
+    selected: []const []bool,
+) Error!void {
     for (original.blocks, candidate.blocks) |before, after| {
         var same = after;
         same.instructions = before.instructions;
@@ -322,28 +381,15 @@ pub fn validate(
                     .operands = &source,
                 };
                 if (op.opcode == .cell_set) {
-                    if (!equal(
-                        ir.Instruction,
+                    expected = try checkStore(
+                        original,
+                        candidate,
+                        before,
+                        after,
+                        op,
                         expected,
-                        after.instructions[next],
-                    )) return error.InvalidCellReduction;
-                    next += 1;
-                    if (next >= after.instructions.len) return error.InvalidCellReduction;
-                    const unit = after.instructions[next];
-                    if (unit.opcode != .constant or
-                        unit.immediate >= candidate.constants.len)
-                        return error.InvalidCellReduction;
-                    const literal = candidate.constants[@intCast(unit.immediate)];
-                    if (literal.schema != original.functions[
-                        @intCast(before.function)
-                    ].layout.slots[
-                        @intCast(op.destination)
-                    ] or literal.bytes.len != 0) return error.InvalidCellReduction;
-                    expected = .{
-                        .destination = op.destination,
-                        .opcode = .constant,
-                        .immediate = unit.immediate,
-                    };
+                        &next,
+                    );
                 }
             }
             if (!equal(
@@ -355,4 +401,37 @@ pub fn validate(
         }
         if (next != after.instructions.len) return error.InvalidCellReduction;
     }
+}
+
+fn checkStore(
+    original: ir.Program,
+    candidate: ir.Program,
+    before: ir.Block,
+    after: ir.Block,
+    op: ir.Instruction,
+    expected: ir.Instruction,
+    next: *usize,
+) Error!ir.Instruction {
+    if (!equal(
+        ir.Instruction,
+        expected,
+        after.instructions[next.*],
+    )) return error.InvalidCellReduction;
+    next.* += 1;
+    if (next.* >= after.instructions.len) return error.InvalidCellReduction;
+    const unit = after.instructions[next.*];
+    if (unit.opcode != .constant or
+        unit.immediate >= candidate.constants.len)
+        return error.InvalidCellReduction;
+    const literal = candidate.constants[@intCast(unit.immediate)];
+    if (literal.schema != original.functions[
+        @intCast(before.function)
+    ].layout.slots[
+        @intCast(op.destination)
+    ] or literal.bytes.len != 0) return error.InvalidCellReduction;
+    return .{
+        .destination = op.destination,
+        .opcode = .constant,
+        .immediate = unit.immediate,
+    };
 }

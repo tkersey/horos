@@ -43,6 +43,24 @@ pub fn fifo(
         .enqueue = try a.interop.declaredFunction(c, value.enqueue),
         .drain = try a.interop.declaredFunction(c, value.drain),
     };
+    const enqueue = try makeEnqueue(c, tasks, queue, regions);
+    const drain = try makeDrain(c, queue, unit, residual, regions, enqueue);
+    _ = try instance.finish(
+        b,
+        .{
+            .enqueue = try a.interop.functionId(c, enqueue),
+            .drain = try a.interop.functionId(c, drain),
+        },
+    );
+    return .{ .queue = queue, .enqueue = enqueue, .drain = drain };
+}
+
+fn makeEnqueue(
+    c: *a.Context,
+    tasks: *const generator.Exchange,
+    queue: *const a.Schema,
+    regions: []const *const a.Region,
+) a.Error!*const a.Function {
     const enqueue_schema = try c.callable(
         &.{ .{ .name = "step", .schema = tasks.answer() }, .{ .name = "queue", .schema = queue } },
         queue,
@@ -61,6 +79,17 @@ pub fn fifo(
         enqueue,
         try push.ret(try push.match(step, &.{ try done.ret(prior), try yielded.ret(appended) })),
     );
+    return enqueue;
+}
+
+fn makeDrain(
+    c: *a.Context,
+    queue: *const a.Schema,
+    unit: *const a.Schema,
+    residual: []const *const a.Operation,
+    regions: []const *const a.Region,
+    enqueue: *const a.Function,
+) a.Error!*const a.Function {
     const drain_schema = try c.callable(
         &.{.{ .name = "queue", .schema = queue }},
         unit,
@@ -92,14 +121,7 @@ pub fn fifo(
             &.{ try empty.ret(try empty.body().constant(void, {})), try ready.ret(drained) },
         )),
     );
-    _ = try instance.finish(
-        b,
-        .{
-            .enqueue = try a.interop.functionId(c, enqueue),
-            .drain = try a.interop.functionId(c, drain),
-        },
-    );
-    return .{ .queue = queue, .enqueue = enqueue, .drain = drain };
+    return drain;
 }
 
 pub const Join = opaque {

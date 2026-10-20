@@ -16,6 +16,62 @@ fn known(value: u64, storage: *[8]u8, schema: p.Id) pe.Knowledge {
     return .{ .known = .{ .schema = schema, .bytes = storage } };
 }
 
+fn resourceAuthorityCaller(b: *source.Builder, resource: p.Resource) !source.Id {
+    // Exercise the authorized effectful helpers through an ordinary
+    // first-order caller, independently of the example's protection.
+    const acquire = resource.introducers[0];
+    const release = resource.eliminators[resource.eliminators.len - 1];
+    const effects = try std.mem.concat(
+        b.allocator(),
+        p.Id,
+        &.{
+            b.functions.items[@intCast(acquire)].effects,
+            b.functions.items[@intCast(release)].effects,
+        },
+    );
+    const function = try b.declare(
+        &.{},
+        b.functions.items[@intCast(release)].result,
+        effects,
+        &.{},
+    );
+    const owned = try b.variable(b.functions.items[@intCast(acquire)].result);
+    const acquired = try b.term(.{ .call = .{ .function = acquire, .arguments = &.{} } });
+    const released = try b.term(.{ .call = .{
+        .function = release,
+        .arguments = &.{try b.reference(owned)},
+    } });
+    try b.define(function, try b.bind(owned, acquired, released));
+    return function;
+}
+
+fn rejectAuthoritySpecialization(
+    b: *source.Builder,
+    module: source.Module,
+    resource: p.Resource,
+    result: *pe.Output,
+) !void {
+    for ([_][]const p.Id{
+        resource.introducers,
+        resource.eliminators,
+    }) |authorities| for (authorities) |function| {
+        for (result.functions.items) |proof| try std.testing.expect(proof.before != function);
+        const inputs = try b.allocator().alloc(
+            pe.Knowledge,
+            module.functions[@intCast(function)].parameters.len,
+        );
+        @memset(inputs, .dynamic);
+        try std.testing.expectError(
+            error.UnsupportedSpecialization,
+            pe.specialize(
+                std.testing.allocator,
+                module,
+                .{ .context = context, .function = function, .arguments = inputs },
+            ),
+        );
+    };
+}
+
 test "specialization retains nominal resource authority in generic callees" {
     const a = std.testing.allocator;
     inline for (.{ "abortCustody", "resourceScalar", "resourcePair" }) |name| {
@@ -23,34 +79,10 @@ test "specialization retains nominal resource authority in generic callees" {
         defer b.deinit();
         const original = try @field(source.examples, name)(&b);
         const resource = original.resources[0];
-        const entry = if (comptime std.mem.eql(u8, name, "abortCustody")) original.entry else blk: {
-            // Exercise the authorized effectful helpers through an ordinary
-            // first-order caller, independently of the example's protection.
-            const acquire = resource.introducers[0];
-            const release = resource.eliminators[resource.eliminators.len - 1];
-            const effects = try std.mem.concat(
-                b.allocator(),
-                p.Id,
-                &.{
-                    b.functions.items[@intCast(acquire)].effects,
-                    b.functions.items[@intCast(release)].effects,
-                },
-            );
-            const function = try b.declare(
-                &.{},
-                b.functions.items[@intCast(release)].result,
-                effects,
-                &.{},
-            );
-            const owned = try b.variable(b.functions.items[@intCast(acquire)].result);
-            const acquired = try b.term(.{ .call = .{ .function = acquire, .arguments = &.{} } });
-            const released = try b.term(.{ .call = .{
-                .function = release,
-                .arguments = &.{try b.reference(owned)},
-            } });
-            try b.define(function, try b.bind(owned, acquired, released));
-            break :blk function;
-        };
+        const entry = if (comptime std.mem.eql(u8, name, "abortCustody"))
+            original.entry
+        else
+            try resourceAuthorityCaller(&b, resource);
         const module = b.module(entry, original.failure);
         var admitted = try source.lower(a, module);
         defer admitted.deinit();
@@ -79,25 +111,7 @@ test "specialization retains nominal resource authority in generic callees" {
             module.functions,
             result.module().functions[0..module.functions.len],
         ));
-        for ([_][]const p.Id{
-            resource.introducers,
-            resource.eliminators,
-        }) |authorities| for (authorities) |function| {
-            for (result.functions.items) |proof| try std.testing.expect(proof.before != function);
-            const inputs = try b.allocator().alloc(
-                pe.Knowledge,
-                module.functions[@intCast(function)].parameters.len,
-            );
-            @memset(inputs, .dynamic);
-            try std.testing.expectError(
-                error.UnsupportedSpecialization,
-                pe.specialize(
-                    a,
-                    module,
-                    .{ .context = context, .function = function, .arguments = inputs },
-                ),
-            );
-        };
+        try rejectAuthoritySpecialization(&b, module, resource, &result);
         // Ordinary admission permits an explicit extra permission. The
         // independent translation checker must reject granting it to a clone.
         const extra = try std.mem.concat(
@@ -155,39 +169,55 @@ test "specialization admits or precisely declines existing public examples" {
     try std.testing.expect(specialized > 0);
 }
 
+fn capturedCallModule(b: *source.Builder, kind: usize) !struct {
+    module: source.Module,
+    word: p.Id,
+    entry: p.Id,
+    outer: p.Id,
+    callee: p.Id,
+} {
+    const unit = try b.scalar(void);
+    const word = try b.scalar(u64);
+    const entry = try b.declare(&.{word}, word, &.{}, &.{});
+    const outer = try b.declare(&.{word}, word, &.{}, &.{});
+    const captured = if (kind == 1) try b.variable(word) else b.parameter(outer, 0);
+    const inner = try b.declare(&.{}, word, &.{}, &.{});
+    try b.define(inner, try b.pure(try b.reference(captured)));
+    const callee = if (kind == 2) blk: {
+        const indirect = try b.declare(&.{}, word, &.{}, &.{});
+        try b.define(
+            indirect,
+            try b.term(.{ .call = .{ .function = inner, .arguments = &.{} } }),
+        );
+        break :blk indirect;
+    } else inner;
+    const call = try b.term(.{ .call = .{ .function = callee, .arguments = &.{} } });
+    try b.define(outer, if (kind == 1 or kind == 3)
+        try b.bind(captured, try b.pure(try b.constant(u64, 42)), call)
+    else
+        call);
+    try b.define(
+        entry,
+        try b.term(.{ .call = .{
+            .function = outer,
+            .arguments = &.{try b.reference(b.parameter(entry, 0))},
+        } }),
+    );
+    const module = b.module(entry, unit);
+    return .{ .module = module, .word = word, .entry = entry, .outer = outer, .callee = callee };
+}
+
 test "specialization keeps captured calls inside their closed generic function" {
     const a = std.testing.allocator;
     for (0..4) |kind| for ([_]bool{ false, true }) |static_input| {
         var b = source.Builder.init(a);
         defer b.deinit();
-        const unit = try b.scalar(void);
-        const word = try b.scalar(u64);
-        const entry = try b.declare(&.{word}, word, &.{}, &.{});
-        const outer = try b.declare(&.{word}, word, &.{}, &.{});
-        const captured = if (kind == 1) try b.variable(word) else b.parameter(outer, 0);
-        const inner = try b.declare(&.{}, word, &.{}, &.{});
-        try b.define(inner, try b.pure(try b.reference(captured)));
-        const callee = if (kind == 2) blk: {
-            const indirect = try b.declare(&.{}, word, &.{}, &.{});
-            try b.define(
-                indirect,
-                try b.term(.{ .call = .{ .function = inner, .arguments = &.{} } }),
-            );
-            break :blk indirect;
-        } else inner;
-        const call = try b.term(.{ .call = .{ .function = callee, .arguments = &.{} } });
-        try b.define(outer, if (kind == 1 or kind == 3)
-            try b.bind(captured, try b.pure(try b.constant(u64, 42)), call)
-        else
-            call);
-        try b.define(
-            entry,
-            try b.term(.{ .call = .{
-                .function = outer,
-                .arguments = &.{try b.reference(b.parameter(entry, 0))},
-            } }),
-        );
-        const module = b.module(entry, unit);
+        const fixture = try capturedCallModule(&b, kind);
+        const module = fixture.module;
+        const word = fixture.word;
+        const entry = fixture.entry;
+        const outer = fixture.outer;
+        const callee = fixture.callee;
         var admitted = try source.lower(a, module);
         defer admitted.deinit();
         var bytes: [8]u8 = undefined;

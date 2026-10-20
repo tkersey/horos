@@ -20,19 +20,24 @@ const Budget = struct {
         self.left -= n;
     }
     fn record(self: *@This(), comptime T: type, value: T) Error!void {
+        @setEvalBranchQuota(10000);
+        return self.recordFields(T, value);
+    }
+
+    inline fn recordFields(self: *@This(), comptime T: type, value: T) Error!void {
         try self.take(1);
         switch (@typeInfo(T)) {
             .@"struct" => |info| inline for (
                 info.field_names,
                 info.field_types,
-            ) |field_name, FieldType| try self.record(FieldType, @field(value, field_name)),
+            ) |field_name, FieldType| try self.recordFields(FieldType, @field(value, field_name)),
             .@"union" => switch (value) {
-                inline else => |v| try self.record(@TypeOf(v), v),
+                inline else => |v| try self.recordFields(@TypeOf(v), v),
             },
             .optional => |info| if (value) |v| {
-                try self.record(info.child, v);
+                try self.recordFields(info.child, v);
             },
-            .pointer => |info| for (value) |v| try self.record(info.child, v),
+            .pointer => |info| for (value) |v| try self.recordFields(info.child, v),
             else => {},
         }
     }
@@ -108,6 +113,19 @@ fn recognize(
         base.terminator != .return_value or
         base.terminator.return_value != base.instructions[0].destination)
         return null;
+    return recognizeStep(program, id, sequence, pop, branch, input, output, budget);
+}
+fn recognizeStep(
+    program: ir.Program,
+    id: p.Id,
+    sequence: p.Id,
+    pop: p.Id,
+    branch: @FieldType(ir.Terminator, "switch_variant"),
+    input: p.Schema,
+    output: p.Schema,
+    budget: *Budget,
+) Error!?Shape {
+    const f = program.functions[@intCast(id)];
     const step = program.blocks[@intCast(branch.cases[1].block)];
     if (step.terminator != .call) return null;
     const bound_payload = branch.cases[1].assignments.len == 1;
@@ -148,6 +166,42 @@ fn recognize(
     if (bound > output.vector.maximum or chunk.operands.len > output.vector.maximum) return null;
     // Exact capacities make these authored failures unreachable on both sides.
     for (join.failures) |failure| if (failure.kind != .capacity_exceeded) return null;
+    return recognizeRoles(
+        program,
+        id,
+        sequence,
+        pop,
+        pair,
+        head,
+        tail,
+        returned,
+        chunk,
+        join,
+        step,
+        first,
+        branch,
+        call,
+        budget,
+    );
+}
+fn recognizeRoles(
+    program: ir.Program,
+    id: p.Id,
+    sequence: p.Id,
+    pop: p.Id,
+    pair: p.Id,
+    head: p.Id,
+    tail: p.Id,
+    returned: p.Id,
+    chunk: ir.Instruction,
+    join: ir.Instruction,
+    step: ir.Block,
+    first: usize,
+    branch: @FieldType(ir.Terminator, "switch_variant"),
+    call: @FieldType(ir.Terminator, "call"),
+    budget: *Budget,
+) Error!?Shape {
+    const f = program.functions[@intCast(id)];
     const roles = [_]p.Id{
         sequence,
         pop,
@@ -243,36 +297,7 @@ pub fn construct(
         std.math.add(usize, original.blocks.len, shapes.items.len) catch return error.Capacity,
     );
     @memcpy(blocks[0..original.blocks.len], original.blocks);
-    for (shapes.items, 0..) |s, index| {
-        const header = original.blocks.len + index;
-        blocks[header] = original.blocks[@intCast(s.entry)];
-        const init_ops = try a.alloc(ir.Instruction, 1);
-        init_ops[0] = .{ .destination = s.accumulator, .opcode = .sequence };
-        blocks[@intCast(s.entry)].instructions = init_ops;
-        blocks[@intCast(s.entry)].terminator = .{ .jump = .{ .block = header } };
-        blocks[@intCast(s.base)].instructions = &.{};
-        blocks[@intCast(s.base)].terminator = .{ .return_value = s.accumulator };
-        const prefix = original.blocks[@intCast(s.step)].instructions;
-        const finish = original.blocks[@intCast(s.finish)].instructions;
-        const operations = try a.alloc(ir.Instruction, prefix.len + 2);
-        @memcpy(operations[0..prefix.len], prefix);
-        operations[prefix.len] = finish[0];
-        operations[prefix.len + 1] = finish[1];
-        operations[prefix.len + 1].destination = s.accumulator;
-        operations[prefix.len + 1].operands = try a.dupe(
-            p.Id,
-            &.{ s.accumulator, finish[0].destination },
-        );
-        blocks[@intCast(s.step)].instructions = operations;
-        const advance = try a.dupe(
-            ir.Assignment,
-            &.{.{ .destination = s.sequence, .source = .{ .slot = s.tail } }},
-        );
-        blocks[@intCast(s.step)].terminator = .{ .jump = .{
-            .block = header,
-            .assignments = advance,
-        } };
-    }
+    try rewriteShapes(a, original, blocks, shapes.items);
     var program = original;
     program.blocks = blocks;
     const selected = try sites.toOwnedSlice(a);
@@ -321,6 +346,15 @@ pub fn validate(
             &budget,
         )) orelse return error.InvalidConstructorContext;
     }
+    try validateBlocks(original, candidate, sites, shapes, &budget);
+}
+fn validateBlocks(
+    original: ir.Program,
+    candidate: ir.Program,
+    sites: []const p.Id,
+    shapes: []const Shape,
+    budget: *Budget,
+) Error!void {
     for (original.blocks, candidate.blocks[0..original.blocks.len], 0..) |old, new, bid| {
         try budget.take(1);
         if (old.function != new.function or
@@ -332,53 +366,7 @@ pub fn validate(
         };
         const s = shapes[index];
         const header = original.blocks.len + index;
-        if (bid == s.entry) {
-            if (!equal(
-                []const ir.Instruction,
-                &.{.{ .destination = s.accumulator, .opcode = .sequence }},
-                new.instructions,
-            ) or !equal(
-                ir.Terminator,
-                .{ .jump = .{ .block = header } },
-                new.terminator,
-            )) return error.InvalidConstructorContext;
-        } else if (bid == s.base) {
-            if (new.instructions.len != 0 or !equal(
-                ir.Terminator,
-                .{ .return_value = s.accumulator },
-                new.terminator,
-            )) return error.InvalidConstructorContext;
-        } else if (bid == s.step) {
-            if (new.instructions.len != old.instructions.len + 2 or !equal(
-                []const ir.Instruction,
-                old.instructions,
-                new.instructions[0..old.instructions.len],
-            )) return error.InvalidConstructorContext;
-            const finish = original.blocks[@intCast(s.finish)].instructions;
-            if (!equal(
-                ir.Instruction,
-                finish[0],
-                new.instructions[old.instructions.len],
-            )) return error.InvalidConstructorContext;
-            const join = new.instructions[old.instructions.len + 1];
-            if (join.destination != s.accumulator or
-                join.opcode != .sequence_concat or
-                join.immediate != 0 or
-                !std.mem.eql(p.Id, join.operands, &.{ s.accumulator, finish[0].destination }) or
-                !equal(@TypeOf(join.failures), finish[1].failures, join.failures))
-                return error.InvalidConstructorContext;
-            if (!equal(
-                ir.Terminator,
-                .{ .jump = .{
-                    .block = header,
-                    .assignments = &.{.{
-                        .destination = s.sequence,
-                        .source = .{ .slot = s.tail },
-                    }},
-                } },
-                new.terminator,
-            )) return error.InvalidConstructorContext;
-        } else if (!equal(ir.Block, old, new)) return error.InvalidConstructorContext;
+        try validateBlock(original, old, new, bid, s, header);
     }
     for (
         shapes,
@@ -433,4 +421,99 @@ pub fn run(
     const result = try p01.run(allocator, candidate.program, options.coalescing);
     stats.contexts_lowered = candidate.sites.len;
     return result;
+}
+
+fn rewriteShapes(
+    a: std.mem.Allocator,
+    original: ir.Program,
+    blocks: []ir.Block,
+    shapes: []const Shape,
+) Error!void {
+    for (shapes, 0..) |s, index| {
+        const header = original.blocks.len + index;
+        blocks[header] = original.blocks[@intCast(s.entry)];
+        const init_ops = try a.alloc(ir.Instruction, 1);
+        init_ops[0] = .{ .destination = s.accumulator, .opcode = .sequence };
+        blocks[@intCast(s.entry)].instructions = init_ops;
+        blocks[@intCast(s.entry)].terminator = .{ .jump = .{ .block = header } };
+        blocks[@intCast(s.base)].instructions = &.{};
+        blocks[@intCast(s.base)].terminator = .{ .return_value = s.accumulator };
+        const prefix = original.blocks[@intCast(s.step)].instructions;
+        const finish = original.blocks[@intCast(s.finish)].instructions;
+        const operations = try a.alloc(ir.Instruction, prefix.len + 2);
+        @memcpy(operations[0..prefix.len], prefix);
+        operations[prefix.len] = finish[0];
+        operations[prefix.len + 1] = finish[1];
+        operations[prefix.len + 1].destination = s.accumulator;
+        operations[prefix.len + 1].operands = try a.dupe(
+            p.Id,
+            &.{ s.accumulator, finish[0].destination },
+        );
+        blocks[@intCast(s.step)].instructions = operations;
+        const advance = try a.dupe(
+            ir.Assignment,
+            &.{.{ .destination = s.sequence, .source = .{ .slot = s.tail } }},
+        );
+        blocks[@intCast(s.step)].terminator = .{ .jump = .{
+            .block = header,
+            .assignments = advance,
+        } };
+    }
+}
+
+fn validateBlock(
+    original: ir.Program,
+    old: ir.Block,
+    new: ir.Block,
+    bid: usize,
+    s: Shape,
+    header: usize,
+) Error!void {
+    if (bid == s.entry) {
+        if (!equal(
+            []const ir.Instruction,
+            &.{.{ .destination = s.accumulator, .opcode = .sequence }},
+            new.instructions,
+        ) or !equal(
+            ir.Terminator,
+            .{ .jump = .{ .block = header } },
+            new.terminator,
+        )) return error.InvalidConstructorContext;
+    } else if (bid == s.base) {
+        if (new.instructions.len != 0 or !equal(
+            ir.Terminator,
+            .{ .return_value = s.accumulator },
+            new.terminator,
+        )) return error.InvalidConstructorContext;
+    } else if (bid == s.step) {
+        if (new.instructions.len != old.instructions.len + 2 or !equal(
+            []const ir.Instruction,
+            old.instructions,
+            new.instructions[0..old.instructions.len],
+        )) return error.InvalidConstructorContext;
+        const finish = original.blocks[@intCast(s.finish)].instructions;
+        if (!equal(
+            ir.Instruction,
+            finish[0],
+            new.instructions[old.instructions.len],
+        )) return error.InvalidConstructorContext;
+        const join = new.instructions[old.instructions.len + 1];
+        if (join.destination != s.accumulator or
+            join.opcode != .sequence_concat or
+            join.immediate != 0 or
+            !std.mem.eql(p.Id, join.operands, &.{ s.accumulator, finish[0].destination }) or
+            !equal(@TypeOf(join.failures), finish[1].failures, join.failures))
+            return error.InvalidConstructorContext;
+        if (!equal(
+            ir.Terminator,
+            .{ .jump = .{
+                .block = header,
+                .assignments = &.{.{
+                    .destination = s.sequence,
+                    .source = .{ .slot = s.tail },
+                }},
+            } },
+            new.terminator,
+        )) return error.InvalidConstructorContext;
+    } else if (!equal(ir.Block, old, new)) return error.InvalidConstructorContext;
 }

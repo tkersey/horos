@@ -163,36 +163,7 @@ fn lowerBody(
         .uses = traits,
         .recovery_enabled = options.recovery,
     };
-    try compiler.constants.appendSlice(a, owned.constants);
-    const functions = try a.alloc(ir.Function, owned.functions.len);
-    for (functions, 0..) |*function, id| {
-        if (options.diagnostic) |diagnostic| diagnostic.function = id;
-        var lowering: Function = .{
-            .compiler = &compiler,
-            .id = id,
-            .bindings = .{ .allocator = a, .name_count = owned.variables.len },
-        };
-        function.* = try lowering.lower();
-    }
-    const program: ir.Program = .{
-        .roots = .{
-            .entry = owned.entry,
-            .result = owned.functions[@intCast(owned.entry)].result,
-            .failure = owned.failure,
-        },
-        .schemas = owned.schemas,
-        .constants = compiler.constants.items,
-        .effects = owned.effects,
-        .functions = functions,
-        .blocks = compiler.blocks.items,
-        .handlers = try stableHandlers(a, owned.handlers),
-        .scopes = .{
-            .captures = compiler.captures.items,
-            .region_count = owned.region_count,
-            .resources = owned.resources,
-        },
-        .constructors = compiler.constructors.items,
-    };
+    const program = try lowerProgram(&compiler, options);
     if (options.diagnostic) |diagnostic| diagnostic.function = null;
     options.stage(.target_check);
     var original_facts = try checkTarget(
@@ -206,61 +177,9 @@ fn lowerBody(
         options,
     );
     original_facts.deinit();
-    options.stage(.direct_optimization);
-    const threaded = try @import("thread_jumps.zig").optimize(a, program);
-    // Tail-clause conversion adds functions and erases a resumption input. It
-    // has no source-binding transport yet. Recovery keeps the general clauses;
-    // source specialization and checked structural coalescing remain enabled.
-    const selected = if (options.recovery) threaded else try data.tail_clauses.optimize(
-        a,
-        threaded,
-        traits,
-    );
-    const ordered = try @import("slot_order.zig").optimizeObserved(
-        a,
-        selected,
-        if (options.recovery) .{
-            .context = &compiler,
-            .receive = Compiler.reorderBindings,
-        } else null,
-    );
+    const ordered = try optimizeDirect(&compiler, program, options);
     if (!component and !recovery_input) return coalesce(allocator, ordered, &compiler, options);
-    if (component) {
-        if (options.semantic_statistics) |stats| stats.outcome = .deferred_open_component;
-        if (options.coalescing.statistics) |stats| stats.* = .{
-            .rounds = stats.rounds,
-            .outcome = .deferred_open_component,
-        };
-    }
-    var output = std.heap.ArenaAllocator.init(allocator);
-    errdefer output.deinit();
-    options.stage(.source_copy);
-    const result = try source.own(ir.Program, output.allocator(), ordered);
-    options.stage(.target_check);
-    const recovery = try output.allocator().dupe(RecoveryBinding, compiler.recovery_bindings.items);
-    const parameters = try output.allocator().dupe(
-        RecoveryBinding,
-        compiler.parameter_bindings.items,
-    );
-    const flow = try checkTarget(
-        allocator,
-        &compiler,
-        result,
-        imports,
-        component,
-        borrows,
-        null,
-        options,
-    );
-    options.stage(.complete);
-    if (options.diagnostic) |diagnostic| diagnostic.* = .{ .phase = .complete };
-    return .{
-        .arena = output,
-        .program = result,
-        .flow = flow,
-        .recovery = recovery,
-        .parameters = parameters,
-    };
+    return ownConstruction(allocator, ordered, &compiler, imports, component, borrows, options);
 }
 
 const CompilationObserver = struct {
@@ -330,96 +249,13 @@ fn coalesce(
     var result = data.closed_compilation.run(
         allocator,
         program,
-        .{
-            .contract = options.contract,
-            .objective = options.objective,
-            .image_growth_bytes = options.image_growth_bytes,
-            .max_image_bytes = options.max_image_bytes,
-            .profile = options.profile,
-            .work_limit = options.semantic_work_limit,
-            .round_limit = options.semantic_round_limit,
-            .statistics = &statistics,
-            .observer = .{
-                .context = &observation,
-                .enter = CompilationObserver.enter,
-                .service = if (options.compilation_observer) |observer|
-                    if (observer.service) |service|
-                        .{ .contract = service.contract, .receive = CompilationObserver.service }
-                    else
-                        null
-                else
-                    null,
-            },
-            .coalescing = selected,
-        },
+        compilationOptions(options, &observation, &statistics, selected),
     ) catch |err| {
-        if (options.diagnostic) |diagnostic| {
-            if (statistics.stages_run != 0 or
-                (statistics.failed_stage != null and
-                    statistics.failed_stage != .p01))
-            {
-                // Semantic records no longer use the source's original indices.
-                diagnostic.target = .{};
-                diagnostic.origins = .{ .ambiguous = true };
-                diagnostic.function = null;
-                diagnostic.variable = null;
-                return err;
-            }
-            diagnostic.target = detail.target;
-            diagnostic.origins = detail.origins;
-            if (detail.origins.count != 0) {
-                const function = detail.origins.functions[0];
-                diagnostic.function = function;
-                if (!detail.origins.ambiguous and detail.target.capture != null) {
-                    if (detail.target.field) |field| {
-                        const free = compiler.facts.functions[@intCast(function)].items;
-                        if (field < free.len) diagnostic.variable = free[@intCast(field)];
-                    }
-                }
-            }
-        }
+        diagnoseCoalescing(compiler, options, statistics, detail);
         return err;
     };
     errdefer result.deinit();
-    const recovery = try result.arena.allocator().dupe(
-        RecoveryBinding,
-        compiler.final_bindings.items,
-    );
-    for (recovery) |binding| {
-        if (binding.function >= result.program.functions.len) return error.InvalidSource;
-        const slots = result.program.functions[@intCast(binding.function)].layout.slots;
-        if (binding.slot >= slots.len or slots[
-            @intCast(binding.slot)
-        ] != binding.schema) return error.InvalidSource;
-    }
-    var parameters: std.ArrayList(RecoveryBinding) = .empty;
-    const evidence: ?RecoveryEvidence = if (options.recovery) try source.own(
-        RecoveryEvidence,
-        result.arena.allocator(),
-        .{ .correspondence = compiler.correspondence orelse return error.InvalidCorrespondence },
-    ) else null;
-    if (evidence) |proof| {
-        try data.coalescing.validateCorrespondence(
-            allocator,
-            program,
-            result.program,
-            proof.correspondence,
-        );
-        for (compiler.parameter_bindings.items) |binding|
-            if (try binding.relocated(proof.correspondence)) |final|
-                try parameters.append(result.arena.allocator(), final);
-    }
-    const constructed: Construction = .{
-        .arena = result.arena,
-        .program = result.program,
-        .flow = result.flow,
-        .recovery = recovery,
-        .parameters = parameters.items,
-        .recovery_evidence = evidence,
-    };
-    options.stage(.complete);
-    if (options.diagnostic) |diagnostic| diagnostic.* = .{ .phase = .complete };
-    return constructed;
+    return finishCoalescing(allocator, program, compiler, options, &result);
 }
 
 fn checkTarget(
@@ -1253,3 +1089,222 @@ const Block = struct {
         return if (supplied) |id| try self.value(id) else null;
     }
 };
+
+fn lowerProgram(compiler: *Compiler, options: source.CompileOptions) Error!ir.Program {
+    const a = compiler.allocator;
+    const owned = compiler.source;
+    try compiler.constants.appendSlice(a, owned.constants);
+    const functions = try a.alloc(ir.Function, owned.functions.len);
+    for (functions, 0..) |*function, id| {
+        if (options.diagnostic) |diagnostic| diagnostic.function = id;
+        var lowering: Function = .{
+            .compiler = compiler,
+            .id = id,
+            .bindings = .{ .allocator = a, .name_count = owned.variables.len },
+        };
+        function.* = try lowering.lower();
+    }
+    return .{
+        .roots = .{
+            .entry = owned.entry,
+            .result = owned.functions[@intCast(owned.entry)].result,
+            .failure = owned.failure,
+        },
+        .schemas = owned.schemas,
+        .constants = compiler.constants.items,
+        .effects = owned.effects,
+        .functions = functions,
+        .blocks = compiler.blocks.items,
+        .handlers = try stableHandlers(a, owned.handlers),
+        .scopes = .{
+            .captures = compiler.captures.items,
+            .region_count = owned.region_count,
+            .resources = owned.resources,
+        },
+        .constructors = compiler.constructors.items,
+    };
+}
+
+fn optimizeDirect(
+    compiler: *Compiler,
+    program: ir.Program,
+    options: source.CompileOptions,
+) Error!ir.Program {
+    const a = compiler.allocator;
+    options.stage(.direct_optimization);
+    const threaded = try @import("thread_jumps.zig").optimize(a, program);
+    // Tail-clause conversion adds functions and erases a resumption input. It
+    // has no source-binding transport yet. Recovery keeps the general clauses;
+    // source specialization and checked structural coalescing remain enabled.
+    const selected = if (options.recovery) threaded else try data.tail_clauses.optimize(
+        a,
+        threaded,
+        compiler.uses,
+    );
+    return try @import("slot_order.zig").optimizeObserved(
+        a,
+        selected,
+        if (options.recovery) .{
+            .context = compiler,
+            .receive = Compiler.reorderBindings,
+        } else null,
+    );
+}
+
+fn ownConstruction(
+    allocator: std.mem.Allocator,
+    ordered: ir.Program,
+    compiler: *Compiler,
+    imports: []const p.Id,
+    component: bool,
+    borrows: []const data.borrow_contract.Summary,
+    options: source.CompileOptions,
+) Error!Construction {
+    if (component) {
+        if (options.semantic_statistics) |stats| stats.outcome = .deferred_open_component;
+        if (options.coalescing.statistics) |stats| stats.* = .{
+            .rounds = stats.rounds,
+            .outcome = .deferred_open_component,
+        };
+    }
+    var output = std.heap.ArenaAllocator.init(allocator);
+    errdefer output.deinit();
+    options.stage(.source_copy);
+    const result = try source.own(ir.Program, output.allocator(), ordered);
+    options.stage(.target_check);
+    const recovery = try output.allocator().dupe(RecoveryBinding, compiler.recovery_bindings.items);
+    const parameters = try output.allocator().dupe(
+        RecoveryBinding,
+        compiler.parameter_bindings.items,
+    );
+    const flow = try checkTarget(
+        allocator,
+        compiler,
+        result,
+        imports,
+        component,
+        borrows,
+        null,
+        options,
+    );
+    options.stage(.complete);
+    if (options.diagnostic) |diagnostic| diagnostic.* = .{ .phase = .complete };
+    return .{
+        .arena = output,
+        .program = result,
+        .flow = flow,
+        .recovery = recovery,
+        .parameters = parameters,
+    };
+}
+
+fn compilationOptions(
+    options: source.CompileOptions,
+    observation: *CompilationObserver,
+    statistics: *data.closed_compilation.Statistics,
+    selected: data.coalescing.Options,
+) data.closed_compilation.Options {
+    return .{
+        .contract = options.contract,
+        .objective = options.objective,
+        .image_growth_bytes = options.image_growth_bytes,
+        .max_image_bytes = options.max_image_bytes,
+        .profile = options.profile,
+        .work_limit = options.semantic_work_limit,
+        .round_limit = options.semantic_round_limit,
+        .statistics = statistics,
+        .observer = .{
+            .context = observation,
+            .enter = CompilationObserver.enter,
+            .service = if (options.compilation_observer) |observer|
+                if (observer.service) |service|
+                    .{ .contract = service.contract, .receive = CompilationObserver.service }
+                else
+                    null
+            else
+                null,
+        },
+        .coalescing = selected,
+    };
+}
+
+fn diagnoseCoalescing(
+    compiler: *Compiler,
+    options: source.CompileOptions,
+    statistics: data.closed_compilation.Statistics,
+    detail: data.coalescing.Diagnostic,
+) void {
+    if (options.diagnostic) |diagnostic| {
+        if (statistics.stages_run != 0 or
+            (statistics.failed_stage != null and
+                statistics.failed_stage != .p01))
+        {
+            // Semantic records no longer use the source's original indices.
+            diagnostic.target = .{};
+            diagnostic.origins = .{ .ambiguous = true };
+            diagnostic.function = null;
+            diagnostic.variable = null;
+            return;
+        }
+        diagnostic.target = detail.target;
+        diagnostic.origins = detail.origins;
+        if (detail.origins.count != 0) {
+            const function = detail.origins.functions[0];
+            diagnostic.function = function;
+            if (!detail.origins.ambiguous and detail.target.capture != null) {
+                if (detail.target.field) |field| {
+                    const free = compiler.facts.functions[@intCast(function)].items;
+                    if (field < free.len) diagnostic.variable = free[@intCast(field)];
+                }
+            }
+        }
+    }
+}
+
+fn finishCoalescing(
+    allocator: std.mem.Allocator,
+    program: ir.Program,
+    compiler: *Compiler,
+    options: source.CompileOptions,
+    result: *data.coalescing.Owned,
+) Error!Construction {
+    const recovery = try result.arena.allocator().dupe(
+        RecoveryBinding,
+        compiler.final_bindings.items,
+    );
+    for (recovery) |binding| {
+        if (binding.function >= result.program.functions.len) return error.InvalidSource;
+        const slots = result.program.functions[@intCast(binding.function)].layout.slots;
+        if (binding.slot >= slots.len or slots[
+            @intCast(binding.slot)
+        ] != binding.schema) return error.InvalidSource;
+    }
+    var parameters: std.ArrayList(RecoveryBinding) = .empty;
+    const evidence: ?RecoveryEvidence = if (options.recovery) try source.own(
+        RecoveryEvidence,
+        result.arena.allocator(),
+        .{ .correspondence = compiler.correspondence orelse return error.InvalidCorrespondence },
+    ) else null;
+    if (evidence) |proof| {
+        try data.coalescing.validateCorrespondence(
+            allocator,
+            program,
+            result.program,
+            proof.correspondence,
+        );
+        for (compiler.parameter_bindings.items) |binding|
+            if (try binding.relocated(proof.correspondence)) |final|
+                try parameters.append(result.arena.allocator(), final);
+    }
+    const constructed: Construction = .{
+        .arena = result.arena,
+        .program = result.program,
+        .flow = result.flow,
+        .recovery = recovery,
+        .parameters = parameters.items,
+        .recovery_evidence = evidence,
+    };
+    options.stage(.complete);
+    if (options.diagnostic) |diagnostic| diagnostic.* = .{ .phase = .complete };
+    return constructed;
+}

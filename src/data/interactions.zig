@@ -155,25 +155,7 @@ pub const Session = struct {
             );
         };
         @memset(engine.opaque_blocks, false);
-        var changed = true;
-        while (changed) {
-            changed = false;
-            engine.stats.iterations += 1;
-            inline for (.{ false, true }) |cleanup| {
-                engine.cleanup = cleanup;
-                for (
-                    image.functions,
-                    0..,
-                ) |_, function|
-                    for (0..monitor.contexts) |context|
-                        for (0..monitor.states) |state| {
-                            const result = try engine.function(function, context, state);
-                            changed = summaries[
-                                engine.index(function, context, state)
-                            ].join(result) or changed;
-                        };
-            }
-        }
+        try engine.fixedPoint();
         for (summaries) |summary| engine.stats.relations += @popCount(
             summary.normal,
         ) + @popCount(summary.failure) + @popCount(summary.cancellation);
@@ -216,6 +198,27 @@ const Engine = struct {
     // Runtime cancellation records an exit but preserves work already executing
     // under unwind. This is execution context, independent of consumer bindings.
     cleanup: bool = false,
+    fn fixedPoint(engine: *Engine) Error!void {
+        var changed = true;
+        while (changed) {
+            changed = false;
+            engine.stats.iterations += 1;
+            inline for (.{ false, true }) |cleanup| {
+                engine.cleanup = cleanup;
+                for (
+                    engine.image.functions,
+                    0..,
+                ) |_, function_id|
+                    for (0..engine.monitor.contexts) |context|
+                        for (0..engine.monitor.states) |state| {
+                            const result = try engine.function(function_id, context, state);
+                            changed = engine.summaries[
+                                engine.index(function_id, context, state)
+                            ].join(result) or changed;
+                        };
+            }
+        }
+    }
     fn operationSelection(self: Engine, block: p.Id) *const provenance.Selection {
         return self.selections[@intCast(block)].?;
     }
@@ -735,6 +738,11 @@ const Engine = struct {
                     for (handler.clauses) |clause| try self.function_(clause.function);
                     try self.add(v.next.block);
                 },
+                else => try self.effectTerminator(id, value),
+            }
+        }
+        fn effectTerminator(self: *Slice, id: p.Id, value: ir.Block) Error!void {
+            switch (value.terminator) {
                 .perform => |v| {
                     const selected = self.engine.operationSelection(id);
                     try self.addEvent(
@@ -788,6 +796,7 @@ const Engine = struct {
                     try self.addEvent(.{ .block = id, .phase = .cleanup });
                     try self.add(v.next.block);
                 },
+                else => unreachable,
             }
         }
     };
@@ -827,240 +836,312 @@ const Engine = struct {
                 out.prefixes |= states;
                 states = try self.cancellation(&out, block_id, context, states);
             }
-            switch (block.terminator) {
-                .return_value => {
-                    const returned = try self.event(
-                        .{ .block = block_id, .phase = .returned },
-                        context,
-                        states,
-                    );
-                    out.normal |= returned;
-                    out.prefixes |= returned;
-                },
-                .fail => {
-                    _ = out.join(try self.abrupt(block_id, context, states, .failure));
-                },
-                .jump => |edge| {
-                    out.may_nonreturn = true;
-                    try self.push(edge, states);
-                },
-                .unpack_product => |v| {
-                    out.may_nonreturn = out.may_nonreturn or v.next.block <= block_id;
-                    try self.push(v.next, states);
-                },
-                .branch => |v| {
-                    out.may_nonreturn = out.may_nonreturn or
-                        v.when_true.block <= block_id or
-                        v.when_false.block <= block_id;
-                    try self.push(
-                        v.when_true,
-                        try self.event(
-                            .{ .block = block_id, .phase = .branch, .alternative = 0 },
-                            context,
-                            states,
-                        ),
-                    );
-                    try self.push(
-                        v.when_false,
-                        try self.event(
-                            .{ .block = block_id, .phase = .branch, .alternative = 1 },
-                            context,
-                            states,
-                        ),
-                    );
-                },
-                .switch_variant => |v| for (v.cases, 0..) |edge, alternative| {
-                    out.may_nonreturn = out.may_nonreturn or edge.block <= block_id;
-                    try self.push(
-                        edge,
-                        try self.event(
-                            .{ .block = block_id, .phase = .branch, .alternative = alternative },
-                            context,
-                            states,
-                        ),
-                    );
-                },
-                .call => |v| try self.propagate(
-                    &out,
-                    try self.call(block_id, v.function, context, states),
-                    v.next,
-                ),
-                .apply => |v| try self.propagate(
-                    &out,
-                    try self.invoke(block_id, v.computation, context, states),
-                    v.next,
-                ),
-                .with_region => |v| try self.propagate(
-                    &out,
-                    try self.invoke(block_id, v.body, context, states),
-                    v.next,
-                ),
-                .handle => |v| {
-                    const body = try self.invoke(block_id, v.body, context, states);
-                    // General clauses may abort to the delimiter. Ordinary
-                    // returns also enter the return function, whose silent steps
-                    // can still add cancellation exits.
-                    try self.propagate(&out, body, v.next);
-                    try self.propagate(
-                        &out,
-                        try self.call(
-                            block_id,
-                            self.image.handlers[@intCast(v.handler)].return_function,
-                            context,
-                            body.normal,
-                        ),
-                        v.next,
-                    );
-                },
-                .perform => |v| {
-                    const selection = self.operationSelection(block_id);
-                    states = try self.event(
-                        .{
-                            .block = block_id,
-                            .phase = .operation,
-                            .selection = selection,
-                            .choice = if (selection.knowledge().conservative)
-                                .approximation
-                            else
-                                .program,
-                        },
-                        context,
-                        states,
-                    );
-                    out.prefixes |= states;
-                    var precise = !selection.knowledge().conservative and v.bodies.len == 0;
-                    for (selection.targets()) |target|
-                        precise = precise and
-                            try self.administrative(target.handler);
-                    if (precise) {
-                        states = try self.cancellation(&out, block_id, context, states);
-                        _ = out.join(try self.abrupt(block_id, context, states, .failure));
-                        out.may_nonreturn = true;
-                        if (selection.targets().len != 0) {
-                            // Every erased clause prefix is projection-silent,
-                            // including cancellation, but remains cancellable.
-                            out.cancellation |= states;
-                            var resumed_states: Mask = 0;
-                            for (selection.targets()) |target| {
-                                var cursor = self.image.functions[@intCast(target.function)].entry;
-                                while (self.image.blocks[
-                                    @intCast(cursor)
-                                ].terminator != .resume_value) cursor = self.image.blocks[
-                                    @intCast(cursor)
-                                ].terminator.jump.block;
-                                const contexts = try self.calleeContexts(
-                                    block_id,
-                                    target.function,
-                                    context,
-                                );
-                                for (0..self.monitor.contexts) |clause_context| if (contexts & bit(
-                                    clause_context,
-                                ) != 0) {
-                                    resumed_states |= try self.event(
-                                        .{ .block = cursor, .phase = .resumed },
-                                        clause_context,
-                                        states,
-                                    );
-                                };
-                            }
-                            states = resumed_states;
-                            out.prefixes |= states;
-                        }
-                        states = try self.event(
-                            .{
-                                .block = block_id,
-                                .phase = .reply,
-                                .selection = selection,
-                                .choice = .environment,
-                            },
-                            context,
-                            states,
-                        );
-                        out.prefixes |= states;
-                        try self.push(v.next, states);
-                    } else {
-                        const allowed = try self.remainingAlphabet(block_id);
-                        var hidden = self.widened(block_id, 0);
-                        const all = self.closure(states, allowed);
-                        hidden.normal = all;
-                        hidden.failure = all;
-                        hidden.cancellation = all;
-                        hidden.prefixes = all;
-                        // Aborting clauses can bypass the captured suffix.
-                        _ = out.join(hidden);
-                        try self.propagate(&out, hidden, v.next);
-                    }
-                },
-                .yield_value => |edge| {
-                    states = try self.event(
-                        .{ .block = block_id, .phase = .yield, .choice = .environment },
-                        context,
-                        states,
-                    );
-                    out.prefixes |= states;
-                    out.may_nonreturn = true;
-                    try self.push(edge, states);
-                },
-                .protect => |v| {
-                    const body = try self.invoke(block_id, v.body, context, states);
-                    out.prefixes |= body.prefixes;
-                    out.widened = out.widened or body.widened;
-                    out.may_nonreturn = out.may_nonreturn or body.may_nonreturn;
-                    const normal = try self.cleanupInvoke(
-                        block_id,
-                        v.cleanup,
-                        context,
-                        body.normal,
-                    );
-                    try self.propagate(&out, normal, v.next);
-                    const failed = try self.cleanupInvoke(
-                        block_id,
-                        v.cleanup,
-                        context,
-                        body.failure,
-                    );
-                    // Cancellation is metadata when the primary exit failed.
-                    out.failure |= failed.normal | failed.failure | failed.cancellation;
-                    out.prefixes |= failed.prefixes;
-                    const cancel = try self.cleanupInvoke(
-                        block_id,
-                        v.cleanup,
-                        context,
-                        body.cancellation,
-                    );
-                    out.cancellation |= cancel.normal | cancel.failure | cancel.cancellation;
-                    out.prefixes |= cancel.prefixes;
-                    out.widened = out.widened or failed.widened or cancel.widened;
-                    out.may_nonreturn = out.may_nonreturn or
-                        failed.may_nonreturn or
-                        cancel.may_nonreturn;
-                },
-                // Retained continuation and injected computation protocols need
-                // a checked library reduction. Unrecognized uses include every
-                // finite projected sequence and all possible exit kinds.
-                .resume_value => |v| try self.propagate(
-                    &out,
-                    try self.resumeSummary(block_id, v.resumption, context, states),
-                    v.next,
-                ),
-                .resume_with => |v| try self.propagate(
-                    &out,
-                    try self.resumeSummary(block_id, v.resumption, context, states),
-                    v.next,
-                ),
-                .resume_computation => |v| try self.propagate(
-                    &out,
-                    try self.resumeSummary(block_id, v.resumption, context, states),
-                    v.next,
-                ),
-                .dispose => |v| try self.propagate(&out, self.widened(block_id, states), v.next),
-            }
+            try self.transferTerminator(&out, block_id, context, states);
         }
         // A cancellation recorded during cleanup can become the eventual
         // primary exit after its remaining normal/failing work. Retaining the
         // ordinary exits as well is an explicit overapproximation.
         if (self.cleanup) out.cancellation |= out.normal | out.failure;
         return out;
+    }
+    fn transferTerminator(
+        self: *Engine,
+        out: *Summary,
+        block_id: p.Id,
+        context: usize,
+        initial: Mask,
+    ) Error!void {
+        const block = self.image.blocks[@intCast(block_id)];
+        const states = initial;
+        switch (block.terminator) {
+            .return_value => {
+                const returned = try self.event(
+                    .{ .block = block_id, .phase = .returned },
+                    context,
+                    states,
+                );
+                out.normal |= returned;
+                out.prefixes |= returned;
+            },
+            .fail => {
+                _ = out.join(try self.abrupt(block_id, context, states, .failure));
+            },
+            .jump => |edge| {
+                out.may_nonreturn = true;
+                try self.push(edge, states);
+            },
+            .unpack_product => |v| {
+                out.may_nonreturn = out.may_nonreturn or v.next.block <= block_id;
+                try self.push(v.next, states);
+            },
+            .branch => |v| {
+                out.may_nonreturn = out.may_nonreturn or
+                    v.when_true.block <= block_id or
+                    v.when_false.block <= block_id;
+                try self.push(
+                    v.when_true,
+                    try self.event(
+                        .{ .block = block_id, .phase = .branch, .alternative = 0 },
+                        context,
+                        states,
+                    ),
+                );
+                try self.push(
+                    v.when_false,
+                    try self.event(
+                        .{ .block = block_id, .phase = .branch, .alternative = 1 },
+                        context,
+                        states,
+                    ),
+                );
+            },
+            .switch_variant => |v| for (v.cases, 0..) |edge, alternative| {
+                out.may_nonreturn = out.may_nonreturn or edge.block <= block_id;
+                try self.push(
+                    edge,
+                    try self.event(
+                        .{ .block = block_id, .phase = .branch, .alternative = alternative },
+                        context,
+                        states,
+                    ),
+                );
+            },
+            else => try self.transferEffect(out, block_id, context, states),
+        }
+    }
+    fn transferOperation(
+        self: *Engine,
+        out: *Summary,
+        block_id: p.Id,
+        context: usize,
+        initial: Mask,
+    ) Error!void {
+        const v = self.image.blocks[@intCast(block_id)].terminator.perform;
+        var states = initial;
+
+        const selection = self.operationSelection(block_id);
+        states = try self.event(
+            .{
+                .block = block_id,
+                .phase = .operation,
+                .selection = selection,
+                .choice = if (selection.knowledge().conservative)
+                    .approximation
+                else
+                    .program,
+            },
+            context,
+            states,
+        );
+        out.prefixes |= states;
+        var precise = !selection.knowledge().conservative and v.bodies.len == 0;
+        for (selection.targets()) |target|
+            precise = precise and
+                try self.administrative(target.handler);
+        if (precise) {
+            states = try self.cancellation(out, block_id, context, states);
+            _ = out.join(try self.abrupt(block_id, context, states, .failure));
+            out.may_nonreturn = true;
+            states = try self.operationResumptions(
+                out,
+                block_id,
+                context,
+                states,
+                selection,
+            );
+            states = try self.event(
+                .{
+                    .block = block_id,
+                    .phase = .reply,
+                    .selection = selection,
+                    .choice = .environment,
+                },
+                context,
+                states,
+            );
+            out.prefixes |= states;
+            try self.push(v.next, states);
+        } else {
+            const allowed = try self.remainingAlphabet(block_id);
+            var hidden = self.widened(block_id, 0);
+            const all = self.closure(states, allowed);
+            hidden.normal = all;
+            hidden.failure = all;
+            hidden.cancellation = all;
+            hidden.prefixes = all;
+            // Aborting clauses can bypass the captured suffix.
+            _ = out.join(hidden);
+            try self.propagate(out, hidden, v.next);
+        }
+    }
+    fn transferProtection(
+        self: *Engine,
+        out: *Summary,
+        block_id: p.Id,
+        context: usize,
+        initial: Mask,
+    ) Error!void {
+        const v = self.image.blocks[@intCast(block_id)].terminator.protect;
+        const states = initial;
+
+        const body = try self.invoke(block_id, v.body, context, states);
+        out.prefixes |= body.prefixes;
+        out.widened = out.widened or body.widened;
+        out.may_nonreturn = out.may_nonreturn or body.may_nonreturn;
+        const normal = try self.cleanupInvoke(
+            block_id,
+            v.cleanup,
+            context,
+            body.normal,
+        );
+        try self.propagate(out, normal, v.next);
+        const failed = try self.cleanupInvoke(
+            block_id,
+            v.cleanup,
+            context,
+            body.failure,
+        );
+        // Cancellation is metadata when the primary exit failed.
+        out.failure |= failed.normal | failed.failure | failed.cancellation;
+        out.prefixes |= failed.prefixes;
+        const cancel = try self.cleanupInvoke(
+            block_id,
+            v.cleanup,
+            context,
+            body.cancellation,
+        );
+        out.cancellation |= cancel.normal | cancel.failure | cancel.cancellation;
+        out.prefixes |= cancel.prefixes;
+        out.widened = out.widened or failed.widened or cancel.widened;
+        out.may_nonreturn = out.may_nonreturn or
+            failed.may_nonreturn or
+            cancel.may_nonreturn;
+    }
+    fn operationResumptions(
+        self: *Engine,
+        out: *Summary,
+        block_id: p.Id,
+        context: usize,
+        initial: Mask,
+        selection: *const provenance.Selection,
+    ) Error!Mask {
+        var states = initial;
+        if (selection.targets().len != 0) {
+            // Every erased clause prefix is projection-silent,
+            // including cancellation, but remains cancellable.
+            out.cancellation |= states;
+            var resumed_states: Mask = 0;
+            for (selection.targets()) |target| {
+                var cursor = self.image.functions[@intCast(target.function)].entry;
+                while (self.image.blocks[
+                    @intCast(cursor)
+                ].terminator != .resume_value) cursor = self.image.blocks[
+                    @intCast(cursor)
+                ].terminator.jump.block;
+                const contexts = try self.calleeContexts(
+                    block_id,
+                    target.function,
+                    context,
+                );
+                for (0..self.monitor.contexts) |clause_context| if (contexts & bit(
+                    clause_context,
+                ) != 0) {
+                    resumed_states |= try self.event(
+                        .{ .block = cursor, .phase = .resumed },
+                        clause_context,
+                        states,
+                    );
+                };
+            }
+            states = resumed_states;
+            out.prefixes |= states;
+        }
+        return states;
+    }
+    fn transferEffect(
+        self: *Engine,
+        out: *Summary,
+        block_id: p.Id,
+        context: usize,
+        initial: Mask,
+    ) Error!void {
+        const block = self.image.blocks[@intCast(block_id)];
+        var states = initial;
+        switch (block.terminator) {
+            .call => |v| try self.propagate(
+                out,
+                try self.call(block_id, v.function, context, states),
+                v.next,
+            ),
+            .apply => |v| try self.propagate(
+                out,
+                try self.invoke(block_id, v.computation, context, states),
+                v.next,
+            ),
+            .with_region => |v| try self.propagate(
+                out,
+                try self.invoke(block_id, v.body, context, states),
+                v.next,
+            ),
+            .handle => try self.transferHandler(out, block_id, context, states),
+            .perform => try self.transferOperation(out, block_id, context, states),
+            .yield_value => |edge| {
+                states = try self.event(
+                    .{ .block = block_id, .phase = .yield, .choice = .environment },
+                    context,
+                    states,
+                );
+                out.prefixes |= states;
+                out.may_nonreturn = true;
+                try self.push(edge, states);
+            },
+            .protect => try self.transferProtection(out, block_id, context, states),
+            // Retained continuation and injected computation protocols need
+            // a checked library reduction. Unrecognized uses include every
+            // finite projected sequence and all possible exit kinds.
+            .resume_value => |v| try self.propagate(
+                out,
+                try self.resumeSummary(block_id, v.resumption, context, states),
+                v.next,
+            ),
+            .resume_with => |v| try self.propagate(
+                out,
+                try self.resumeSummary(block_id, v.resumption, context, states),
+                v.next,
+            ),
+            .resume_computation => |v| try self.propagate(
+                out,
+                try self.resumeSummary(block_id, v.resumption, context, states),
+                v.next,
+            ),
+            .dispose => |v| try self.propagate(out, self.widened(block_id, states), v.next),
+            else => unreachable,
+        }
+    }
+    fn transferHandler(
+        self: *Engine,
+        out: *Summary,
+        block_id: p.Id,
+        context: usize,
+        states: Mask,
+    ) Error!void {
+        const v = self.image.blocks[@intCast(block_id)].terminator.handle;
+
+        const body = try self.invoke(block_id, v.body, context, states);
+        // General clauses may abort to the delimiter. Ordinary
+        // returns also enter the return function, whose silent steps
+        // can still add cancellation exits.
+        try self.propagate(out, body, v.next);
+        try self.propagate(
+            out,
+            try self.call(
+                block_id,
+                self.image.handlers[@intCast(v.handler)].return_function,
+                context,
+                body.normal,
+            ),
+            v.next,
+        );
     }
 };
 

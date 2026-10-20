@@ -266,40 +266,7 @@ test "Reader law is recognized from admitted records and actual capability bindi
     try std.testing.expectEqual(readers.functions[1].layout.slots.len, fused_body.layout.slots.len);
     try std.testing.expectEqual(@as(p.Id, 4), fused_body.inputs[4]);
     try std.testing.expectEqual(@as(p.Id, 4), fused_body.layout.slots[4]);
-    var reordered = candidate.program;
-    const changed = try scratch.dupe(ir.Block, candidate.program.blocks);
-    changed[0].terminator.handle.state = &.{ 1, 0 };
-    reordered.blocks = changed;
-    admitted = try @import("activation_ownership.zig").analyze(a, reordered);
-    admitted.deinit();
-    try std.testing.expectError(
-        error.InvalidReaderFusion,
-        fusion.validate(a, readers, reordered, 0, .{}),
-    );
-    @memcpy(changed, candidate.program.blocks);
-    const entry = readers.blocks.len;
-    const arguments = candidate.program.blocks[entry].terminator.call.arguments;
-    const swapped_arguments = [_]p.Id{ arguments[0], arguments[2], arguments[1], arguments[3] };
-    changed[entry].terminator.call.arguments = &swapped_arguments;
-    admitted = try @import("activation_ownership.zig").analyze(a, reordered);
-    admitted.deinit();
-    try std.testing.expectError(
-        error.InvalidReaderFusion,
-        fusion.validate(a, readers, reordered, 0, .{}),
-    );
-    @memcpy(changed, candidate.program.blocks);
-    const first_clause = candidate.program.handlers[candidate.program.handlers.len - 1].clauses[0];
-    changed[
-        @intCast(candidate.program.functions[
-            @intCast(first_clause.function)
-        ].entry)
-    ].terminator = .{ .return_value = 1 };
-    admitted = try @import("activation_ownership.zig").analyze(a, reordered);
-    admitted.deinit();
-    try std.testing.expectError(
-        error.InvalidReaderFusion,
-        fusion.validate(a, readers, reordered, 0, .{}),
-    );
+    try rejectReaderReordering(scratch, candidate.program);
     var stats: fusion.Statistics = .{};
     var selected = try fusion.run(a, readers, &stats, .{});
     defer selected.deinit();
@@ -315,6 +282,43 @@ test "Reader law is recognized from admitted records and actual capability bindi
     try std.testing.expectError(
         error.InvalidReference,
         fusion.run(a, invalid, null, .{ .work_limit = 0 }),
+    );
+}
+
+fn rejectReaderReordering(scratch: std.mem.Allocator, program: ir.Program) !void {
+    var reordered = program;
+    const changed = try scratch.dupe(ir.Block, program.blocks);
+    changed[0].terminator.handle.state = &.{ 1, 0 };
+    reordered.blocks = changed;
+    var admitted = try @import("activation_ownership.zig").analyze(a, reordered);
+    admitted.deinit();
+    try std.testing.expectError(
+        error.InvalidReaderFusion,
+        fusion.validate(a, readers, reordered, 0, .{}),
+    );
+    @memcpy(changed, program.blocks);
+    const entry = readers.blocks.len;
+    const arguments = program.blocks[entry].terminator.call.arguments;
+    const swapped_arguments = [_]p.Id{ arguments[0], arguments[2], arguments[1], arguments[3] };
+    changed[entry].terminator.call.arguments = &swapped_arguments;
+    admitted = try @import("activation_ownership.zig").analyze(a, reordered);
+    admitted.deinit();
+    try std.testing.expectError(
+        error.InvalidReaderFusion,
+        fusion.validate(a, readers, reordered, 0, .{}),
+    );
+    @memcpy(changed, program.blocks);
+    const first_clause = program.handlers[program.handlers.len - 1].clauses[0];
+    changed[
+        @intCast(program.functions[
+            @intCast(first_clause.function)
+        ].entry)
+    ].terminator = .{ .return_value = 1 };
+    admitted = try @import("activation_ownership.zig").analyze(a, reordered);
+    admitted.deinit();
+    try std.testing.expectError(
+        error.InvalidReaderFusion,
+        fusion.validate(a, readers, reordered, 0, .{}),
     );
 }
 
@@ -351,55 +355,59 @@ test "Reader fusion separates canonical rows from positional handled evidence" {
     reversed.handlers = handlers;
     reversed.effects = &.{ readers.effects[1], readers.effects[0] };
     for ([_]ir.Program{ readers, reversed }) |original| {
-        var admitted = try @import("activation_ownership.zig").analyze(a, original);
-        admitted.deinit();
-        var candidate = (try fusion.construct(a, original, .{})).?;
-        defer candidate.deinit();
-        try fusion.validate(a, original, candidate.program, candidate.shape.site, .{});
-        const handled = [_]p.Id{
-            original.handlers[0].clauses[0].effect,
-            original.handlers[1].clauses[0].effect,
-        };
-        try std.testing.expectEqualSlices(
-            p.Id,
-            &.{ 0, 1 },
-            candidate.program.functions[original.functions.len].effects,
-        );
-        try std.testing.expectEqualSlices(
-            p.Id,
-            &.{ 0, 1 },
-            candidate.program.schemas[original.schemas.len + 2].internal.computation.effects,
-        );
-        for (candidate.program.schemas[original.schemas.len..][0..2]) |schema| {
-            try std.testing.expectEqualSlices(p.Id, &handled, schema.internal.resumption.handled);
-        }
-        var stats: fusion.Statistics = .{};
-        var fused = try fusion.run(a, original, &stats, .{});
-        defer fused.deinit();
-        try std.testing.expectEqual(@as(usize, 1), stats.pairs_fused);
-        var compiled = try @import("closed_compilation.zig").run(
-            a,
-            original,
-            .{ .contract = .semantic },
-        );
-        defer compiled.deinit();
-        try std.testing.expectEqual(@as(usize, 1), compiled.program.handlers.len);
-
-        var wrong = candidate.program;
-        const changed = try scratch.dupe(p.Schema, candidate.program.schemas);
-        wrong.schemas = changed;
-        changed[original.schemas.len].internal.resumption.handled = &.{ handled[1], handled[0] };
-        try std.testing.expectError(
-            error.InvalidEffect,
-            fusion.validate(a, original, wrong, candidate.shape.site, .{}),
-        );
-        @memcpy(changed, candidate.program.schemas);
-        changed[original.schemas.len + 2].internal.computation.effects = &.{ 1, 0 };
-        try std.testing.expectError(
-            error.NonCanonical,
-            fusion.validate(a, original, wrong, candidate.shape.site, .{}),
-        );
+        try checkCanonicalReaderRows(scratch, original);
     }
+}
+
+fn checkCanonicalReaderRows(scratch: std.mem.Allocator, original: ir.Program) !void {
+    var admitted = try @import("activation_ownership.zig").analyze(a, original);
+    admitted.deinit();
+    var candidate = (try fusion.construct(a, original, .{})).?;
+    defer candidate.deinit();
+    try fusion.validate(a, original, candidate.program, candidate.shape.site, .{});
+    const handled = [_]p.Id{
+        original.handlers[0].clauses[0].effect,
+        original.handlers[1].clauses[0].effect,
+    };
+    try std.testing.expectEqualSlices(
+        p.Id,
+        &.{ 0, 1 },
+        candidate.program.functions[original.functions.len].effects,
+    );
+    try std.testing.expectEqualSlices(
+        p.Id,
+        &.{ 0, 1 },
+        candidate.program.schemas[original.schemas.len + 2].internal.computation.effects,
+    );
+    for (candidate.program.schemas[original.schemas.len..][0..2]) |schema| {
+        try std.testing.expectEqualSlices(p.Id, &handled, schema.internal.resumption.handled);
+    }
+    var stats: fusion.Statistics = .{};
+    var fused = try fusion.run(a, original, &stats, .{});
+    defer fused.deinit();
+    try std.testing.expectEqual(@as(usize, 1), stats.pairs_fused);
+    var compiled = try @import("closed_compilation.zig").run(
+        a,
+        original,
+        .{ .contract = .semantic },
+    );
+    defer compiled.deinit();
+    try std.testing.expectEqual(@as(usize, 1), compiled.program.handlers.len);
+
+    var wrong = candidate.program;
+    const changed = try scratch.dupe(p.Schema, candidate.program.schemas);
+    wrong.schemas = changed;
+    changed[original.schemas.len].internal.resumption.handled = &.{ handled[1], handled[0] };
+    try std.testing.expectError(
+        error.InvalidEffect,
+        fusion.validate(a, original, wrong, candidate.shape.site, .{}),
+    );
+    @memcpy(changed, candidate.program.schemas);
+    changed[original.schemas.len + 2].internal.computation.effects = &.{ 1, 0 };
+    try std.testing.expectError(
+        error.NonCanonical,
+        fusion.validate(a, original, wrong, candidate.shape.site, .{}),
+    );
 }
 
 test "overlapping Reader effects are admitted but cannot use the disjoint law" {

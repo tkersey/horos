@@ -121,42 +121,7 @@ pub fn validate(
                 witness = item;
             };
             if (witness) |item| {
-                if (instruction.opcode != .field or
-                    item.construction >= index)
-                    return error.InvalidAggregateReduction;
-                var slot = instruction.operands[0];
-                var cursor = index;
-                var found: ?usize = null;
-                while (cursor != 0) {
-                    cursor -= 1;
-                    const operation = before.instructions[cursor];
-                    if (operation.destination != slot) continue;
-                    if (operation.opcode == .move) {
-                        slot = operation.operands[0];
-                        continue;
-                    }
-                    if (operation.opcode == .product) found = cursor;
-                    break;
-                }
-                if (found == null or
-                    found.? != item.construction)
-                    return error.InvalidAggregateReduction;
-                const product = before.instructions[item.construction];
-                if (!safe(slots, product, permissions)) return error.InvalidAggregateReduction;
-                const source = product.operands[@intCast(instruction.immediate)];
-                for (before.instructions[item.construction..index]) |operation|
-                    if (operation.destination == source)
-                        return error.InvalidAggregateReduction;
-                const expected: ir.Instruction = .{
-                    .destination = instruction.destination,
-                    .opcode = .move,
-                    .operands = &.{source},
-                };
-                if (!equal(
-                    ir.Instruction,
-                    expected,
-                    replacement,
-                )) return error.InvalidAggregateReduction;
+                try validateProjection(before, slots, permissions, item, index, replacement);
             } else if (!equal(
                 ir.Instruction,
                 instruction,
@@ -168,4 +133,51 @@ pub fn validate(
         if (item.block >= original.blocks.len or
             item.projection >= original.blocks[item.block].instructions.len)
             return error.InvalidAggregateReduction;
+}
+
+fn validateProjection(
+    before: ir.Block,
+    slots: []const p.Id,
+    permissions: traits.Facts,
+    item: Witness,
+    index: usize,
+    replacement: ir.Instruction,
+) Error!void {
+    const instruction = before.instructions[index];
+    if (instruction.opcode != .field or
+        item.construction >= index)
+        return error.InvalidAggregateReduction;
+    var slot = instruction.operands[0];
+    var cursor = index;
+    var found: ?usize = null;
+    while (cursor != 0) {
+        cursor -= 1;
+        const operation = before.instructions[cursor];
+        if (operation.destination != slot) continue;
+        if (operation.opcode == .move) {
+            slot = operation.operands[0];
+            continue;
+        }
+        if (operation.opcode == .product) found = cursor;
+        break;
+    }
+    if (found == null or
+        found.? != item.construction)
+        return error.InvalidAggregateReduction;
+    const product = before.instructions[item.construction];
+    if (!safe(slots, product, permissions)) return error.InvalidAggregateReduction;
+    const source = product.operands[@intCast(instruction.immediate)];
+    for (before.instructions[item.construction..index]) |operation|
+        if (operation.destination == source)
+            return error.InvalidAggregateReduction;
+    const expected: ir.Instruction = .{
+        .destination = instruction.destination,
+        .opcode = .move,
+        .operands = &.{source},
+    };
+    if (!equal(
+        ir.Instruction,
+        expected,
+        replacement,
+    )) return error.InvalidAggregateReduction;
 }

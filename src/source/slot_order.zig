@@ -41,33 +41,7 @@ pub fn optimizeObserved(
         temporary[@intCast(block.function)][@intCast(instruction.destination)] = true;
     };
     const functions = try a.dupe(ir.Function, input.functions);
-    for (functions, maps, temporary) |*function, *map, flags| {
-        // A single word already represents arbitrary small subsets directly.
-        // Avoid changing those layouts without a multiword fragmentation gain.
-        var saw_temporary = false;
-        const scattered = for (flags, 0..) |is_temporary, slot| {
-            if (is_temporary)
-                saw_temporary = true
-            else if (saw_temporary and
-                slot >= 64)
-                break true;
-        } else false;
-        if (!scattered or !try accumulates(a, input, function.*, visited)) continue;
-        const mapping = try a.alloc(Id, flags.len);
-        map.* = mapping;
-        const layout = try a.alloc(Id, mapping.len);
-        var next: usize = 0;
-        for ([_]bool{ false, true }) |kind| {
-            for (flags, 0..) |is_temporary, old| {
-                if (is_temporary != kind) continue;
-                mapping[old] = next;
-                layout[next] = function.layout.slots[old];
-                next += 1;
-            }
-        }
-        function.inputs = try ids(a, function.inputs, mapping);
-        function.layout.slots = layout;
-    }
+    try reorderLayouts(a, input, functions, maps, temporary, visited);
     const blocks = try a.dupe(ir.Block, input.blocks);
     for (blocks) |*block| {
         const mapping = maps[@intCast(block.function)] orelse continue;
@@ -328,4 +302,41 @@ test "slot ordering is an immutable idempotent renaming of schemas and simultane
     var branching_facts = try data.activation_ownership.analyze(testing.allocator, branching);
     defer branching_facts.deinit();
     try testing.expectEqualDeep(branching, try optimize(arena.allocator(), branching));
+}
+
+fn reorderLayouts(
+    a: std.mem.Allocator,
+    input: ir.Program,
+    functions: []ir.Function,
+    maps: []?[]Id,
+    temporary: []const []bool,
+    visited: []bool,
+) Error!void {
+    for (functions, maps, temporary) |*function, *map, flags| {
+        // A single word already represents arbitrary small subsets directly.
+        // Avoid changing those layouts without a multiword fragmentation gain.
+        var saw_temporary = false;
+        const scattered = for (flags, 0..) |is_temporary, slot| {
+            if (is_temporary)
+                saw_temporary = true
+            else if (saw_temporary and
+                slot >= 64)
+                break true;
+        } else false;
+        if (!scattered or !try accumulates(a, input, function.*, visited)) continue;
+        const mapping = try a.alloc(Id, flags.len);
+        map.* = mapping;
+        const layout = try a.alloc(Id, mapping.len);
+        var next: usize = 0;
+        for ([_]bool{ false, true }) |kind| {
+            for (flags, 0..) |is_temporary, old| {
+                if (is_temporary != kind) continue;
+                mapping[old] = next;
+                layout[next] = function.layout.slots[old];
+                next += 1;
+            }
+        }
+        function.inputs = try ids(a, function.inputs, mapping);
+        function.layout.slots = layout;
+    }
 }

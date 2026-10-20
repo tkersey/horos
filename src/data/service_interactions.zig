@@ -224,25 +224,43 @@ const Checker = struct {
         try require(std.mem.eql(p.Id, call.arguments, &.{initial}));
         try self.returned(entry_id, call.next);
 
-        const producer = try self.function(producer_id, 1);
-        var region_entry = try self.block(producer.entry, producer_id);
+        return checkProducer(.{
+            .call = call,
+            .command = command,
+            .entry_id = entry_id,
+            .finalizer = finalizer,
+            .handle = handle,
+            .offer = offer,
+            .producer_id = producer_id,
+            .reply = reply,
+            .self = self,
+        });
+    }
+    fn checkProducer(ctx: anytype) Error!Checked {
+        const producer = try ctx.self.function(ctx.producer_id, 1);
+        var region_entry = try ctx.self.block(producer.entry, ctx.producer_id);
         const region_instruction = try region_entry.next();
-        const region_function_id = try self.constructor(region_instruction, &.{producer.inputs[0]});
+        const region_function_id = try ctx.self.constructor(
+            region_instruction,
+            &.{
+                producer.inputs[0],
+            },
+        );
         const region = (try region_entry.term(.with_region)).with_region;
         try require(region.body == region_instruction.destination and region.arguments.len == 0);
-        try self.returned(producer_id, region.next);
-        const region_function = try self.function(region_function_id, 2);
-        var state = try self.block(region_function.entry, region_function_id);
+        try ctx.self.returned(ctx.producer_id, region.next);
+        const region_function = try ctx.self.function(region_function_id, 2);
+        var state = try ctx.self.block(region_function.entry, region_function_id);
         const zero = try state.next();
-        try self.constant(zero, 0);
+        try ctx.self.constant(zero, 0);
         const cell = try state.op(.cell_new, &.{ region_function.inputs[1], zero.destination }, 0);
         const body_instruction = try state.next();
-        const body_id = try self.constructor(
+        const body_id = try ctx.self.constructor(
             body_instruction,
             &.{ region_function.inputs[0], cell },
         );
         const cleanup_instruction = try state.next();
-        const cleanup_id = try self.constructor(cleanup_instruction, &.{cell});
+        const cleanup_id = try ctx.self.constructor(cleanup_instruction, &.{cell});
         const protect = (try state.term(.protect)).protect;
         try require(
             protect.body == body_instruction.destination and
@@ -251,35 +269,53 @@ const Checker = struct {
                 protect.resource == null and
                 protect.loan_region == null,
         );
-        try self.returned(region_function_id, protect.next);
-        const cleanup = try self.function(cleanup_id, 2);
-        var cleanup_entry = try self.block(cleanup.entry, cleanup_id);
+        try ctx.self.returned(region_function_id, protect.next);
+        const cleanup = try ctx.self.function(cleanup_id, 2);
+        var cleanup_entry = try ctx.self.block(cleanup.entry, cleanup_id);
         const final_value = try cleanup_entry.op(.cell_get, &.{cleanup.inputs[0]}, 0);
-        const final_operation = try cleanup_entry.perform(finalizer, null, final_value);
-        try self.returned(cleanup_id, final_operation.next);
+        const final_operation = try cleanup_entry.perform(ctx.finalizer, null, final_value);
+        try ctx.self.returned(cleanup_id, final_operation.next);
 
-        const body = try self.function(body_id, 2);
-        var initial_offer = try self.block(body.entry, body_id);
+        return checkWorker(.{
+            .body_id = body_id,
+            .cell = cell,
+            .cleanup_entry = cleanup_entry,
+            .region = region,
+            .region_function = region_function,
+            .call = ctx.call,
+            .command = ctx.command,
+            .entry_id = ctx.entry_id,
+            .finalizer = ctx.finalizer,
+            .handle = ctx.handle,
+            .offer = ctx.offer,
+            .producer_id = ctx.producer_id,
+            .reply = ctx.reply,
+            .self = ctx.self,
+        });
+    }
+    fn checkWorker(ctx: anytype) Error!Checked {
+        const body = try ctx.self.function(ctx.body_id, 2);
+        var initial_offer = try ctx.self.block(body.entry, ctx.body_id);
         const empty_ready = try initial_offer.next();
-        try self.unit(empty_ready);
+        try ctx.self.unit(empty_ready);
         const ready = try initial_offer.op(.variant, &.{empty_ready.destination}, 0);
-        const offered = try initial_offer.perform(offer, body.inputs[0], ready);
+        const offered = try initial_offer.perform(ctx.offer, body.inputs[0], ready);
         const first_command = try resultSlot(offered.next);
-        var begin_work = try self.block(offered.next.block, body_id);
+        var begin_work = try ctx.self.block(offered.next.block, ctx.body_id);
         const worker_call = (try begin_work.term(.call)).call;
         try require(std.mem.eql(
             p.Id,
             worker_call.arguments,
             &.{ first_command, body.inputs[1], body.inputs[0] },
         ));
-        try self.returned(body_id, worker_call.next);
-        const worker = try self.function(worker_call.function, 3);
-        var dispatch = try self.block(worker.entry, worker_call.function);
+        try ctx.self.returned(ctx.body_id, worker_call.next);
+        const worker = try ctx.self.function(worker_call.function, 3);
+        var dispatch = try ctx.self.block(worker.entry, worker_call.function);
         const choice = (try dispatch.term(.switch_variant)).switch_variant;
         try require(choice.value == worker.inputs[0] and choice.cases.len == 2);
         const request = try resultSlot(choice.cases[0]);
         _ = try resultSlot(choice.cases[1]);
-        var work = try self.block(choice.cases[0].block, worker_call.function);
+        var work = try ctx.self.block(choice.cases[0].block, worker_call.function);
         const id = try work.op(.field, &.{request}, 0);
         const delta = try work.op(.field, &.{request}, 1);
         const before = try work.op(.cell_get, &.{worker.inputs[1]}, 0);
@@ -289,120 +325,227 @@ const Checker = struct {
             addition.operands,
             &.{ before, delta },
         ) and addition.failures.len == 1 and addition.failures[0].kind == .arithmetic_overflow);
-        const failure_literal = self.image.constants[@intCast(addition.failures[0].value)];
+        const failure_literal = ctx.self.image.constants[@intCast(addition.failures[0].value)];
         try require(
-            self.image.schemas[
+            ctx.self.image.schemas[
                 @intCast(failure_literal.schema)
             ] == .unit and failure_literal.bytes.len == 0,
         );
         _ = try work.op(.cell_set, &.{ worker.inputs[1], addition.destination }, 0);
+        return checkReply(.{
+            .before = before,
+            .choice = choice,
+            .id = id,
+            .initial_offer = initial_offer,
+            .work = work,
+            .worker = worker,
+            .worker_call = worker_call,
+            .call = ctx.call,
+            .cell = ctx.cell,
+            .cleanup_entry = ctx.cleanup_entry,
+            .command = ctx.command,
+            .entry_id = ctx.entry_id,
+            .finalizer = ctx.finalizer,
+            .handle = ctx.handle,
+            .offer = ctx.offer,
+            .producer_id = ctx.producer_id,
+            .region = ctx.region,
+            .region_function = ctx.region_function,
+            .reply = ctx.reply,
+            .self = ctx.self,
+        });
+    }
+    fn checkReply(ctx: anytype) Error!Checked {
+        var work = ctx.work;
         const suspension = (try work.term(.yield_value)).yield_value;
         try require(suspension.assignments.len == 0);
-        var respond = try self.block(suspension.block, worker_call.function);
-        var reply_id = id;
+        var respond = try ctx.self.block(suspension.block, ctx.worker_call.function);
+        var reply_id = ctx.id;
         var matches = true;
         if (respond.value.instructions.len > 2) {
             const three = try respond.next();
-            try self.constant(three, 3);
-            reply_id = try respond.op(.integer_bit_xor, &.{ id, three.destination }, 0);
+            try ctx.self.constant(three, 3);
+            reply_id = try respond.op(.integer_bit_xor, &.{ ctx.id, three.destination }, 0);
             matches = false;
         }
-        const response = try respond.op(.product, &.{ reply_id, before }, 0);
+        const response = try respond.op(.product, &.{ reply_id, ctx.before }, 0);
         const output = try respond.op(.variant, &.{response}, 1);
-        const local_reply = try respond.perform(offer, worker.inputs[2], output);
+        const local_reply = try respond.perform(ctx.offer, ctx.worker.inputs[2], output);
         const next_command = try resultSlot(local_reply.next);
-        var again = try self.block(local_reply.next.block, worker_call.function);
+        var again = try ctx.self.block(local_reply.next.block, ctx.worker_call.function);
         const recurse = (try again.term(.call)).call;
-        try require(recurse.function == worker_call.function and std.mem.eql(
+        try require(recurse.function == ctx.worker_call.function and std.mem.eql(
             p.Id,
             recurse.arguments,
-            &.{ next_command, worker.inputs[1], worker.inputs[2] },
+            &.{ next_command, ctx.worker.inputs[1], ctx.worker.inputs[2] },
         ));
-        try self.returned(worker_call.function, recurse.next);
-        var close = try self.block(choice.cases[1].block, worker_call.function);
-        const final_counter = try close.op(.cell_get, &.{worker.inputs[1]}, 0);
+        try ctx.self.returned(ctx.worker_call.function, recurse.next);
+        var close = try ctx.self.block(ctx.choice.cases[1].block, ctx.worker_call.function);
+        const final_counter = try close.op(.cell_get, &.{ctx.worker.inputs[1]}, 0);
         try close.ret(final_counter);
 
-        const driver = try self.function(call.function, 1);
-        var drive = try self.block(driver.entry, call.function);
+        return checkDriver(.{
+            .close = close,
+            .matches = matches,
+            .respond = respond,
+            .call = ctx.call,
+            .cell = ctx.cell,
+            .cleanup_entry = ctx.cleanup_entry,
+            .command = ctx.command,
+            .entry_id = ctx.entry_id,
+            .finalizer = ctx.finalizer,
+            .handle = ctx.handle,
+            .initial_offer = ctx.initial_offer,
+            .offer = ctx.offer,
+            .producer_id = ctx.producer_id,
+            .region = ctx.region,
+            .region_function = ctx.region_function,
+            .reply = ctx.reply,
+            .self = ctx.self,
+            .work = work,
+            .worker_call = ctx.worker_call,
+        });
+    }
+    fn checkDriver(ctx: anytype) Error!Checked {
+        const driver = try ctx.self.function(ctx.call.function, 1);
+        var drive = try ctx.self.block(driver.entry, ctx.call.function);
         const answer = (try drive.term(.switch_variant)).switch_variant;
         try require(answer.value == driver.inputs[0] and answer.cases.len == 2);
-        var finished = try self.block(answer.cases[0].block, call.function);
+        var finished = try ctx.self.block(answer.cases[0].block, ctx.call.function);
         try finished.ret(try resultSlot(answer.cases[0]));
         const yielded = try resultSlot(answer.cases[1]);
-        var receive_answer = try self.block(answer.cases[1].block, call.function);
+        var receive_answer = try ctx.self.block(answer.cases[1].block, ctx.call.function);
         const parts = (try receive_answer.term(.unpack_product)).unpack_product;
         try require(
             parts.value == yielded and
                 parts.destinations.len == 2 and
                 parts.next.assignments.len == 0,
         );
-        var dispatch_message = try self.block(parts.next.block, call.function);
+        var dispatch_message = try ctx.self.block(parts.next.block, ctx.call.function);
         const message = (try dispatch_message.term(.switch_variant)).switch_variant;
         try require(message.value == parts.destinations[0] and message.cases.len == 2);
         _ = try resultSlot(message.cases[0]);
         const reply_value = try resultSlot(message.cases[1]);
-        var ready_branch = try self.block(message.cases[0].block, call.function);
+        var ready_branch = try ctx.self.block(message.cases[0].block, ctx.call.function);
         const empty = try ready_branch.next();
-        try self.unit(empty);
+        try ctx.self.unit(empty);
         const next_request = (try ready_branch.term(.jump)).jump;
         _ = try moved(next_request, empty.destination);
-        var reply_branch = try self.block(message.cases[1].block, call.function);
-        const sent = try reply_branch.perform(reply, null, reply_value);
+        var reply_branch = try ctx.self.block(message.cases[1].block, ctx.call.function);
+        const sent = try reply_branch.perform(ctx.reply, null, reply_value);
         try require(sent.next.block == next_request.block);
         _ = try resultSlot(sent.next);
-        var request_next = try self.block(next_request.block, call.function);
+        return checkDriverResumption(.{
+            .next_request = next_request,
+            .parts = parts,
+            .reply_branch = reply_branch,
+            .call = ctx.call,
+            .cell = ctx.cell,
+            .cleanup_entry = ctx.cleanup_entry,
+            .close = ctx.close,
+            .command = ctx.command,
+            .entry_id = ctx.entry_id,
+            .finalizer = ctx.finalizer,
+            .handle = ctx.handle,
+            .initial_offer = ctx.initial_offer,
+            .matches = ctx.matches,
+            .offer = ctx.offer,
+            .producer_id = ctx.producer_id,
+            .region = ctx.region,
+            .region_function = ctx.region_function,
+            .reply = ctx.reply,
+            .respond = ctx.respond,
+            .self = ctx.self,
+            .work = ctx.work,
+            .worker_call = ctx.worker_call,
+        });
+    }
+    fn checkDriverResumption(ctx: anytype) Error!Checked {
+        var request_next = try ctx.self.block(ctx.next_request.block, ctx.call.function);
         const command_payload = try request_next.next();
-        try self.unit(command_payload);
-        const received = try request_next.perform(command, null, command_payload.destination);
+        try ctx.self.unit(command_payload);
+        const received = try request_next.perform(ctx.command, null, command_payload.destination);
         const command_value = try resultSlot(received.next);
-        var resume_ = try self.block(received.next.block, call.function);
-        const token = try resume_.op(.unpack, &.{parts.destinations[1]}, 0);
+        var resume_ = try ctx.self.block(received.next.block, ctx.call.function);
+        const token = try resume_.op(.unpack, &.{ctx.parts.destinations[1]}, 0);
         const resumed = (try resume_.term(.resume_value)).resume_value;
         try require(resumed.resumption == token and resumed.argument == command_value);
         const successor = try resultSlot(resumed.next);
-        var next_driver = try self.block(resumed.next.block, call.function);
+        var next_driver = try ctx.self.block(resumed.next.block, ctx.call.function);
         const continued = (try next_driver.term(.call)).call;
-        try require(continued.function == call.function and std.mem.eql(
+        try require(continued.function == ctx.call.function and std.mem.eql(
             p.Id,
             continued.arguments,
             &.{successor},
         ));
-        try self.returned(call.function, continued.next);
+        try ctx.self.returned(ctx.call.function, continued.next);
+        return checkCoverage(.{
+            .reply_branch = ctx.reply_branch,
+            .request_next = request_next,
+            .resume_ = resume_,
+            .call = ctx.call,
+            .cell = ctx.cell,
+            .cleanup_entry = ctx.cleanup_entry,
+            .close = ctx.close,
+            .command = ctx.command,
+            .entry_id = ctx.entry_id,
+            .finalizer = ctx.finalizer,
+            .handle = ctx.handle,
+            .initial_offer = ctx.initial_offer,
+            .matches = ctx.matches,
+            .offer = ctx.offer,
+            .producer_id = ctx.producer_id,
+            .region = ctx.region,
+            .region_function = ctx.region_function,
+            .reply = ctx.reply,
+            .respond = ctx.respond,
+            .self = ctx.self,
+            .work = ctx.work,
+            .worker_call = ctx.worker_call,
+        });
+    }
+
+    fn checkCoverage(ctx: anytype) Error!Checked {
         // Every executable record in this admitted image participates in the
         // checked construction. Extra behavior cannot hide behind a label.
-        for (self.blocks) |visited| try require(visited);
-        for (self.functions) |visited| try require(visited);
-        try self.freshDefinitions();
-        for ([_]p.Id{ initial_offer.id, respond.id }) |site| {
-            const selected = try self.owner.select(.{ .block = site, .role = .operation }, offer);
+        for (ctx.self.blocks) |visited| try require(visited);
+        for (ctx.self.functions) |visited| try require(visited);
+        try ctx.self.freshDefinitions();
+        for ([_]p.Id{ ctx.initial_offer.id, ctx.respond.id }) |site| {
+            const selected = try ctx.self.owner.select(
+                .{
+                    .block = site,
+                    .role = .operation,
+                },
+                ctx.offer,
+            );
             try require(
                 !selected.knowledge().conservative and
                     selected.targets().len == 1 and
-                    selected.targets()[0].handler == handle.handler,
+                    selected.targets()[0].handler == ctx.handle.handler,
             );
         }
-        return .{ .owner = self.owner, .roles = .{
-            .entry = entry_id,
-            .driver = call.function,
-            .worker = worker_call.function,
-            .producer = producer_id,
-            .handler = handle.handler,
-            .region = region.region,
-            .cell_schema = region_function.layout.slots[@intCast(cell)],
-            .command = command,
-            .reply = reply,
-            .finalizer = finalizer,
-            .offer = offer,
-            .request_site = request_next.id,
-            .reply_site = reply_branch.id,
-            .finalizer_site = cleanup_entry.id,
-            .resume_site = resume_.id,
-            .suspension_site = work.id,
-            .close_site = close.id,
-            .initial_offer_site = initial_offer.id,
-            .local_reply_site = respond.id,
-            .reply_matches = matches,
+        return .{ .owner = ctx.self.owner, .roles = .{
+            .entry = ctx.entry_id,
+            .driver = ctx.call.function,
+            .worker = ctx.worker_call.function,
+            .producer = ctx.producer_id,
+            .handler = ctx.handle.handler,
+            .region = ctx.region.region,
+            .cell_schema = ctx.region_function.layout.slots[@intCast(ctx.cell)],
+            .command = ctx.command,
+            .reply = ctx.reply,
+            .finalizer = ctx.finalizer,
+            .offer = ctx.offer,
+            .request_site = ctx.request_next.id,
+            .reply_site = ctx.reply_branch.id,
+            .finalizer_site = ctx.cleanup_entry.id,
+            .resume_site = ctx.resume_.id,
+            .suspension_site = ctx.work.id,
+            .close_site = ctx.close.id,
+            .initial_offer_site = ctx.initial_offer.id,
+            .local_reply_site = ctx.respond.id,
+            .reply_matches = ctx.matches,
         } };
     }
 };
@@ -571,20 +714,20 @@ const transitions = table: {
     result[6 * 12 + @backingInt(Event.finalize)] = 8;
     break :table result;
 };
+const Builder = struct {
+    fn add(
+        a: std.mem.Allocator,
+        list: *std.ArrayList(interaction.PhaseEdge),
+        from: usize,
+        to: usize,
+        site: interaction.Site,
+    ) Error!void {
+        try list.append(a, .{ .from = from, .to = to, .site = site });
+    }
+};
 fn graph(allocator: std.mem.Allocator, checked: Checked) Error!interaction.PhaseGraph {
     const r = checked.roles;
     var edges: std.ArrayList(interaction.PhaseEdge) = .empty;
-    const Builder = struct {
-        fn add(
-            a: std.mem.Allocator,
-            list: *std.ArrayList(interaction.PhaseEdge),
-            from: usize,
-            to: usize,
-            site: interaction.Site,
-        ) Error!void {
-            try list.append(a, .{ .from = from, .to = to, .site = site });
-        }
-    };
     // Producer startup happens once. Only the captured suffix returns to node 1.
     try Builder.add(
         allocator,
@@ -624,6 +767,14 @@ fn graph(allocator: std.mem.Allocator, checked: Checked) Error!interaction.Phase
         1,
         .{ .block = r.reply_site, .phase = .reply, .choice = .environment },
     );
+    return graphCleanup(.{
+        .allocator = allocator,
+        .checked = checked,
+        .edges = &edges,
+        .r = r,
+    });
+}
+fn graphCleanup(ctx: anytype) Error!interaction.PhaseGraph {
     // Three distinct cleanup exits. An exceptional exit while a future is held
     // disposes that owned future, which reaches the registered protected cleanup.
     for (0..3) |exit| {
@@ -631,55 +782,58 @@ fn graph(allocator: std.mem.Allocator, checked: Checked) Error!interaction.Phase
         const waiting = cleanup_node + 1;
         const terminal = cleanup_node + 2;
         try Builder.add(
-            allocator,
-            &edges,
+            ctx.allocator,
+            &ctx.edges.*,
             cleanup_node,
             waiting,
-            .{ .block = r.finalizer_site, .phase = .operation },
+            .{ .block = ctx.r.finalizer_site, .phase = .operation },
         );
         try Builder.add(
-            allocator,
-            &edges,
+            ctx.allocator,
+            &ctx.edges.*,
             waiting,
             terminal,
-            .{ .block = r.finalizer_site, .phase = .reply, .choice = .environment },
+            .{ .block = ctx.r.finalizer_site, .phase = .reply, .choice = .environment },
         );
         // A finalizer may itself fail/cancel; it is never run a second time.
         try Builder.add(
-            allocator,
-            &edges,
+            ctx.allocator,
+            &ctx.edges.*,
             waiting,
             12,
-            .{ .block = r.finalizer_site, .phase = .failure, .choice = .environment },
+            .{ .block = ctx.r.finalizer_site, .phase = .failure, .choice = .environment },
         );
         try Builder.add(
-            allocator,
-            &edges,
+            ctx.allocator,
+            &ctx.edges.*,
             waiting,
             15,
-            .{ .block = r.finalizer_site, .phase = .cancellation, .choice = .environment },
+            .{ .block = ctx.r.finalizer_site, .phase = .cancellation, .choice = .environment },
         );
     }
+    return graphExceptionalExits(ctx);
+}
+fn graphExceptionalExits(ctx: anytype) Error!interaction.PhaseGraph {
     for (0..8) |node| {
         try Builder.add(
-            allocator,
-            &edges,
+            ctx.allocator,
+            &ctx.edges.*,
             node,
             10,
             .{
-                .block = r.finalizer_site,
+                .block = ctx.r.finalizer_site,
                 .phase = .cleanup,
                 .alternative = 1,
                 .choice = .environment,
             },
         );
         try Builder.add(
-            allocator,
-            &edges,
+            ctx.allocator,
+            &ctx.edges.*,
             node,
             13,
             .{
-                .block = r.finalizer_site,
+                .block = ctx.r.finalizer_site,
                 .phase = .cleanup,
                 .alternative = 2,
                 .choice = .environment,
@@ -688,24 +842,24 @@ fn graph(allocator: std.mem.Allocator, checked: Checked) Error!interaction.Phase
     }
     // Allocation/failure/cancellation before protection establishes no cleanup.
     try Builder.add(
-        allocator,
-        &edges,
+        ctx.allocator,
+        &ctx.edges.*,
         0,
         12,
-        .{ .block = r.initial_offer_site, .phase = .failure, .choice = .environment },
+        .{ .block = ctx.r.initial_offer_site, .phase = .failure, .choice = .environment },
     );
     try Builder.add(
-        allocator,
-        &edges,
+        ctx.allocator,
+        &ctx.edges.*,
         0,
         15,
-        .{ .block = r.initial_offer_site, .phase = .cancellation, .choice = .environment },
+        .{ .block = ctx.r.initial_offer_site, .phase = .cancellation, .choice = .environment },
     );
     return .{
-        .subject = checked.owner.program(),
+        .subject = ctx.checked.owner.program(),
         .nodes = 16,
         .entry = 0,
-        .edges = try edges.toOwnedSlice(allocator),
+        .edges = try ctx.edges.*.toOwnedSlice(ctx.allocator),
         .normal = 9,
         .failure = 12,
         .cancellation = 15,

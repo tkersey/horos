@@ -228,6 +228,14 @@ pub fn validate(
         proof,
         &budget,
     )) != witness.instruction) return error.InvalidInductionReduction;
+    try validateRewrite(original, candidate, witness, &budget);
+}
+fn validateRewrite(
+    original: ir.Program,
+    candidate: ir.Program,
+    witness: Witness,
+    budget: *loops.Budget,
+) Error!void {
     var rest = candidate;
     rest.blocks = original.blocks;
     if (!equal(ir.Program, original, rest)) return error.InvalidInductionReduction;

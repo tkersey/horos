@@ -103,37 +103,21 @@ pub fn linkWithCompilation(
     defer for (decoded[0..initialized]) |*owner| owner.deinit();
     const units = try a.alloc(Unit, sorted.len);
     var totals = @as([relocate.kind_count]usize, @splat(0));
-    for (sorted, units, decoded, 0..) |instance, *unit, *owner, i| {
-        if (instance.key.len == 0 or !std.unicode.utf8ValidateSlice(
-            instance.key,
-        )) return error.InvalidSymbol;
-        if (i != 0 and std.mem.eql(
-            u8,
-            sorted[i - 1].key,
-            instance.key,
-        )) return error.DuplicateInstance;
-        owner.* = try component.decode(allocator, instance.object);
-        initialized += 1;
-        unit.* = .{
-            .key = instance.key,
-            .object = owner.object,
-            .offsets = totals,
-            .maps = undefined,
-        };
-        for (
-            &totals,
-            try relocate.sizes(owner.object.program),
-        ) |*total, count| total.* = std.math.add(
-            usize,
-            total.*,
-            count,
-        ) catch return error.InvalidLength;
-        var entries: usize = 0;
-        for (totals) |count| {
-            entries = std.math.add(usize, entries, count) catch return error.Capacity;
-            if (entries > component.max_catalog_entries) return error.Capacity;
-        }
-    }
+    try decodeUnits(allocator, sorted, units, decoded, &initialized, &totals);
+    const imports = try resolveImports(a, units, bindings, totals);
+    return finishLink(allocator, a, units, entry, imports, options);
+}
+
+const Imports = struct {
+    imported: [relocate.kind_count][]bool,
+    counts: [relocate.kind_count]usize,
+};
+fn resolveImports(
+    a: std.mem.Allocator,
+    units: []Unit,
+    bindings: []const Binding,
+    totals: [relocate.kind_count]usize,
+) Error!Imports {
     var aliases: [relocate.kind_count][]Id = undefined;
     var imported: [relocate.kind_count][]bool = undefined;
     var maps: [relocate.kind_count][]Id = undefined;
@@ -182,12 +166,22 @@ pub fn linkWithCompilation(
     ) |*map, global, offset, count| {
         map.* = global[offset..][0..count];
     };
+    return .{ .imported = imported, .counts = counts };
+}
+fn finishLink(
+    allocator: std.mem.Allocator,
+    a: std.mem.Allocator,
+    units: []Unit,
+    entry: Endpoint,
+    imports: Imports,
+    options: @import("closed_compilation.zig").Options,
+) Error!Linked {
     const selected_unit = units[try unitAt(units, entry.instance)];
     const selected = try symbolAt(selected_unit.object.exports, entry.symbol);
     if (selected.kind != .function) return error.IncompatibleInterface;
     const selected_mapper: relocate.Mapper = .{ .allocator = a, .maps = selected_unit.maps };
     const root = try selected_mapper.id(.function, selected.id);
-    var provisional = try assemble(a, units, imported, counts);
+    var provisional = try assemble(a, units, imports.imported, imports.counts);
     provisional.roots = .{
         .entry = root,
         .result = provisional.functions[@intCast(root)].result,
@@ -221,6 +215,47 @@ pub fn linkWithCompilation(
     try checkBorrows(a, units, result);
     const optimized = try @import("closed_compilation.zig").run(allocator, result, options);
     return .{ .arena = optimized.arena, .program = optimized.program, .flow = optimized.flow };
+}
+
+fn decodeUnits(
+    allocator: std.mem.Allocator,
+    sorted: []const Instance,
+    units: []Unit,
+    decoded: []component.Decoded,
+    initialized: *usize,
+    totals: *[relocate.kind_count]usize,
+) Error!void {
+    for (sorted, units, decoded, 0..) |instance, *unit, *owner, i| {
+        if (instance.key.len == 0 or !std.unicode.utf8ValidateSlice(
+            instance.key,
+        )) return error.InvalidSymbol;
+        if (i != 0 and std.mem.eql(
+            u8,
+            sorted[i - 1].key,
+            instance.key,
+        )) return error.DuplicateInstance;
+        owner.* = try component.decode(allocator, instance.object);
+        initialized.* += 1;
+        unit.* = .{
+            .key = instance.key,
+            .object = owner.object,
+            .offsets = totals.*,
+            .maps = undefined,
+        };
+        for (
+            totals,
+            try relocate.sizes(owner.object.program),
+        ) |*total, count| total.* = std.math.add(
+            usize,
+            total.*,
+            count,
+        ) catch return error.InvalidLength;
+        var entries: usize = 0;
+        for (totals.*) |count| {
+            entries = std.math.add(usize, entries, count) catch return error.Capacity;
+            if (entries > component.max_catalog_entries) return error.Capacity;
+        }
+    }
 }
 
 fn checkBorrows(a: std.mem.Allocator, units: []const Unit, result: ir.Program) Error!void {
@@ -341,15 +376,7 @@ fn assemble(
 ) Error!ir.Program {
     return .{
         .roots = .{ .entry = 0, .result = 0, .failure = 0 },
-        .schemas = try catalog(
-            p.Schema,
-            .schema,
-            a,
-            units,
-            imported[0],
-            counts[0],
-            relocate.Mapper.schema,
-        ),
+        .schemas = try assembleSchemas(a, units, imported, counts),
         .constants = try catalog(
             p.Literal,
             .constant,
@@ -395,27 +422,7 @@ fn assemble(
             counts[5],
             relocate.Mapper.handler,
         ),
-        .scopes = .{
-            .captures = try catalog(
-                p.Capture,
-                .capture,
-                a,
-                units,
-                imported[6],
-                counts[6],
-                relocate.Mapper.capture,
-            ),
-            .region_count = counts[7],
-            .resources = try catalog(
-                p.Resource,
-                .resource,
-                a,
-                units,
-                imported[8],
-                counts[8],
-                relocate.Mapper.resource,
-            ),
-        },
+        .scopes = try assembleScopes(a, units, imported, counts),
         .constructors = try catalog(
             p.Constructor,
             .constructor,
@@ -424,6 +431,50 @@ fn assemble(
             imported[9],
             counts[9],
             relocate.Mapper.constructor,
+        ),
+    };
+}
+fn assembleSchemas(
+    a: std.mem.Allocator,
+    units: []const Unit,
+    imported: [relocate.kind_count][]bool,
+    counts: [relocate.kind_count]usize,
+) Error![]const p.Schema {
+    return try catalog(
+        p.Schema,
+        .schema,
+        a,
+        units,
+        imported[0],
+        counts[0],
+        relocate.Mapper.schema,
+    );
+}
+fn assembleScopes(
+    a: std.mem.Allocator,
+    units: []const Unit,
+    imported: [relocate.kind_count][]bool,
+    counts: [relocate.kind_count]usize,
+) Error!p.ScopeCatalog {
+    return .{
+        .captures = try catalog(
+            p.Capture,
+            .capture,
+            a,
+            units,
+            imported[6],
+            counts[6],
+            relocate.Mapper.capture,
+        ),
+        .region_count = counts[7],
+        .resources = try catalog(
+            p.Resource,
+            .resource,
+            a,
+            units,
+            imported[8],
+            counts[8],
+            relocate.Mapper.resource,
         ),
     };
 }

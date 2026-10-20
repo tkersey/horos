@@ -39,7 +39,7 @@ pub fn KeyOps(comptime Key: type, comptime Policy: type) type {
         }
     };
 }
-fn validate(comptime T: type, comptime Policy: type) void {
+inline fn validate(comptime T: type, comptime Policy: type) void {
     if (Policy.leaf(T)) return;
     switch (@typeInfo(T)) {
         .int, .bool, .@"enum" => {},
@@ -60,7 +60,7 @@ fn validate(comptime T: type, comptime Policy: type) void {
         else => @compileError("Horos cache key: unsupported field type " ++ @typeName(T)),
     }
 }
-fn equal(comptime T: type, comptime Policy: type, left: T, right: T) bool {
+inline fn equal(comptime T: type, comptime Policy: type, left: T, right: T) bool {
     if (comptime Policy.leaf(T)) return Policy.eql(T, left, right);
     return switch (@typeInfo(T)) {
         .int, .bool, .@"enum" => left == right,
@@ -94,7 +94,7 @@ fn equal(comptime T: type, comptime Policy: type, left: T, right: T) bool {
         else => unreachable,
     };
 }
-fn copy(
+inline fn copy(
     comptime T: type,
     comptime Policy: type,
     allocator: std.mem.Allocator,
@@ -147,7 +147,12 @@ fn copy(
         else => unreachable,
     };
 }
-fn release(comptime T: type, comptime Policy: type, allocator: std.mem.Allocator, value: T) void {
+inline fn release(
+    comptime T: type,
+    comptime Policy: type,
+    allocator: std.mem.Allocator,
+    value: T,
+) void {
     if (comptime Policy.leaf(T)) return Policy.release(T, allocator, value);
     switch (@typeInfo(T)) {
         .int, .bool, .@"enum" => {},

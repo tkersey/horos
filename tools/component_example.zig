@@ -46,6 +46,31 @@ const Runner = struct {
 fn require(value: bool) !void {
     if (!value) return error.ContractMismatch;
 }
+const bindings: []const horos.data.linker.Binding = &.{
+    .{
+        .required = .{ .instance = "call", .symbol = "read" },
+        .supplied = .{ .instance = "state", .symbol = "read" },
+    },
+    .{
+        .required = .{ .instance = "state", .symbol = "twice" },
+        .supplied = .{ .instance = "call", .symbol = "twice" },
+    },
+    .{
+        .required = .{ .instance = "suspend", .symbol = "compute" },
+        .supplied = .{ .instance = "state", .symbol = "compute" },
+    },
+    .{
+        .required = .{ .instance = "suspend", .symbol = "read" },
+        .supplied = .{ .instance = "state", .symbol = "read" },
+    },
+};
+const Instance = struct { key: []const u8, path: []const u8 };
+const instances: []const Instance = &.{
+    .{ .key = "call", .path = "call.bmo1" },
+    .{ .key = "state", .path = "state.bmo1" },
+    .{ .key = "suspend", .path = "suspend.bmo1" },
+};
+
 fn components(r: Runner, linker: []const u8, output: []const u8) !void {
     const transported = try r.path(&.{ output, "horos-link" });
     try r.write(transported, try r.read(linker));
@@ -61,30 +86,6 @@ fn components(r: Runner, linker: []const u8, output: []const u8) !void {
         const bytes = try horos.source.component_examples.emit(r.a, item[1]);
         try r.write(try r.path(&.{ output, item[0] ++ ".bmo1" }), bytes);
     }
-    const bindings: []const horos.data.linker.Binding = &.{
-        .{
-            .required = .{ .instance = "call", .symbol = "read" },
-            .supplied = .{ .instance = "state", .symbol = "read" },
-        },
-        .{
-            .required = .{ .instance = "state", .symbol = "twice" },
-            .supplied = .{ .instance = "call", .symbol = "twice" },
-        },
-        .{
-            .required = .{ .instance = "suspend", .symbol = "compute" },
-            .supplied = .{ .instance = "state", .symbol = "compute" },
-        },
-        .{
-            .required = .{ .instance = "suspend", .symbol = "read" },
-            .supplied = .{ .instance = "state", .symbol = "read" },
-        },
-    };
-    const Instance = struct { key: []const u8, path: []const u8 };
-    const instances: []const Instance = &.{
-        .{ .key = "call", .path = "call.bmo1" },
-        .{ .key = "state", .path = "state.bmo1" },
-        .{ .key = "suspend", .path = "suspend.bmo1" },
-    };
     const manifest = .{
         .instances = instances,
         .bindings = bindings,
@@ -96,6 +97,35 @@ fn components(r: Runner, linker: []const u8, output: []const u8) !void {
     const first = try r.run(&.{ transported, "link.json" }, output, true);
     var admitted = try horos.data.program_image.Admitted.decode(r.a, first.stdout);
     defer admitted.deinit();
+    try checkReversed(r, transported, output, manifest_path, first.stdout);
+    const second = try linkExtended(r, transported, output, manifest_path);
+    var second_admitted = try horos.data.program_image.Admitted.decode(r.a, second.stdout);
+    defer second_admitted.deinit();
+    try require(!std.mem.eql(u8, first.stdout, second.stdout));
+    for ([_][]const u8{ "off", "safe" }) |retired| {
+        try r.write(
+            manifest_path,
+            try std.fmt.allocPrint(
+                r.a,
+                "{s},\"coalescing\":\"{s}\"}}",
+                .{ bytes[0 .. bytes.len - 1], retired },
+            ),
+        );
+        const rejected = try r.run(&.{ transported, "link.json" }, output, false);
+        try require(rejected.stdout.len == 0 and std.mem.indexOf(
+            u8,
+            rejected.stderr,
+            "UnknownField",
+        ) != null);
+    }
+}
+fn checkReversed(
+    r: Runner,
+    transported: []const u8,
+    output: []const u8,
+    manifest_path: []const u8,
+    first: []const u8,
+) !void {
     const reverse_instances = try r.a.dupe(Instance, instances);
     const reverse_bindings = try r.a.dupe(horos.data.linker.Binding, bindings);
     std.mem.reverse(Instance, reverse_instances);
@@ -107,13 +137,20 @@ fn components(r: Runner, linker: []const u8, output: []const u8) !void {
             .{
                 .instances = reverse_instances,
                 .bindings = reverse_bindings,
-                .entry = manifest.entry,
+                .entry = .{ .instance = "suspend", .symbol = "main" },
             },
             .{},
         ),
     );
     const reversed = try r.run(&.{ transported, "link.json" }, output, true);
-    try require(std.mem.eql(u8, first.stdout, reversed.stdout));
+    try require(std.mem.eql(u8, first, reversed.stdout));
+}
+fn linkExtended(
+    r: Runner,
+    transported: []const u8,
+    output: []const u8,
+    manifest_path: []const u8,
+) !std.process.RunResult {
     var extended: std.ArrayList(horos.data.linker.Binding) = .empty;
     try extended.appendSlice(r.a, bindings);
     for ([_][]const u8{ "main", "read", "release" }) |name| try extended.append(
@@ -138,44 +175,10 @@ fn components(r: Runner, linker: []const u8, output: []const u8) !void {
             .{},
         ),
     );
-    const second = try r.run(&.{ transported, "link.json" }, output, true);
-    var second_admitted = try horos.data.program_image.Admitted.decode(r.a, second.stdout);
-    defer second_admitted.deinit();
-    try require(!std.mem.eql(u8, first.stdout, second.stdout));
-    for ([_][]const u8{ "off", "safe" }) |retired| {
-        try r.write(
-            manifest_path,
-            try std.fmt.allocPrint(
-                r.a,
-                "{s},\"coalescing\":\"{s}\"}}",
-                .{ bytes[0 .. bytes.len - 1], retired },
-            ),
-        );
-        const rejected = try r.run(&.{ transported, "link.json" }, output, false);
-        try require(rejected.stdout.len == 0 and std.mem.indexOf(
-            u8,
-            rejected.stderr,
-            "UnknownField",
-        ) != null);
-    }
+    return r.run(&.{ transported, "link.json" }, output, true);
 }
 fn package(r: Runner, zig: []const u8, repository: []const u8, output: []const u8) !void {
-    const status = try r.run(
-        &.{ "git", "--no-replace-objects", "status", "--porcelain", "--untracked-files=all" },
-        repository,
-        true,
-    );
-    if (status.stdout.len != 0) return error.PackageCheckRequiresCommittedCandidate;
-    const snapshot = try r.run(
-        &.{ "git", "--no-replace-objects", "archive", "--format=tar", "HEAD" },
-        repository,
-        true,
-    );
-    const archive = try r.path(&.{ output, "source.tar" });
-    try r.write(archive, snapshot.stdout);
-    const source = try r.path(&.{ output, "source" });
-    try Dir.cwd().createDirPath(r.io, source);
-    _ = try r.run(&.{ "tar", "-xf", archive, "-C", source }, output, true);
+    const source = try packageSource(r, repository, output);
     var env = try r.env.clone(r.a);
     defer env.deinit();
     const global = try r.path(&.{ output, "global" });
@@ -206,30 +209,7 @@ fn package(r: Runner, zig: []const u8, repository: []const u8, output: []const u
         output,
         true,
     );
-    const consumer = try r.path(&.{ output, "consumer" });
-    try Dir.cwd().createDirPath(r.io, consumer);
-    try r.write(
-        try r.path(&.{ consumer, "build.zig.zon" }),
-        ".{ .name=.consumer, .version=\"0.0.0\", .fingerprint=0x705b3727bb03dcc2, " ++
-            ".dependencies=.{ .horos=.{.path=\"../package\"}}, .paths=.{\"\"} }",
-    );
-    inline for (.{
-        "build.zig",
-        "rejection.zig",
-        "category.zig",
-        "failure_literal_category.zig",
-        "lifecycle.zig",
-        "data.zig",
-        "static.zig",
-        "static_cases.zig",
-    }) |file| try r.write(
-        try r.path(&.{ consumer, file }),
-        try r.read(try r.path(&.{ source, "test/package_authoring", file })),
-    );
-    try r.write(
-        try r.path(&.{ consumer, "client.zig" }),
-        try r.read(try r.path(&.{ source, "examples/authoring_client.zig" })),
-    );
+    const consumer = try packageConsumer(r, source, output);
     const image = try selected.run(
         &.{ zig, "build", "emit", "reject", "data", "comptime-reject" },
         consumer,
@@ -255,6 +235,52 @@ fn package(r: Runner, zig: []const u8, repository: []const u8, output: []const u
             ) != null and std.mem.indexOf(u8, rejected.stderr, item[2]) != null,
         );
     }
+}
+fn packageSource(r: Runner, repository: []const u8, output: []const u8) ![]const u8 {
+    const status = try r.run(
+        &.{ "git", "--no-replace-objects", "status", "--porcelain", "--untracked-files=all" },
+        repository,
+        true,
+    );
+    if (status.stdout.len != 0) return error.PackageCheckRequiresCommittedCandidate;
+    const snapshot = try r.run(
+        &.{ "git", "--no-replace-objects", "archive", "--format=tar", "HEAD" },
+        repository,
+        true,
+    );
+    const archive = try r.path(&.{ output, "source.tar" });
+    try r.write(archive, snapshot.stdout);
+    const source = try r.path(&.{ output, "source" });
+    try Dir.cwd().createDirPath(r.io, source);
+    _ = try r.run(&.{ "tar", "-xf", archive, "-C", source }, output, true);
+    return source;
+}
+fn packageConsumer(r: Runner, source: []const u8, output: []const u8) ![]const u8 {
+    const consumer = try r.path(&.{ output, "consumer" });
+    try Dir.cwd().createDirPath(r.io, consumer);
+    try r.write(
+        try r.path(&.{ consumer, "build.zig.zon" }),
+        ".{ .name=.consumer, .version=\"0.0.0\", .fingerprint=0x705b3727bb03dcc2, " ++
+            ".dependencies=.{ .horos=.{.path=\"../package\"}}, .paths=.{\"\"} }",
+    );
+    inline for (.{
+        "build.zig",
+        "rejection.zig",
+        "category.zig",
+        "failure_literal_category.zig",
+        "lifecycle.zig",
+        "data.zig",
+        "static.zig",
+        "static_cases.zig",
+    }) |file| try r.write(
+        try r.path(&.{ consumer, file }),
+        try r.read(try r.path(&.{ source, "test/package_authoring", file })),
+    );
+    try r.write(
+        try r.path(&.{ consumer, "client.zig" }),
+        try r.read(try r.path(&.{ source, "examples/authoring_client.zig" })),
+    );
+    return consumer;
 }
 fn scratch(r: Runner, parent: []const u8) ![]const u8 {
     const absolute = try Dir.cwd().realPathFileAlloc(r.io, parent, r.a);

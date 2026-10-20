@@ -1,6 +1,7 @@
 //! Two live one-shot tokens of the same type, under distinct installations.
 //! The inner clause yields while its caller still owns the outer token.
 const source = @import("../source.zig");
+const p = @import("horos_data").program;
 pub fn build(b: *source.Builder) source.Error!source.Module {
     const unit = try b.scalar(void);
     const boolean = try b.scalar(bool);
@@ -46,6 +47,26 @@ pub fn build(b: *source.Builder) source.Error!source.Module {
         .state = &.{boolean},
         .clauses = &.{.{ .effect = effect, .function = clause, .resumption = token }},
     });
+    try defineNestedClause(b, integer, clause, handler, body, computation);
+    try b.define(
+        main,
+        try b.term(.{ .handle = .{
+            .handler = handler,
+            .body = try b.lambda(body, computation),
+            .state = &.{try b.constant(bool, false)},
+        } }),
+    );
+    return b.module(main, unit);
+}
+
+fn defineNestedClause(
+    b: *source.Builder,
+    integer: p.Id,
+    clause: p.Id,
+    handler: p.Id,
+    body: p.Id,
+    computation: p.Id,
+) source.Error!void {
     const suspended = try b.reference(b.parameter(clause, 2));
     const resumed = try b.term(.{ .resume_value = .{
         .resumption = suspended,
@@ -74,13 +95,4 @@ pub fn build(b: *source.Builder) source.Error!source.Module {
             .when_false = outer,
         } }),
     );
-    try b.define(
-        main,
-        try b.term(.{ .handle = .{
-            .handler = handler,
-            .body = try b.lambda(body, computation),
-            .state = &.{try b.constant(bool, false)},
-        } }),
-    );
-    return b.module(main, unit);
 }

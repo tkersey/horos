@@ -263,7 +263,7 @@ pub const Mapper = struct {
 const ControlMapper = struct {
     pub const VisitError = Error;
     mapper: Mapper,
-    pub fn reference(
+    pub inline fn reference(
         self: *ControlMapper,
         comptime role: roles.Role,
         comptime cardinality: roles.Cardinality,

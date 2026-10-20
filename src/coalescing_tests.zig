@@ -154,54 +154,10 @@ test "coalescing retains each original closure observation through constructor c
     };
     var b = source.Builder.init(testing.allocator);
     defer b.deinit();
-    const integer = try b.scalar(u64);
-    const unit = try b.scalar(void);
-    const triple = try b.schema(.{ .product = &.{ integer, integer, integer } });
-    const shape = try b.schema(.{ .internal = .{ .computation = .{
-        .parameters = &.{},
-        .result = integer,
-        .capture_bound = &.{integer},
-        .use = .reusable,
-    } } });
-    const entry = try b.declare(&.{integer}, triple, &.{}, &.{});
-    const variable = b.parameter(entry, 0);
-    var helpers: [2]Id = undefined;
-    for (&helpers) |*helper| {
-        helper.* = try b.declare(&.{}, integer, &.{}, &.{});
-        try b.define(helper.*, try b.pure(try b.reference(variable)));
-    }
-    var lambdas: [3]Id = undefined;
-    var closures_: [3]Id = undefined;
-    var results: [3]Id = undefined;
-    var values: [3]Id = undefined;
-    for (
-        &lambdas,
-        &closures_,
-        &results,
-        &values,
-        [_]Id{ helpers[0], helpers[0], helpers[1] },
-    ) |*lambda, *closure, *result, *value, helper| {
-        lambda.* = try b.lambda(helper, shape);
-        closure.* = try b.variable(shape);
-        result.* = try b.variable(integer);
-        value.* = try b.reference(result.*);
-    }
-    var next = try b.pure(try b.primitive(triple, .product, &values, 0));
-    var index: usize = 3;
-    while (index != 0) {
-        index -= 1;
-        const apply = try b.term(.{ .apply = .{
-            .computation = try b.reference(closures_[index]),
-            .arguments = &.{},
-        } });
-        next = try b.bind(
-            closures_[index],
-            try b.pure(lambdas[index]),
-            try b.bind(results[index], apply, next),
-        );
-    }
-    try b.define(entry, next);
-    const module = b.module(entry, unit);
+    const fixture = try closureTraceModule(&b);
+    const module = fixture.module;
+    const lambdas = fixture.lambdas;
+    const variable = fixture.variable;
     {
         var trace: Trace = .{};
         var observed = try source.lowerObserved(testing.allocator, module, .{
@@ -567,4 +523,59 @@ test "coalescing allocation failures cover handlers, constructors, regions and r
             try data.program_image.identity(testing.allocator, baseline.program),
         );
     }
+}
+
+fn closureTraceModule(
+    b: *source.Builder,
+) source.Error!struct { module: source.Module, lambdas: [3]source.Id, variable: source.Id } {
+    const Id = source.Id;
+    const integer = try b.scalar(u64);
+    const unit = try b.scalar(void);
+    const triple = try b.schema(.{ .product = &.{ integer, integer, integer } });
+    const shape = try b.schema(.{ .internal = .{ .computation = .{
+        .parameters = &.{},
+        .result = integer,
+        .capture_bound = &.{integer},
+        .use = .reusable,
+    } } });
+    const entry = try b.declare(&.{integer}, triple, &.{}, &.{});
+    const variable = b.parameter(entry, 0);
+    var helpers: [2]Id = undefined;
+    for (&helpers) |*helper| {
+        helper.* = try b.declare(&.{}, integer, &.{}, &.{});
+        try b.define(helper.*, try b.pure(try b.reference(variable)));
+    }
+    var lambdas: [3]Id = undefined;
+    var closures_: [3]Id = undefined;
+    var results: [3]Id = undefined;
+    var values: [3]Id = undefined;
+    for (
+        &lambdas,
+        &closures_,
+        &results,
+        &values,
+        [_]Id{ helpers[0], helpers[0], helpers[1] },
+    ) |*lambda, *closure, *result, *value, helper| {
+        lambda.* = try b.lambda(helper, shape);
+        closure.* = try b.variable(shape);
+        result.* = try b.variable(integer);
+        value.* = try b.reference(result.*);
+    }
+    var next = try b.pure(try b.primitive(triple, .product, &values, 0));
+    var index: usize = 3;
+    while (index != 0) {
+        index -= 1;
+        const apply = try b.term(.{ .apply = .{
+            .computation = try b.reference(closures_[index]),
+            .arguments = &.{},
+        } });
+        next = try b.bind(
+            closures_[index],
+            try b.pure(lambdas[index]),
+            try b.bind(results[index], apply, next),
+        );
+    }
+    try b.define(entry, next);
+    const module = b.module(entry, unit);
+    return .{ .module = module, .lambdas = lambdas, .variable = variable };
 }

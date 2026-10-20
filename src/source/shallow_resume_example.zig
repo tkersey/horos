@@ -72,50 +72,88 @@ fn instance(
     try b.define(returns, try b.pure(try b.constant(u64, 99)));
     const clause = try b.declare(&.{ unit, token }, integer, &.{effect}, &.{});
     const k = try b.reference(b.parameter(clause, 1));
+    return defineResumeClause(b, mode, use, injecting, .{
+        .unit = unit,
+        .integer = integer,
+        .effect = effect,
+        .cap = cap,
+        .token = token,
+        .returns = returns,
+        .clause = clause,
+        .k = k,
+    });
+}
+
+fn defineResumeClause(
+    b: *source.Builder,
+    comptime mode: p.Mode,
+    comptime use: p.Use,
+    comptime injecting: bool,
+    ctx: anytype,
+) source.Error!p.Id {
     const resume_term = if (injecting) blk: {
-        const thunk = try b.declare(&.{}, unit, &.{}, &.{});
+        const thunk = try b.declare(&.{}, ctx.unit, &.{}, &.{});
         try b.define(thunk, try b.pure(try b.constant(void, {})));
         const thunk_type = try b.schema(.{ .internal = .{ .computation = .{
             .parameters = &.{},
-            .result = unit,
+            .result = ctx.unit,
         } } });
         break :blk try b.term(.{ .resume_computation = .{
-            .resumption = k,
+            .resumption = ctx.k,
             .computation = try b.lambda(thunk, thunk_type),
         } });
     } else try b.term(.{ .resume_value = .{
-        .resumption = k,
+        .resumption = ctx.k,
         .argument = try b.constant(void, {}),
     } });
     const body_term = if (use == .multi)
-        try b.bind(try b.variable(integer), resume_term, resume_term)
+        try b.bind(try b.variable(ctx.integer), resume_term, resume_term)
     else
         resume_term;
-    try b.define(clause, body_term);
+    try b.define(ctx.clause, body_term);
     const handler = try b.handler(.{
         .mode = mode,
-        .input = integer,
-        .answer = integer,
-        .effects = &.{effect},
-        .return_function = returns,
-        .clauses = &.{.{ .effect = effect, .function = clause, .resumption = token }},
+        .input = ctx.integer,
+        .answer = ctx.integer,
+        .effects = &.{ctx.effect},
+        .return_function = ctx.returns,
+        .clauses = &.{.{ .effect = ctx.effect, .function = ctx.clause, .resumption = ctx.token }},
     });
-    const body = try b.declare(&.{cap}, integer, &.{effect}, &.{});
+    return defineHandledBody(b, .{
+        .unit = ctx.unit,
+        .integer = ctx.integer,
+        .effect = ctx.effect,
+        .cap = ctx.cap,
+        .handler = handler,
+    });
+}
+
+fn defineHandledBody(
+    b: *source.Builder,
+    ctx: anytype,
+) source.Error!p.Id {
+    const body = try b.declare(&.{ctx.cap}, ctx.integer, &.{ctx.effect}, &.{});
     const call = try b.term(.{ .perform = .{
-        .effect = effect,
+        .effect = ctx.effect,
         .capability = try b.reference(b.parameter(body, 0)),
         .payload = try b.constant(void, {}),
     } });
-    try b.define(body, try b.bind(try b.variable(unit), call, try b.pure(try b.constant(u64, 42))));
+    try b.define(
+        body,
+        try b.bind(try b.variable(ctx.unit), call, try b.pure(try b.constant(u64, 42))),
+    );
     const body_type = try b.schema(.{ .internal = .{ .computation = .{
-        .parameters = &.{cap},
-        .result = integer,
-        .effects = &.{effect},
+        .parameters = &.{ctx.cap},
+        .result = ctx.integer,
+        .effects = &.{ctx.effect},
     } } });
-    const entry = try b.declare(&.{}, integer, &.{effect}, &.{});
+    const entry = try b.declare(&.{}, ctx.integer, &.{ctx.effect}, &.{});
     try b.define(
         entry,
-        try b.term(.{ .handle = .{ .handler = handler, .body = try b.lambda(body, body_type) } }),
+        try b.term(.{ .handle = .{
+            .handler = ctx.handler,
+            .body = try b.lambda(body, body_type),
+        } }),
     );
     return entry;
 }

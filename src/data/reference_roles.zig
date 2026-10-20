@@ -34,84 +34,89 @@ const assignment_fields = &[_]Field{
     field("destination", p.Id, .slot_write, .one),
     field("source", ir.Source, .source, .one),
 };
+const reference_fields = std.EnumArray(p.TerminatorTag, []const Field).init(.{
+    .return_value = &.{},
+    .fail = &.{},
+    .jump = &.{},
+    .yield_value = &.{},
+    .branch = &.{
+        field("condition", p.Id, .slot_read, .one),
+        field("when_true", ir.Edge, .edge, .one),
+        field("when_false", ir.Edge, .edge, .one),
+    },
+    .switch_variant = &.{
+        field("value", p.Id, .slot_read, .one),
+        field("cases", []const ir.Edge, .edge, .list),
+    },
+    .unpack_product = &.{
+        field("value", p.Id, .slot_read, .one),
+        field("destinations", []const p.Id, .slot_write, .list),
+        field("next", ir.Edge, .edge, .one),
+    },
+    .call = &.{
+        field("function", p.Id, .function, .one),
+        field("arguments", []const p.Id, .slot_read, .list),
+        field("next", ir.Edge, .edge, .one),
+    },
+    .perform = &.{
+        field("effect", p.Id, .effect, .one),
+        field("capability", ?p.Id, .slot_read, .optional),
+        field("payload", p.Id, .slot_read, .one),
+        field("bodies", []const p.Id, .slot_read, .list),
+        field("use_site_capabilities", []const p.Id, .slot_read, .list),
+        field("next", ir.Edge, .edge, .one),
+    },
+    .apply = &.{
+        field("computation", p.Id, .slot_read, .one),
+        field("arguments", []const p.Id, .slot_read, .list),
+        field("next", ir.Edge, .edge, .one),
+    },
+    .handle = &.{
+        field("handler", p.Id, .handler, .one),
+        field("body", p.Id, .slot_read, .one),
+        field("arguments", []const p.Id, .slot_read, .list),
+        field("state", []const p.Id, .slot_read, .list),
+        field("next", ir.Edge, .edge, .one),
+    },
+    .resume_value = &.{
+        field("resumption", p.Id, .slot_read, .one),
+        field("argument", p.Id, .slot_read, .one),
+        field("next", ir.Edge, .edge, .one),
+    },
+    .resume_with = &.{
+        field("resumption", p.Id, .slot_read, .one),
+        field("argument", p.Id, .slot_read, .one),
+        field("handler", p.Id, .handler, .one),
+        field("state", []const p.Id, .slot_read, .list),
+        field("next", ir.Edge, .edge, .one),
+    },
+    .resume_computation = &.{
+        field("resumption", p.Id, .slot_read, .one),
+        field("computation", p.Id, .slot_read, .one),
+        field("next", ir.Edge, .edge, .one),
+    },
+    .dispose = &.{
+        field("owned", p.Id, .slot_read, .one),
+        field("next", ir.Edge, .edge, .one),
+    },
+    .protect = &.{
+        field("body", p.Id, .slot_read, .one),
+        field("cleanup", p.Id, .slot_read, .one),
+        field("arguments", []const p.Id, .slot_read, .list),
+        field("resource", ?p.Id, .slot_read, .optional),
+        field("loan_region", ?p.Id, .region, .optional),
+        field("next", ir.Edge, .edge, .one),
+    },
+    .with_region = &.{
+        field("region", p.Id, .region, .one),
+        field("body", p.Id, .slot_read, .one),
+        field("arguments", []const p.Id, .slot_read, .list),
+        field("next", ir.Edge, .edge, .one),
+    },
+});
+
 fn fields(comptime tag: p.TerminatorTag) []const Field {
-    return switch (tag) {
-        .return_value, .fail, .jump, .yield_value => &.{},
-        .branch => &.{
-            field("condition", p.Id, .slot_read, .one),
-            field("when_true", ir.Edge, .edge, .one),
-            field("when_false", ir.Edge, .edge, .one),
-        },
-        .switch_variant => &.{
-            field("value", p.Id, .slot_read, .one),
-            field("cases", []const ir.Edge, .edge, .list),
-        },
-        .unpack_product => &.{
-            field("value", p.Id, .slot_read, .one),
-            field("destinations", []const p.Id, .slot_write, .list),
-            field("next", ir.Edge, .edge, .one),
-        },
-        .call => &.{
-            field("function", p.Id, .function, .one),
-            field("arguments", []const p.Id, .slot_read, .list),
-            field("next", ir.Edge, .edge, .one),
-        },
-        .perform => &.{
-            field("effect", p.Id, .effect, .one),
-            field("capability", ?p.Id, .slot_read, .optional),
-            field("payload", p.Id, .slot_read, .one),
-            field("bodies", []const p.Id, .slot_read, .list),
-            field("use_site_capabilities", []const p.Id, .slot_read, .list),
-            field("next", ir.Edge, .edge, .one),
-        },
-        .apply => &.{
-            field("computation", p.Id, .slot_read, .one),
-            field("arguments", []const p.Id, .slot_read, .list),
-            field("next", ir.Edge, .edge, .one),
-        },
-        .handle => &.{
-            field("handler", p.Id, .handler, .one),
-            field("body", p.Id, .slot_read, .one),
-            field("arguments", []const p.Id, .slot_read, .list),
-            field("state", []const p.Id, .slot_read, .list),
-            field("next", ir.Edge, .edge, .one),
-        },
-        .resume_value => &.{
-            field("resumption", p.Id, .slot_read, .one),
-            field("argument", p.Id, .slot_read, .one),
-            field("next", ir.Edge, .edge, .one),
-        },
-        .resume_with => &.{
-            field("resumption", p.Id, .slot_read, .one),
-            field("argument", p.Id, .slot_read, .one),
-            field("handler", p.Id, .handler, .one),
-            field("state", []const p.Id, .slot_read, .list),
-            field("next", ir.Edge, .edge, .one),
-        },
-        .resume_computation => &.{
-            field("resumption", p.Id, .slot_read, .one),
-            field("computation", p.Id, .slot_read, .one),
-            field("next", ir.Edge, .edge, .one),
-        },
-        .dispose => &.{
-            field("owned", p.Id, .slot_read, .one),
-            field("next", ir.Edge, .edge, .one),
-        },
-        .protect => &.{
-            field("body", p.Id, .slot_read, .one),
-            field("cleanup", p.Id, .slot_read, .one),
-            field("arguments", []const p.Id, .slot_read, .list),
-            field("resource", ?p.Id, .slot_read, .optional),
-            field("loan_region", ?p.Id, .region, .optional),
-            field("next", ir.Edge, .edge, .one),
-        },
-        .with_region => &.{
-            field("region", p.Id, .region, .one),
-            field("body", p.Id, .slot_read, .one),
-            field("arguments", []const p.Id, .slot_read, .list),
-            field("next", ir.Edge, .edge, .one),
-        },
-    };
+    return reference_fields.get(tag);
 }
 pub fn validateFields(comptime T: type, comptime expected: []const Field) void {
     if (@typeInfo(T) != .@"struct") @compileError("portable reference roles: expected a record");

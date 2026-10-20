@@ -31,7 +31,7 @@ pub const cases = .{
     .{
         "pending_unknown",
         "Horos defineAlternatives.some: refine the unknown input before fulfilling a known " ++
-        "declaration shape",
+            "declaration shape",
     },
     .{
         "declaration_erasure",
@@ -50,7 +50,7 @@ pub const cases = .{
     .{
         "native_recursive",
         "Horos native schema: value.children.element: recursive native type requires an " ++
-        "explicit runtime declaration",
+            "explicit runtime declaration",
     },
     .{ "match_arm", "Horos match.no: case belongs to a different arm" },
     .{ "failure_category", "Horos authoring: wrong handle family; expected failure_literal" },

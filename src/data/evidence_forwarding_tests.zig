@@ -254,34 +254,7 @@ test "writes and distinct argument slots cannot certify equal installations" {
     try std.testing.expect(unknown == null);
 }
 
-fn nestedFixture(allocator: std.mem.Allocator) !ir.Program {
-    var program = try fixture(allocator);
-    const schemas = try allocator.alloc(p.Schema, 7);
-    @memcpy(schemas[0..6], program.schemas);
-    schemas[4].internal.resumption.effects = &.{0};
-    schemas[6] = .{ .internal = .{ .computation = .{
-        .parameters = &.{5},
-        .result = 0,
-        .effects = &.{0},
-        .capture_bound = &.{ 0, 5 },
-    } } };
-    const functions = try allocator.alloc(ir.Function, 6);
-    @memcpy(functions[0..5], program.functions);
-    functions[0].layout.slots = &.{ 0, 3, 0, 0 };
-    functions[0].effects = &.{0};
-    functions[1].layout.slots = &.{ 0, 5, 0, 0, 6, 0 };
-    functions[2].inputs = &.{ 0, 1 };
-    functions[2].layout.slots = &.{ 0, 0 };
-    functions[3].inputs = &.{ 4, 0, 1 };
-    functions[3].layout.slots = &.{ 0, 4, 0, 0, 0 };
-    functions[3].effects = &.{0};
-    functions[5] = .{
-        .entry = 11,
-        .inputs = &.{ 0, 1, 2 },
-        .layout = .{ .slots = &.{ 5, 0, 5, 0 } },
-        .result = 0,
-        .effects = &.{0},
-    };
+fn nestedBlocks(allocator: std.mem.Allocator, program: ir.Program) ![]ir.Block {
     const blocks = try allocator.alloc(ir.Block, 13);
     @memcpy(blocks[0..11], program.blocks);
     blocks[0].instructions = &.{
@@ -315,6 +288,38 @@ fn nestedFixture(allocator: std.mem.Allocator) !ir.Program {
         } },
     };
     blocks[12] = .{ .function = 5, .instructions = &.{}, .terminator = .{ .return_value = 3 } };
+    return blocks;
+}
+
+fn nestedFixture(allocator: std.mem.Allocator) !ir.Program {
+    var program = try fixture(allocator);
+    const schemas = try allocator.alloc(p.Schema, 7);
+    @memcpy(schemas[0..6], program.schemas);
+    schemas[4].internal.resumption.effects = &.{0};
+    schemas[6] = .{ .internal = .{ .computation = .{
+        .parameters = &.{5},
+        .result = 0,
+        .effects = &.{0},
+        .capture_bound = &.{ 0, 5 },
+    } } };
+    const functions = try allocator.alloc(ir.Function, 6);
+    @memcpy(functions[0..5], program.functions);
+    functions[0].layout.slots = &.{ 0, 3, 0, 0 };
+    functions[0].effects = &.{0};
+    functions[1].layout.slots = &.{ 0, 5, 0, 0, 6, 0 };
+    functions[2].inputs = &.{ 0, 1 };
+    functions[2].layout.slots = &.{ 0, 0 };
+    functions[3].inputs = &.{ 4, 0, 1 };
+    functions[3].layout.slots = &.{ 0, 4, 0, 0, 0 };
+    functions[3].effects = &.{0};
+    functions[5] = .{
+        .entry = 11,
+        .inputs = &.{ 0, 1, 2 },
+        .layout = .{ .slots = &.{ 5, 0, 5, 0 } },
+        .result = 0,
+        .effects = &.{0},
+    };
+    const blocks = try nestedBlocks(allocator, program);
     const handlers = try allocator.dupe(ir.Handler, program.handlers);
     handlers[0].state = &.{0};
     handlers[0].effects = &.{0};
@@ -466,10 +471,46 @@ test "conservative provenance preserves valid admission and rejects an unsafe re
     );
 }
 
-test "successor bindings retain original views without poisoning unrelated deep handlers" {
-    var arena = std.heap.ArenaAllocator.init(a);
-    defer arena.deinit();
-    const allocator = arena.allocator();
+const SuccessorFixture = struct {
+    program: ir.Program,
+    functions: []ir.Function,
+    blocks: []ir.Block,
+    handlers: []ir.Handler,
+};
+fn successorBlocks(allocator: std.mem.Allocator) ![]ir.Block {
+    const blocks = try allocator.alloc(ir.Block, 12);
+    @memcpy(blocks[0..8], base.blocks);
+    blocks[8] = .{
+        .function = 4,
+        .instructions = &.{},
+        .terminator = .{ .resume_with = .{
+            .resumption = 1,
+            .argument = 0,
+            .handler = 2,
+            .state = &.{},
+            .next = .{ .block = 9, .assignments = &.{.{ .destination = 2, .source = .returned }} },
+        } },
+    };
+    blocks[9] = .{ .function = 4, .instructions = &.{}, .terminator = .{ .return_value = 2 } };
+    blocks[10] = .{
+        .function = 5,
+        .instructions = &.{},
+        .terminator = .{ .resume_with = .{
+            .resumption = 1,
+            .argument = 0,
+            .handler = 1,
+            .state = &.{},
+            .next = .{
+                .block = 11,
+                .assignments = &.{.{ .destination = 2, .source = .returned }},
+            },
+        } },
+    };
+    blocks[11] = .{ .function = 5, .instructions = &.{}, .terminator = .{ .return_value = 2 } };
+    blocks[3] = .{ .function = 1, .instructions = &.{}, .terminator = .{ .return_value = 0 } };
+    return blocks;
+}
+fn successorFixture(allocator: std.mem.Allocator) !SuccessorFixture {
     var program = base;
     const schemas = try allocator.alloc(p.Schema, base.schemas.len + 2);
     @memcpy(schemas[0..base.schemas.len], base.schemas);
@@ -501,36 +542,7 @@ test "successor bindings retain original views without poisoning unrelated deep 
         .result = 0,
     };
     program.functions = functions;
-    const blocks = try allocator.alloc(ir.Block, 12);
-    @memcpy(blocks[0..8], base.blocks);
-    blocks[8] = .{
-        .function = 4,
-        .instructions = &.{},
-        .terminator = .{ .resume_with = .{
-            .resumption = 1,
-            .argument = 0,
-            .handler = 2,
-            .state = &.{},
-            .next = .{ .block = 9, .assignments = &.{.{ .destination = 2, .source = .returned }} },
-        } },
-    };
-    blocks[9] = .{ .function = 4, .instructions = &.{}, .terminator = .{ .return_value = 2 } };
-    blocks[10] = .{
-        .function = 5,
-        .instructions = &.{},
-        .terminator = .{ .resume_with = .{
-            .resumption = 1,
-            .argument = 0,
-            .handler = 1,
-            .state = &.{},
-            .next = .{
-                .block = 11,
-                .assignments = &.{.{ .destination = 2, .source = .returned }},
-            },
-        } },
-    };
-    blocks[11] = .{ .function = 5, .instructions = &.{}, .terminator = .{ .return_value = 2 } };
-    blocks[3] = .{ .function = 1, .instructions = &.{}, .terminator = .{ .return_value = 0 } };
+    const blocks = try successorBlocks(allocator);
     program.blocks = blocks;
     const handlers = try allocator.dupe(ir.Handler, &.{
         base.handlers[0],
@@ -550,6 +562,18 @@ test "successor bindings retain original views without poisoning unrelated deep 
         },
     });
     program.handlers = handlers;
+    return .{ .program = program, .functions = functions, .blocks = blocks, .handlers = handlers };
+}
+
+test "successor bindings retain original views without poisoning unrelated deep handlers" {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const fixture_value = try successorFixture(allocator);
+    const program = fixture_value.program;
+    const functions = fixture_value.functions;
+    const blocks = fixture_value.blocks;
+    const handlers = fixture_value.handlers;
     var admitted = try @import("activation_ownership.zig").analyze(a, program);
     admitted.deinit();
     const provenance = @import("control_provenance.zig");
@@ -810,33 +834,52 @@ test "explanations name unwitnessed inputs and close recursive summaries with ba
     try std.testing.expect(explanationHas(unknown, .conservative_expansion));
 }
 
-test "multi shot repeats captured suffix without replaying producer prefix" {
-    const interactions = @import("interactions.zig");
-    var image = base;
-    var schemas = base.schemas[0..6].*;
-    schemas[3].internal.computation.effects = &.{ 0, 1, 2 };
-    schemas[4].internal.resumption.use = .multi;
-    schemas[4].internal.resumption.effects = &.{ 1, 2 };
-    image.schemas = &schemas;
-    image.effects = &.{
-        .{
-            .identity = "multi",
-            .payload = 0,
-            .result = 0,
-            .external = false,
-            .control_use = .multi,
-        },
-        .{ .identity = "producer", .payload = 0, .result = 0 },
-        .{ .identity = "suffix", .payload = 0, .result = 0 },
-    };
-    var functions = base.functions[0..4].*;
-    functions[0].effects = &.{ 1, 2 };
-    functions[1].effects = &.{ 0, 1, 2 };
-    functions[3].effects = &.{ 1, 2 };
-    image.functions = &functions;
-    var handlers = base.handlers[0..1].*;
-    handlers[0].effects = &.{ 1, 2 };
-    image.handlers = &handlers;
+const MultiShotFixture = struct {
+    schemas: [6]p.Schema,
+    functions: [4]ir.Function,
+    handlers: [1]ir.Handler,
+    blocks: [10]ir.Block,
+
+    fn init() MultiShotFixture {
+        var schemas = base.schemas[0..6].*;
+        schemas[3].internal.computation.effects = &.{ 0, 1, 2 };
+        schemas[4].internal.resumption.use = .multi;
+        schemas[4].internal.resumption.effects = &.{ 1, 2 };
+        var functions = base.functions[0..4].*;
+        functions[0].effects = &.{ 1, 2 };
+        functions[1].effects = &.{ 0, 1, 2 };
+        functions[3].effects = &.{ 1, 2 };
+        var handlers = base.handlers[0..1].*;
+        handlers[0].effects = &.{ 1, 2 };
+        const blocks = multiShotBlocks();
+        return .{
+            .schemas = schemas,
+            .functions = functions,
+            .handlers = handlers,
+            .blocks = blocks,
+        };
+    }
+    fn program(self: *const MultiShotFixture) ir.Program {
+        var result = base;
+        result.schemas = &self.schemas;
+        result.functions = &self.functions;
+        result.handlers = &self.handlers;
+        result.blocks = &self.blocks;
+        result.effects = &.{
+            .{
+                .identity = "multi",
+                .payload = 0,
+                .result = 0,
+                .external = false,
+                .control_use = .multi,
+            },
+            .{ .identity = "producer", .payload = 0, .result = 0 },
+            .{ .identity = "suffix", .payload = 0, .result = 0 },
+        };
+        return result;
+    }
+};
+fn multiShotBlocks() [10]ir.Block {
     var blocks: [10]ir.Block = undefined;
     @memcpy(blocks[0..8], base.blocks);
     blocks[2].terminator = .{ .perform = .{
@@ -869,7 +912,13 @@ test "multi shot repeats captured suffix without replaying producer prefix" {
         .argument = 0,
         .next = .{ .block = 7, .assignments = &.{.{ .destination = 2, .source = .returned }} },
     } };
-    image.blocks = &blocks;
+    return blocks;
+}
+
+test "multi shot repeats captured suffix without replaying producer prefix" {
+    const interactions = @import("interactions.zig");
+    const fixture_value = MultiShotFixture.init();
+    const image = fixture_value.program();
     var admitted = try @import("activation_ownership.zig").analyze(a, image);
     admitted.deinit();
     var arena = std.heap.ArenaAllocator.init(a);

@@ -376,11 +376,26 @@ pub fn own(
     allocator: std.mem.Allocator,
     value_item: T,
 ) std.mem.Allocator.Error!T {
+    @setEvalBranchQuota(10000);
+    return ownFields(T, allocator, value_item);
+}
+
+inline fn ownFields(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    value_item: T,
+) std.mem.Allocator.Error!T {
     return switch (@typeInfo(T)) {
         .pointer => |pointer| blk: {
             if (pointer.size != .slice) @compileError("source records contain only owned slices");
             const output = try allocator.alloc(pointer.child, value_item.len);
-            for (output, value_item) |*to, from| to.* = try own(pointer.child, allocator, from);
+            for (output, value_item) |*to, from|
+                to.* =
+                    try ownFields(
+                        pointer.child,
+                        allocator,
+                        from,
+                    );
             break :blk output;
         },
         .@"struct" => blk: {
@@ -388,29 +403,21 @@ pub fn own(
             inline for (
                 @typeInfo(T).@"struct".field_names,
                 @typeInfo(T).@"struct".field_types,
-            ) |field_name, FieldType| @field(output, field_name) = try own(
+            ) |field_name, FieldType| @field(output, field_name) = try ownFields(
                 FieldType,
                 allocator,
                 @field(value_item, field_name),
             );
             break :blk output;
         },
-        .@"union" => blk: {
-            inline for (
-                @typeInfo(T).@"union".field_names,
-                @typeInfo(T).@"union".field_types,
-            ) |field_name, FieldType| if (std.mem.eql(
-                u8,
-                @tagName(value_item),
-                field_name,
-            )) break :blk @unionInit(
+        .@"union" => switch (value_item) {
+            inline else => |payload, tag| @unionInit(
                 T,
-                field_name,
-                try own(FieldType, allocator, @field(value_item, field_name)),
-            );
-            unreachable;
+                @tagName(tag),
+                try ownFields(@TypeOf(payload), allocator, payload),
+            ),
         },
-        .optional => |optional| if (value_item) |present| try own(
+        .optional => |optional| if (value_item) |present| try ownFields(
             optional.child,
             allocator,
             present,
@@ -418,13 +425,19 @@ pub fn own(
         .array => |array| blk: {
             // Preserve the complete array, including any sentinel outside len.
             var output = value_item;
-            for (&output, value_item) |*to, from| to.* = try own(array.child, allocator, from);
+            for (&output, value_item) |*to, from|
+                to.* =
+                    try ownFields(
+                        array.child,
+                        allocator,
+                        from,
+                    );
             break :blk output;
         },
         else => value_item,
     };
 }
-fn equal(comptime T: type, left: T, right: T) bool {
+inline fn equal(comptime T: type, left: T, right: T) bool {
     return switch (@typeInfo(T)) {
         .pointer => |pointer| blk: {
             if (left.len != right.len) break :blk false;

@@ -94,6 +94,22 @@ pub fn interpret(
         .state = &.{.{ .name = "log", .schema = cell }},
         .obligations = true,
     });
+    try defineWriter(c, handler, answer);
+    const value: Writer = .{
+        .answer = answer,
+        .cell = cell,
+        .sequence = sequence,
+        .handler = handler,
+        .resumption = try a.interop.resumptionSchema(c, handler),
+    };
+    try f.interpretations.append(
+        allocator,
+        .{ .key = try KeyOps.snapshot(allocator, key), .value = value },
+    );
+    return value;
+}
+
+fn defineWriter(c: *a.Context, handler: *const a.Handler, answer: *const a.Schema) a.Error!void {
     const returns_fn = try c.returnFunction(handler);
     const returns = try c.body(returns_fn);
     const logs = try returns.readCell(try returns.parameter("log"));
@@ -113,16 +129,4 @@ pub fn interpret(
             try clause.constant(void, {}),
         )),
     );
-    const value: Writer = .{
-        .answer = answer,
-        .cell = cell,
-        .sequence = sequence,
-        .handler = handler,
-        .resumption = try a.interop.resumptionSchema(c, handler),
-    };
-    try f.interpretations.append(
-        allocator,
-        .{ .key = try KeyOps.snapshot(allocator, key), .value = value },
-    );
-    return value;
 }

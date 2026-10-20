@@ -138,7 +138,6 @@ test "opcode parser preserves unknown tags failure counts budgets and failure ad
 }
 
 test "schema dependent admission faults stay independent of possible wire faults" {
-    const admission = @import("admission.zig");
     const schemas = [_]p.Schema{
         .unit,                                          .u8,           .u64, .bytes, .text,
         .{ .vector = .{ .element = 2, .maximum = 3 } }, .{ .seq = 2 },
@@ -155,9 +154,19 @@ test "schema dependent admission faults stay independent of possible wire faults
         .{ .kind = .invalid_utf8, .value = 0 },
     };
     const overflow = [_]p.InstructionFailure{.{ .kind = .arithmetic_overflow, .value = 0 }};
+    try checkBlobFaults(image, &capacity, &text_faults);
+    try checkSequenceFaults(image, &capacity);
+    try checkConversionFaults(image, &overflow);
+}
+fn checkBlobFaults(
+    image: anytype,
+    capacity: []const p.InstructionFailure,
+    text_faults: []const p.InstructionFailure,
+) !void {
+    const admission = @import("admission.zig");
     inline for (.{ @as(u64, 3), @as(u64, 4) }) |result| {
-        const valid: []const p.InstructionFailure = if (result == 3) &capacity else &text_faults;
-        const invalid: []const p.InstructionFailure = if (result == 3) &text_faults else &capacity;
+        const valid: []const p.InstructionFailure = if (result == 3) capacity else text_faults;
+        const invalid: []const p.InstructionFailure = if (result == 3) text_faults else capacity;
         try admission.validateInstruction(
             image,
             0,
@@ -188,9 +197,15 @@ test "schema dependent admission faults stay independent of possible wire faults
             ),
         );
     }
+}
+fn checkSequenceFaults(
+    image: anytype,
+    capacity: []const p.InstructionFailure,
+) !void {
+    const admission = @import("admission.zig");
     inline for (.{ @as(u64, 5), @as(u64, 6) }) |result| {
-        const valid: []const p.InstructionFailure = if (result == 5) &capacity else &.{};
-        const invalid: []const p.InstructionFailure = if (result == 5) &.{} else &capacity;
+        const valid: []const p.InstructionFailure = if (result == 5) capacity else &.{};
+        const invalid: []const p.InstructionFailure = if (result == 5) &.{} else capacity;
         try admission.validateInstruction(
             image,
             0,
@@ -221,10 +236,16 @@ test "schema dependent admission faults stay independent of possible wire faults
             ),
         );
     }
+}
+fn checkConversionFaults(
+    image: anytype,
+    overflow: []const p.InstructionFailure,
+) !void {
+    const admission = @import("admission.zig");
     inline for (.{ @as(u64, 1), @as(u64, 2) }) |result| {
         const from: u64 = if (result == 1) 2 else 1;
-        const valid: []const p.InstructionFailure = if (result == 1) &overflow else &.{};
-        const invalid: []const p.InstructionFailure = if (result == 1) &.{} else &overflow;
+        const valid: []const p.InstructionFailure = if (result == 1) overflow else &.{};
+        const invalid: []const p.InstructionFailure = if (result == 1) &.{} else overflow;
         try admission.validateInstruction(
             image,
             0,

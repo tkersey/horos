@@ -61,6 +61,57 @@ pub fn validate(
     // Establish this before allocating indexes by a submitted target domain;
     // in particular, a nominal region bound is not a stored-record count.
     for (counts, targets) |count, target| try require(target <= count);
+    const projected_maps = try projectMaps(storage, live, projection, map, counts, targets);
+    const final = projected_maps.final;
+    var representatives = projected_maps.representatives;
+    try require(map.locals.len == original.functions.len);
+    const locals = try storage.alloc(witness.Local, live.program.functions.len);
+    for (live.function_origins, locals) |origin, *local| local.* = map.locals[@intCast(origin)];
+    try blockRepresentatives(storage, live.program, candidate, final, &representatives);
+    try validation.validate(
+        a,
+        live.program,
+        candidate,
+        .{ .representatives = representatives, .final = final, .locals = locals },
+    );
+}
+
+fn blockRepresentatives(
+    storage: std.mem.Allocator,
+    original: ir.Program,
+    candidate: ir.Program,
+    final: r.Maps,
+    representatives: *r.Maps,
+) Error!void {
+    // Blocks are owned by whole functions. Select the representative's block
+    // rather than assuming arbitrary input block order follows function order.
+    const block_kind = @backingInt(r.Kind.block);
+    const function_kind = @backingInt(r.Kind.function);
+    const block_reps = try storage.alloc(p.Id, original.blocks.len);
+    const block_owners = try storage.alloc(p.Id, candidate.blocks.len);
+    @memset(block_owners, r.missing);
+    for (original.blocks, final[block_kind], 0..) |block, target, id| {
+        if (representatives[function_kind][@intCast(block.function)] == block.function) {
+            try require(block_owners[@intCast(target)] == r.missing);
+            block_owners[@intCast(target)] = id;
+        }
+    }
+    for (final[block_kind], block_reps) |target, *rep| {
+        rep.* = block_owners[@intCast(target)];
+        try require(rep.* != r.missing);
+    }
+    representatives[block_kind] = block_reps;
+}
+
+const ProjectedMaps = struct { final: r.Maps, representatives: r.Maps };
+fn projectMaps(
+    storage: std.mem.Allocator,
+    live: r.Projection,
+    projection: r.Maps,
+    map: Correspondence,
+    counts: [r.kind_count]usize,
+    targets: [r.kind_count]usize,
+) Error!ProjectedMaps {
     var final: r.Maps = undefined;
     var representatives: r.Maps = undefined;
     for (projection, map.maps, 0..) |projected, submitted, kind| {
@@ -98,31 +149,5 @@ pub fn validate(
         final[kind] = mapped;
         representatives[kind] = reps;
     }
-    try require(map.locals.len == original.functions.len);
-    const locals = try storage.alloc(witness.Local, live.program.functions.len);
-    for (live.function_origins, locals) |origin, *local| local.* = map.locals[@intCast(origin)];
-    // Blocks are owned by whole functions. Select the representative's block
-    // rather than assuming arbitrary input block order follows function order.
-    const block_kind = @backingInt(r.Kind.block);
-    const function_kind = @backingInt(r.Kind.function);
-    const block_reps = try storage.alloc(p.Id, live.program.blocks.len);
-    const block_owners = try storage.alloc(p.Id, candidate.blocks.len);
-    @memset(block_owners, r.missing);
-    for (live.program.blocks, final[block_kind], 0..) |block, target, id| {
-        if (representatives[function_kind][@intCast(block.function)] == block.function) {
-            try require(block_owners[@intCast(target)] == r.missing);
-            block_owners[@intCast(target)] = id;
-        }
-    }
-    for (final[block_kind], block_reps) |target, *rep| {
-        rep.* = block_owners[@intCast(target)];
-        try require(rep.* != r.missing);
-    }
-    representatives[block_kind] = block_reps;
-    try validation.validate(
-        a,
-        live.program,
-        candidate,
-        .{ .representatives = representatives, .final = final, .locals = locals },
-    );
+    return .{ .final = final, .representatives = representatives };
 }

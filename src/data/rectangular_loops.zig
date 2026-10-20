@@ -98,6 +98,16 @@ pub fn analyze(a: std.mem.Allocator, program: ir.Program, budget: *loops.Budget)
     if (program.blocks[exit].instructions.len != 0 or
         program.blocks[exit].terminator != .return_value)
         return null;
+    return analyzeRoles(a, program, budget, ids);
+}
+fn analyzeRoles(
+    a: std.mem.Allocator,
+    program: ir.Program,
+    budget: *loops.Budget,
+    ids: [7]usize,
+) Error!?Shape {
+    const entry, const outer, const reset, const inner, const body, const latch, const exit = ids;
+    const f = program.functions[0];
     const i = program.blocks[outer].instructions[0].operands[0];
     const n = program.blocks[outer].instructions[0].operands[1];
     const j = program.blocks[inner].instructions[0].operands[0];
@@ -137,32 +147,8 @@ pub fn analyze(a: std.mem.Allocator, program: ir.Program, budget: *loops.Budget)
         reduction.operands[0] != accumulator or
         reduction.failures.len != 0)
         return null;
-    const available = try a.alloc(bool, f.layout.slots.len);
-    @memset(available, false);
-    for (f.inputs) |slot| {
-        if (program.schemas[@intCast(f.layout.slots[@intCast(slot)])] != .u64) return null;
-        available[@intCast(slot)] = true;
-    }
-    for ([_]p.Id{ i, j, n, m, one }) |slot| available[@intCast(slot)] = true;
-    for (work[0 .. work.len - 2]) |op| {
-        try budget.take(1);
-        if (op.failures.len != 0 or available[
-            @intCast(op.destination)
-        ] or op.destination == accumulator or program.schemas[
-            @intCast(f.layout.slots[
-                @intCast(op.destination)
-            ])
-        ] != .u64) return null;
-        switch (op.opcode) {
-            .integer_bit_xor, .integer_bit_and, .integer_bit_or => if (op.operands.len != 2)
-                return null,
-            .integer_bit_not, .move => if (op.operands.len != 1) return null,
-            else => return null,
-        }
-        for (op.operands) |slot| if (!available[@intCast(slot)]) return null;
-        available[@intCast(op.destination)] = true;
-    }
-    if (!available[@intCast(reduction.operands[1])]) return null;
+    if (!try validReductionInputs(a, program, budget, work, .{ i, j, n, m, one }, accumulator))
+        return null;
     return .{
         .entry = entry,
         .outer = outer,
@@ -180,6 +166,44 @@ pub fn analyze(a: std.mem.Allocator, program: ir.Program, budget: *loops.Budget)
         .rows = rows,
         .columns = columns,
     };
+}
+fn validReductionInputs(
+    a: std.mem.Allocator,
+    program: ir.Program,
+    budget: *loops.Budget,
+    work: []const ir.Instruction,
+    indices: [5]p.Id,
+    accumulator: p.Id,
+) Error!bool {
+    const f = program.functions[0];
+    const reduction = work[work.len - 2];
+    const available = try a.alloc(bool, f.layout.slots.len);
+    @memset(available, false);
+    for (f.inputs) |slot| {
+        if (program.schemas[@intCast(f.layout.slots[@intCast(slot)])] != .u64) return false;
+        available[@intCast(slot)] = true;
+    }
+    for (indices) |slot| available[@intCast(slot)] = true;
+    for (work[0 .. work.len - 2]) |op| {
+        try budget.take(1);
+        if (op.failures.len != 0 or available[
+            @intCast(op.destination)
+        ] or op.destination == accumulator or program.schemas[
+            @intCast(f.layout.slots[
+                @intCast(op.destination)
+            ])
+        ] != .u64) return false;
+        switch (op.opcode) {
+            .integer_bit_xor, .integer_bit_and, .integer_bit_or => if (op.operands.len != 2)
+                return false,
+            .integer_bit_not, .move => if (op.operands.len != 1) return false,
+            else => return false,
+        }
+        for (op.operands) |slot| if (!available[@intCast(slot)]) return false;
+        available[@intCast(op.destination)] = true;
+    }
+    if (!available[@intCast(reduction.operands[1])]) return false;
+    return true;
 }
 fn replacement(op: ir.Instruction, destination: p.Id, operands: []const p.Id) ir.Instruction {
     var result = op;

@@ -242,6 +242,27 @@ pub fn constructTarget(
         var buffer: [space.max_dimension]space.Row = undefined;
         plan.basis = try plan.arena.allocator().dupe(space.Row, basis.rows(&buffer));
     }
+    const program = try emitProgram(a, original, &plan, &basis, &budget);
+    const owned_basis = try a.dupe(space.Row, plan.basis);
+    const owned_bias = try a.dupe(u64, plan.input_bias);
+    // Complete allocations before copying the arena's owning list head.
+    return .{
+        .arena = arena,
+        .program = program,
+        .constructor = constructor_id,
+        .basis = owned_basis,
+        .input_bias = owned_bias,
+    };
+}
+
+fn emitProgram(
+    a: std.mem.Allocator,
+    original: ir.Program,
+    plan: *census.Plan,
+    basis: *space.Space,
+    budget: *space.Budget,
+) Error!ir.Program {
+    const constructor_id = plan.constructor;
     const functions = try a.dupe(ir.Function, original.functions);
     const blocks = try a.dupe(ir.Block, original.blocks);
     const constructors = try a.dupe(p.Constructor, original.constructors);
@@ -271,207 +292,17 @@ pub fn constructTarget(
     }
     var literals: std.ArrayList(p.Literal) = .empty;
     try literals.appendSlice(a, original.constants);
+    const emission: Emission = .{
+        .a = a,
+        .original = original,
+        .plan = plan,
+        .basis = basis,
+        .budget = budget,
+        .input_slots = input_slots,
+        .constructor_id = constructor_id,
+    };
     for (original.blocks, blocks) |block, *out| {
-        var builder: Builder = .{
-            .a = a,
-            .schema = plan.schema,
-            .width = extract.unsignedWidth(original.schemas[@intCast(plan.schema)]).?,
-            .slots = &layouts[@intCast(block.function)],
-            .literals = &literals,
-            .budget = &budget,
-            .input_bias = plan.input_bias,
-        };
-        if (block.function != plan.worker) {
-            for (block.instructions) |op| {
-                var replacement = op;
-                if (constructor_id != null and
-                    op.opcode == .computation and
-                    op.immediate == constructor_id.?)
-                {
-                    const operands = try a.alloc(p.Id, plan.basis.len);
-                    for (
-                        plan.basis,
-                        operands,
-                    ) |row, *operand| operand.* = try builder.original(row, op.operands);
-                    replacement.operands = operands;
-                }
-                try builder.operations.append(a, replacement);
-            }
-            if (block.terminator == .call and block.terminator.call.function == plan.worker) {
-                const call = block.terminator.call;
-                const arguments = try a.alloc(p.Id, input_slots.len);
-                for (
-                    plan.basis,
-                    arguments[0..plan.basis.len],
-                ) |row, *argument| argument.* = try builder.original(
-                    row,
-                    call.arguments[0..plan.dimension],
-                );
-                for (
-                    call.arguments[plan.dimension..],
-                    arguments[plan.basis.len..],
-                    plan.input_bias,
-                ) |slot, *argument, bias| argument.* = try builder.biased(slot, bias);
-                out.terminator.call.arguments = arguments;
-            }
-            if (constructor_id != null and block.terminator == .apply and appliesConstructor(
-                original,
-                block.function,
-                block.terminator.apply.computation,
-                constructor_id.?,
-            )) {
-                const arguments = try a.dupe(p.Id, block.terminator.apply.arguments);
-                for (
-                    arguments,
-                    plan.input_bias,
-                ) |*argument, bias| argument.* = try builder.biased(argument.*, bias);
-                out.terminator.apply.arguments = arguments;
-            }
-        } else {
-            const values = try a.alloc(?extract.Expression, worker.layout.slots.len);
-            @memset(values, null);
-            for (worker.inputs, 0..) |slot, index| {
-                if (index < plan.dimension) values[
-                    @intCast(slot)
-                ] = .{ .state = space.coordinate(index) } else if (worker.layout.slots[
-                    @intCast(slot)
-                ] == plan.schema) values[
-                    @intCast(slot)
-                ] = .{ .input = space.coordinate(index - plan.dimension) };
-            }
-            const summary = input_slots[0..plan.basis.len];
-            const dynamic = worker.inputs[plan.dimension..];
-            for (block.instructions) |op| {
-                const value = try extract.instruction(
-                    original,
-                    worker,
-                    op,
-                    values,
-                    plan.schema,
-                    &budget,
-                );
-                if (value == null) {
-                    var replacement = op;
-                    const operands = try a.dupe(p.Id, op.operands);
-                    for (operands) |*operand| operand.* = try remap(
-                        &builder,
-                        operand.*,
-                        values,
-                        &basis,
-                        summary,
-                        dynamic,
-                    );
-                    replacement.operands = operands;
-                    try builder.operations.append(a, replacement);
-                }
-                values[@intCast(op.destination)] = value;
-            }
-            switch (block.terminator) {
-                .return_value => |slot| out.terminator.return_value = try remap(
-                    &builder,
-                    slot,
-                    values,
-                    &basis,
-                    summary,
-                    dynamic,
-                ),
-                .branch => |branch| {
-                    out.terminator.branch.condition = try remap(
-                        &builder,
-                        branch.condition,
-                        values,
-                        &basis,
-                        summary,
-                        dynamic,
-                    );
-                    out.terminator.branch.when_true = try rewriteEdge(
-                        &builder,
-                        branch.when_true,
-                        worker,
-                        values,
-                        &basis,
-                        plan.basis,
-                        plan.dimension,
-                        summary,
-                    );
-                    out.terminator.branch.when_false = try rewriteEdge(
-                        &builder,
-                        branch.when_false,
-                        worker,
-                        values,
-                        &basis,
-                        plan.basis,
-                        plan.dimension,
-                        summary,
-                    );
-                },
-                .call => |call| {
-                    out.terminator.call.next = try rewriteEdge(
-                        &builder,
-                        call.next,
-                        worker,
-                        values,
-                        &basis,
-                        plan.basis,
-                        plan.dimension,
-                        summary,
-                    );
-                    if (call.function == plan.worker) {
-                        const arguments = try a.alloc(p.Id, input_slots.len);
-                        for (plan.basis, arguments[0..plan.basis.len]) |row, *argument| {
-                            var value: extract.Expression = .{};
-                            for (
-                                call.arguments[0..plan.dimension],
-                                0..,
-                            ) |slot, i| if (row & space.coordinate(i) != 0) {
-                                value = value.xor(values[@intCast(slot)].?);
-                            };
-                            argument.* = try builder.expression(value, &basis, summary, dynamic);
-                        }
-                        for (
-                            call.arguments[plan.dimension..],
-                            arguments[plan.basis.len..],
-                            plan.input_bias,
-                        ) |slot, *argument, bias| {
-                            if (values[@intCast(slot)]) |value| {
-                                var encoded = value;
-                                encoded.constant ^= bias;
-                                argument.* = try builder.expression(
-                                    encoded,
-                                    &basis,
-                                    summary,
-                                    dynamic,
-                                );
-                            } else argument.* = try builder.biased(slot, bias);
-                        }
-                        out.terminator.call.arguments = arguments;
-                    } else {
-                        const arguments = try a.dupe(p.Id, call.arguments);
-                        for (arguments) |*argument| argument.* = try remap(
-                            &builder,
-                            argument.*,
-                            values,
-                            &basis,
-                            summary,
-                            dynamic,
-                        );
-                        out.terminator.call.arguments = arguments;
-                    }
-                },
-                .jump => |edge| out.terminator.jump = try rewriteEdge(
-                    &builder,
-                    edge,
-                    worker,
-                    values,
-                    &basis,
-                    plan.basis,
-                    plan.dimension,
-                    summary,
-                ),
-                else => unreachable,
-            }
-        }
-        out.instructions = try builder.operations.toOwnedSlice(a);
+        try emission.rewriteBlock(block, out, &layouts[@intCast(block.function)], &literals);
     }
     for (functions, layouts) |*function, layout| function.layout.slots = layout.items;
     var program = original;
@@ -480,14 +311,276 @@ pub fn constructTarget(
     program.constructors = constructors;
     program.scopes.captures = captures;
     program.constants = try literals.toOwnedSlice(a);
-    const owned_basis = try a.dupe(space.Row, plan.basis);
-    const owned_bias = try a.dupe(u64, plan.input_bias);
-    // Complete allocations before copying the arena's owning list head.
-    return .{
-        .arena = arena,
-        .program = program,
-        .constructor = constructor_id,
-        .basis = owned_basis,
-        .input_bias = owned_bias,
-    };
+    return program;
 }
+
+const Emission = struct {
+    a: std.mem.Allocator,
+    original: ir.Program,
+    plan: *const census.Plan,
+    basis: *space.Space,
+    budget: *space.Budget,
+    input_slots: []const p.Id,
+    constructor_id: ?usize,
+    fn rewriteBlock(
+        self: Emission,
+        source: ir.Block,
+        out: *ir.Block,
+        layout: *std.ArrayList(p.Id),
+        literals: *std.ArrayList(p.Literal),
+    ) Error!void {
+        var builder: Builder = .{
+            .a = self.a,
+            .schema = self.plan.schema,
+            .width = extract.unsignedWidth(self.original.schemas[@intCast(self.plan.schema)]).?,
+            .slots = layout,
+            .literals = literals,
+            .budget = self.budget,
+            .input_bias = self.plan.input_bias,
+        };
+        if (source.function != self.plan.worker) {
+            try self.caller(source, out, &builder);
+        } else try self.worker(source, out, &builder);
+        out.instructions = try builder.operations.toOwnedSlice(self.a);
+    }
+    fn caller(self: Emission, block: ir.Block, out: *ir.Block, builder: *Builder) Error!void {
+        for (block.instructions) |op| {
+            var replacement = op;
+            if (self.constructor_id != null and
+                op.opcode == .computation and
+                op.immediate == self.constructor_id.?)
+            {
+                const operands = try self.a.alloc(p.Id, self.plan.basis.len);
+                for (
+                    self.plan.basis,
+                    operands,
+                ) |row, *operand| operand.* = try builder.original(row, op.operands);
+                replacement.operands = operands;
+            }
+            try builder.operations.append(self.a, replacement);
+        }
+        if (block.terminator == .call and block.terminator.call.function == self.plan.worker) {
+            const call = block.terminator.call;
+            const arguments = try self.a.alloc(p.Id, self.input_slots.len);
+            for (
+                self.plan.basis,
+                arguments[0..self.plan.basis.len],
+            ) |row, *argument| argument.* = try builder.original(
+                row,
+                call.arguments[0..self.plan.dimension],
+            );
+            for (
+                call.arguments[self.plan.dimension..],
+                arguments[self.plan.basis.len..],
+                self.plan.input_bias,
+            ) |slot, *argument, bias| argument.* = try builder.biased(slot, bias);
+            out.terminator.call.arguments = arguments;
+        }
+        if (self.constructor_id != null and block.terminator == .apply and appliesConstructor(
+            self.original,
+            block.function,
+            block.terminator.apply.computation,
+            self.constructor_id.?,
+        )) {
+            const arguments = try self.a.dupe(p.Id, block.terminator.apply.arguments);
+            for (
+                arguments,
+                self.plan.input_bias,
+            ) |*argument, bias| argument.* = try builder.biased(argument.*, bias);
+            out.terminator.apply.arguments = arguments;
+        }
+    }
+    fn worker(self: Emission, block: ir.Block, out: *ir.Block, builder: *Builder) Error!void {
+        const worker_function = self.original.functions[@intCast(self.plan.worker)];
+        const values = try self.a.alloc(?extract.Expression, worker_function.layout.slots.len);
+        @memset(values, null);
+        for (worker_function.inputs, 0..) |slot, index| {
+            if (index < self.plan.dimension) values[
+                @intCast(slot)
+            ] = .{ .state = space.coordinate(index) } else if (worker_function.layout.slots[
+                @intCast(slot)
+            ] == self.plan.schema) values[
+                @intCast(slot)
+            ] = .{ .input = space.coordinate(index - self.plan.dimension) };
+        }
+        const summary = self.input_slots[0..self.plan.basis.len];
+        const dynamic = worker_function.inputs[self.plan.dimension..];
+        for (block.instructions) |op| {
+            const value = try extract.instruction(
+                self.original,
+                worker_function,
+                op,
+                values,
+                self.plan.schema,
+                self.budget,
+            );
+            if (value == null) {
+                var replacement = op;
+                const operands = try self.a.dupe(p.Id, op.operands);
+                for (operands) |*operand| operand.* = try remap(
+                    builder,
+                    operand.*,
+                    values,
+                    self.basis,
+                    summary,
+                    dynamic,
+                );
+                replacement.operands = operands;
+                try builder.operations.append(self.a, replacement);
+            }
+            values[@intCast(op.destination)] = value;
+        }
+        try self.terminator(block, out, builder, values, summary, dynamic, worker_function);
+    }
+    fn branchTerminator(
+        self: Emission,
+        value: @FieldType(ir.Terminator, "branch"),
+        out: *ir.Block,
+        builder: *Builder,
+        values: []?extract.Expression,
+        summary: []const p.Id,
+        dynamic: []const p.Id,
+        worker_function: ir.Function,
+    ) Error!void {
+        out.terminator.branch.condition = try remap(
+            builder,
+            value.condition,
+            values,
+            self.basis,
+            summary,
+            dynamic,
+        );
+        out.terminator.branch.when_true = try rewriteEdge(
+            builder,
+            value.when_true,
+            worker_function,
+            values,
+            self.basis,
+            self.plan.basis,
+            self.plan.dimension,
+            summary,
+        );
+        out.terminator.branch.when_false = try rewriteEdge(
+            builder,
+            value.when_false,
+            worker_function,
+            values,
+            self.basis,
+            self.plan.basis,
+            self.plan.dimension,
+            summary,
+        );
+    }
+    fn callTerminator(
+        self: Emission,
+        call: @FieldType(ir.Terminator, "call"),
+        out: *ir.Block,
+        builder: *Builder,
+        values: []?extract.Expression,
+        summary: []const p.Id,
+        dynamic: []const p.Id,
+        worker_function: ir.Function,
+    ) Error!void {
+        out.terminator.call.next = try rewriteEdge(
+            builder,
+            call.next,
+            worker_function,
+            values,
+            self.basis,
+            self.plan.basis,
+            self.plan.dimension,
+            summary,
+        );
+        if (call.function == self.plan.worker) {
+            const arguments = try self.a.alloc(p.Id, self.input_slots.len);
+            for (self.plan.basis, arguments[0..self.plan.basis.len]) |row, *argument| {
+                var value: extract.Expression = .{};
+                for (
+                    call.arguments[0..self.plan.dimension],
+                    0..,
+                ) |slot, i| if (row & space.coordinate(i) != 0) {
+                    value = value.xor(values[@intCast(slot)].?);
+                };
+                argument.* = try builder.expression(value, self.basis, summary, dynamic);
+            }
+            for (
+                call.arguments[self.plan.dimension..],
+                arguments[self.plan.basis.len..],
+                self.plan.input_bias,
+            ) |slot, *argument, bias| {
+                if (values[@intCast(slot)]) |value| {
+                    var encoded = value;
+                    encoded.constant ^= bias;
+                    argument.* = try builder.expression(
+                        encoded,
+                        self.basis,
+                        summary,
+                        dynamic,
+                    );
+                } else argument.* = try builder.biased(slot, bias);
+            }
+            out.terminator.call.arguments = arguments;
+        } else {
+            const arguments = try self.a.dupe(p.Id, call.arguments);
+            for (arguments) |*argument| argument.* = try remap(
+                builder,
+                argument.*,
+                values,
+                self.basis,
+                summary,
+                dynamic,
+            );
+            out.terminator.call.arguments = arguments;
+        }
+    }
+    fn terminator(
+        self: Emission,
+        block: ir.Block,
+        out: *ir.Block,
+        builder: *Builder,
+        values: []?extract.Expression,
+        summary: []const p.Id,
+        dynamic: []const p.Id,
+        worker_function: ir.Function,
+    ) Error!void {
+        switch (block.terminator) {
+            .return_value => |slot| out.terminator.return_value = try remap(
+                builder,
+                slot,
+                values,
+                self.basis,
+                summary,
+                dynamic,
+            ),
+            .branch => |value| try self.branchTerminator(
+                value,
+                out,
+                builder,
+                values,
+                summary,
+                dynamic,
+                worker_function,
+            ),
+            .call => |value| try self.callTerminator(
+                value,
+                out,
+                builder,
+                values,
+                summary,
+                dynamic,
+                worker_function,
+            ),
+            .jump => |edge| out.terminator.jump = try rewriteEdge(
+                builder,
+                edge,
+                worker_function,
+                values,
+                self.basis,
+                self.plan.basis,
+                self.plan.dimension,
+                summary,
+            ),
+            else => unreachable,
+        }
+    }
+};

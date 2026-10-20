@@ -29,6 +29,11 @@ test "native BPI3 BMO1 and invocation decoders admit allocator-backed large valu
             .terminator = .{ .return_value = 0 },
         }},
     };
+    try checkLargeProgram(program, value);
+    try checkLargeInvocation(value);
+}
+
+fn checkLargeProgram(program: data.activation.Program, value: []const u8) !void {
     {
         const image = try a.alloc(u8, try data.program_image.encodedLength(program));
         defer a.free(image);
@@ -58,6 +63,9 @@ test "native BPI3 BMO1 and invocation decoders admit allocator-backed large valu
         defer decoded.deinit();
         try std.testing.expectEqualSlices(u8, value, decoded.object.program.constants[0].bytes);
     }
+}
+
+fn checkLargeInvocation(value: []const u8) !void {
     const schema = try data.schema.encodeOwned(a, &.{.bytes}, 0);
     defer a.free(schema);
     const request = try data.invocation.request(.{

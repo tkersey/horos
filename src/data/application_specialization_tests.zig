@@ -256,68 +256,7 @@ fn branchProgram(comptime known: bool) ir.Program {
                 .result = 3,
             },
         },
-        .blocks = &.{
-            .{
-                .function = 0,
-                .instructions = if (known) &.{.{
-                    .destination = 4,
-                    .opcode = .constant,
-                    .immediate = 0,
-                }} else &.{},
-                .terminator = .{ .branch = .{
-                    .condition = 4,
-                    .when_true = .{ .block = 1 },
-                    .when_false = .{ .block = 2 },
-                } },
-            },
-            .{
-                .function = 0,
-                .instructions = &.{.{
-                    .destination = 2,
-                    .opcode = .computation,
-                    .operands = &.{0},
-                    .immediate = 0,
-                }},
-                .terminator = .{ .jump = .{ .block = 3 } },
-            },
-            .{
-                .function = 0,
-                .instructions = &.{.{
-                    .destination = 2,
-                    .opcode = .computation,
-                    .operands = &.{1},
-                    .immediate = 1,
-                }},
-                .terminator = .{ .jump = .{ .block = 3 } },
-            },
-            .{
-                .function = 0,
-                .instructions = &.{},
-                .terminator = .{ .apply = .{
-                    .computation = 2,
-                    .arguments = &.{1},
-                    .next = .{
-                        .block = 4,
-                        .assignments = &.{.{ .destination = 3, .source = .returned }},
-                    },
-                } },
-            },
-            .{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 3 } },
-            .{
-                .function = 1,
-                .instructions = captured.blocks[2].instructions,
-                .terminator = captured.blocks[2].terminator,
-            },
-            .{
-                .function = 2,
-                .instructions = &.{.{
-                    .destination = 2,
-                    .opcode = .product,
-                    .operands = &.{ 1, 0 },
-                }},
-                .terminator = .{ .return_value = 2 },
-            },
-        },
+        .blocks = branchBlocks(known),
         .scopes = captured.scopes,
         .constructors = &.{
             captured.constructors[0],
@@ -325,6 +264,74 @@ fn branchProgram(comptime known: bool) ir.Program {
         },
     };
 }
+const branchCallees = [_]ir.Block{
+    .{
+        .function = 1,
+        .instructions = captured.blocks[2].instructions,
+        .terminator = captured.blocks[2].terminator,
+    },
+    .{
+        .function = 2,
+        .instructions = &.{.{
+            .destination = 2,
+            .opcode = .product,
+            .operands = &.{ 1, 0 },
+        }},
+        .terminator = .{ .return_value = 2 },
+    },
+};
+
+fn branchBlocks(comptime known: bool) []const ir.Block {
+    return &([_]ir.Block{
+        .{
+            .function = 0,
+            .instructions = if (known) &.{.{
+                .destination = 4,
+                .opcode = .constant,
+                .immediate = 0,
+            }} else &.{},
+            .terminator = .{ .branch = .{
+                .condition = 4,
+                .when_true = .{ .block = 1 },
+                .when_false = .{ .block = 2 },
+            } },
+        },
+        .{
+            .function = 0,
+            .instructions = &.{.{
+                .destination = 2,
+                .opcode = .computation,
+                .operands = &.{0},
+                .immediate = 0,
+            }},
+            .terminator = .{ .jump = .{ .block = 3 } },
+        },
+        .{
+            .function = 0,
+            .instructions = &.{.{
+                .destination = 2,
+                .opcode = .computation,
+                .operands = &.{1},
+                .immediate = 1,
+            }},
+            .terminator = .{ .jump = .{ .block = 3 } },
+        },
+        .{
+            .function = 0,
+            .instructions = &.{},
+            .terminator = .{ .apply = .{
+                .computation = 2,
+                .arguments = &.{1},
+                .next = .{
+                    .block = 4,
+                    .assignments = &.{.{ .destination = 3, .source = .returned }},
+                },
+            } },
+        },
+        .{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 3 } },
+    } ++ branchCallees);
+}
+
 test "feasible edges narrow constructor sets without inventing an opaque environment" {
     var polymorphic = try facts.analyze(a, comptime branchProgram(false));
     defer polymorphic.deinit();

@@ -175,42 +175,7 @@ pub fn construct(allocator: std.mem.Allocator, original: ir.Program, id: usize) 
     }
     functions[@intCast(worker_id)].inputs = try replacePrefix(a, worker.inputs, inputs);
     const blocks = try a.dupe(ir.Block, original.blocks);
-    for (original.blocks, blocks) |block, *out| {
-        var instructions: std.ArrayList(ir.Instruction) = .empty;
-        const layout = &layouts[@intCast(block.function)];
-        for (block.instructions) |op| {
-            var replacement = op;
-            if (block.function == worker_id and
-                op.opcode == .field and
-                op.operands[0] == worker.inputs[0])
-                replacement = .{
-                    .destination = op.destination,
-                    .opcode = .move,
-                    .operands = try a.dupe(p.Id, &.{inputs[@intCast(op.immediate)]}),
-                };
-            if (op.opcode == .computation and op.immediate == id) {
-                replacement.operands = try project(
-                    a,
-                    layout,
-                    &instructions,
-                    op.operands[0],
-                    field_types,
-                );
-                layout.items[@intCast(op.destination)] = original.schemas.len;
-            }
-            try instructions.append(a, replacement);
-        }
-        if (block.terminator == .call and block.terminator.call.function == worker_id) {
-            const call = block.terminator.call;
-            const prefix = if (block.function == worker_id and
-                call.arguments[0] == worker.inputs[0])
-                inputs
-            else
-                try project(a, layout, &instructions, call.arguments[0], field_types);
-            out.terminator.call.arguments = try replacePrefix(a, call.arguments, prefix);
-        }
-        out.instructions = try instructions.toOwnedSlice(a);
-    }
+    try rewriteBlocks(a, original, id, field_types, inputs, layouts, blocks);
     for (functions, layouts) |*function, layout| function.layout.slots = layout.items;
     var candidate = original;
     candidate.functions = functions;
@@ -272,6 +237,91 @@ pub fn validate(
     const field_types = fields(original, id) orelse return error.InvalidCaptureUnpack;
     const ctor = original.constructors[id];
     const worker = original.functions[@intCast(ctor.function)];
+    try checkShape(original, candidate, id, field_types);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const next = try a.alloc(usize, original.functions.len);
+    const inputs = try a.alloc(p.Id, field_types.len);
+    for (inputs, 0..) |*slot, index| slot.* = worker.layout.slots.len + index;
+    try checkFunctions(original, candidate, id, inputs, field_types, next);
+    const prefix = try a.alloc(p.Id, field_types.len);
+    try checkBlocks(original, candidate, id, inputs, field_types, next, prefix);
+    for (
+        candidate.functions,
+        next,
+    ) |function, count| if (function.layout.slots.len != count) return error.InvalidCaptureUnpack;
+}
+
+pub fn run(
+    allocator: std.mem.Allocator,
+    original: ir.Program,
+    options: @import("coalescing.zig").Options,
+) (Error || @import("coalescing.zig").Error)!@import("coalescing.zig").Owned {
+    for (original.constructors, 0..) |_, id| {
+        var candidate = (try construct(allocator, original, id)) orelse continue;
+        defer candidate.deinit();
+        return @import("coalescing.zig").run(allocator, candidate.program, options);
+    }
+    return @import("coalescing.zig").run(allocator, original, options);
+}
+
+fn rewriteBlocks(
+    a: std.mem.Allocator,
+    original: ir.Program,
+    id: usize,
+    field_types: []const p.Id,
+    inputs: []const p.Id,
+    layouts: []std.ArrayList(p.Id),
+    blocks: []ir.Block,
+) Error!void {
+    const worker_id = original.constructors[id].function;
+    const worker = original.functions[@intCast(worker_id)];
+    for (original.blocks, blocks) |block, *out| {
+        var instructions: std.ArrayList(ir.Instruction) = .empty;
+        const layout = &layouts[@intCast(block.function)];
+        for (block.instructions) |op| {
+            var replacement = op;
+            if (block.function == worker_id and
+                op.opcode == .field and
+                op.operands[0] == worker.inputs[0])
+                replacement = .{
+                    .destination = op.destination,
+                    .opcode = .move,
+                    .operands = try a.dupe(p.Id, &.{inputs[@intCast(op.immediate)]}),
+                };
+            if (op.opcode == .computation and op.immediate == id) {
+                replacement.operands = try project(
+                    a,
+                    layout,
+                    &instructions,
+                    op.operands[0],
+                    field_types,
+                );
+                layout.items[@intCast(op.destination)] = original.schemas.len;
+            }
+            try instructions.append(a, replacement);
+        }
+        if (block.terminator == .call and block.terminator.call.function == worker_id) {
+            const call = block.terminator.call;
+            const prefix = if (block.function == worker_id and
+                call.arguments[0] == worker.inputs[0])
+                inputs
+            else
+                try project(a, layout, &instructions, call.arguments[0], field_types);
+            out.terminator.call.arguments = try replacePrefix(a, call.arguments, prefix);
+        }
+        out.instructions = try instructions.toOwnedSlice(a);
+    }
+}
+
+fn checkShape(
+    original: ir.Program,
+    candidate: ir.Program,
+    id: usize,
+    field_types: []const p.Id,
+) Error!void {
+    const ctor = original.constructors[id];
     var same = candidate;
     same.functions = original.functions;
     same.blocks = original.blocks;
@@ -315,12 +365,17 @@ pub fn validate(
         }
         if (!equal(p.Constructor, expected, y)) return error.InvalidCaptureUnpack;
     }
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const next = try a.alloc(usize, original.functions.len);
-    const inputs = try a.alloc(p.Id, field_types.len);
-    for (inputs, 0..) |*slot, index| slot.* = worker.layout.slots.len + index;
+}
+
+fn checkFunctions(
+    original: ir.Program,
+    candidate: ir.Program,
+    id: usize,
+    inputs: []const p.Id,
+    field_types: []const p.Id,
+    next: []usize,
+) Error!void {
+    const ctor = original.constructors[id];
     for (original.functions, candidate.functions, next, 0..) |x, y, *count, owner| {
         var metadata = y;
         metadata.layout = x.layout;
@@ -359,46 +414,33 @@ pub fn validate(
             }
         } else if (!std.mem.eql(p.Id, x.inputs, y.inputs)) return error.InvalidCaptureUnpack;
     }
-    const prefix = try a.alloc(p.Id, field_types.len);
+}
+
+fn checkBlocks(
+    original: ir.Program,
+    candidate: ir.Program,
+    id: usize,
+    inputs: []const p.Id,
+    field_types: []const p.Id,
+    next: []usize,
+    prefix: []p.Id,
+) Error!void {
+    const ctor = original.constructors[id];
+    const worker = original.functions[@intCast(ctor.function)];
     for (original.blocks, candidate.blocks) |x, y| {
         if (x.function != y.function or x.custody != y.custody) return error.InvalidCaptureUnpack;
         const owner: usize = @intCast(x.function);
-        var cursor: usize = 0;
-        for (x.instructions) |op| {
-            var expected = op;
-            var operand: [1]p.Id = undefined;
-            if (x.function == ctor.function and
-                op.opcode == .field and
-                op.operands[0] == worker.inputs[0])
-            {
-                operand[0] = inputs[@intCast(op.immediate)];
-                expected = .{
-                    .destination = op.destination,
-                    .opcode = .move,
-                    .operands = &operand,
-                };
-            }
-            if (op.opcode == .computation and op.immediate == id) {
-                try checkProjections(
-                    original,
-                    candidate,
-                    owner,
-                    op.operands[0],
-                    field_types,
-                    y.instructions,
-                    &cursor,
-                    &next[owner],
-                    prefix,
-                );
-                expected.operands = prefix;
-            }
-            if (cursor >= y.instructions.len or !equal(
-                ir.Instruction,
-                expected,
-                y.instructions[cursor],
-            )) return error.InvalidCaptureUnpack;
-            cursor += 1;
-        }
+        var cursor = try checkInstructions(
+            original,
+            candidate,
+            id,
+            x,
+            y,
+            inputs,
+            field_types,
+            next,
+            prefix,
+        );
         var terminator = y.terminator;
         if (x.terminator == .call and x.terminator.call.function == ctor.function) {
             if (terminator != .call) return error.InvalidCaptureUnpack;
@@ -428,21 +470,57 @@ pub fn validate(
             terminator,
         )) return error.InvalidCaptureUnpack;
     }
-    for (
-        candidate.functions,
-        next,
-    ) |function, count| if (function.layout.slots.len != count) return error.InvalidCaptureUnpack;
 }
 
-pub fn run(
-    allocator: std.mem.Allocator,
+fn checkInstructions(
     original: ir.Program,
-    options: @import("coalescing.zig").Options,
-) (Error || @import("coalescing.zig").Error)!@import("coalescing.zig").Owned {
-    for (original.constructors, 0..) |_, id| {
-        var candidate = (try construct(allocator, original, id)) orelse continue;
-        defer candidate.deinit();
-        return @import("coalescing.zig").run(allocator, candidate.program, options);
+    candidate: ir.Program,
+    id: usize,
+    x: ir.Block,
+    y: ir.Block,
+    inputs: []const p.Id,
+    field_types: []const p.Id,
+    next: []usize,
+    prefix: []p.Id,
+) Error!usize {
+    const ctor = original.constructors[id];
+    const worker = original.functions[@intCast(ctor.function)];
+    const owner: usize = @intCast(x.function);
+    var cursor: usize = 0;
+    for (x.instructions) |op| {
+        var expected = op;
+        var operand: [1]p.Id = undefined;
+        if (x.function == ctor.function and
+            op.opcode == .field and
+            op.operands[0] == worker.inputs[0])
+        {
+            operand[0] = inputs[@intCast(op.immediate)];
+            expected = .{
+                .destination = op.destination,
+                .opcode = .move,
+                .operands = &operand,
+            };
+        }
+        if (op.opcode == .computation and op.immediate == id) {
+            try checkProjections(
+                original,
+                candidate,
+                owner,
+                op.operands[0],
+                field_types,
+                y.instructions,
+                &cursor,
+                &next[owner],
+                prefix,
+            );
+            expected.operands = prefix;
+        }
+        if (cursor >= y.instructions.len or !equal(
+            ir.Instruction,
+            expected,
+            y.instructions[cursor],
+        )) return error.InvalidCaptureUnpack;
+        cursor += 1;
     }
-    return @import("coalescing.zig").run(allocator, original, options);
+    return cursor;
 }

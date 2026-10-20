@@ -96,7 +96,6 @@ fn FlowFor(comptime open: bool) type {
         operation: ?Perform = null,
         resumed: ?p.Id = null,
     };
-
     return struct {
         const Self = @This();
         allocator: std.mem.Allocator,
@@ -113,14 +112,12 @@ fn FlowFor(comptime open: bool) type {
         import_summaries: if (open) []const @import(
             "borrow_contract.zig",
         ).Summary else void = if (open) &.{} else {},
-
         pub fn entry(self: Self, function: p.Id) p.Id {
             const start = self.program.functions[@intCast(function)].entry;
             if (open and start == @import("relocation.zig").missing and
                 self.import_summaries.len != 0) return self.program.blocks.len + function;
             return start;
         }
-
         fn imported(self: Self, start: p.Id) ?@import("borrow_contract.zig").Summary {
             if (!open) return null;
             if (start < self.program.blocks.len) return null;
@@ -128,7 +125,6 @@ fn FlowFor(comptime open: bool) type {
             for (self.import_summaries) |summary| if (summary.function == function) return summary;
             return null;
         }
-
         pub fn contractSource(
             self: *Self,
             function: p.Id,
@@ -163,7 +159,6 @@ fn FlowFor(comptime open: bool) type {
             }
             return .{ .parameter = source.source.input, .path = path };
         }
-
         fn rejected(self: Self, binding: Binding) a.Error {
             if (self.diagnostic) |diagnostic| diagnostic.* = .{
                 .phase = .block,
@@ -174,7 +169,6 @@ fn FlowFor(comptime open: bool) type {
             };
             return error.InvalidOwnership;
         }
-
         pub fn init(
             allocator: std.mem.Allocator,
             program: Program,
@@ -187,7 +181,6 @@ fn FlowFor(comptime open: bool) type {
                 try provenance.derive(allocator, program, &.{}, open),
             );
         }
-
         pub fn initWithControl(
             allocator: std.mem.Allocator,
             program: Program,
@@ -236,7 +229,6 @@ fn FlowFor(comptime open: bool) type {
             };
             return self;
         }
-
         fn link(self: *Self, from: p.Id, edge: Edge, variant: ?usize) a.Error!void {
             try self.incoming[@intCast(edge.block)].append(
                 self.allocator,
@@ -244,7 +236,6 @@ fn FlowFor(comptime open: bool) type {
             );
             try self.outgoing[@intCast(from)].append(self.allocator, edge.block);
         }
-
         fn prepend(self: *Self, step: Step, tail: usize) a.Error!usize {
             if (step == .outer and tail != 0 and std.meta.eql(
                 self.paths.items[tail - 1].step,
@@ -260,12 +251,10 @@ fn FlowFor(comptime open: bool) type {
             try self.paths.append(self.allocator, .{ .step = step, .tail = tail });
             return self.paths.items.len;
         }
-
         fn slotType(self: Self, block: p.Id, slot: p.Id) p.Id {
             const code = self.program.blocks[@intCast(block)];
             return self.program.functions[@intCast(code.function)].layout.slots[@intCast(slot)];
         }
-
         fn selectedSchema(self: Self, schema: p.Id, step: Step) ?p.Id {
             const shape = self.program.schemas[@intCast(schema)];
             return switch (step) {
@@ -281,25 +270,7 @@ fn FlowFor(comptime open: bool) type {
                     .array => |array| array.element,
                     else => null,
                 },
-                .environment => |environment| blk: {
-                    const constructor = self.program.constructors[
-                        @intCast(environment.constructor)
-                    ];
-                    if (constructor.schema != schema) break :blk null;
-                    const fields = self.program.scopes.captures[
-                        @intCast(constructor.capture)
-                    ].fields;
-                    break :blk if (environment.field < fields.len) fields[
-                        @intCast(environment.field)
-                    ] else null;
-                },
-                .handler_state => |state| blk: {
-                    if (shape != .internal or shape.internal != .capability) break :blk null;
-                    const handler = self.program.handlers[@intCast(state.handler)];
-                    break :blk if (state.field < handler.state.len) handler.state[
-                        @intCast(state.field)
-                    ] else null;
-                },
+                .environment, .handler_state => self.selectedCapturedSchema(schema, step),
                 .cell_content => if (shape == .internal and
                     shape.internal == .cell)
                     shape.internal.cell.element
@@ -310,22 +281,7 @@ fn FlowFor(comptime open: bool) type {
                     shape.internal.suspension_package
                 else
                     null,
-                .use_site => |site| blk: {
-                    if (shape != .internal or shape.internal != .resumption) break :blk null;
-                    const effects = self.program.effects[
-                        @intCast(shape.internal.resumption.effect)
-                    ].use_site_effects;
-                    const selected = self.program.schemas[@intCast(site.schema)];
-                    break :blk if (site.index < effects.len and
-                        selected == .internal and
-                        selected.internal == .capability and
-                        selected.internal.capability == effects[
-                            @intCast(site.index)
-                        ])
-                        site.schema
-                    else
-                        null;
-                },
+                .use_site => self.selectedUseSiteSchema(shape, step.use_site),
                 .outer => if (shape == .internal and
                     shape.internal == .capability)
                     schema
@@ -345,7 +301,47 @@ fn FlowFor(comptime open: bool) type {
                 } else null,
             };
         }
-
+        fn selectedCapturedSchema(self: Self, schema: p.Id, step: Step) ?p.Id {
+            const shape = self.program.schemas[@intCast(schema)];
+            return switch (step) {
+                .environment => |environment| blk: {
+                    const constructor = self.program.constructors[
+                        @intCast(environment.constructor)
+                    ];
+                    if (constructor.schema != schema) break :blk null;
+                    const fields = self.program.scopes.captures[
+                        @intCast(constructor.capture)
+                    ].fields;
+                    break :blk if (environment.field < fields.len) fields[
+                        @intCast(environment.field)
+                    ] else null;
+                },
+                .handler_state => |state| blk: {
+                    if (shape != .internal or shape.internal != .capability) break :blk null;
+                    const handler = self.program.handlers[@intCast(state.handler)];
+                    break :blk if (state.field < handler.state.len) handler.state[
+                        @intCast(state.field)
+                    ] else null;
+                },
+                else => unreachable,
+            };
+        }
+        fn selectedUseSiteSchema(self: Self, shape: anytype, site: anytype) ?p.Id {
+            if (shape != .internal or shape.internal != .resumption) return null;
+            const effects = self.program.effects[
+                @intCast(shape.internal.resumption.effect)
+            ].use_site_effects;
+            const selected = self.program.schemas[@intCast(site.schema)];
+            return if (site.index < effects.len and
+                selected == .internal and
+                selected.internal == .capability and
+                selected.internal.capability == effects[
+                    @intCast(site.index)
+                ])
+                site.schema
+            else
+                null;
+        }
         // A repeated recursive schema means an arbitrary subtree at that position.
         // Widening to the whole subtree terminates recursive selector growth without
         // dropping any dependency. Products before the cycle remain field-sensitive.
@@ -375,7 +371,6 @@ fn FlowFor(comptime open: bool) type {
             }
             return result;
         }
-
         fn checkStart(self: *Self, start: p.Id, position: ?usize) a.Error!void {
             if (self.imported(start) != null) {
                 if (position != null) return error.InvalidReference;
@@ -392,11 +387,9 @@ fn FlowFor(comptime open: bool) type {
                     return error.InvalidProgram;
             }
         }
-
         fn query(self: *Self, start: p.Id, path: usize) a.Error!usize {
             return self.queryFrom(start, path, null);
         }
-
         fn queryFrom(self: *Self, start: p.Id, path: usize, position: ?usize) a.Error!usize {
             try self.checkStart(start, position);
             const owner = if (self.imported(
@@ -423,17 +416,14 @@ fn FlowFor(comptime open: bool) type {
             self.changed = true;
             return self.queries.items.len - 1;
         }
-
         pub fn returned(self: *Self, start: p.Id) a.Error![]const Source {
             return self.returnedAt(start, 0);
         }
-
         pub fn returnedAt(self: *Self, start: p.Id, path: usize) a.Error![]const Source {
             const index = try self.query(start, path);
             try self.settle();
             return self.queries.items[index].sources.items;
         }
-
         fn origin(self: *Self, start: p.Id, target: Trace, position: ?usize) a.Error!usize {
             for (
                 self.queries.items,
@@ -451,17 +441,14 @@ fn FlowFor(comptime open: bool) type {
             self.changed = true;
             return self.queries.items.len - 1;
         }
-
         fn writeQuery(self: *Self, start: p.Id, schema: p.Id, path: usize) a.Error!usize {
             return self.writeQueryFrom(start, schema, path, null);
         }
-
         pub fn written(self: *Self, start: p.Id, schema: p.Id) a.Error![]const Source {
             const index = try self.writeQuery(start, schema, 0);
             try self.settle();
             return self.queries.items[index].sources.items;
         }
-
         fn writeQueryFrom(
             self: *Self,
             start: p.Id,
@@ -486,7 +473,6 @@ fn FlowFor(comptime open: bool) type {
             self.changed = true;
             return self.queries.items.len - 1;
         }
-
         fn settle(self: *Self) a.Error!void {
             // Every new query or fact marks the analysis dirty. A failed pass must
             // remain dirty so a retry cannot publish a partially settled result.
@@ -500,7 +486,6 @@ fn FlowFor(comptime open: bool) type {
                     try self.solveRequirements(current);
             }
         }
-
         fn addSource(self: *Self, query_index: usize, source: Source) a.Error!void {
             for (self.queries.items[query_index].sources.items) |existing| if (std.meta.eql(
                 existing,
@@ -509,11 +494,9 @@ fn FlowFor(comptime open: bool) type {
             try self.queries.items[query_index].sources.append(self.allocator, source);
             self.changed = true;
         }
-
         fn requirementsQuery(self: *Self, start: p.Id) a.Error!usize {
             return self.requirementsQueryFrom(start, null);
         }
-
         fn requirementsQueryFrom(self: *Self, start: p.Id, position: ?usize) a.Error!usize {
             try self.checkStart(start, position);
             for (
@@ -524,13 +507,11 @@ fn FlowFor(comptime open: bool) type {
             self.changed = true;
             return self.requirements.items.len - 1;
         }
-
         pub fn required(self: *Self, start: p.Id) a.Error![]const Constraint {
             const index = try self.requirementsQuery(start);
             try self.settle();
             return self.requirements.items[index].constraints.items;
         }
-
         pub fn requiredFrom(self: *Self, start: p.Id, position: usize) a.Error![]const Constraint {
             const index = try self.requirementsQueryFrom(start, position);
             try self.settle();
@@ -546,7 +527,6 @@ fn FlowFor(comptime open: bool) type {
             try self.settle();
             return self.queries.items[index].sources.items;
         }
-
         fn reenters(self: Self, start: p.Id, live: []const bool) bool {
             for (self.incoming[
                 @intCast(start)
@@ -568,7 +548,6 @@ fn FlowFor(comptime open: bool) type {
                 live,
             );
         }
-
         fn addConstraint(
             self: *Self,
             index: usize,
@@ -584,7 +563,6 @@ fn FlowFor(comptime open: bool) type {
             try self.requirements.items[index].constraints.append(self.allocator, constraint);
             self.changed = true;
         }
-
         fn relation(
             self: *Self,
             index: usize,
@@ -620,71 +598,9 @@ fn FlowFor(comptime open: bool) type {
                 for (self.queries.items[owners].sources.items) |destination|
                     try self.addConstraint(index, source, destination, bound);
         }
-
         fn mapInput(self: *Self, binding: Binding, source: Source) a.Error!Mapped {
-            if (source.ambient) |ambient| {
-                if (binding.resumed) |token| return Mapped.one(.{
-                    .block = binding.block,
-                    .slot = token,
-                    .path = try self.prepend(.{ .resumed = ambient }, 0),
-                });
-                if (binding.operation) |op| return Mapped.one(.{
-                    .block = binding.block,
-                    .slot = op.capability.?,
-                    .path = try self.prepend(.{ .outer = ambient }, 0),
-                });
-                if (binding.fresh == ambient) return .{ .fresh = ambient };
-                return Mapped.one(.{ .block = binding.block, .ambient = ambient });
-            }
-            if (binding.operation) |op| {
-                const handler = self.program.handlers[@intCast(binding.handler.?)];
-                if (source.parameter < handler.state.len) return Mapped.one(.{
-                    .block = binding.block,
-                    .slot = op.capability.?,
-                    .path = try self.prepend(
-                        .{ .handler_state = .{
-                            .handler = binding.handler.?,
-                            .field = source.parameter,
-                        } },
-                        source.path,
-                    ),
-                });
-                const argument = source.parameter - handler.state.len;
-                if (argument == 0) return Mapped.one(.{
-                    .block = binding.block,
-                    .slot = op.payload,
-                    .path = source.path,
-                });
-                if (argument <= op.bodies.len) return Mapped.one(.{
-                    .block = binding.block,
-                    .slot = op.bodies[@intCast(argument - 1)],
-                    .path = source.path,
-                });
-                if (source.path != 0 and self.paths.items[source.path - 1].step == .body_result)
-                    return Mapped.one(.{
-                        .block = binding.block,
-                        .slot = op.capability.?,
-                        .path = source.path,
-                    });
-                if (source.path != 0 and self.paths.items[source.path - 1].step == .use_site) {
-                    const path = self.paths.items[source.path - 1];
-                    return Mapped.one(.{
-                        .block = binding.block,
-                        .slot = op.use_site_capabilities[@intCast(path.step.use_site.index)],
-                        .path = path.tail,
-                    });
-                }
-                if (source.path != 0 and
-                    self.paths.items[source.path - 1].step == .resumed)
-                    return Mapped.one(
-                        .{ .block = binding.block, .slot = op.capability.?, .path = source.path },
-                    );
-                return Mapped.one(.{
-                    .block = binding.block,
-                    .slot = op.capability.?,
-                    .path = try self.prepend(.{ .outer = null }, 0),
-                });
-            }
+            if (source.ambient) |ambient| return self.mapAmbientInput(binding, ambient);
+            if (binding.operation) |op| return self.mapOperationInput(binding, source, op);
             const captures = if (binding.constructor) |id| self.program.scopes.captures[
                 @intCast(self.program.constructors[
                     @intCast(id)
@@ -722,48 +638,117 @@ fn FlowFor(comptime open: bool) type {
                     ),
                 },
             );
-            if (source.parameter < captures + binding.supplied) {
-                if (source.path != 0) {
-                    const path = self.paths.items[source.path - 1];
-                    if (path.step == .outer) return Mapped.ambient(binding.block, path.step.outer);
-                    if (path.step == .resumed and binding.fresh == .evidence) {
-                        if (path.step.resumed == .region) return Mapped.ambient(
-                            binding.block,
-                            .region,
-                        );
-                        if (path.step.resumed == null) {
-                            var context = Mapped.ambient(binding.block, .region);
-                            context.fresh = .evidence;
-                            return context;
-                        }
-                    }
-                    if (path.step == .handler_state) {
-                        if (binding.handler != path.step.handler_state.handler) return .{};
-                        return Mapped.one(.{
-                            .block = binding.block,
-                            .slot = binding.state[@intCast(path.step.handler_state.field)],
-                            .path = path.tail,
-                        });
-                    }
-                    if (path.step == .body_result and binding.fresh == .evidence) {
-                        const handler = self.program.handlers[@intCast(binding.handler.?)];
-                        if (handler.input != path.step.body_result) return .{};
-                        return Mapped.one(.{
-                            .block = binding.block,
-                            .path = path.tail,
-                            .body_result = true,
-                        });
-                    }
-                }
-                return .{ .fresh = binding.fresh orelse return self.rejected(binding) };
-            }
+            if (source.parameter < captures + binding.supplied)
+                return self.mapSuppliedInput(binding, source);
             return Mapped.one(.{
                 .block = binding.block,
                 .slot = binding.arguments[@intCast(source.parameter - captures - binding.supplied)],
                 .path = source.path,
             });
         }
-
+        fn mapOperationInput(
+            self: *Self,
+            binding: Binding,
+            source: Source,
+            op: Perform,
+        ) a.Error!Mapped {
+            const handler = self.program.handlers[@intCast(binding.handler.?)];
+            if (source.parameter < handler.state.len) return Mapped.one(.{
+                .block = binding.block,
+                .slot = op.capability.?,
+                .path = try self.prepend(
+                    .{ .handler_state = .{
+                        .handler = binding.handler.?,
+                        .field = source.parameter,
+                    } },
+                    source.path,
+                ),
+            });
+            const argument = source.parameter - handler.state.len;
+            if (argument == 0) return Mapped.one(.{
+                .block = binding.block,
+                .slot = op.payload,
+                .path = source.path,
+            });
+            if (argument <= op.bodies.len) return Mapped.one(.{
+                .block = binding.block,
+                .slot = op.bodies[@intCast(argument - 1)],
+                .path = source.path,
+            });
+            if (source.path != 0 and self.paths.items[source.path - 1].step == .body_result)
+                return Mapped.one(.{
+                    .block = binding.block,
+                    .slot = op.capability.?,
+                    .path = source.path,
+                });
+            if (source.path != 0 and self.paths.items[source.path - 1].step == .use_site) {
+                const path = self.paths.items[source.path - 1];
+                return Mapped.one(.{
+                    .block = binding.block,
+                    .slot = op.use_site_capabilities[@intCast(path.step.use_site.index)],
+                    .path = path.tail,
+                });
+            }
+            if (source.path != 0 and
+                self.paths.items[source.path - 1].step == .resumed)
+                return Mapped.one(
+                    .{ .block = binding.block, .slot = op.capability.?, .path = source.path },
+                );
+            return Mapped.one(.{
+                .block = binding.block,
+                .slot = op.capability.?,
+                .path = try self.prepend(.{ .outer = null }, 0),
+            });
+        }
+        fn mapSuppliedInput(self: *Self, binding: Binding, source: Source) a.Error!Mapped {
+            if (source.path != 0) {
+                const path = self.paths.items[source.path - 1];
+                if (path.step == .outer) return Mapped.ambient(binding.block, path.step.outer);
+                if (path.step == .resumed and binding.fresh == .evidence) {
+                    if (path.step.resumed == .region) return Mapped.ambient(
+                        binding.block,
+                        .region,
+                    );
+                    if (path.step.resumed == null) {
+                        var context = Mapped.ambient(binding.block, .region);
+                        context.fresh = .evidence;
+                        return context;
+                    }
+                }
+                if (path.step == .handler_state) {
+                    if (binding.handler != path.step.handler_state.handler) return .{};
+                    return Mapped.one(.{
+                        .block = binding.block,
+                        .slot = binding.state[@intCast(path.step.handler_state.field)],
+                        .path = path.tail,
+                    });
+                }
+                if (path.step == .body_result and binding.fresh == .evidence) {
+                    const handler = self.program.handlers[@intCast(binding.handler.?)];
+                    if (handler.input != path.step.body_result) return .{};
+                    return Mapped.one(.{
+                        .block = binding.block,
+                        .path = path.tail,
+                        .body_result = true,
+                    });
+                }
+            }
+            return .{ .fresh = binding.fresh orelse return self.rejected(binding) };
+        }
+        fn mapAmbientInput(self: *Self, binding: Binding, ambient: Ambient) a.Error!Mapped {
+            if (binding.resumed) |token| return Mapped.one(.{
+                .block = binding.block,
+                .slot = token,
+                .path = try self.prepend(.{ .resumed = ambient }, 0),
+            });
+            if (binding.operation) |op| return Mapped.one(.{
+                .block = binding.block,
+                .slot = op.capability.?,
+                .path = try self.prepend(.{ .outer = ambient }, 0),
+            });
+            if (binding.fresh == ambient) return .{ .fresh = ambient };
+            return Mapped.one(.{ .block = binding.block, .ambient = ambient });
+        }
         fn transferRequirements(self: *Self, index: usize, binding: Binding) a.Error!void {
             const called = try self.requirementsQuery(self.entry(binding.function));
             const pairs = try self.allocator.dupe(
@@ -804,7 +789,6 @@ fn FlowFor(comptime open: bool) type {
                     };
             }
         }
-
         fn mapOwner(self: *Self, binding: Binding, source: Source, bound: Bound) a.Error!Mapped {
             const mapped = try self.mapInput(binding, source);
             // A clause executes outside the capability's delimiter. Explicit
@@ -817,7 +801,6 @@ fn FlowFor(comptime open: bool) type {
                 return Mapped.ambient(binding.block, null);
             return mapped;
         }
-
         fn selectedComponent(self: Self, trace: Trace) ?Ambient {
             if (trace.ambient) |selected| return selected;
             var cursor = trace.path;
@@ -830,7 +813,6 @@ fn FlowFor(comptime open: bool) type {
             }
             return null;
         }
-
         fn bodyBinding(
             self: Self,
             block: p.Id,
@@ -867,7 +849,6 @@ fn FlowFor(comptime open: bool) type {
                 .state = if (term == .handle) term.handle.state else &.{},
             };
         }
-
         fn bodyRequirements(
             self: *Self,
             index: usize,
@@ -885,7 +866,6 @@ fn FlowFor(comptime open: bool) type {
                 self.bodyBinding(block, computation_slot, arguments, supplied, id),
             );
         }
-
         fn returnInput(
             self: *Self,
             pending: *std.ArrayList(Trace),
@@ -922,7 +902,6 @@ fn FlowFor(comptime open: bool) type {
                 else => return error.InvalidProgram,
             }
         }
-
         fn returnInputs(
             self: *Self,
             start: p.Id,
@@ -940,7 +919,6 @@ fn FlowFor(comptime open: bool) type {
             }
             return result;
         }
-
         fn returnRequirements(self: *Self, index: usize, block: p.Id) a.Error!void {
             const handler_id = switch (self.program.blocks[@intCast(block)].terminator) {
                 inline .handle, .resume_with => |v| v.handler,
@@ -976,7 +954,6 @@ fn FlowFor(comptime open: bool) type {
                 );
             }
         }
-
         fn solveRequirements(self: *Self, index: usize) a.Error!void {
             if (self.imported(self.requirements.items[index].start)) |summary| {
                 for (summary.requirements) |pair| try self.addConstraint(
@@ -1016,108 +993,122 @@ fn FlowFor(comptime open: bool) type {
                     ),
                     else => {},
                 };
-                switch (block.terminator) {
-                    .call => |v| try self.transferRequirements(
-                        index,
-                        .{ .block = id, .function = v.function, .arguments = v.arguments },
-                    ),
-                    .apply => |v| try self.bodyRequirements(
-                        index,
-                        id,
-                        v.computation,
-                        v.arguments,
-                        0,
-                    ),
-                    .with_region => |v| try self.bodyRequirements(
+                try self.terminatorRequirements(index, id, block.terminator);
+            }
+        }
+        fn scopedRequirements(self: *Self, index: usize, id: p.Id, term: anytype) a.Error!void {
+            switch (term) {
+                .protect => |v| {
+                    try self.bodyRequirements(
                         index,
                         id,
                         v.body,
                         v.arguments,
-                        1,
-                    ),
-                    .protect => |v| {
-                        try self.bodyRequirements(
-                            index,
-                            id,
-                            v.body,
-                            v.arguments,
-                            @intFromBool(v.resource != null),
-                        );
-                        // Exit information and the owned resource are exportable;
-                        // cleanup's retained environment still has ordinary bounds.
-                        try self.bodyRequirements(
-                            index,
-                            id,
-                            v.cleanup,
-                            &.{},
-                            if (v.resource == null) 1 else 2,
-                        );
-                    },
-                    .handle => |v| {
-                        try self.bodyRequirements(
-                            index,
-                            id,
-                            v.body,
-                            v.arguments,
-                            self.program.handlers[@intCast(v.handler)].clauses.len,
-                        );
-                        try self.returnRequirements(index, id);
-                    },
-                    .perform => |v| if (v.capability) |capability| {
-                        var captures = false;
-                        const targets = self.control.targets(
-                            .{ .block = id, .role = .operation },
-                            v.effect,
-                        );
-                        for (targets) |target| captures = captures or target.retains;
-                        if (captures) {
-                            try self.relation(index, id, v.payload, capability, .clause);
-                            for (v.bodies) |slot| try self.relation(
-                                index,
-                                id,
-                                slot,
-                                capability,
-                                .clause,
-                            );
-                        }
-                        for (targets) |target| try self.transferRequirements(
-                            index,
-                            .{
-                                .block = id,
-                                .function = target.function,
-                                .arguments = &.{},
-                                .handler = target.handler,
-                                .operation = v,
-                            },
-                        );
-                    },
-                    .resume_value => |v| try self.relation(
+                        @intFromBool(v.resource != null),
+                    );
+                    // Exit information and the owned resource are exportable;
+                    // cleanup's retained environment still has ordinary bounds.
+                    try self.bodyRequirements(
                         index,
                         id,
-                        v.argument,
-                        v.resumption,
-                        .capture,
-                    ),
-                    .resume_with => |v| {
-                        try self.relation(index, id, v.argument, v.resumption, .capture);
-                        for (v.state) |slot| try self.relation(
+                        v.cleanup,
+                        &.{},
+                        if (v.resource == null) 1 else 2,
+                    );
+                },
+                .handle => |v| {
+                    try self.bodyRequirements(
+                        index,
+                        id,
+                        v.body,
+                        v.arguments,
+                        self.program.handlers[@intCast(v.handler)].clauses.len,
+                    );
+                    try self.returnRequirements(index, id);
+                },
+                else => unreachable,
+            }
+        }
+        fn operationRequirements(self: *Self, index: usize, id: p.Id, term: anytype) a.Error!void {
+            switch (term) {
+                .perform => |v| if (v.capability) |capability| {
+                    var captures = false;
+                    const targets = self.control.targets(
+                        .{ .block = id, .role = .operation },
+                        v.effect,
+                    );
+                    for (targets) |target| captures = captures or target.retains;
+                    if (captures) {
+                        try self.relation(index, id, v.payload, capability, .clause);
+                        for (v.bodies) |slot| try self.relation(
                             index,
                             id,
                             slot,
-                            v.resumption,
-                            .capture,
+                            capability,
+                            .clause,
                         );
-                        try self.returnRequirements(index, id);
-                    },
-                    .resume_computation => |v| {
-                        try self.relation(index, id, v.computation, v.resumption, .capture);
-                        try self.bodyRequirements(index, id, v.computation, &.{}, 0);
-                    },
-                    else => {},
-                }
+                    }
+                    for (targets) |target| try self.transferRequirements(
+                        index,
+                        .{
+                            .block = id,
+                            .function = target.function,
+                            .arguments = &.{},
+                            .handler = target.handler,
+                            .operation = v,
+                        },
+                    );
+                },
+                else => unreachable,
             }
         }
-
+        fn terminatorRequirements(self: *Self, index: usize, id: p.Id, term: anytype) a.Error!void {
+            switch (term) {
+                .call => |v| try self.transferRequirements(
+                    index,
+                    .{ .block = id, .function = v.function, .arguments = v.arguments },
+                ),
+                .apply => |v| try self.bodyRequirements(
+                    index,
+                    id,
+                    v.computation,
+                    v.arguments,
+                    0,
+                ),
+                .with_region => |v| try self.bodyRequirements(
+                    index,
+                    id,
+                    v.body,
+                    v.arguments,
+                    1,
+                ),
+                .protect, .handle => try self.scopedRequirements(index, id, term),
+                .perform => try self.operationRequirements(index, id, term),
+                .resume_value => |v| try self.relation(
+                    index,
+                    id,
+                    v.argument,
+                    v.resumption,
+                    .capture,
+                ),
+                .resume_with => |v| {
+                    try self.relation(index, id, v.argument, v.resumption, .capture);
+                    for (v.state) |slot| try self.relation(
+                        index,
+                        id,
+                        slot,
+                        v.resumption,
+                        .capture,
+                    );
+                    try self.returnRequirements(index, id);
+                },
+                .resume_computation => |v| {
+                    try self.relation(index, id, v.computation, v.resumption, .capture);
+                    try self.bodyRequirements(index, id, v.computation, &.{}, 0);
+                },
+                else => {},
+            }
+        }
         fn push(
             self: *Self,
             pending: *std.ArrayList(Trace),
@@ -1150,13 +1141,11 @@ fn FlowFor(comptime open: bool) type {
                 .{ .block = block, .slot = slot, .path = selected, .position = position },
             );
         }
-
         fn pushTrace(self: *Self, pending: *std.ArrayList(Trace), trace: Trace) a.Error!void {
             if (trace.ambient != null or trace.body_result)
                 return pending.append(self.allocator, trace);
             try self.pushAt(pending, trace.block, trace.slot, trace.path, trace.position);
         }
-
         fn transferSources(
             self: *Self,
             pending: *std.ArrayList(Trace),
@@ -1174,9 +1163,7 @@ fn FlowFor(comptime open: bool) type {
                 for (mapped.items[0..mapped.len]) |trace| try self.pushTrace(pending, trace);
             }
         }
-
         const Reachable = struct { membership: []const bool, blocks: []const p.Id };
-
         fn reachable(self: Self, start: p.Id, allocator: std.mem.Allocator) a.Error!Reachable {
             const visited = try allocator.alloc(bool, self.program.blocks.len);
             @memset(visited, false);
@@ -1197,10 +1184,48 @@ fn FlowFor(comptime open: bool) type {
             std.mem.sort(p.Id, blocks, {}, std.sort.asc(p.Id));
             return .{ .membership = visited, .blocks = blocks };
         }
-
-        fn solve(self: *Self, query_index: usize) a.Error!void {
+        fn seedQuery(
+            self: *Self,
+            pending: *std.ArrayList(Trace),
+            query_index: usize,
+            reach: Reachable,
+        ) a.Error!void {
             const query_start = self.queries.items[query_index].start;
             const query_path = self.queries.items[query_index].path;
+            const query_target = self.queries.items[query_index].target;
+            const query_writes = self.queries.items[query_index].writes;
+            const live = reach.membership;
+            if (query_target) |target| {
+                if (live[@intCast(target.block)]) try self.pushTrace(pending, target);
+            } else if (query_writes) |schema| {
+                for (reach.blocks) |id| {
+                    const block = self.program.blocks[@intCast(id)];
+                    for (block.instructions, 0..) |op, position|
+                        if (self.futureInstruction(
+                            query_start,
+                            self.queries.items[query_index].position,
+                            id,
+                            position,
+                            live,
+                        ) and op.opcode == .cell_set and self.slotType(
+                            id,
+                            op.operands[0],
+                        ) == schema)
+                            try self.pushAt(pending, id, op.operands[1], query_path, position);
+                    try self.calledWrites(pending, id, schema, query_path);
+                }
+            } else for (reach.blocks) |id| {
+                const block = self.program.blocks[@intCast(id)];
+                if (block.terminator == .return_value) try self.push(
+                    pending,
+                    id,
+                    block.terminator.return_value,
+                    query_path,
+                );
+            }
+        }
+        fn solve(self: *Self, query_index: usize) a.Error!void {
+            const query_start = self.queries.items[query_index].start;
             const query_target = self.queries.items[query_index].target;
             const query_writes = self.queries.items[query_index].writes;
             if (self.imported(query_start)) |summary| {
@@ -1227,34 +1252,7 @@ fn FlowFor(comptime open: bool) type {
             var pending: std.ArrayList(Trace) = .empty;
             defer pending.deinit(self.allocator);
             var visited: std.AutoHashMapUnmanaged(Trace, void) = .empty;
-            if (query_target) |target| {
-                if (live[@intCast(target.block)]) try self.pushTrace(&pending, target);
-            } else if (query_writes) |schema| {
-                for (reach.blocks) |id| {
-                    const block = self.program.blocks[@intCast(id)];
-                    for (block.instructions, 0..) |op, position|
-                        if (self.futureInstruction(
-                            query_start,
-                            self.queries.items[query_index].position,
-                            id,
-                            position,
-                            live,
-                        ) and op.opcode == .cell_set and self.slotType(
-                            id,
-                            op.operands[0],
-                        ) == schema)
-                            try self.pushAt(&pending, id, op.operands[1], query_path, position);
-                    try self.calledWrites(&pending, id, schema, query_path);
-                }
-            } else for (reach.blocks) |id| {
-                const block = self.program.blocks[@intCast(id)];
-                if (block.terminator == .return_value) try self.push(
-                    &pending,
-                    id,
-                    block.terminator.return_value,
-                    query_path,
-                );
-            }
+            try self.seedQuery(&pending, query_index, reach);
             while (pending.pop()) |trace| {
                 if ((try visited.getOrPut(allocator, trace)).found_existing) continue;
                 if (trace.body_result) {
@@ -1278,7 +1276,6 @@ fn FlowFor(comptime open: bool) type {
                 try self.stableTrace(&pending, trace, query_index, query_start, live, allocator);
             }
         }
-
         fn stableTrace(
             self: *Self,
             pending: *std.ArrayList(Trace),
@@ -1335,6 +1332,14 @@ fn FlowFor(comptime open: bool) type {
                         .{ .parameter = parameter, .path = trace.path },
                     );
             }
+            try self.traceIncoming(pending, trace, live);
+        }
+        fn traceIncoming(
+            self: *Self,
+            pending: *std.ArrayList(Trace),
+            trace: Trace,
+            live: []const bool,
+        ) a.Error!void {
             for (self.incoming[@intCast(trace.block)].items) |incoming| {
                 if (!live[@intCast(incoming.block)]) continue;
                 const edge = incoming.edge.?;
@@ -1371,7 +1376,6 @@ fn FlowFor(comptime open: bool) type {
                 );
             }
         }
-
         fn stableIncoming(
             self: *Self,
             pending: *std.ArrayList(Trace),
@@ -1393,13 +1397,11 @@ fn FlowFor(comptime open: bool) type {
             }
             try self.push(pending, block, slot, path);
         }
-
         fn childPath(self: Self, path: usize, step: Step) ?usize {
             if (path == 0) return 0;
             const selected = self.paths.items[path - 1];
             return if (std.meta.eql(selected.step, step)) selected.tail else null;
         }
-
         fn sequenceInstruction(
             self: *Self,
             pending: *std.ArrayList(Trace),
@@ -1463,8 +1465,7 @@ fn FlowFor(comptime open: bool) type {
                 else => return error.InvalidProgram,
             }
         }
-
-        fn instruction(
+        fn capturedInstruction(
             self: *Self,
             pending: *std.ArrayList(Trace),
             trace: Trace,
@@ -1472,41 +1473,6 @@ fn FlowFor(comptime open: bool) type {
         ) a.Error!void {
             const path = if (trace.path == 0) null else self.paths.items[trace.path - 1];
             switch (op.opcode) {
-                .move => try self.pushAt(
-                    pending,
-                    trace.block,
-                    op.operands[0],
-                    trace.path,
-                    trace.position,
-                ),
-                .select => for (op.operands[1..]) |slot|
-                    try self.pushAt(pending, trace.block, slot, trace.path, trace.position),
-                .product => {
-                    if (path) |selected| {
-                        if (selected.step == .field and
-                            selected.step.field < op.operands.len)
-                            try self.pushAt(
-                                pending,
-                                trace.block,
-                                op.operands[@intCast(selected.step.field)],
-                                selected.tail,
-                                trace.position,
-                            );
-                    } else for (op.operands) |slot| try self.pushAt(
-                        pending,
-                        trace.block,
-                        slot,
-                        0,
-                        trace.position,
-                    );
-                },
-                .field, .variant_payload => try self.pushAt(
-                    pending,
-                    trace.block,
-                    op.operands[0],
-                    try self.prepend(.{ .field = op.immediate }, trace.path),
-                    trace.position,
-                ),
                 .variant => {
                     if (path) |selected| {
                         if (selected.step == .field and
@@ -1545,6 +1511,55 @@ fn FlowFor(comptime open: bool) type {
                         trace.position,
                     );
                 },
+                else => unreachable,
+            }
+        }
+        fn aggregateInstruction(
+            self: *Self,
+            pending: *std.ArrayList(Trace),
+            trace: Trace,
+            op: anytype,
+        ) a.Error!void {
+            const path = if (trace.path == 0) null else self.paths.items[trace.path - 1];
+            switch (op.opcode) {
+                .product => {
+                    if (path) |selected| {
+                        if (selected.step == .field and
+                            selected.step.field < op.operands.len)
+                            try self.pushAt(
+                                pending,
+                                trace.block,
+                                op.operands[@intCast(selected.step.field)],
+                                selected.tail,
+                                trace.position,
+                            );
+                    } else for (op.operands) |slot| try self.pushAt(
+                        pending,
+                        trace.block,
+                        slot,
+                        0,
+                        trace.position,
+                    );
+                },
+                .field, .variant_payload => try self.pushAt(
+                    pending,
+                    trace.block,
+                    op.operands[0],
+                    try self.prepend(.{ .field = op.immediate }, trace.path),
+                    trace.position,
+                ),
+                .variant, .computation => try self.capturedInstruction(pending, trace, op),
+                else => unreachable,
+            }
+        }
+        fn cellInstruction(
+            self: *Self,
+            pending: *std.ArrayList(Trace),
+            trace: Trace,
+            op: anytype,
+        ) a.Error!void {
+            const path = if (trace.path == 0) null else self.paths.items[trace.path - 1];
+            switch (op.opcode) {
                 .cell_new => if (path) |selected| {
                     if (selected.step == .cell_content) try self.pushAt(
                         pending,
@@ -1561,6 +1576,17 @@ fn FlowFor(comptime open: bool) type {
                     try self.prepend(.cell_content, trace.path),
                     trace.position,
                 ),
+                else => unreachable,
+            }
+        }
+        fn sequenceSourceInstruction(
+            self: *Self,
+            pending: *std.ArrayList(Trace),
+            trace: Trace,
+            op: anytype,
+        ) a.Error!void {
+            const path = if (trace.path == 0) null else self.paths.items[trace.path - 1];
+            switch (op.opcode) {
                 .sequence => for (op.operands) |slot| try self.pushAt(
                     pending,
                     trace.block,
@@ -1584,6 +1610,17 @@ fn FlowFor(comptime open: bool) type {
                     try self.prepend(.element, 0),
                     trace.position,
                 ),
+                else => unreachable,
+            }
+        }
+        fn resumptionInstruction(
+            self: *Self,
+            pending: *std.ArrayList(Trace),
+            trace: Trace,
+            op: anytype,
+        ) a.Error!void {
+            const path = if (trace.path == 0) null else self.paths.items[trace.path - 1];
+            switch (op.opcode) {
                 .clone_resumption => try self.pushAt(
                     pending,
                     trace.block,
@@ -1607,6 +1644,37 @@ fn FlowFor(comptime open: bool) type {
                         trace.position,
                     );
                 } else try self.pushAt(pending, trace.block, op.operands[0], 0, trace.position),
+                else => unreachable,
+            }
+        }
+        fn instruction(
+            self: *Self,
+            pending: *std.ArrayList(Trace),
+            trace: Trace,
+            op: anytype,
+        ) a.Error!void {
+            switch (op.opcode) {
+                .move => try self.pushAt(
+                    pending,
+                    trace.block,
+                    op.operands[0],
+                    trace.path,
+                    trace.position,
+                ),
+                .select => for (op.operands[1..]) |slot|
+                    try self.pushAt(pending, trace.block, slot, trace.path, trace.position),
+                .product,
+                .field,
+                .variant_payload,
+                .variant,
+                .computation,
+                => try self.aggregateInstruction(pending, trace, op),
+                .cell_new, .cell_get => try self.cellInstruction(pending, trace, op),
+                .sequence, .sequence_get => try self.sequenceSourceInstruction(pending, trace, op),
+                .clone_resumption,
+                .unpack,
+                .package,
+                => try self.resumptionInstruction(pending, trace, op),
                 .sequence_append,
                 .sequence_concat,
                 .sequence_pop,
@@ -1647,7 +1715,6 @@ fn FlowFor(comptime open: bool) type {
                 => {},
             }
         }
-
         fn call(
             self: *Self,
             pending: *std.ArrayList(Trace),
@@ -1663,7 +1730,6 @@ fn FlowFor(comptime open: bool) type {
                 index,
             );
         }
-
         fn body(
             self: *Self,
             pending: *std.ArrayList(Trace),
@@ -1684,7 +1750,6 @@ fn FlowFor(comptime open: bool) type {
                 );
             }
         }
-
         fn callWrites(
             self: *Self,
             pending: *std.ArrayList(Trace),
@@ -1701,7 +1766,6 @@ fn FlowFor(comptime open: bool) type {
                 index,
             );
         }
-
         fn bodyWrites(
             self: *Self,
             pending: *std.ArrayList(Trace),
@@ -1723,41 +1787,15 @@ fn FlowFor(comptime open: bool) type {
                 );
             }
         }
-
-        fn calledWrites(
+        fn scopedWrites(
             self: *Self,
             pending: *std.ArrayList(Trace),
             block: p.Id,
             schema: p.Id,
             path: usize,
+            term: anytype,
         ) a.Error!void {
-            switch (self.program.blocks[@intCast(block)].terminator) {
-                .call => |v| try self.callWrites(
-                    pending,
-                    block,
-                    v.function,
-                    v.arguments,
-                    schema,
-                    path,
-                ),
-                .apply => |v| try self.bodyWrites(
-                    pending,
-                    block,
-                    v.computation,
-                    v.arguments,
-                    0,
-                    schema,
-                    path,
-                ),
-                .with_region => |v| try self.bodyWrites(
-                    pending,
-                    block,
-                    v.body,
-                    v.arguments,
-                    1,
-                    schema,
-                    path,
-                ),
+            switch (term) {
                 .protect => |v| {
                     try self.bodyWrites(
                         pending,
@@ -1801,6 +1839,18 @@ fn FlowFor(comptime open: bool) type {
                     defer self.allocator.free(sources);
                     for (sources) |source| try self.returnInput(pending, block, source);
                 },
+                else => unreachable,
+            }
+        }
+        fn operationWrites(
+            self: *Self,
+            pending: *std.ArrayList(Trace),
+            block: p.Id,
+            schema: p.Id,
+            path: usize,
+            term: anytype,
+        ) a.Error!void {
+            switch (term) {
                 .perform => |v| if (v.capability != null) {
                     for (self.control.targets(
                         .{ .block = block, .role = .operation },
@@ -1824,6 +1874,46 @@ fn FlowFor(comptime open: bool) type {
                         );
                     }
                 },
+                else => unreachable,
+            }
+        }
+        fn calledWrites(
+            self: *Self,
+            pending: *std.ArrayList(Trace),
+            block: p.Id,
+            schema: p.Id,
+            path: usize,
+        ) a.Error!void {
+            const term = self.program.blocks[@intCast(block)].terminator;
+            switch (term) {
+                .call => |v| try self.callWrites(
+                    pending,
+                    block,
+                    v.function,
+                    v.arguments,
+                    schema,
+                    path,
+                ),
+                .apply => |v| try self.bodyWrites(
+                    pending,
+                    block,
+                    v.computation,
+                    v.arguments,
+                    0,
+                    schema,
+                    path,
+                ),
+                .with_region => |v| try self.bodyWrites(
+                    pending,
+                    block,
+                    v.body,
+                    v.arguments,
+                    1,
+                    schema,
+                    path,
+                ),
+                .protect, .handle => try self.scopedWrites(pending, block, schema, path, term),
+                .perform => try self.operationWrites(pending, block, schema, path, term),
                 .resume_value => |v| {
                     try self.push(pending, block, v.resumption, 0);
                     try self.push(pending, block, v.argument, 0);
@@ -1840,7 +1930,6 @@ fn FlowFor(comptime open: bool) type {
                 else => {},
             }
         }
-
         pub fn isOuter(self: Self, path: usize) bool {
             var cursor = path;
             while (cursor != 0) {
@@ -1850,25 +1939,14 @@ fn FlowFor(comptime open: bool) type {
             }
             return false;
         }
-
-        fn output(
+        fn handlerOutput(
             self: *Self,
             pending: *std.ArrayList(Trace),
             block: p.Id,
             path: usize,
+            term: anytype,
         ) a.Error!void {
-            switch (self.program.blocks[@intCast(block)].terminator) {
-                .call => |v| try self.call(pending, block, v.function, v.arguments, path),
-                .apply => |v| try self.body(pending, block, v.computation, v.arguments, 0, path),
-                .with_region => |v| try self.body(pending, block, v.body, v.arguments, 1, path),
-                .protect => |v| try self.body(
-                    pending,
-                    block,
-                    v.body,
-                    v.arguments,
-                    @intFromBool(v.resource != null),
-                    path,
-                ),
+            switch (term) {
                 .handle => |v| {
                     const handler = self.program.handlers[@intCast(v.handler)];
                     const returns = try self.query(self.entry(handler.return_function), path);
@@ -1917,6 +1995,29 @@ fn FlowFor(comptime open: bool) type {
                         }
                     }
                 },
+                else => unreachable,
+            }
+        }
+        fn output(
+            self: *Self,
+            pending: *std.ArrayList(Trace),
+            block: p.Id,
+            path: usize,
+        ) a.Error!void {
+            const term = self.program.blocks[@intCast(block)].terminator;
+            switch (term) {
+                .call => |v| try self.call(pending, block, v.function, v.arguments, path),
+                .apply => |v| try self.body(pending, block, v.computation, v.arguments, 0, path),
+                .with_region => |v| try self.body(pending, block, v.body, v.arguments, 1, path),
+                .protect => |v| try self.body(
+                    pending,
+                    block,
+                    v.body,
+                    v.arguments,
+                    @intFromBool(v.resource != null),
+                    path,
+                ),
+                .handle => try self.handlerOutput(pending, block, path, term),
                 .resume_value => |v| {
                     try self.push(pending, block, v.resumption, 0);
                     try self.push(pending, block, v.argument, 0);

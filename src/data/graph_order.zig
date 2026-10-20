@@ -172,7 +172,7 @@ fn reverseAppend(
 }
 
 /// The record type graph is acyclic; process cycles appear only as NodeRef IDs.
-pub fn references(
+pub inline fn references(
     comptime T: type,
     value: T,
     list: *std.ArrayList(Reference),
@@ -222,7 +222,7 @@ pub fn references(
     }
 }
 
-pub fn remap(
+pub inline fn remap(
     comptime T: type,
     value: T,
     nodes: []const u64,
@@ -253,20 +253,7 @@ pub fn remap(
             blobs,
             allocator,
         ) else null,
-        .array => |info| blk: {
-            var result: T = undefined;
-            for (
-                &result,
-                value,
-            ) |*target, source| target.* = try remap(
-                info.child,
-                source,
-                nodes,
-                blobs,
-                allocator,
-            );
-            break :blk result;
-        },
+        .array => remapArray(T, value, nodes, blobs, allocator),
         .@"struct" => |info| blk: {
             var result: T = undefined;
             inline for (
@@ -294,4 +281,25 @@ pub fn remap(
         },
         else => value,
     };
+}
+
+inline fn remapArray(
+    comptime T: type,
+    value: T,
+    nodes: []const u64,
+    blobs: []const u64,
+    allocator: std.mem.Allocator,
+) Error!T {
+    var result: T = undefined;
+    for (
+        &result,
+        value,
+    ) |*target, source| target.* = try remap(
+        @typeInfo(T).array.child,
+        source,
+        nodes,
+        blobs,
+        allocator,
+    );
+    return result;
 }

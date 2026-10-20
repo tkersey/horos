@@ -102,15 +102,7 @@ pub fn run(
     const workers = try a.alloc(bool, original.functions.len);
     @memset(selected, false);
     @memset(workers, false);
-    for (original.constructors, 0..) |constructor, id| {
-        if (!lawDomain(original, id)) {
-            stats.retained_constructors += 1;
-            continue;
-        }
-        selected[id] = true;
-        workers[@intCast(constructor.function)] = true;
-        try witnesses.append(a, .{ .constructor = id });
-    }
+    try selectWitnesses(a, original, selected, workers, &witnesses, &stats);
     const functions = try a.dupe(ir.Function, original.functions);
     const constructors = try a.dupe(p.Constructor, original.constructors);
     var captures: std.ArrayList(p.Capture) = .empty;
@@ -132,6 +124,107 @@ pub fn run(
         try layout.appendSlice(a, function.layout.slots);
     }
     const blocks = try a.dupe(ir.Block, original.blocks);
+    try rewriteBlocks(a, original, blocks, workers, selected, layouts, &stats);
+    for (functions, layouts) |*function, layout| function.layout.slots = layout.items;
+    var candidate = original;
+    candidate.functions = functions;
+    candidate.constructors = constructors;
+    candidate.scopes.captures = captures.items;
+    candidate.blocks = blocks;
+    try validate(allocator, original, candidate, witnesses.items);
+    stats.constructors_summarized = witnesses.items.len;
+    stats.fields_removed = witnesses.items.len;
+    return coalescing.run(allocator, candidate, options);
+}
+
+/// Check the complete observation census and each correspondence, not a finder
+/// fingerprint. The only admitted relation is s = x XOR y on immutable u64s.
+/// Every worker observer reads s; all other operations keep their exact records.
+pub fn validate(
+    allocator: std.mem.Allocator,
+    original: ir.Program,
+    candidate: ir.Program,
+    witnesses: []const Witness,
+) Error!void {
+    var flow = try ownership.analyze(allocator, original);
+    defer flow.deinit();
+    var checked = try ownership.analyze(allocator, candidate);
+    defer checked.deinit();
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try checkShape(original, candidate, witnesses);
+    const selected = try a.alloc(bool, original.constructors.len);
+    const workers = try a.alloc(bool, original.functions.len);
+    const capture_ids = try a.alloc(p.Id, original.constructors.len);
+    @memset(selected, false);
+    @memset(workers, false);
+    for (original.constructors, capture_ids) |constructor, *id| id.* = constructor.capture;
+    try checkWitnesses(original, candidate, witnesses, selected, workers, capture_ids);
+    for (original.constructors, candidate.constructors, capture_ids) |before, after, id| {
+        var expected = before;
+        expected.capture = id;
+        if (!equal(p.Constructor, expected, after)) return error.InvalidCaptureSummary;
+    }
+    const next_slot = try a.alloc(usize, original.functions.len);
+    try checkFunctions(original, candidate, workers, next_slot);
+    try checkBlocks(original, candidate, workers, selected, next_slot);
+    for (
+        candidate.functions,
+        next_slot,
+    ) |function, count| if (function.layout.slots.len != count) return error.InvalidCaptureSummary;
+}
+fn checkInsertion(
+    original: ir.Program,
+    candidate: ir.Program,
+    owner: usize,
+    slot: usize,
+    arguments: []const p.Id,
+    op: ir.Instruction,
+) Error!void {
+    if (slot >= candidate.functions[owner].layout.slots.len or
+        arguments.len < 2)
+        return error.InvalidCaptureSummary;
+    const schema = original.functions[owner].layout.slots[@intCast(arguments[0])];
+    if (candidate.functions[owner].layout.slots[slot] != schema or original.schemas[
+        @intCast(schema)
+    ] != .u64) return error.InvalidCaptureSummary;
+    const expected: ir.Instruction = .{
+        .destination = slot,
+        .opcode = .integer_bit_xor,
+        .operands = arguments[0..2],
+    };
+    if (!equal(ir.Instruction, expected, op)) return error.InvalidCaptureSummary;
+}
+
+fn selectWitnesses(
+    a: std.mem.Allocator,
+    original: ir.Program,
+    selected: []bool,
+    workers: []bool,
+    witnesses: *std.ArrayList(Witness),
+    stats: *Statistics,
+) Error!void {
+    for (original.constructors, 0..) |constructor, id| {
+        if (!lawDomain(original, id)) {
+            stats.retained_constructors += 1;
+            continue;
+        }
+        selected[id] = true;
+        workers[@intCast(constructor.function)] = true;
+        try witnesses.append(a, .{ .constructor = id });
+    }
+}
+
+fn rewriteBlocks(
+    a: std.mem.Allocator,
+    original: ir.Program,
+    blocks: []ir.Block,
+    workers: []const bool,
+    selected: []const bool,
+    layouts: []std.ArrayList(p.Id),
+    stats: *Statistics,
+) Error!void {
     for (original.blocks, blocks) |block, *out| {
         var instructions: std.ArrayList(ir.Instruction) = .empty;
         const worker = original.functions[@intCast(block.function)];
@@ -171,54 +264,46 @@ pub fn run(
             }
             try instructions.append(a, replacement);
         }
-        if (block.terminator == .call and workers[@intCast(block.terminator.call.function)]) {
-            const call = block.terminator.call;
-            const target = original.functions[@intCast(call.function)];
-            const schema = target.layout.slots[@intCast(target.inputs[0])];
-            const layout = &layouts[@intCast(block.function)];
-            const slot = layout.items.len;
-            try layout.append(a, schema);
-            try instructions.append(
-                a,
-                .{
-                    .destination = slot,
-                    .opcode = .integer_bit_xor,
-                    .operands = try a.dupe(p.Id, call.arguments[0..2]),
-                },
-            );
-            out.terminator.call.arguments = try summarized(a, call.arguments, slot);
-            stats.direct_call_xors += 1;
-        }
+        try rewriteCall(a, original, block, out, workers, layouts, &instructions, stats);
         out.instructions = try instructions.toOwnedSlice(a);
     }
-    for (functions, layouts) |*function, layout| function.layout.slots = layout.items;
-    var candidate = original;
-    candidate.functions = functions;
-    candidate.constructors = constructors;
-    candidate.scopes.captures = captures.items;
-    candidate.blocks = blocks;
-    try validate(allocator, original, candidate, witnesses.items);
-    stats.constructors_summarized = witnesses.items.len;
-    stats.fields_removed = witnesses.items.len;
-    return coalescing.run(allocator, candidate, options);
 }
 
-/// Check the complete observation census and each correspondence, not a finder
-/// fingerprint. The only admitted relation is s = x XOR y on immutable u64s.
-/// Every worker observer reads s; all other operations keep their exact records.
-pub fn validate(
-    allocator: std.mem.Allocator,
+fn rewriteCall(
+    a: std.mem.Allocator,
+    original: ir.Program,
+    block: ir.Block,
+    out: *ir.Block,
+    workers: []const bool,
+    layouts: []std.ArrayList(p.Id),
+    instructions: *std.ArrayList(ir.Instruction),
+    stats: *Statistics,
+) Error!void {
+    if (block.terminator == .call and workers[@intCast(block.terminator.call.function)]) {
+        const call = block.terminator.call;
+        const target = original.functions[@intCast(call.function)];
+        const schema = target.layout.slots[@intCast(target.inputs[0])];
+        const layout = &layouts[@intCast(block.function)];
+        const slot = layout.items.len;
+        try layout.append(a, schema);
+        try instructions.append(
+            a,
+            .{
+                .destination = slot,
+                .opcode = .integer_bit_xor,
+                .operands = try a.dupe(p.Id, call.arguments[0..2]),
+            },
+        );
+        out.terminator.call.arguments = try summarized(a, call.arguments, slot);
+        stats.direct_call_xors += 1;
+    }
+}
+
+fn checkShape(
     original: ir.Program,
     candidate: ir.Program,
     witnesses: []const Witness,
 ) Error!void {
-    var flow = try ownership.analyze(allocator, original);
-    defer flow.deinit();
-    var checked = try ownership.analyze(allocator, candidate);
-    defer checked.deinit();
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
     var same = candidate;
     same.functions = original.functions;
     same.blocks = original.blocks;
@@ -234,12 +319,16 @@ pub fn validate(
         original.scopes.captures,
         candidate.scopes.captures[0..original.scopes.captures.len],
     ) |before, after| if (!equal(p.Capture, before, after)) return error.InvalidCaptureSummary;
-    const selected = try a.alloc(bool, original.constructors.len);
-    const workers = try a.alloc(bool, original.functions.len);
-    const capture_ids = try a.alloc(p.Id, original.constructors.len);
-    @memset(selected, false);
-    @memset(workers, false);
-    for (original.constructors, capture_ids) |constructor, *id| id.* = constructor.capture;
+}
+
+fn checkWitnesses(
+    original: ir.Program,
+    candidate: ir.Program,
+    witnesses: []const Witness,
+    selected: []bool,
+    workers: []bool,
+    capture_ids: []p.Id,
+) Error!void {
     for (witnesses, 0..) |witness, index| {
         if (witness.constructor >= selected.len or
             selected[witness.constructor])
@@ -256,34 +345,7 @@ pub fn validate(
             !privacy.privateWorker(original, witness.constructor) or
             !privacy.privateConstructions(original, witness.constructor))
             return error.InvalidCaptureSummary;
-        const worker = original.functions[@intCast(constructor.function)];
-        // Independent universal-use check: no individual observer or update may
-        // distinguish two environments with the same bitwise summary.
-        var observers: usize = 0;
-        for (original.blocks) |block| {
-            if (block.function != constructor.function) continue;
-            for (block.instructions) |op| {
-                if (op.destination == worker.inputs[0] or
-                    op.destination == worker.inputs[1])
-                    return error.InvalidCaptureSummary;
-                for (op.operands) |slot|
-                    if (slot == worker.inputs[0] or slot == worker.inputs[1]) {
-                        if (op.opcode != .integer_bit_xor or
-                            op.operands.len != 2 or
-                            op.operands[0] != worker.inputs[0] or
-                            op.operands[1] != worker.inputs[1] or
-                            op.immediate != 0 or
-                            op.failures.len != 0)
-                            return error.InvalidCaptureSummary;
-                        observers += 1;
-                    };
-            }
-            for (worker.inputs[0..2]) |slot| {
-                const uses = access(block.terminator, slot);
-                if (uses.reads != 0 or uses.writes != 0) return error.InvalidCaptureSummary;
-            }
-        }
-        if (observers == 0) return error.InvalidCaptureSummary;
+        try checkObservations(original, constructor);
         const id = original.scopes.captures.len + index;
         var expected = capture;
         expected.fields = capture.fields[0..1];
@@ -296,12 +358,45 @@ pub fn validate(
         workers[@intCast(constructor.function)] = true;
         capture_ids[witness.constructor] = id;
     }
-    for (original.constructors, candidate.constructors, capture_ids) |before, after, id| {
-        var expected = before;
-        expected.capture = id;
-        if (!equal(p.Constructor, expected, after)) return error.InvalidCaptureSummary;
+}
+
+fn checkObservations(original: ir.Program, constructor: p.Constructor) Error!void {
+    const worker = original.functions[@intCast(constructor.function)];
+    // Independent universal-use check: no individual observer or update may
+    // distinguish two environments with the same bitwise summary.
+    var observers: usize = 0;
+    for (original.blocks) |block| {
+        if (block.function != constructor.function) continue;
+        for (block.instructions) |op| {
+            if (op.destination == worker.inputs[0] or
+                op.destination == worker.inputs[1])
+                return error.InvalidCaptureSummary;
+            for (op.operands) |slot|
+                if (slot == worker.inputs[0] or slot == worker.inputs[1]) {
+                    if (op.opcode != .integer_bit_xor or
+                        op.operands.len != 2 or
+                        op.operands[0] != worker.inputs[0] or
+                        op.operands[1] != worker.inputs[1] or
+                        op.immediate != 0 or
+                        op.failures.len != 0)
+                        return error.InvalidCaptureSummary;
+                    observers += 1;
+                };
+        }
+        for (worker.inputs[0..2]) |slot| {
+            const uses = access(block.terminator, slot);
+            if (uses.reads != 0 or uses.writes != 0) return error.InvalidCaptureSummary;
+        }
     }
-    const next_slot = try a.alloc(usize, original.functions.len);
+    if (observers == 0) return error.InvalidCaptureSummary;
+}
+
+fn checkFunctions(
+    original: ir.Program,
+    candidate: ir.Program,
+    workers: []const bool,
+    next_slot: []usize,
+) Error!void {
     for (
         original.functions,
         candidate.functions,
@@ -330,48 +425,26 @@ pub fn validate(
             after.inputs,
         )) return error.InvalidCaptureSummary;
     }
+}
+
+fn checkBlocks(
+    original: ir.Program,
+    candidate: ir.Program,
+    workers: []const bool,
+    selected: []const bool,
+    next_slot: []usize,
+) Error!void {
     for (original.blocks, candidate.blocks) |before, after| {
         const owner: usize = @intCast(before.function);
-        const worker = original.functions[owner];
-        var next: usize = 0;
-        for (before.instructions) |op| {
-            var expected = op;
-            var operands: [1]p.Id = undefined;
-            if (workers[owner] and exactXor(op, worker.inputs[0], worker.inputs[1])) {
-                operands[0] = worker.inputs[0];
-                expected = .{
-                    .destination = op.destination,
-                    .opcode = .move,
-                    .operands = &operands,
-                };
-            }
-            if (op.opcode == .computation and selected[@intCast(op.immediate)]) {
-                if (next >= after.instructions.len) return error.InvalidCaptureSummary;
-                const slot = next_slot[owner];
-                next_slot[owner] += 1;
-                try checkInsertion(
-                    original,
-                    candidate,
-                    owner,
-                    slot,
-                    op.operands,
-                    after.instructions[next],
-                );
-                next += 1;
-                if (next >= after.instructions.len or !matchesArguments(
-                    op.operands,
-                    after.instructions[next].operands,
-                    slot,
-                )) return error.InvalidCaptureSummary;
-                expected.operands = after.instructions[next].operands;
-            }
-            if (next >= after.instructions.len or !equal(
-                ir.Instruction,
-                expected,
-                after.instructions[next],
-            )) return error.InvalidCaptureSummary;
-            next += 1;
-        }
+        var next = try checkInstructions(
+            original,
+            candidate,
+            before,
+            after,
+            workers,
+            selected,
+            next_slot,
+        );
         var unchanged = after;
         unchanged.instructions = before.instructions;
         if (before.terminator == .call and workers[@intCast(before.terminator.call.function)]) {
@@ -399,30 +472,57 @@ pub fn validate(
             unchanged,
         )) return error.InvalidCaptureSummary;
     }
-    for (
-        candidate.functions,
-        next_slot,
-    ) |function, count| if (function.layout.slots.len != count) return error.InvalidCaptureSummary;
 }
-fn checkInsertion(
+
+fn checkInstructions(
     original: ir.Program,
     candidate: ir.Program,
-    owner: usize,
-    slot: usize,
-    arguments: []const p.Id,
-    op: ir.Instruction,
-) Error!void {
-    if (slot >= candidate.functions[owner].layout.slots.len or
-        arguments.len < 2)
-        return error.InvalidCaptureSummary;
-    const schema = original.functions[owner].layout.slots[@intCast(arguments[0])];
-    if (candidate.functions[owner].layout.slots[slot] != schema or original.schemas[
-        @intCast(schema)
-    ] != .u64) return error.InvalidCaptureSummary;
-    const expected: ir.Instruction = .{
-        .destination = slot,
-        .opcode = .integer_bit_xor,
-        .operands = arguments[0..2],
-    };
-    if (!equal(ir.Instruction, expected, op)) return error.InvalidCaptureSummary;
+    before: ir.Block,
+    after: ir.Block,
+    workers: []const bool,
+    selected: []const bool,
+    next_slot: []usize,
+) Error!usize {
+    const owner: usize = @intCast(before.function);
+    const worker = original.functions[owner];
+    var next: usize = 0;
+    for (before.instructions) |op| {
+        var expected = op;
+        var operands: [1]p.Id = undefined;
+        if (workers[owner] and exactXor(op, worker.inputs[0], worker.inputs[1])) {
+            operands[0] = worker.inputs[0];
+            expected = .{
+                .destination = op.destination,
+                .opcode = .move,
+                .operands = &operands,
+            };
+        }
+        if (op.opcode == .computation and selected[@intCast(op.immediate)]) {
+            if (next >= after.instructions.len) return error.InvalidCaptureSummary;
+            const slot = next_slot[owner];
+            next_slot[owner] += 1;
+            try checkInsertion(
+                original,
+                candidate,
+                owner,
+                slot,
+                op.operands,
+                after.instructions[next],
+            );
+            next += 1;
+            if (next >= after.instructions.len or !matchesArguments(
+                op.operands,
+                after.instructions[next].operands,
+                slot,
+            )) return error.InvalidCaptureSummary;
+            expected.operands = after.instructions[next].operands;
+        }
+        if (next >= after.instructions.len or !equal(
+            ir.Instruction,
+            expected,
+            after.instructions[next],
+        )) return error.InvalidCaptureSummary;
+        next += 1;
+    }
+    return next;
 }

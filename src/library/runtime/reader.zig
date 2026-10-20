@@ -150,32 +150,9 @@ pub fn interpret(
             .state = &.{.{ .name = "environment", .schema = f.environment }},
             .resumption_slots = declarations[index * 2 ..][0..2],
         });
-        const returns_fn = try c.returnFunction(handler.*);
-        const returns = try c.body(returns_fn);
-        try c.define(returns_fn, try returns.ret(try returns.parameter("result")));
-        const asks_fn = try c.clauseFunctionFor(handler.*, f.ask);
-        const asks = try c.body(asks_fn);
-        try c.define(
-            asks_fn,
-            try asks.ret(try asks.resumeValue(
-                try asks.parameter("resumption"),
-                try asks.parameter("environment"),
-            )),
-        );
+        try defineAsk(c, f, handler.*);
     }
-    for (handlers[0..count]) |handler| {
-        const clause_fn = try c.clauseFunctionFor(handler, f.local);
-        const clause = try c.body(clause_fn);
-        const inner = try clause.handleWith(
-            handlers[count - 1],
-            try clause.parameter("inside"),
-            &.{.{ .name = "environment", .value = try clause.parameter("payload") }},
-        );
-        try c.define(
-            clause_fn,
-            try clause.ret(try clause.resumeValue(try clause.parameter("resumption"), inner)),
-        );
-    }
+    try defineLocal(c, f, handlers[0..count]);
     const value: Reader = .{
         .handler = handlers[0],
         .inside_handler = handlers[count - 1],
@@ -186,4 +163,39 @@ pub fn interpret(
         .{ .key = try KeyOps.snapshot(allocator, key), .value = value },
     );
     return value;
+}
+
+fn defineAsk(c: *a.Context, f: *const FamilyData, handler: *const a.Handler) a.Error!void {
+    const returns_fn = try c.returnFunction(handler);
+    const returns = try c.body(returns_fn);
+    try c.define(returns_fn, try returns.ret(try returns.parameter("result")));
+    const asks_fn = try c.clauseFunctionFor(handler, f.ask);
+    const asks = try c.body(asks_fn);
+    try c.define(
+        asks_fn,
+        try asks.ret(try asks.resumeValue(
+            try asks.parameter("resumption"),
+            try asks.parameter("environment"),
+        )),
+    );
+}
+
+fn defineLocal(
+    c: *a.Context,
+    f: *const FamilyData,
+    handlers: []const *const a.Handler,
+) a.Error!void {
+    for (handlers) |handler| {
+        const clause_fn = try c.clauseFunctionFor(handler, f.local);
+        const clause = try c.body(clause_fn);
+        const inner = try clause.handleWith(
+            handlers[handlers.len - 1],
+            try clause.parameter("inside"),
+            &.{.{ .name = "environment", .value = try clause.parameter("payload") }},
+        );
+        try c.define(
+            clause_fn,
+            try clause.ret(try clause.resumeValue(try clause.parameter("resumption"), inner)),
+        );
+    }
 }

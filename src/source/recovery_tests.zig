@@ -78,9 +78,11 @@ test "source recovery evidence owns arrays of relocation slices" {
     try std.testing.expectEqualSlices(u64, &.{ 7, 11 }, copied[1]);
 }
 
-test "source recovery retains binding aliases through checked function coalescing" {
-    var b = source.Builder.init(a);
-    defer b.deinit();
+fn coalescedBindingModule(b: *source.Builder) !struct {
+    module: source.Module,
+    first: source.Id,
+    second: source.Id,
+} {
     const unit = try b.scalar(void);
     const word = try b.scalar(u64);
     const pair = try b.schema(.{ .product = &.{ word, word } });
@@ -115,9 +117,57 @@ test "source recovery retains binding aliases through checked function coalescin
             ),
         ),
     );
-    var compiled = try source.lowerObserved(a, b.module(entry, unit), .{ .recovery = true });
+    return .{ .module = b.module(entry, unit), .first = first, .second = second };
+}
+
+fn rejectForgedBindingParameters(module: source.Module, compiled: source.Compiled) !void {
+    // A different same-typed input is not an admissible recovery substitution.
+    const parameters = try a.dupe(source.RecoveryBinding, compiled.parameters);
+    defer a.free(parameters);
+    var forged = compiled;
+    forged.parameters = parameters;
+    const old = parameters[0];
+    const target = compiled.program.functions[@intCast(old.function)];
+    try std.testing.expectEqual(@as(usize, 2), target.inputs.len);
+    parameters[0].slot = target.inputs[1];
+    try std.testing.expectEqual(target.layout.slots[@intCast(parameters[0].slot)], old.schema);
+    try std.testing.expectError(
+        error.InvalidCorrespondence,
+        source.recovery.validate(a, module, &forged),
+    );
+    parameters[0] = old;
+    forged.parameters = parameters[1..];
+    try std.testing.expectError(
+        error.InvalidCorrespondence,
+        source.recovery.validate(a, module, &forged),
+    );
+    forged.parameters = parameters;
+
+    // Altering actual final input records remains well typed. Checking merely
+    // the map's schema or a producer-supplied digest would miss this change.
+    const functions = try a.dupe(data.activation.Function, compiled.program.functions);
+    defer a.free(functions);
+    const reversed = [_]u64{ target.inputs[1], target.inputs[0] };
+    functions[@intCast(old.function)].inputs = &reversed;
+    forged.program.functions = functions;
+    var admitted = try data.activation_ownership.analyze(a, forged.program);
+    admitted.deinit();
+    try std.testing.expectError(
+        error.InvalidCorrespondence,
+        source.recovery.validate(a, module, &forged),
+    );
+}
+
+test "source recovery retains binding aliases through checked function coalescing" {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const fixture = try coalescedBindingModule(&b);
+    const module = fixture.module;
+    const first = fixture.first;
+    const second = fixture.second;
+    var compiled = try source.lowerObserved(a, module, .{ .recovery = true });
     defer compiled.deinit();
-    try source.recovery.validate(a, b.module(entry, unit), &compiled);
+    try source.recovery.validate(a, module, &compiled);
     var first_location: ?source.RecoveryBinding = null;
     var second_location: ?source.RecoveryBinding = null;
     for (compiled.recovery) |binding| {
@@ -150,13 +200,13 @@ test "source recovery retains binding aliases through checked function coalescin
         error.InvalidCorrespondence,
         source.lowerObserved(
             a,
-            b.module(entry, unit),
+            module,
             .{ .recovery = true, .contract = .semantic },
         ),
     );
     var bounded = try source.lowerObserved(
         a,
-        b.module(entry, unit),
+        module,
         .{ .recovery = true, .coalescing = .{ .work_limit = 0 } },
     );
     defer bounded.deinit();
@@ -165,43 +215,9 @@ test "source recovery retains binding aliases through checked function coalescin
         if (binding.variable == b.parameter(binding.source_function, 0))
             try std.testing.expectEqual(target.inputs[0], binding.slot);
     }
-    try source.recovery.validate(a, b.module(entry, unit), &bounded);
+    try source.recovery.validate(a, module, &bounded);
 
-    // A different same-typed input is not an admissible recovery substitution.
-    const parameters = try a.dupe(source.RecoveryBinding, compiled.parameters);
-    defer a.free(parameters);
-    var forged = compiled;
-    forged.parameters = parameters;
-    const old = parameters[0];
-    const target = compiled.program.functions[@intCast(old.function)];
-    try std.testing.expectEqual(@as(usize, 2), target.inputs.len);
-    parameters[0].slot = target.inputs[1];
-    try std.testing.expectEqual(target.layout.slots[@intCast(parameters[0].slot)], old.schema);
-    try std.testing.expectError(
-        error.InvalidCorrespondence,
-        source.recovery.validate(a, b.module(entry, unit), &forged),
-    );
-    parameters[0] = old;
-    forged.parameters = parameters[1..];
-    try std.testing.expectError(
-        error.InvalidCorrespondence,
-        source.recovery.validate(a, b.module(entry, unit), &forged),
-    );
-    forged.parameters = parameters;
-
-    // Altering actual final input records remains well typed. Checking merely
-    // the map's schema or a producer-supplied digest would miss this change.
-    const functions = try a.dupe(data.activation.Function, compiled.program.functions);
-    defer a.free(functions);
-    const reversed = [_]u64{ target.inputs[1], target.inputs[0] };
-    functions[@intCast(old.function)].inputs = &reversed;
-    forged.program.functions = functions;
-    var admitted = try data.activation_ownership.analyze(a, forged.program);
-    admitted.deinit();
-    try std.testing.expectError(
-        error.InvalidCorrespondence,
-        source.recovery.validate(a, b.module(entry, unit), &forged),
-    );
+    try rejectForgedBindingParameters(module, compiled);
 }
 
 test "source recovery derives formal parameters after captured inputs" {

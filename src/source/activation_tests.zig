@@ -617,9 +617,7 @@ test "projection forwarding cannot erase malformed source operations" {
     }
 }
 
-test "copy-binding fusion preserves repeated mutable reads across a write" {
-    var b = source.Builder.init(testing.allocator);
-    defer b.deinit();
+fn repeatedCellReadModule(b: *source.Builder) !source.Module {
     const unit = try b.scalar(void);
     const integer = try b.scalar(u64);
     const pair = try b.schema(.{ .product = &.{ integer, integer } });
@@ -678,7 +676,14 @@ test "copy-binding fusion preserves repeated mutable reads across a write" {
             .body = try b.lambda(inside, signature),
         } }),
     );
-    var compiled = try lower(testing.allocator, b.module(main, unit));
+    return b.module(main, unit);
+}
+
+test "copy-binding fusion preserves repeated mutable reads across a write" {
+    var b = source.Builder.init(testing.allocator);
+    defer b.deinit();
+    const module = try repeatedCellReadModule(&b);
+    var compiled = try lower(testing.allocator, module);
     defer compiled.deinit();
     var matched = false;
     for (compiled.program.blocks) |block| {

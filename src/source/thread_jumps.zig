@@ -59,7 +59,7 @@ pub fn optimize(
     return result;
 }
 
-fn redirect(
+inline fn redirect(
     comptime T: type,
     allocator: std.mem.Allocator,
     input: T,

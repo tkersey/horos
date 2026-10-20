@@ -28,7 +28,7 @@ else
     @TypeOf(default)) {
     return if (@hasField(@TypeOf(options), name)) @field(options, name) else default;
 }
-fn count(comptime T: type) ?usize {
+inline fn count(comptime T: type) ?usize {
     return switch (@typeInfo(T)) {
         .@"struct" => |s| s.field_types.len,
         .array => |ar| ar.len,

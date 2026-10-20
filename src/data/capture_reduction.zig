@@ -128,30 +128,7 @@ pub fn run(
     const a = arena.allocator();
     const permissions = try traits.derive(a, original.schemas);
     var witnesses: std.ArrayList(Witness) = .empty;
-    for (original.constructors, 0..) |constructor, id| {
-        const capture = original.scopes.captures[@intCast(constructor.capture)];
-        if (capture.fields.len == 0) continue;
-        if (!privateWorker(original, id) or !privateConstructions(original, id)) {
-            stats.opaque_constructors += 1;
-            continue;
-        }
-        const worker = original.functions[@intCast(constructor.function)];
-        var removed: std.ArrayList(usize) = .empty;
-        for (capture.fields, 0..) |schema, index| {
-            if (!permissions.copy[
-                @intCast(schema)
-            ] or !permissions.drop[
-                @intCast(schema)
-            ] or flow.pool.contains(
-                flow.live[@intCast(worker.entry)][0],
-                worker.inputs[index],
-            )) continue;
-            try removed.append(a, index);
-        }
-        if (removed.items.len == 0) continue;
-        stats.fields_removed += removed.items.len;
-        try witnesses.append(a, .{ .constructor = id, .removed = try removed.toOwnedSlice(a) });
-    }
+    try selectWitnesses(a, original, permissions, flow, &stats, &witnesses);
     const functions = try a.dupe(ir.Function, original.functions);
     const constructors = try a.dupe(p.Constructor, original.constructors);
     var captures: std.ArrayList(p.Capture) = .empty;
@@ -175,28 +152,7 @@ pub fn run(
         by_function[@intCast(constructor.function)] = witness.removed;
     }
     const blocks = try a.dupe(ir.Block, original.blocks);
-    for (blocks) |*block| {
-        const instructions = try a.dupe(ir.Instruction, block.instructions);
-        for (instructions) |*op| if (op.opcode == .computation and by_constructor[
-            @intCast(op.immediate)
-        ].len != 0) {
-            const removed = by_constructor[@intCast(op.immediate)];
-            op.operands = try without(a, op.operands, removed);
-            stats.construction_operands_removed += removed.len;
-        };
-        block.instructions = instructions;
-        if (block.terminator == .call and by_function[
-            @intCast(block.terminator.call.function)
-        ].len != 0) {
-            const removed = by_function[@intCast(block.terminator.call.function)];
-            block.terminator.call.arguments = try without(
-                a,
-                block.terminator.call.arguments,
-                removed,
-            );
-            stats.direct_arguments_removed += removed.len;
-        }
-    }
+    try rewriteBlocks(a, blocks, by_constructor, by_function, &stats);
     var candidate = original;
     candidate.functions = functions;
     candidate.constructors = constructors;
@@ -249,6 +205,108 @@ pub fn validate(
         original.constructors,
         mapped_capture,
     ) |constructor, *mapped| mapped.* = constructor.capture;
+    try checkWitnesses(
+        original,
+        candidate,
+        witnesses,
+        permissions,
+        flow,
+        ctor_removed,
+        fn_removed,
+        mapped_capture,
+    );
+    for (original.constructors, candidate.constructors, mapped_capture) |before, after, capture| {
+        var expected = before;
+        expected.capture = capture;
+        if (!equal(p.Constructor, expected, after)) return error.InvalidCaptureReduction;
+    }
+    for (original.functions, candidate.functions, fn_removed) |before, after, removed| {
+        var unchanged = after;
+        unchanged.inputs = before.inputs;
+        if (!equal(ir.Function, before, unchanged) or !subsequence(
+            before.inputs,
+            after.inputs,
+            removed,
+        )) return error.InvalidCaptureReduction;
+    }
+    try checkBlocks(original, candidate, fn_removed, ctor_removed);
+}
+
+fn selectWitnesses(
+    a: std.mem.Allocator,
+    original: ir.Program,
+    permissions: traits.Facts,
+    flow: @import("activation_flow.zig").Facts,
+    stats: *Statistics,
+    witnesses: *std.ArrayList(Witness),
+) Error!void {
+    for (original.constructors, 0..) |constructor, id| {
+        const capture = original.scopes.captures[@intCast(constructor.capture)];
+        if (capture.fields.len == 0) continue;
+        if (!privateWorker(original, id) or !privateConstructions(original, id)) {
+            stats.opaque_constructors += 1;
+            continue;
+        }
+        const worker = original.functions[@intCast(constructor.function)];
+        var removed: std.ArrayList(usize) = .empty;
+        for (capture.fields, 0..) |schema, index| {
+            if (!permissions.copy[
+                @intCast(schema)
+            ] or !permissions.drop[
+                @intCast(schema)
+            ] or flow.pool.contains(
+                flow.live[@intCast(worker.entry)][0],
+                worker.inputs[index],
+            )) continue;
+            try removed.append(a, index);
+        }
+        if (removed.items.len == 0) continue;
+        stats.fields_removed += removed.items.len;
+        try witnesses.append(a, .{ .constructor = id, .removed = try removed.toOwnedSlice(a) });
+    }
+}
+
+fn rewriteBlocks(
+    a: std.mem.Allocator,
+    blocks: []ir.Block,
+    by_constructor: []const []const usize,
+    by_function: []const []const usize,
+    stats: *Statistics,
+) Error!void {
+    for (blocks) |*block| {
+        const instructions = try a.dupe(ir.Instruction, block.instructions);
+        for (instructions) |*op| if (op.opcode == .computation and by_constructor[
+            @intCast(op.immediate)
+        ].len != 0) {
+            const removed = by_constructor[@intCast(op.immediate)];
+            op.operands = try without(a, op.operands, removed);
+            stats.construction_operands_removed += removed.len;
+        };
+        block.instructions = instructions;
+        if (block.terminator == .call and by_function[
+            @intCast(block.terminator.call.function)
+        ].len != 0) {
+            const removed = by_function[@intCast(block.terminator.call.function)];
+            block.terminator.call.arguments = try without(
+                a,
+                block.terminator.call.arguments,
+                removed,
+            );
+            stats.direct_arguments_removed += removed.len;
+        }
+    }
+}
+
+fn checkWitnesses(
+    original: ir.Program,
+    candidate: ir.Program,
+    witnesses: []const Witness,
+    permissions: traits.Facts,
+    flow: @import("activation_flow.zig").Facts,
+    ctor_removed: [][]const usize,
+    fn_removed: [][]const usize,
+    mapped_capture: []p.Id,
+) Error!void {
     for (witnesses, 0..) |witness, index| {
         if (witness.constructor >= original.constructors.len or
             witness.removed.len == 0 or
@@ -284,20 +342,14 @@ pub fn validate(
         fn_removed[@intCast(constructor.function)] = witness.removed;
         mapped_capture[witness.constructor] = mapped;
     }
-    for (original.constructors, candidate.constructors, mapped_capture) |before, after, capture| {
-        var expected = before;
-        expected.capture = capture;
-        if (!equal(p.Constructor, expected, after)) return error.InvalidCaptureReduction;
-    }
-    for (original.functions, candidate.functions, fn_removed) |before, after, removed| {
-        var unchanged = after;
-        unchanged.inputs = before.inputs;
-        if (!equal(ir.Function, before, unchanged) or !subsequence(
-            before.inputs,
-            after.inputs,
-            removed,
-        )) return error.InvalidCaptureReduction;
-    }
+}
+
+fn checkBlocks(
+    original: ir.Program,
+    candidate: ir.Program,
+    fn_removed: []const []const usize,
+    ctor_removed: []const []const usize,
+) Error!void {
     for (original.blocks, candidate.blocks) |before, after| {
         if (before.instructions.len != after.instructions.len) return error.InvalidCaptureReduction;
         var unchanged = after;

@@ -117,29 +117,7 @@ fn handlerCase(raw: *source.Builder, comptime kind: Kind) !source.Module {
         try returns.product(answer, .{ .answer = returned })
     else
         returned));
-    const clause_fn = try c.clauseFunction(h);
-    const clause = try c.body(clause_fn);
-    if (kind == .dispose) _ = try clause.dispose(try clause.parameter("resumption"));
-    const resumed = if (kind == .bypass or kind == .dispose) try clause.constant(
-        u64,
-        17,
-    ) else try clause.resumeValue(
-        try clause.parameter("resumption"),
-        try clause.constant(void, {}),
-    );
-    const scalar = if (transformed and mode == .deep) try clause.field(
-        resumed,
-        "answer",
-    ) else resumed;
-    const plus = try clause.checkedAdd(
-        scalar,
-        try clause.constant(u64, 1),
-        try c.literalFailure(void, {}),
-    );
-    try c.define(clause_fn, try clause.ret(if (transformed)
-        try clause.product(answer, .{ .answer = plus })
-    else
-        plus));
+    try defineHandlerClause(c, kind, transformed, mode, h, answer);
     const body_schema = try c.handledSchema(h);
     const work = try c.functionFor("work", body_schema);
     const body = try c.body(work);
@@ -636,4 +614,37 @@ pub fn main(init: std.process.Init) !void {
         try output.interface.writeAll(bytes);
     }
     try output.interface.flush();
+}
+
+fn defineHandlerClause(
+    c: *a.Context,
+    comptime kind: Kind,
+    comptime transformed: bool,
+    comptime mode: p.Mode,
+    h: anytype,
+    answer: anytype,
+) a.Error!void {
+    const clause_fn = try c.clauseFunction(h);
+    const clause = try c.body(clause_fn);
+    if (kind == .dispose) _ = try clause.dispose(try clause.parameter("resumption"));
+    const resumed = if (kind == .bypass or kind == .dispose) try clause.constant(
+        u64,
+        17,
+    ) else try clause.resumeValue(
+        try clause.parameter("resumption"),
+        try clause.constant(void, {}),
+    );
+    const scalar = if (transformed and mode == .deep) try clause.field(
+        resumed,
+        "answer",
+    ) else resumed;
+    const plus = try clause.checkedAdd(
+        scalar,
+        try clause.constant(u64, 1),
+        try c.literalFailure(void, {}),
+    );
+    try c.define(clause_fn, try clause.ret(if (transformed)
+        try clause.product(answer, .{ .answer = plus })
+    else
+        plus));
 }

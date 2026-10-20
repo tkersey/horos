@@ -53,28 +53,32 @@ test "stable borrow requirements use the value and owner versions at a store" {
             },
             .scopes = .{ .region_count = 1 },
         };
-        try @import("activation_types.zig").validate(testing.allocator, program);
-        var arena = std.heap.ArenaAllocator.init(testing.allocator);
-        defer arena.deinit();
-        const facts = try @import("admission.zig").schemas(arena.allocator(), program.schemas);
-        var flow = try borrows.StableFlow.init(arena.allocator(), program, facts.exportable);
-        const required = try flow.required(0);
-        try testing.expectEqual(1, required.len);
-        try testing.expectEqual(@as(p.Id, if (before) 0 else 1), required[0].value.parameter);
-        try testing.expectEqual(@as(p.Id, if (before) 3 else 2), required[0].owner.parameter);
-        try testing.expectEqual(borrows.Bound.region, required[0].bound);
-        const suffix = try flow.requiredFrom(0, 1);
-        try testing.expectEqual(@as(usize, if (before) 1 else 0), suffix.len);
-        if (before) {
-            try testing.expect(suffix[0].value.stable_slot and suffix[0].owner.stable_slot);
-            try testing.expectEqual(1, suffix[0].value.parameter);
-            try testing.expectEqual(4, suffix[0].owner.parameter);
-            const at_store = try flow.requiredFrom(0, 2);
-            try testing.expectEqual(1, at_store.len);
-            try testing.expectEqual(2, at_store[0].owner.parameter);
-        }
-        try testing.expectEqual(0, (try flow.requiredFrom(0, 3)).len);
+        try expectStoreRequirements(program, before);
     }
+}
+
+fn expectStoreRequirements(program: ir.Program, before: bool) !void {
+    try @import("activation_types.zig").validate(testing.allocator, program);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const facts = try @import("admission.zig").schemas(arena.allocator(), program.schemas);
+    var flow = try borrows.StableFlow.init(arena.allocator(), program, facts.exportable);
+    const required = try flow.required(0);
+    try testing.expectEqual(1, required.len);
+    try testing.expectEqual(@as(p.Id, if (before) 0 else 1), required[0].value.parameter);
+    try testing.expectEqual(@as(p.Id, if (before) 3 else 2), required[0].owner.parameter);
+    try testing.expectEqual(borrows.Bound.region, required[0].bound);
+    const suffix = try flow.requiredFrom(0, 1);
+    try testing.expectEqual(@as(usize, if (before) 1 else 0), suffix.len);
+    if (before) {
+        try testing.expect(suffix[0].value.stable_slot and suffix[0].owner.stable_slot);
+        try testing.expectEqual(1, suffix[0].value.parameter);
+        try testing.expectEqual(4, suffix[0].owner.parameter);
+        const at_store = try flow.requiredFrom(0, 2);
+        try testing.expectEqual(1, at_store.len);
+        try testing.expectEqual(2, at_store[0].owner.parameter);
+    }
+    try testing.expectEqual(0, (try flow.requiredFrom(0, 3)).len);
 }
 
 test "stable borrow tracing follows simultaneous loop transfers and non-prefix inputs" {

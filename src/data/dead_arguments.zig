@@ -157,6 +157,13 @@ pub fn validate(
             )) return error.InvalidDeadArguments;
         }
     }
+    try validateSubsequences(original, candidate, removals);
+}
+fn validateSubsequences(
+    original: ir.Program,
+    candidate: ir.Program,
+    removals: []const []const usize,
+) Error!void {
     for (original.functions, candidate.functions, removals) |before, after, removed| {
         var same = after;
         same.inputs = before.inputs;

@@ -18,20 +18,25 @@ fn take(budget: ?*Budget, amount: usize) Error!void {
     b.remaining -= amount;
 }
 fn charge(comptime T: type, value: T, budget: ?*Budget) Error!void {
+    @setEvalBranchQuota(10000);
+    return chargeFields(T, value, budget);
+}
+
+inline fn chargeFields(comptime T: type, value: T, budget: ?*Budget) Error!void {
     if (budget == null) return;
     try take(budget, 1);
     switch (@typeInfo(T)) {
         .@"struct" => |info| inline for (
             info.field_names,
             info.field_types,
-        ) |field_name, FieldType| try charge(FieldType, @field(value, field_name), budget),
+        ) |field_name, FieldType| try chargeFields(FieldType, @field(value, field_name), budget),
         .@"union" => switch (value) {
-            inline else => |payload| try charge(@TypeOf(payload), payload, budget),
+            inline else => |payload| try chargeFields(@TypeOf(payload), payload, budget),
         },
         .optional => |info| if (value) |payload| {
-            try charge(info.child, payload, budget);
+            try chargeFields(info.child, payload, budget);
         },
-        .pointer => |info| for (value) |item| try charge(info.child, item, budget),
+        .pointer => |info| for (value) |item| try chargeFields(info.child, item, budget),
         else => {},
     }
 }
@@ -99,6 +104,7 @@ pub fn validate(
 ) ValidationError!void {
     return validateBudgeted(a, original, candidate, null);
 }
+const Origin = struct { handler: usize, clause: usize };
 fn validateBudgeted(
     a: std.mem.Allocator,
     original: ir.Program,
@@ -134,9 +140,31 @@ fn validateBudgeted(
     defer arena.deinit();
     const scratch = arena.allocator();
     const uses = try traits.derive(scratch, original.schemas);
-    const Origin = struct { handler: usize, clause: usize };
     const origins = try scratch.alloc(?Origin, candidate.functions.len - original.functions.len);
     @memset(origins, null);
+    try validateOrigins(original, candidate, origins);
+    const seen = try scratch.alloc(bool, candidate.blocks.len - original.blocks.len);
+    @memset(seen, false);
+    for (origins, 0..) |possible_origin, index| {
+        try validateSpecialization(
+            scratch,
+            original,
+            candidate,
+            possible_origin,
+            index,
+            uses,
+            seen,
+            budget,
+        );
+    }
+    for (seen) |covered| if (!covered) return error.InvalidTailClause;
+}
+
+fn validateOrigins(
+    original: ir.Program,
+    candidate: ir.Program,
+    origins: []?Origin,
+) ValidationError!void {
     for (original.handlers, candidate.handlers, 0..) |old, new, handler_id| {
         var metadata = new;
         metadata.clauses = old.clauses;
@@ -167,55 +195,62 @@ fn validateBudgeted(
             } else origins[index] = .{ .handler = handler_id, .clause = clause_id };
         }
     }
-    const seen = try scratch.alloc(bool, candidate.blocks.len - original.blocks.len);
-    @memset(seen, false);
-    for (origins, 0..) |possible_origin, index| {
-        const origin = possible_origin orelse return error.InvalidTailClause;
-        const clause = original.handlers[origin.handler].clauses[origin.clause];
-        const old = original.functions[@intCast(clause.function)];
-        const id = original.functions.len + index;
-        const new = candidate.functions[id];
-        const token = old.inputs[old.inputs.len - 1];
-        var metadata = new;
-        metadata.entry = old.entry;
-        metadata.inputs = old.inputs;
-        metadata.layout = old.layout;
-        metadata.result = old.result;
-        metadata.effects = old.effects;
-        if (!equal(
-            ir.Function,
-            old,
-            metadata,
-        ) or new.result != original.effects[@intCast(clause.effect)].result or
-            new.effects.len != 0 or !equal(
-            []const p.Id,
-            new.inputs,
-            old.inputs[0 .. old.inputs.len - 1],
-        ) or
-            new.layout.slots.len != old.layout.slots.len) return error.InvalidTailClause;
-        for (old.layout.slots, new.layout.slots, 0..) |old_schema, new_schema, slot| {
-            if (new_schema != (if (slot == token) original.effects[
-                @intCast(clause.effect)
-            ].payload else old_schema)) return error.InvalidTailClause;
-            if (slot != token and !uses.copy[@intCast(old_schema)]) return error.InvalidTailClause;
-        }
-        var walk: Correspondence = .{
-            .allocator = scratch,
-            .original = original,
-            .candidate = candidate,
-            .seen = seen,
-            .old_function = clause.function,
-            .new_function = id,
-            .token = token,
-            .budget = budget,
-        };
-        try walk.push(old.entry, new.entry);
-        var cursor: usize = 0;
-        while (cursor < walk.pending.items.len) : (cursor += 1) try walk.block(
-            walk.pending.items[cursor],
-        );
+}
+
+fn validateSpecialization(
+    scratch: std.mem.Allocator,
+    original: ir.Program,
+    candidate: ir.Program,
+    possible_origin: ?Origin,
+    index: usize,
+    uses: traits.Facts,
+    seen: []bool,
+    budget: ?*Budget,
+) ValidationError!void {
+    const origin = possible_origin orelse return error.InvalidTailClause;
+    const clause = original.handlers[origin.handler].clauses[origin.clause];
+    const old = original.functions[@intCast(clause.function)];
+    const id = original.functions.len + index;
+    const new = candidate.functions[id];
+    const token = old.inputs[old.inputs.len - 1];
+    var metadata = new;
+    metadata.entry = old.entry;
+    metadata.inputs = old.inputs;
+    metadata.layout = old.layout;
+    metadata.result = old.result;
+    metadata.effects = old.effects;
+    if (!equal(
+        ir.Function,
+        old,
+        metadata,
+    ) or new.result != original.effects[@intCast(clause.effect)].result or
+        new.effects.len != 0 or !equal(
+        []const p.Id,
+        new.inputs,
+        old.inputs[0 .. old.inputs.len - 1],
+    ) or
+        new.layout.slots.len != old.layout.slots.len) return error.InvalidTailClause;
+    for (old.layout.slots, new.layout.slots, 0..) |old_schema, new_schema, slot| {
+        if (new_schema != (if (slot == token) original.effects[
+            @intCast(clause.effect)
+        ].payload else old_schema)) return error.InvalidTailClause;
+        if (slot != token and !uses.copy[@intCast(old_schema)]) return error.InvalidTailClause;
     }
-    for (seen) |covered| if (!covered) return error.InvalidTailClause;
+    var walk: Correspondence = .{
+        .allocator = scratch,
+        .original = original,
+        .candidate = candidate,
+        .seen = seen,
+        .old_function = clause.function,
+        .new_function = id,
+        .token = token,
+        .budget = budget,
+    };
+    try walk.push(old.entry, new.entry);
+    var cursor: usize = 0;
+    while (cursor < walk.pending.items.len) : (cursor += 1) try walk.block(
+        walk.pending.items[cursor],
+    );
 }
 
 const Pair = struct { original: p.Id, candidate: p.Id };
@@ -277,6 +312,9 @@ const Correspondence = struct {
             ) or op.destination == self.token) return error.InvalidTailClause;
             for (op.operands) |slot| if (slot == self.token) return error.InvalidTailClause;
         }
+        try self.checkTerminator(old, new);
+    }
+    fn checkTerminator(self: *Correspondence, old: ir.Block, new: ir.Block) ValidationError!void {
         switch (old.terminator) {
             .jump => |edge| {
                 if (new.terminator != .jump) return error.InvalidTailClause;
@@ -316,23 +354,29 @@ const Correspondence = struct {
                         return error.InvalidTailClause;
                 try self.checkEdge(unpack.next, new.terminator.unpack_product.next);
             },
-            .resume_value => |resumption| {
-                if (resumption.resumption != self.token or
-                    resumption.argument == self.token or
-                    new.terminator != .return_value or
-                    new.terminator.return_value != resumption.argument or
-                    !try certifyAdministrativeResult(
-                        self.allocator,
-                        self.original,
-                        old.function,
-                        old.custody,
-                        resumption.next,
-                        self.budget,
-                    ))
-                    return error.InvalidTailClause;
-            },
+            .resume_value => |resumption| try self.checkResumption(old, new, resumption),
             else => return error.InvalidTailClause,
         }
+    }
+    fn checkResumption(
+        self: *Correspondence,
+        old: ir.Block,
+        new: ir.Block,
+        resumption: @FieldType(ir.Terminator, "resume_value"),
+    ) ValidationError!void {
+        if (resumption.resumption != self.token or
+            resumption.argument == self.token or
+            new.terminator != .return_value or
+            new.terminator.return_value != resumption.argument or
+            !try certifyAdministrativeResult(
+                self.allocator,
+                self.original,
+                old.function,
+                old.custody,
+                resumption.next,
+                self.budget,
+            ))
+            return error.InvalidTailClause;
     }
 };
 
@@ -983,17 +1027,37 @@ test "a general resumption with an administrative join becomes a checked tail cl
         try image_codec.identity(a, limited.program),
         try image_codec.identity(a, late_limit.program),
     );
+    try checkChangedAnswer(a, scratch, original);
+    try checkShallowClause(a, scratch, original);
+    try checkEffectfulClause(a, scratch, original);
+    try checkMutatedClause(a, scratch, original, candidate);
+}
+
+fn checkChangedAnswer(
+    a: std.mem.Allocator,
+    scratch: std.mem.Allocator,
+    original: ir.Program,
+) !void {
+    var stats: Statistics = .{};
     var changed_answer = original;
     const changed_blocks = try scratch.dupe(ir.Block, original.blocks);
     changed_blocks[7].terminator = .{ .return_value = 0 };
     changed_answer.blocks = changed_blocks;
-    admitted = try @import("activation_ownership.zig").analyze(a, changed_answer);
+    var admitted = try @import("activation_ownership.zig").analyze(a, changed_answer);
     admitted.deinit();
     var retained = try run(a, changed_answer, &stats, .{});
     defer retained.deinit();
     try std.testing.expectEqual(@as(usize, 0), stats.clauses_selected);
     try std.testing.expect(!stats.work_limit);
     try std.testing.expect(retained.program.handlers[0].clauses[0].strategy == .general);
+}
+
+fn checkShallowClause(
+    a: std.mem.Allocator,
+    scratch: std.mem.Allocator,
+    original: ir.Program,
+) !void {
+    var stats: Statistics = .{};
     var shallow = original;
     const shallow_schemas = try scratch.dupe(p.Schema, original.schemas);
     shallow_schemas[4].internal.resumption.mode = .shallow;
@@ -1011,7 +1075,7 @@ test "a general resumption with an administrative join becomes a checked tail cl
     shallow.schemas = shallow_schemas;
     shallow.handlers = shallow_handlers;
     shallow.blocks = shallow_blocks;
-    admitted = @import("activation_ownership.zig").analyze(a, shallow) catch |err| {
+    var admitted = @import("activation_ownership.zig").analyze(a, shallow) catch |err| {
         std.debug.print("shallow admission: {any}\n", .{err});
         return err;
     };
@@ -1020,7 +1084,14 @@ test "a general resumption with an administrative join becomes a checked tail cl
     defer shallow_result.deinit();
     try std.testing.expectEqual(@as(usize, 0), stats.clauses_selected);
     try std.testing.expect(shallow_result.program.handlers[0].clauses[0].strategy == .general);
+}
 
+fn checkEffectfulClause(
+    a: std.mem.Allocator,
+    scratch: std.mem.Allocator,
+    original: ir.Program,
+) !void {
+    var stats: Statistics = .{};
     var effectful = original;
     const functions = try scratch.dupe(ir.Function, original.functions);
     functions[0].effects = &.{1};
@@ -1045,7 +1116,7 @@ test "a general resumption with an administrative join becomes a checked tail cl
         original.effects[0],
         .{ .identity = "test.before-resumption", .payload = 0, .result = 0 },
     };
-    admitted = @import("activation_ownership.zig").analyze(a, effectful) catch |err| {
+    var admitted = @import("activation_ownership.zig").analyze(a, effectful) catch |err| {
         std.debug.print("effectful admission: {any}\n", .{err});
         return err;
     };
@@ -1054,6 +1125,14 @@ test "a general resumption with an administrative join becomes a checked tail cl
     defer effect_result.deinit();
     try std.testing.expectEqual(@as(usize, 0), stats.clauses_selected);
     try std.testing.expect(effect_result.program.handlers[0].clauses[0].strategy == .general);
+}
+
+fn checkMutatedClause(
+    a: std.mem.Allocator,
+    scratch: std.mem.Allocator,
+    original: ir.Program,
+    candidate: ir.Program,
+) !void {
     const selected = candidate.functions[@intCast(candidate.handlers[0].clauses[0].function)];
     try std.testing.expectEqual(@as(usize, 1), selected.inputs.len);
     try std.testing.expect(candidate.blocks[@intCast(selected.entry)].terminator == .return_value);
@@ -1066,7 +1145,7 @@ test "a general resumption with an administrative join becomes a checked tail cl
     }};
     blocks[@intCast(selected.entry)].terminator = .{ .return_value = 2 };
     mutant.blocks = blocks;
-    admitted = try @import("activation_ownership.zig").analyze(a, mutant);
+    var admitted = try @import("activation_ownership.zig").analyze(a, mutant);
     admitted.deinit();
     try std.testing.expectError(error.InvalidTailClause, validate(a, original, mutant));
 }

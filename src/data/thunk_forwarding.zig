@@ -18,19 +18,24 @@ const Budget = struct {
         self.left -= 1;
     }
     fn record(self: *@This(), comptime T: type, value: T) Error!void {
+        @setEvalBranchQuota(10000);
+        return self.recordFields(T, value);
+    }
+
+    inline fn recordFields(self: *@This(), comptime T: type, value: T) Error!void {
         try self.tick();
         switch (@typeInfo(T)) {
             .@"struct" => |info| inline for (
                 info.field_names,
                 info.field_types,
-            ) |field_name, FieldType| try self.record(FieldType, @field(value, field_name)),
+            ) |field_name, FieldType| try self.recordFields(FieldType, @field(value, field_name)),
             .@"union" => switch (value) {
-                inline else => |v| try self.record(@TypeOf(v), v),
+                inline else => |v| try self.recordFields(@TypeOf(v), v),
             },
             .optional => |info| if (value) |v| {
-                try self.record(info.child, v);
+                try self.recordFields(info.child, v);
             },
-            .pointer => |info| for (value) |v| try self.record(info.child, v),
+            .pointer => |info| for (value) |v| try self.recordFields(info.child, v),
             else => {},
         }
     }

@@ -21,20 +21,7 @@ pub fn build(b: *source.Builder, escape: bool) !source.Module {
         signature.effects,
         signature.regions,
     );
-    for ([_]Id{ first_body, second_body }, 0..) |body, index| {
-        const identity = try b.declare(&.{borrowed}, borrowed, &.{}, signature.regions);
-        try b.define(identity, try b.pure(try b.reference(b.parameter(identity, 0))));
-        const alias = try b.variable(borrowed);
-        const invoke = try b.term(.{ .call = .{
-            .function = identity,
-            .arguments = &.{try b.reference(b.parameter(body, 0))},
-        } });
-        const result = if (escape and index == 1)
-            try b.pure(try b.reference(alias))
-        else
-            try b.term(.{ .call = .{ .function = read, .arguments = &.{try b.reference(alias)} } });
-        b.functions.items[@intCast(body)].body = try b.bind(alias, invoke, result);
-    }
+    try defineLoanHelpers(b, first_body, second_body, borrowed, signature, escape, read);
     var body_shape = b.schemas.items[@intCast(body_value.schema)].internal.computation;
     if (escape) body_shape.result = borrowed;
     const second_resource = try b.variable(owned);
@@ -75,4 +62,29 @@ pub fn build(b: *source.Builder, escape: bool) !source.Module {
         tail,
     );
     return b.module(original.entry, original.failure);
+}
+
+fn defineLoanHelpers(
+    b: *source.Builder,
+    first_body: Id,
+    second_body: Id,
+    borrowed: Id,
+    signature: anytype,
+    escape: bool,
+    read: Id,
+) source.Error!void {
+    for ([_]Id{ first_body, second_body }, 0..) |body, index| {
+        const identity = try b.declare(&.{borrowed}, borrowed, &.{}, signature.regions);
+        try b.define(identity, try b.pure(try b.reference(b.parameter(identity, 0))));
+        const alias = try b.variable(borrowed);
+        const invoke = try b.term(.{ .call = .{
+            .function = identity,
+            .arguments = &.{try b.reference(b.parameter(body, 0))},
+        } });
+        const result = if (escape and index == 1)
+            try b.pure(try b.reference(alias))
+        else
+            try b.term(.{ .call = .{ .function = read, .arguments = &.{try b.reference(alias)} } });
+        b.functions.items[@intCast(body)].body = try b.bind(alias, invoke, result);
+    }
 }

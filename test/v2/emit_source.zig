@@ -17,56 +17,7 @@ pub fn main(init: std.process.Init) !void {
         return error.InvalidArguments;
     var builder = horos.source.Builder.init(init.gpa);
     defer builder.deinit();
-    const module = try switch (example) {
-        0 => horos.source.examples.lexical(&builder),
-        1 => horos.source.examples.deep(&builder),
-        2 => horos.source.examples.recursive(&builder),
-        3 => horos.source.examples.choicesAll(&builder),
-        4 => horos.source.examples.choicesFirst(&builder),
-        5 => horos.source.examples.generator(&builder),
-        6 => horos.source.examples.stateLocal(&builder),
-        7 => horos.source.examples.stateShared(&builder),
-        8 => horos.source.examples.resourceScalar(&builder),
-        9 => horos.source.examples.resourcePair(&builder),
-        10 => horos.source.examples.answers(&builder),
-        11 => horos.source.examples.scopedReader(&builder),
-        12 => horos.source.examples.writerRaise(&builder),
-        13 => horos.source.examples.schedulerFifo(&builder),
-        14 => horos.source.examples.queensDfs(&builder),
-        15 => horos.source.examples.queensBfs(&builder),
-        16 => horos.source.examples.cellOrder(&builder),
-        17 => horos.source.examples.nested(&builder),
-        18 => horos.source.examples.shallow(&builder),
-        19 => horos.source.examples.injection(&builder),
-        20 => horos.source.examples.indexed(&builder),
-        21 => horos.source.examples.abortCustody(&builder),
-        22 => horos.source.examples.unwind(&builder),
-        23 => horos.source.examples.reentrant(&builder),
-        24 => horos.source.examples.cloned(&builder),
-        25 => horos.source.examples.clauseAbort(&builder),
-        26 => horos.source.examples.boundedValues(&builder),
-        27 => horos.source.examples.scalarContracts(&builder),
-        28 => horos.source.examples.ownership(&builder),
-        29 => horos.source.examples.shallowResumptions(&builder),
-        30 => horos.source.examples.shallowInjection(&builder),
-        31 => horos.source.examples.handleOperandOrder(&builder),
-        32 => horos.source.examples.protectOperandOrder(&builder),
-        33 => horos.source.examples.successorState(&builder),
-        34 => horos.source.examples.clausePayload(&builder),
-        35 => horos.source.examples.yieldingCleanup(&builder),
-        36 => horos.source.examples.borrowOperands(&builder),
-        37 => CleanupDisposal.build(&builder, .always),
-        38 => CleanupDisposal.build(&builder, .running),
-        39 => CleanupDisposal.build(&builder, .failure),
-        40 => CleanupDisposal.ownedResult(&builder),
-        41 => horos.source.examples.productProjection(&builder),
-        42 => horos.source.examples.localContinuation(&builder, false),
-        43 => horos.source.examples.localContinuation(&builder, true),
-        44 => horos.source.examples.statefulService(&builder),
-        45 => horos.source.examples.swappedServiceReplies(&builder),
-        46 => horos.source.examples.pairedServices(&builder),
-        else => error.UnknownExample,
-    };
+    const module = try exampleModule(&builder, example);
     var buffer: [4096]u8 = undefined;
     var output = std.Io.File.stdout().writer(init.io, &buffer);
     if (emit_source) {
@@ -77,29 +28,7 @@ pub fn main(init: std.process.Init) !void {
         );
         try output.interface.writeByte('\n');
     } else if (emit_analysis) {
-        var observation: ServiceAnalysis = .{ .allocator = init.gpa };
-        defer if (observation.json) |json| init.gpa.free(json);
-        var compiled = try horos.source.lowerObserved(
-            init.gpa,
-            module,
-            .{ .compilation_observer = .{
-                .context = &observation,
-                .enter = ServiceAnalysis.enter,
-                .service = .{
-                    .contract = .{
-                        .command = "example/service-command",
-                        .reply = "example/service-reply",
-                        .finalizer = "example/service-finalize",
-                    },
-                    .receive = ServiceAnalysis.receive,
-                },
-            } },
-        );
-        defer compiled.deinit();
-        try output.interface.writeAll(
-            observation.json orelse return error.UnavailableServiceAnalysis,
-        );
-        try output.interface.writeByte('\n');
+        try emitAnalysis(init.gpa, module, &output.interface);
     } else {
         var compiled = try horos.program.compile(init.gpa, module);
         defer compiled.deinit();
@@ -112,6 +41,92 @@ pub fn main(init: std.process.Init) !void {
         try output.interface.writeAll(bytes);
     }
     try output.interface.flush();
+}
+
+fn exampleModule(
+    builder: *horos.source.Builder,
+    example: usize,
+) !horos.source.ast.Module {
+    return switch (example) {
+        0 => horos.source.examples.lexical(builder),
+        1 => horos.source.examples.deep(builder),
+        2 => horos.source.examples.recursive(builder),
+        3 => horos.source.examples.choicesAll(builder),
+        4 => horos.source.examples.choicesFirst(builder),
+        5 => horos.source.examples.generator(builder),
+        6 => horos.source.examples.stateLocal(builder),
+        7 => horos.source.examples.stateShared(builder),
+        8 => horos.source.examples.resourceScalar(builder),
+        9 => horos.source.examples.resourcePair(builder),
+        10 => horos.source.examples.answers(builder),
+        11 => horos.source.examples.scopedReader(builder),
+        12 => horos.source.examples.writerRaise(builder),
+        13 => horos.source.examples.schedulerFifo(builder),
+        14 => horos.source.examples.queensDfs(builder),
+        15 => horos.source.examples.queensBfs(builder),
+        16 => horos.source.examples.cellOrder(builder),
+        17 => horos.source.examples.nested(builder),
+        18 => horos.source.examples.shallow(builder),
+        19 => horos.source.examples.injection(builder),
+        20 => horos.source.examples.indexed(builder),
+        21 => horos.source.examples.abortCustody(builder),
+        22 => horos.source.examples.unwind(builder),
+        23 => horos.source.examples.reentrant(builder),
+        24 => horos.source.examples.cloned(builder),
+        25 => horos.source.examples.clauseAbort(builder),
+        26 => horos.source.examples.boundedValues(builder),
+        27 => horos.source.examples.scalarContracts(builder),
+        28 => horos.source.examples.ownership(builder),
+        29 => horos.source.examples.shallowResumptions(builder),
+        30 => horos.source.examples.shallowInjection(builder),
+        31 => horos.source.examples.handleOperandOrder(builder),
+        32 => horos.source.examples.protectOperandOrder(builder),
+        33 => horos.source.examples.successorState(builder),
+        34 => horos.source.examples.clausePayload(builder),
+        35 => horos.source.examples.yieldingCleanup(builder),
+        36 => horos.source.examples.borrowOperands(builder),
+        37 => CleanupDisposal.build(builder, .always),
+        38 => CleanupDisposal.build(builder, .running),
+        39 => CleanupDisposal.build(builder, .failure),
+        40 => CleanupDisposal.ownedResult(builder),
+        41 => horos.source.examples.productProjection(builder),
+        42 => horos.source.examples.localContinuation(builder, false),
+        43 => horos.source.examples.localContinuation(builder, true),
+        44 => horos.source.examples.statefulService(builder),
+        45 => horos.source.examples.swappedServiceReplies(builder),
+        46 => horos.source.examples.pairedServices(builder),
+        else => error.UnknownExample,
+    };
+}
+
+fn emitAnalysis(
+    allocator: std.mem.Allocator,
+    module: horos.source.ast.Module,
+    output: *std.Io.Writer,
+) !void {
+    var observation: ServiceAnalysis = .{ .allocator = allocator };
+    defer if (observation.json) |json| allocator.free(json);
+    var compiled = try horos.source.lowerObserved(
+        allocator,
+        module,
+        .{ .compilation_observer = .{
+            .context = &observation,
+            .enter = ServiceAnalysis.enter,
+            .service = .{
+                .contract = .{
+                    .command = "example/service-command",
+                    .reply = "example/service-reply",
+                    .finalizer = "example/service-finalize",
+                },
+                .receive = ServiceAnalysis.receive,
+            },
+        } },
+    );
+    defer compiled.deinit();
+    try output.writeAll(
+        observation.json orelse return error.UnavailableServiceAnalysis,
+    );
+    try output.writeByte('\n');
 }
 
 // Kept in the shipped emitter so its archive has no unlisted source dependency.
@@ -239,11 +254,50 @@ const CleanupDisposal = struct {
         return ownedResultTyped(b) catch |err| return horos.authoring.sourceError(err);
     }
     fn ownedResultTyped(b: *source.Builder) horos.authoring.Error!source.ast.Module {
+        const setup = try ownedSetup(b);
+        const functions = try ownedFunctions(b, setup);
+        const cleanup_type = try defineOwnedGenerator(b, setup, functions);
+        const protected = try protectOwnedGenerator(b, setup, functions, cleanup_type);
+        try disposeOwnedGenerator(b, setup, functions, protected);
+        try installOwnedWriter(b, setup, functions);
+        try disposeOwnedLoggingClause(b, setup);
+        return b.module(functions.fixture_entry, setup.unit);
+    }
+    const WriterIds = struct { effect: p.Id, capability: p.Id };
+    const GeneratorIds = struct {
+        capability: p.Id,
+        effect: p.Id,
+        handler: p.Id,
+        answer: p.Id,
+        yielded: p.Id,
+        package: p.Id,
+        resumption: p.Id,
+    };
+    const WrittenIds = struct { answer: p.Id, cell: p.Id, sequence: p.Id, handler: p.Id };
+    const OwnedSetup = struct {
+        unit: p.Id,
+        integer: p.Id,
+        region: p.Id,
+        region_type: p.Id,
+        w: WriterIds,
+        g: GeneratorIds,
+        written: WrittenIds,
+    };
+    const OwnedFunctions = struct {
+        fixture_entry: p.Id,
+        inside: p.Id,
+        written_body: p.Id,
+        write_capability: p.Id,
+        info: p.Id,
+        start: p.Id,
+        generated_body: p.Id,
+        generated_cleanup: p.Id,
+    };
+    fn ownedSetup(b: *source.Builder) horos.authoring.Error!OwnedSetup {
         const a = horos.authoring;
         const c = try a.Context.init(b);
         const writer = horos.library.writer;
         const generator = horos.library.generator;
-        const cleanup = horos.library.cleanup;
         const unit = try b.scalar(void);
         const integer = try b.scalar(u64);
         const region = b.region();
@@ -253,7 +307,7 @@ const CleanupDisposal = struct {
             "example/cleanup-owner-writer",
             try c.schema(u64),
         );
-        const w = .{
+        const w: WriterIds = .{
             .effect = try a.interop.operationId(c, logging_family.effect()),
             .capability = try a.interop.schemaId(c, logging_family.capability()),
         };
@@ -274,7 +328,7 @@ const CleanupDisposal = struct {
             },
         );
         // This fixture varies cleanup/disposal IR around one checked family.
-        const g = .{
+        const g: GeneratorIds = .{
             .capability = try a.interop.schemaId(c, definition.capability()),
             .effect = try a.interop.operationId(c, definition.effect()),
             .handler = try a.interop.handlerId(c, definition.handler()),
@@ -283,6 +337,27 @@ const CleanupDisposal = struct {
             .package = try a.interop.schemaId(c, definition.package()),
             .resumption = try a.interop.schemaId(c, definition.resumption()),
         };
+        const written = try ownedLoggingWriter(c, logging_family, unit, integer, region, g);
+        return .{
+            .unit = unit,
+            .integer = integer,
+            .region = region,
+            .region_type = region_type,
+            .w = w,
+            .g = g,
+            .written = written,
+        };
+    }
+    fn ownedLoggingWriter(
+        c: *horos.authoring.Context,
+        logging_family: anytype,
+        unit: p.Id,
+        integer: p.Id,
+        region: p.Id,
+        g: GeneratorIds,
+    ) horos.authoring.Error!WrittenIds {
+        const a = horos.authoring;
+        const writer = horos.library.writer;
         const capture_ids = [_]horos.data.program.Id{
             unit,
             integer,
@@ -302,20 +377,57 @@ const CleanupDisposal = struct {
             .{ .continuation = &captures },
             &.{},
         );
-        const written = .{
+        return .{
             .answer = try a.interop.schemaId(c, logging_handler.answer),
             .cell = try a.interop.schemaId(c, logging_handler.cell),
             .sequence = try a.interop.schemaId(c, logging_handler.sequence),
             .handler = try a.interop.handlerId(c, logging_handler.handler),
         };
+    }
+    fn ownedFunctions(
+        b: *source.Builder,
+        setup: OwnedSetup,
+    ) horos.authoring.Error!OwnedFunctions {
+        const unit = setup.unit;
+        const integer = setup.integer;
+        const region = setup.region;
+        const region_type = setup.region_type;
+        const w = setup.w;
+        const g = setup.g;
+        const written = setup.written;
         const fixture_entry = try b.declare(&.{}, written.answer, &.{}, &.{});
         const inside = try b.declare(&.{region_type}, written.answer, &.{}, &.{region});
         const written_body = try b.declare(&.{w.capability}, integer, &.{w.effect}, &.{region});
         const write_capability = try b.reference(b.parameter(written_body, 0));
-        const info = try cleanup.exitInfo(b, unit);
+        const info = try horos.library.cleanup.exitInfo(b, unit);
         const start = try b.declare(&.{g.capability}, unit, &.{ w.effect, g.effect }, &.{region});
         const generated_body = try b.declare(&.{}, unit, &.{g.effect}, &.{region});
         const generated_cleanup = try b.declare(&.{info}, unit, &.{w.effect}, &.{region});
+        return .{
+            .fixture_entry = fixture_entry,
+            .inside = inside,
+            .written_body = written_body,
+            .write_capability = write_capability,
+            .info = info,
+            .start = start,
+            .generated_body = generated_body,
+            .generated_cleanup = generated_cleanup,
+        };
+    }
+    fn defineOwnedGenerator(
+        b: *source.Builder,
+        setup: OwnedSetup,
+        functions: OwnedFunctions,
+    ) horos.authoring.Error!p.Id {
+        const unit = setup.unit;
+        const region = setup.region;
+        const w = setup.w;
+        const g = setup.g;
+        const write_capability = functions.write_capability;
+        const info = functions.info;
+        const start = functions.start;
+        const generated_body = functions.generated_body;
+        const generated_cleanup = functions.generated_cleanup;
         try b.define(generated_body, try b.term(.{ .perform = .{
             .effect = g.effect,
             .capability = try b.reference(b.parameter(start, 0)),
@@ -344,6 +456,21 @@ const CleanupDisposal = struct {
             .body = try b.lambda(generated_body, generated_body_type),
             .cleanup = try b.lambda(generated_cleanup, cleanup_type),
         } }));
+        return cleanup_type;
+    }
+    fn protectOwnedGenerator(
+        b: *source.Builder,
+        setup: OwnedSetup,
+        functions: OwnedFunctions,
+        cleanup_type: p.Id,
+    ) horos.authoring.Error!p.Id {
+        const unit = setup.unit;
+        const region = setup.region;
+        const w = setup.w;
+        const g = setup.g;
+        const write_capability = functions.write_capability;
+        const info = functions.info;
+        const start = functions.start;
         const start_type = try b.schema(.{ .internal = .{ .computation = .{
             .parameters = &.{g.capability},
             .result = unit,
@@ -376,6 +503,18 @@ const CleanupDisposal = struct {
             .body = try b.lambda(body, body_type),
             .cleanup = try b.lambda(finalizer, cleanup_type),
         } });
+        return protected;
+    }
+    fn disposeOwnedGenerator(
+        b: *source.Builder,
+        setup: OwnedSetup,
+        functions: OwnedFunctions,
+        protected: p.Id,
+    ) horos.authoring.Error!void {
+        const unit = setup.unit;
+        const integer = setup.integer;
+        const g = setup.g;
+        const written_body = functions.written_body;
         const answer = try b.variable(g.answer);
         const done = try b.variable(unit);
         const yielded = try b.variable(g.yielded);
@@ -405,6 +544,20 @@ const CleanupDisposal = struct {
             },
         } });
         try b.define(written_body, try b.bind(answer, protected, matched));
+    }
+    fn installOwnedWriter(
+        b: *source.Builder,
+        setup: OwnedSetup,
+        functions: OwnedFunctions,
+    ) horos.authoring.Error!void {
+        const integer = setup.integer;
+        const region = setup.region;
+        const region_type = setup.region_type;
+        const w = setup.w;
+        const written = setup.written;
+        const fixture_entry = functions.fixture_entry;
+        const inside = functions.inside;
+        const written_body = functions.written_body;
         const written_type = try b.schema(.{ .internal = .{ .computation = .{
             .parameters = &.{w.capability},
             .result = integer,
@@ -443,6 +596,13 @@ const CleanupDisposal = struct {
                 .body = try b.lambda(inside, inside_type),
             } }),
         );
+    }
+    fn disposeOwnedLoggingClause(
+        b: *source.Builder,
+        setup: OwnedSetup,
+    ) horos.authoring.Error!void {
+        const unit = setup.unit;
+        const written = setup.written;
         const handler = b.handlers.items[@intCast(written.handler)];
         const clause = handler.clauses[0].function;
         const log = try b.reference(b.parameter(clause, 0));
@@ -481,7 +641,6 @@ const CleanupDisposal = struct {
                 .when_false = resumed,
             } }),
         );
-        return b.module(fixture_entry, unit);
     }
 };
 

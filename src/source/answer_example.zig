@@ -35,19 +35,7 @@ fn authored(b: *source.Builder) a.Error!source.Module {
     const body_type = try c.handledSchema(optional.handler);
     const body_fn = try c.functionFor("increment read", body_type);
     const body = try c.body(body_fn);
-    const read = try body.performLocal(
-        family.get(),
-        try body.parameter("get"),
-        try body.constant(void, {}),
-    );
-    try c.define(
-        body_fn,
-        try body.ret(try body.checkedAdd(
-            read,
-            try body.constant(u64, 1),
-            try c.literalFailure(void, {}),
-        )),
-    );
+    try defineIncrement(c, body, body_fn, family);
     const inside_type = try c.regionBodySchema(
         region,
         .{},
@@ -87,4 +75,25 @@ fn authored(b: *source.Builder) a.Error!source.Module {
         )),
     );
     return c.module(main, unit);
+}
+
+fn defineIncrement(
+    c: *a.Context,
+    body: anytype,
+    body_fn: anytype,
+    family: anytype,
+) a.Error!void {
+    const read = try body.performLocal(
+        family.get(),
+        try body.parameter("get"),
+        try body.constant(void, {}),
+    );
+    try c.define(
+        body_fn,
+        try body.ret(try body.checkedAdd(
+            read,
+            try body.constant(u64, 1),
+            try c.literalFailure(void, {}),
+        )),
+    );
 }

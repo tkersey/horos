@@ -403,122 +403,133 @@ test "component guarantees bind cell writes and outlives requirements" {
 }
 
 test "imported handler and constructor functions cannot substitute different borrow provenance" {
-    {
-        inline for (.{ data.relocation.Kind.handler, data.relocation.Kind.constructor }) |kind| {
-            inline for (.{ false, true }) |honest| {
-                const provider_input: data.program.Id = if (honest) 1 else 0;
-                const declared = [_]data.borrow_contract.Projection{.{ .source = .{ .input = 1 } }};
-                const provided = [_]data.borrow_contract.Projection{
-                    .{ .source = .{ .input = provider_input } },
-                };
-                const object_value: data.component.Object = .{
-                    .program = .{
-                        .roots = .{ .entry = 2, .result = 0, .failure = 0 },
-                        .schemas = &.{
-                            .unit, .{ .internal = .{ .capability = 0 } },
-                            .{ .internal = .{ .computation = .{
-                                .parameters = &.{ 1, 1 },
-                                .result = 1,
-                            } } },
-                        },
-                        .constants = &.{.{ .schema = 0, .bytes = &.{} }},
-                        .effects = &.{.{
-                            .identity = "borrow-interface",
-                            .payload = 0,
-                            .result = 0,
-                            .external = false,
-                        }},
-                        .functions = &.{
-                            .{
-                                .entry = 0,
-                                .inputs = &.{ 0, 1 },
-                                .layout = .{ .slots = &.{ 1, 1 } },
-                                .result = 1,
-                            },
-                            .{
-                                .entry = 1,
-                                .inputs = &.{ 0, 1 },
-                                .layout = .{ .slots = &.{ 1, 1 } },
-                                .result = 1,
-                            },
-                            .{
-                                .entry = 2,
-                                .inputs = &.{},
-                                .layout = .{ .slots = &.{0} },
-                                .result = 0,
-                            },
-                        },
-                        .blocks = &.{
-                            .{
-                                .function = 0,
-                                .instructions = &.{},
-                                .terminator = .{ .return_value = 1 },
-                            },
-                            .{
-                                .function = 1,
-                                .instructions = &.{},
-                                .terminator = .{ .return_value = provider_input },
-                            },
-                            .{
-                                .function = 2,
-                                .instructions = &.{.{ .destination = 0, .opcode = .constant }},
-                                .terminator = .{ .return_value = 0 },
-                            },
-                        },
-                        .handlers = if (kind == .handler) &.{
-                            .{
-                                .mode = .deep,
-                                .input = 1,
-                                .answer = 1,
-                                .return_function = 0,
-                                .state = &.{1},
-                                .clauses = &.{},
-                            },
-                            .{
-                                .mode = .deep,
-                                .input = 1,
-                                .answer = 1,
-                                .return_function = 1,
-                                .state = &.{1},
-                                .clauses = &.{},
-                            },
-                        } else &.{},
-                        .constructors = if (kind == .constructor) &.{
-                            .{ .function = 0, .capture = 0, .schema = 2 },
-                            .{ .function = 1, .capture = 0, .schema = 2 },
-                        } else &.{},
-                        .scopes = .{ .captures = if (kind == .constructor)
-                            &.{.{ .fields = &.{}, .use = .reusable }}
-                        else
-                            &.{} },
-                    },
-                    .imports = &.{.{ .name = "need", .reference = .{ .kind = kind, .id = 0 } }},
-                    .exports = &.{
-                        .{ .name = "main", .reference = .{ .kind = .function, .id = 2 } },
-                        .{ .name = "provided", .reference = .{ .kind = kind, .id = 1 } },
-                    },
-                    .borrows = &.{
-                        .{ .function = 0, .returned = &declared },
-                        .{ .function = 1, .returned = &provided },
-                        .{ .function = 2 },
-                    },
-                };
-                var buffer: [2048]u8 = undefined;
-                const bytes = try data.component.encode(testing.allocator, object_value, &buffer);
-                const result = data.linker.linkWithOptions(testing.allocator, &.{.{
-                    .key = "case",
-                    .object = bytes,
-                }}, &.{.{
-                    .required = .{ .instance = "case", .symbol = "need" },
-                    .supplied = .{ .instance = "case", .symbol = "provided" },
-                }}, .{ .instance = "case", .symbol = "main" }, .{});
-                if (honest) {
-                    var linked = try result;
-                    linked.deinit();
-                } else try testing.expectError(error.InvalidOwnership, result);
-            }
-        }
+    inline for (.{ data.relocation.Kind.handler, data.relocation.Kind.constructor }) |kind| {
+        inline for (.{ false, true }) |honest| try checkImportedBorrow(kind, honest);
     }
+}
+
+fn checkImportedBorrow(comptime kind: data.relocation.Kind, comptime honest: bool) !void {
+    const provider_input: data.program.Id = if (honest) 1 else 0;
+    const declared = [_]data.borrow_contract.Projection{.{ .source = .{ .input = 1 } }};
+    const provided = [_]data.borrow_contract.Projection{
+        .{ .source = .{ .input = provider_input } },
+    };
+    const object_value: data.component.Object = .{
+        .program = comptime importedBorrowProgram(kind, provider_input),
+        .imports = &.{.{ .name = "need", .reference = .{ .kind = kind, .id = 0 } }},
+        .exports = &.{
+            .{ .name = "main", .reference = .{ .kind = .function, .id = 2 } },
+            .{ .name = "provided", .reference = .{ .kind = kind, .id = 1 } },
+        },
+        .borrows = &.{
+            .{ .function = 0, .returned = &declared },
+            .{ .function = 1, .returned = &provided },
+            .{ .function = 2 },
+        },
+    };
+    var buffer: [2048]u8 = undefined;
+    const bytes = try data.component.encode(testing.allocator, object_value, &buffer);
+    const result = data.linker.linkWithOptions(testing.allocator, &.{.{
+        .key = "case",
+        .object = bytes,
+    }}, &.{.{
+        .required = .{ .instance = "case", .symbol = "need" },
+        .supplied = .{ .instance = "case", .symbol = "provided" },
+    }}, .{ .instance = "case", .symbol = "main" }, .{});
+    if (honest) {
+        var linked = try result;
+        linked.deinit();
+    } else try testing.expectError(error.InvalidOwnership, result);
+}
+
+const borrow_provider_functions = [_]data.activation.Function{
+    .{
+        .entry = 0,
+        .inputs = &.{ 0, 1 },
+        .layout = .{ .slots = &.{ 1, 1 } },
+        .result = 1,
+    },
+    .{
+        .entry = 1,
+        .inputs = &.{ 0, 1 },
+        .layout = .{ .slots = &.{ 1, 1 } },
+        .result = 1,
+    },
+    .{
+        .entry = 2,
+        .inputs = &.{},
+        .layout = .{ .slots = &.{0} },
+        .result = 0,
+    },
+};
+fn borrowProviderBlocks(comptime provider_input: data.program.Id) [3]data.activation.Block {
+    return .{
+        .{
+            .function = 0,
+            .instructions = &.{},
+            .terminator = .{ .return_value = 1 },
+        },
+        .{
+            .function = 1,
+            .instructions = &.{},
+            .terminator = .{ .return_value = provider_input },
+        },
+        .{
+            .function = 2,
+            .instructions = &.{.{ .destination = 0, .opcode = .constant }},
+            .terminator = .{ .return_value = 0 },
+        },
+    };
+}
+fn importedBorrowProgram(
+    comptime kind: data.relocation.Kind,
+    comptime provider_input: data.program.Id,
+) data.activation.Program {
+    return .{
+        .roots = .{ .entry = 2, .result = 0, .failure = 0 },
+        .schemas = &.{
+            .unit, .{ .internal = .{ .capability = 0 } },
+            .{ .internal = .{ .computation = .{
+                .parameters = &.{ 1, 1 },
+                .result = 1,
+            } } },
+        },
+        .constants = &.{.{ .schema = 0, .bytes = &.{} }},
+        .effects = &.{.{
+            .identity = "borrow-interface",
+            .payload = 0,
+            .result = 0,
+            .external = false,
+        }},
+        .functions = &borrow_provider_functions,
+        .blocks = &borrowProviderBlocks(provider_input),
+        .handlers = if (kind == .handler) &.{
+            .{
+                .mode = .deep,
+                .input = 1,
+                .answer = 1,
+                .return_function = 0,
+                .state = &.{1},
+                .clauses = &.{},
+            },
+            .{
+                .mode = .deep,
+                .input = 1,
+                .answer = 1,
+                .return_function = 1,
+                .state = &.{1},
+                .clauses = &.{},
+            },
+        } else &.{},
+        .constructors = if (kind == .constructor) &.{
+            .{ .function = 0, .capture = 0, .schema = 2 },
+            .{ .function = 1, .capture = 0, .schema = 2 },
+        } else &.{},
+        .scopes = .{ .captures = if (kind == .constructor)
+            &.{.{ .fields = &.{}, .use = .reusable }}
+        else
+            &.{} },
+    };
 }
 
 fn borrowFailure(allocator: std.mem.Allocator) !void {

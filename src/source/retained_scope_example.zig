@@ -77,19 +77,38 @@ fn context(b: *source.Builder) Error!Context {
         .result = unit,
         .effects = &.{release},
     } } });
+    return captureContext(b, .{
+        .unit = unit,
+        .integer = integer,
+        .pair = pair,
+        .read = read,
+        .release = release,
+        .capability = capability,
+        .inside_type = inside_type,
+        .scoped = scoped,
+        .scope_capability = scope_capability,
+        .work_type = work_type,
+        .cleanup_type = cleanup_type,
+    });
+}
+
+fn captureContext(
+    b: *source.Builder,
+    ctx: anytype,
+) Error!Context {
     var tokens: [3]p.Id = undefined;
     for (&tokens) |*token| token.* = try b.reserveSchema();
     const captures = try b.allocator().dupe(
         p.Id,
         &.{
-            unit,
-            integer,
-            pair,
-            capability,
-            scope_capability,
-            inside_type,
-            work_type,
-            cleanup_type,
+            ctx.unit,
+            ctx.integer,
+            ctx.pair,
+            ctx.capability,
+            ctx.scope_capability,
+            ctx.inside_type,
+            ctx.work_type,
+            ctx.cleanup_type,
             tokens[0],
             tokens[1],
             tokens[2],
@@ -97,18 +116,18 @@ fn context(b: *source.Builder) Error!Context {
     );
     return .{
         .b = b,
-        .unit = unit,
-        .integer = integer,
-        .pair = pair,
-        .read = read,
-        .release = release,
-        .scoped = scoped,
-        .capability = capability,
-        .scope_capability = scope_capability,
-        .inside_type = inside_type,
-        .work_type = work_type,
-        .thunk_type = work_type,
-        .cleanup_type = cleanup_type,
+        .unit = ctx.unit,
+        .integer = ctx.integer,
+        .pair = ctx.pair,
+        .read = ctx.read,
+        .release = ctx.release,
+        .scoped = ctx.scoped,
+        .capability = ctx.capability,
+        .scope_capability = ctx.scope_capability,
+        .inside_type = ctx.inside_type,
+        .work_type = ctx.work_type,
+        .thunk_type = ctx.work_type,
+        .cleanup_type = ctx.cleanup_type,
         .tokens = tokens,
         .captures = captures,
     };

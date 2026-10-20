@@ -144,58 +144,7 @@ pub fn deep(builder: *source.Builder) Error!source.ast.Module {
     const body = try builder.declare(&.{capability}, integer, &.{operation}, &.{});
     const returns = try builder.declare(&.{integer}, integer, &.{}, &.{});
     const clause = try builder.declare(&.{ unit, resumption }, integer, &.{}, &.{});
-    const x = try builder.variable(integer);
-    const performed = try builder.term(.{ .perform = .{
-        .effect = operation,
-        .capability = try builder.reference(builder.parameter(body, 0)),
-        .payload = fault,
-    } });
-    try builder.define(
-        body,
-        try builder.bind(
-            x,
-            performed,
-            try builder.pure(try binary(
-                builder,
-                .integer_add,
-                integer,
-                try builder.reference(x),
-                try builder.constant(u64, 1),
-                fault,
-            )),
-        ),
-    );
-    try builder.define(
-        returns,
-        try builder.pure(try binary(
-            builder,
-            .integer_mul,
-            integer,
-            try builder.reference(builder.parameter(returns, 0)),
-            try builder.constant(u64, 10),
-            fault,
-        )),
-    );
-    const answer = try builder.variable(integer);
-    const resumed = try builder.term(.{ .resume_value = .{
-        .resumption = try builder.reference(builder.parameter(clause, 1)),
-        .argument = try builder.constant(u64, 5),
-    } });
-    try builder.define(
-        clause,
-        try builder.bind(
-            answer,
-            resumed,
-            try builder.pure(try binary(
-                builder,
-                .integer_add,
-                integer,
-                try builder.reference(answer),
-                try builder.constant(u64, 7),
-                fault,
-            )),
-        ),
-    );
+    try defineDeepBodies(builder, integer, body, operation, fault, returns, clause);
     const handler = try builder.handler(.{
         .mode = .deep,
         .input = integer,
@@ -245,50 +194,7 @@ pub fn branchingTail(b: *source.Builder) Error!source.Module {
         .effects = &.{effect},
         .capture_bound = &.{boolean},
     } } });
-    const performed = try b.term(.{ .perform = .{
-        .effect = effect,
-        .capability = try b.reference(b.parameter(body, 0)),
-        .payload = try b.reference(b.parameter(main, 0)),
-    } });
-    const result = try b.variable(integer);
-    try b.define(
-        body,
-        try b.bind(
-            result,
-            performed,
-            try b.pure(try binary(
-                b,
-                .integer_add,
-                integer,
-                try b.reference(result),
-                try b.constant(u64, 1),
-                fault,
-            )),
-        ),
-    );
-    try b.define(
-        returns,
-        try b.pure(try binary(
-            b,
-            .integer_mul,
-            integer,
-            try b.reference(b.parameter(returns, 0)),
-            try b.constant(u64, 10),
-            fault,
-        )),
-    );
-    const resumption = try b.reference(b.parameter(clause, 1));
-    try b.define(clause, try b.term(.{ .conditional = .{
-        .condition = try b.reference(b.parameter(clause, 0)),
-        .when_true = try b.term(.{ .resume_value = .{
-            .resumption = resumption,
-            .argument = try b.constant(u64, 5),
-        } }),
-        .when_false = try b.term(.{ .resume_value = .{
-            .resumption = resumption,
-            .argument = try b.constant(u64, 9),
-        } }),
-    } }));
+    try defineBranchingBodies(b, integer, effect, body, main, fault, returns, clause);
     const handler = try b.handler(.{
         .mode = .deep,
         .input = integer,
@@ -530,18 +436,165 @@ pub fn localContinuation(b: *source.Builder, multi: bool) Error!source.Module {
         .mode = .deep,
         .use = if (multi) .multi else .linear,
     } } });
-    const computation = try b.schema(.{ .internal = .{ .computation = .{
-        .parameters = &.{cap},
-        .result = integer,
-        .effects = &.{ observe, ask },
-        .capture_bound = &.{integer},
-    } } });
+    const computation = try localComputation(b, cap, integer, observe, ask);
     const main = try b.declare(&.{}, integer, &.{ produce, observe }, &.{});
     const body = try b.declare(&.{cap}, integer, &.{ observe, ask }, &.{});
     const returns = try b.declare(&.{integer}, integer, &.{}, &.{});
     const clause = try b.declare(&.{ unit, token }, integer, &.{observe}, &.{});
     const unused = try b.declare(&.{ unit, narrow }, integer, &.{observe}, &.{});
     const produced = try b.variable(integer);
+    try defineLocalBody(b, integer, unit, ask, body, fault, produced, observe, returns);
+    try defineLocalClause(b, integer, clause, multi, fault);
+    return defineLocalHandlers(
+        b,
+        unit,
+        integer,
+        unused,
+        observe,
+        returns,
+        ask,
+        clause,
+        token,
+        narrow,
+        produce,
+        fault,
+        body,
+        computation,
+        main,
+        produced,
+    );
+}
+
+fn defineDeepBodies(
+    builder: *source.Builder,
+    integer: p.Id,
+    body: p.Id,
+    operation: p.Id,
+    fault: p.Id,
+    returns: p.Id,
+    clause: p.Id,
+) source.Error!void {
+    const x = try builder.variable(integer);
+    const performed = try builder.term(.{ .perform = .{
+        .effect = operation,
+        .capability = try builder.reference(builder.parameter(body, 0)),
+        .payload = fault,
+    } });
+    try builder.define(
+        body,
+        try builder.bind(
+            x,
+            performed,
+            try builder.pure(try binary(
+                builder,
+                .integer_add,
+                integer,
+                try builder.reference(x),
+                try builder.constant(u64, 1),
+                fault,
+            )),
+        ),
+    );
+    try builder.define(
+        returns,
+        try builder.pure(try binary(
+            builder,
+            .integer_mul,
+            integer,
+            try builder.reference(builder.parameter(returns, 0)),
+            try builder.constant(u64, 10),
+            fault,
+        )),
+    );
+    const answer = try builder.variable(integer);
+    const resumed = try builder.term(.{ .resume_value = .{
+        .resumption = try builder.reference(builder.parameter(clause, 1)),
+        .argument = try builder.constant(u64, 5),
+    } });
+    try builder.define(
+        clause,
+        try builder.bind(
+            answer,
+            resumed,
+            try builder.pure(try binary(
+                builder,
+                .integer_add,
+                integer,
+                try builder.reference(answer),
+                try builder.constant(u64, 7),
+                fault,
+            )),
+        ),
+    );
+}
+
+fn defineBranchingBodies(
+    b: *source.Builder,
+    integer: p.Id,
+    effect: p.Id,
+    body: p.Id,
+    main: p.Id,
+    fault: p.Id,
+    returns: p.Id,
+    clause: p.Id,
+) source.Error!void {
+    const performed = try b.term(.{ .perform = .{
+        .effect = effect,
+        .capability = try b.reference(b.parameter(body, 0)),
+        .payload = try b.reference(b.parameter(main, 0)),
+    } });
+    const result = try b.variable(integer);
+    try b.define(
+        body,
+        try b.bind(
+            result,
+            performed,
+            try b.pure(try binary(
+                b,
+                .integer_add,
+                integer,
+                try b.reference(result),
+                try b.constant(u64, 1),
+                fault,
+            )),
+        ),
+    );
+    try b.define(
+        returns,
+        try b.pure(try binary(
+            b,
+            .integer_mul,
+            integer,
+            try b.reference(b.parameter(returns, 0)),
+            try b.constant(u64, 10),
+            fault,
+        )),
+    );
+    const resumption = try b.reference(b.parameter(clause, 1));
+    try b.define(clause, try b.term(.{ .conditional = .{
+        .condition = try b.reference(b.parameter(clause, 0)),
+        .when_true = try b.term(.{ .resume_value = .{
+            .resumption = resumption,
+            .argument = try b.constant(u64, 5),
+        } }),
+        .when_false = try b.term(.{ .resume_value = .{
+            .resumption = resumption,
+            .argument = try b.constant(u64, 9),
+        } }),
+    } }));
+}
+
+fn defineLocalBody(
+    b: *source.Builder,
+    integer: p.Id,
+    unit: p.Id,
+    ask: p.Id,
+    body: p.Id,
+    fault: p.Id,
+    produced: p.Id,
+    observe: p.Id,
+    returns: p.Id,
+) source.Error!void {
     const answer = try b.variable(integer);
     const total = try b.variable(integer);
     const ignored = try b.variable(unit);
@@ -569,6 +622,15 @@ pub fn localContinuation(b: *source.Builder, multi: bool) Error!source.Module {
     );
     try b.define(body, try b.bind(answer, perform, try b.term(.{ .yield_then = suffix })));
     try b.define(returns, try b.pure(try b.reference(b.parameter(returns, 0))));
+}
+
+fn defineLocalClause(
+    b: *source.Builder,
+    integer: p.Id,
+    clause: p.Id,
+    multi: bool,
+    fault: p.Id,
+) source.Error!void {
     const first = try b.variable(integer);
     const resume_first = try b.term(.{ .resume_value = .{
         .resumption = try b.reference(b.parameter(clause, 1)),
@@ -594,6 +656,26 @@ pub fn localContinuation(b: *source.Builder, multi: bool) Error!source.Module {
         );
     } else try b.pure(try b.reference(first));
     try b.define(clause, try b.bind(first, resume_first, tail));
+}
+
+fn defineLocalHandlers(
+    b: *source.Builder,
+    unit: p.Id,
+    integer: p.Id,
+    unused: p.Id,
+    observe: p.Id,
+    returns: p.Id,
+    ask: p.Id,
+    clause: p.Id,
+    token: p.Id,
+    narrow: p.Id,
+    produce: p.Id,
+    fault: p.Id,
+    body: p.Id,
+    computation: p.Id,
+    main: p.Id,
+    produced: p.Id,
+) source.Error!source.Module {
     // An unused linear token still has to be consumed by its declaration.
     const unused_resume = try b.term(.{ .resume_value = .{
         .resumption = try b.reference(b.parameter(unused, 1)),
@@ -623,4 +705,20 @@ pub fn localContinuation(b: *source.Builder, multi: bool) Error!source.Module {
     } });
     try b.define(main, try b.bind(produced, produced_once, handled));
     return b.module(main, unit);
+}
+
+fn localComputation(
+    b: *source.Builder,
+    cap: p.Id,
+    integer: p.Id,
+    observe: p.Id,
+    ask: p.Id,
+) source.Error!p.Id {
+    const computation = try b.schema(.{ .internal = .{ .computation = .{
+        .parameters = &.{cap},
+        .result = integer,
+        .effects = &.{ observe, ask },
+        .capture_bound = &.{integer},
+    } } });
+    return computation;
 }

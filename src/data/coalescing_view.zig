@@ -191,7 +191,7 @@ const Body = struct {
         }
     }
     pub const VisitError = names.Error;
-    pub fn reference(
+    pub inline fn reference(
         self: *Body,
         comptime role: roles.Role,
         comptime cardinality: roles.Cardinality,

@@ -227,29 +227,7 @@ fn classify(
             contexts.unknownEntry(program, helper))
             return null;
     }
-    var context: ?Context = null;
-    for (program.blocks) |block| {
-        try budget.tick();
-        if (block.terminator != .call or !member(
-            helpers,
-            block.terminator.call.function,
-        ) or member(helpers, block.function)) continue;
-        if (context) |*known| {
-            if (known.caller != block.function or !equal(
-                ir.Edge,
-                known.continuation,
-                block.terminator.call.next,
-            )) return null;
-            known.calls += 1;
-        } else context = .{
-            .caller = block.function,
-            .continuation = block.terminator.call.next,
-            .calls = 1,
-            .blocks = 0,
-            .slots = 0,
-        };
-    }
-    var result = context orelse return null;
+    var result = (try callerContext(program, helpers, budget)) orelse return null;
     for (helpers) |helper| {
         if (!try quietFunction(
             program,
@@ -389,88 +367,10 @@ pub fn construct(
         break;
     }
     const witness = selected orelse return null;
-    const functions = try a.dupe(ir.Function, original.functions);
-    const slots = try a.alloc(p.Id, witness.first_slot + context.slots);
-    @memcpy(slots[0..witness.first_slot], functions[@intCast(witness.caller)].layout.slots);
-    for (witness.helpers) |id| {
-        const base = try slotBase(original, witness, id);
-        const local = original.functions[@intCast(id)].layout.slots;
-        @memcpy(slots[base..][0..local.len], local);
-    }
-    functions[@intCast(witness.caller)].layout.slots = slots;
+    const functions = try extendLayout(a, original, witness, context);
     const blocks = try a.alloc(ir.Block, original.blocks.len + context.blocks);
     @memcpy(blocks[0..original.blocks.len], original.blocks);
-    var next = witness.first_block;
-    for (original.blocks, 0..) |block, bid| {
-        try budget.tick();
-        if (block.terminator == .call and member(
-            witness.helpers,
-            block.terminator.call.function,
-        ) and !member(witness.helpers, block.function)) {
-            blocks[bid].terminator = .{ .jump = try callEdge(
-                a,
-                original,
-                witness,
-                block.terminator.call,
-                0,
-            ) };
-        }
-        if (!member(witness.helpers, block.function)) continue;
-        const base = try slotBase(original, witness, block.function);
-        var copied = block;
-        copied.function = witness.caller;
-        const instructions = try a.dupe(ir.Instruction, block.instructions);
-        for (instructions) |*op| {
-            try budget.tick();
-            op.destination += base;
-            const operands = try a.dupe(p.Id, op.operands);
-            for (operands) |*slot| slot.* += base;
-            op.operands = operands;
-        }
-        copied.instructions = instructions;
-        switch (block.terminator) {
-            .call => |call| copied.terminator = .{ .jump = try callEdge(
-                a,
-                original,
-                witness,
-                call,
-                base,
-            ) },
-            .return_value => |value| {
-                if (terminalReturn(original, context.continuation)) |source| {
-                    copied.terminator = .{ .return_value = switch (source) {
-                        .returned => value + base,
-                        .slot => |slot| slot,
-                    } };
-                } else {
-                    const assignments = try a.dupe(ir.Assignment, context.continuation.assignments);
-                    for (assignments) |*assignment| if (assignment.source == .returned) {
-                        assignment.source = .{ .slot = value + base };
-                    };
-                    copied.terminator = .{ .jump = .{
-                        .block = context.continuation.block,
-                        .assignments = assignments,
-                    } };
-                }
-            },
-            .fail => |value| copied.terminator = .{ .fail = value + base },
-            .jump => |edge| copied.terminator = .{ .jump = try localEdge(
-                a,
-                original,
-                witness,
-                edge,
-                base,
-            ) },
-            .branch => |branch| copied.terminator = .{ .branch = .{
-                .condition = branch.condition + base,
-                .when_true = try localEdge(a, original, witness, branch.when_true, base),
-                .when_false = try localEdge(a, original, witness, branch.when_false, base),
-            } },
-            else => return error.InvalidContification,
-        }
-        blocks[next] = copied;
-        next += 1;
-    }
+    try rewriteBlocks(a, original, blocks, witness, context, &budget);
     var program = original;
     program.functions = functions;
     program.blocks = blocks;
@@ -545,31 +445,7 @@ pub fn validate(
     unchanged.functions = original.functions;
     unchanged.blocks = original.blocks;
     if (!equal(ir.Program, original, unchanged)) return error.InvalidContification;
-    const bases = try a.alloc(usize, original.functions.len);
-    @memset(bases, std.math.maxInt(usize));
-    const slots = candidate.functions[@intCast(witness.caller)].layout.slots;
-    if (slots.len != witness.first_slot + context.slots or !std.mem.eql(
-        p.Id,
-        caller.layout.slots,
-        slots[0..witness.first_slot],
-    )) return error.InvalidContification;
-    var next_slot = witness.first_slot;
-    const shared_slots = sharedLayout(original, witness.helpers);
-    for (witness.helpers) |id| {
-        const local = original.functions[@intCast(id)].layout.slots;
-        bases[@intCast(id)] = next_slot;
-        if (!std.mem.eql(
-            p.Id,
-            local,
-            slots[next_slot..][0..local.len],
-        )) return error.InvalidContification;
-        if (!shared_slots) next_slot += local.len;
-    }
-    for (original.functions, candidate.functions, 0..) |old, new, id| {
-        var restored = new;
-        if (id == witness.caller) restored.layout = old.layout;
-        if (!equal(ir.Function, old, restored)) return error.InvalidContification;
-    }
+    const bases = try validateLayout(a, original, candidate, witness, context);
     const targets = try a.alloc(p.Id, original.blocks.len);
     @memset(targets, std.math.maxInt(p.Id));
     var next_block = witness.first_block;
@@ -577,109 +453,7 @@ pub fn validate(
         targets[id] = next_block;
         next_block += 1;
     };
-    for (original.blocks, candidate.blocks[0..original.blocks.len], 0..) |old, new, bid| {
-        try budget.tick();
-        if (old.terminator == .call and member(
-            witness.helpers,
-            old.terminator.call.function,
-        ) and !member(witness.helpers, old.function)) {
-            var restored = new;
-            restored.terminator = old.terminator;
-            if (!equal(ir.Block, old, restored)) return error.InvalidContification;
-            try checkCall(original, old.terminator.call, new.terminator, 0, bases, targets);
-        } else if (!equal(ir.Block, old, new)) return error.InvalidContification;
-        if (!member(witness.helpers, old.function)) continue;
-        const base = bases[@intCast(old.function)];
-        const copied = candidate.blocks[@intCast(targets[bid])];
-        if (copied.function != witness.caller or
-            copied.custody != old.custody or
-            copied.instructions.len != old.instructions.len)
-            return error.InvalidContification;
-        for (old.instructions, copied.instructions) |op, replacement| {
-            try budget.tick();
-            if (replacement.destination != op.destination + base or
-                replacement.operands.len != op.operands.len)
-                return error.InvalidContification;
-            for (
-                op.operands,
-                replacement.operands,
-            ) |operand, mapped| if (mapped != operand + base) return error.InvalidContification;
-            var restored = replacement;
-            restored.destination = op.destination;
-            restored.operands = op.operands;
-            if (!equal(ir.Instruction, op, restored)) return error.InvalidContification;
-        }
-        switch (old.terminator) {
-            .call => |call| try checkCall(original, call, copied.terminator, base, bases, targets),
-            .return_value => |value| {
-                if (copied.terminator == .return_value) {
-                    const continuation = original.blocks[@intCast(context.continuation.block)];
-                    if (continuation.instructions.len != 0 or
-                        continuation.terminator != .return_value)
-                        return error.InvalidContification;
-                    const result = continuation.terminator.return_value;
-                    var expected = result;
-                    for (context.continuation.assignments) |transfer|
-                        if (transfer.destination == result) {
-                            expected = switch (transfer.source) {
-                                .returned => value + base,
-                                .slot => |slot| slot,
-                            };
-                        };
-                    if (copied.terminator.return_value != expected)
-                        return error.InvalidContification;
-                } else {
-                    if (copied.terminator != .jump or
-                        copied.terminator.jump.block != context.continuation.block or
-                        copied.terminator.jump.assignments.len !=
-                            context.continuation.assignments.len)
-                        return error.InvalidContification;
-                    for (
-                        context.continuation.assignments,
-                        copied.terminator.jump.assignments,
-                    ) |transfer, replacement| {
-                        var expected = transfer;
-                        if (expected.source == .returned) expected.source = .{
-                            .slot = value + base,
-                        };
-                        if (!equal(
-                            ir.Assignment,
-                            expected,
-                            replacement,
-                        )) return error.InvalidContification;
-                    }
-                }
-            },
-            .fail => |value| if (copied.terminator != .fail or
-                copied.terminator.fail != value + base)
-                return error.InvalidContification,
-            .jump => |edge| if (copied.terminator != .jump or !edgeCorresponds(
-                original,
-                witness,
-                edge,
-                copied.terminator.jump,
-                base,
-            )) return error.InvalidContification,
-            .branch => |branch| if (copied.terminator != .branch or
-                copied.terminator.branch.condition != branch.condition + base or
-                !edgeCorresponds(
-                    original,
-                    witness,
-                    branch.when_true,
-                    copied.terminator.branch.when_true,
-                    base,
-                ) or
-                !edgeCorresponds(
-                    original,
-                    witness,
-                    branch.when_false,
-                    copied.terminator.branch.when_false,
-                    base,
-                ))
-                return error.InvalidContification,
-            else => return error.InvalidContification,
-        }
-    }
+    try validateBlocks(original, candidate, witness, context, bases, targets, &budget);
 }
 fn checkCall(
     program: ir.Program,
@@ -748,4 +522,314 @@ pub fn run(
         stats.calls_removed += 1;
     };
     return p01.run(allocator, candidate.program, options.coalescing);
+}
+
+fn callerContext(program: ir.Program, helpers: []const p.Id, budget: *Budget) Error!?Context {
+    var context: ?Context = null;
+    for (program.blocks) |block| {
+        try budget.tick();
+        if (block.terminator != .call or !member(
+            helpers,
+            block.terminator.call.function,
+        ) or member(helpers, block.function)) continue;
+        if (context) |*known| {
+            if (known.caller != block.function or !equal(
+                ir.Edge,
+                known.continuation,
+                block.terminator.call.next,
+            )) return null;
+            known.calls += 1;
+        } else context = .{
+            .caller = block.function,
+            .continuation = block.terminator.call.next,
+            .calls = 1,
+            .blocks = 0,
+            .slots = 0,
+        };
+    }
+    return context;
+}
+
+fn rewriteBlocks(
+    a: std.mem.Allocator,
+    original: ir.Program,
+    blocks: []ir.Block,
+    witness: Witness,
+    context: Context,
+    budget: *Budget,
+) Error!void {
+    var next = witness.first_block;
+    for (original.blocks, 0..) |block, bid| {
+        try budget.tick();
+        if (block.terminator == .call and member(
+            witness.helpers,
+            block.terminator.call.function,
+        ) and !member(witness.helpers, block.function)) {
+            blocks[bid].terminator = .{ .jump = try callEdge(
+                a,
+                original,
+                witness,
+                block.terminator.call,
+                0,
+            ) };
+        }
+        if (!member(witness.helpers, block.function)) continue;
+        const copied = try copyBlock(a, original, witness, context, block, budget);
+        blocks[next] = copied;
+        next += 1;
+    }
+}
+
+fn copyBlock(
+    a: std.mem.Allocator,
+    original: ir.Program,
+    witness: Witness,
+    context: Context,
+    block: ir.Block,
+    budget: *Budget,
+) Error!ir.Block {
+    const base = try slotBase(original, witness, block.function);
+    var copied = block;
+    copied.function = witness.caller;
+    const instructions = try a.dupe(ir.Instruction, block.instructions);
+    for (instructions) |*op| {
+        try budget.tick();
+        op.destination += base;
+        const operands = try a.dupe(p.Id, op.operands);
+        for (operands) |*slot| slot.* += base;
+        op.operands = operands;
+    }
+    copied.instructions = instructions;
+    switch (block.terminator) {
+        .call => |call| copied.terminator = .{ .jump = try callEdge(
+            a,
+            original,
+            witness,
+            call,
+            base,
+        ) },
+        .return_value => |value| {
+            if (terminalReturn(original, context.continuation)) |source| {
+                copied.terminator = .{ .return_value = switch (source) {
+                    .returned => value + base,
+                    .slot => |slot| slot,
+                } };
+            } else {
+                const assignments = try a.dupe(ir.Assignment, context.continuation.assignments);
+                for (assignments) |*assignment| if (assignment.source == .returned) {
+                    assignment.source = .{ .slot = value + base };
+                };
+                copied.terminator = .{ .jump = .{
+                    .block = context.continuation.block,
+                    .assignments = assignments,
+                } };
+            }
+        },
+        .fail => |value| copied.terminator = .{ .fail = value + base },
+        .jump => |edge| copied.terminator = .{ .jump = try localEdge(
+            a,
+            original,
+            witness,
+            edge,
+            base,
+        ) },
+        .branch => |branch| copied.terminator = .{ .branch = .{
+            .condition = branch.condition + base,
+            .when_true = try localEdge(a, original, witness, branch.when_true, base),
+            .when_false = try localEdge(a, original, witness, branch.when_false, base),
+        } },
+        else => return error.InvalidContification,
+    }
+    return copied;
+}
+
+fn extendLayout(
+    a: std.mem.Allocator,
+    original: ir.Program,
+    witness: Witness,
+    context: Context,
+) Error![]ir.Function {
+    const functions = try a.dupe(ir.Function, original.functions);
+    const slots = try a.alloc(p.Id, witness.first_slot + context.slots);
+    @memcpy(slots[0..witness.first_slot], functions[@intCast(witness.caller)].layout.slots);
+    for (witness.helpers) |id| {
+        const base = try slotBase(original, witness, id);
+        const local = original.functions[@intCast(id)].layout.slots;
+        @memcpy(slots[base..][0..local.len], local);
+    }
+    functions[@intCast(witness.caller)].layout.slots = slots;
+    return functions;
+}
+
+fn validateLayout(
+    a: std.mem.Allocator,
+    original: ir.Program,
+    candidate: ir.Program,
+    witness: Witness,
+    context: Context,
+) Error![]usize {
+    const caller = original.functions[@intCast(witness.caller)];
+    const bases = try a.alloc(usize, original.functions.len);
+    @memset(bases, std.math.maxInt(usize));
+    const slots = candidate.functions[@intCast(witness.caller)].layout.slots;
+    if (slots.len != witness.first_slot + context.slots or !std.mem.eql(
+        p.Id,
+        caller.layout.slots,
+        slots[0..witness.first_slot],
+    )) return error.InvalidContification;
+    var next_slot = witness.first_slot;
+    const shared_slots = sharedLayout(original, witness.helpers);
+    for (witness.helpers) |id| {
+        const local = original.functions[@intCast(id)].layout.slots;
+        bases[@intCast(id)] = next_slot;
+        if (!std.mem.eql(
+            p.Id,
+            local,
+            slots[next_slot..][0..local.len],
+        )) return error.InvalidContification;
+        if (!shared_slots) next_slot += local.len;
+    }
+    for (original.functions, candidate.functions, 0..) |old, new, id| {
+        var restored = new;
+        if (id == witness.caller) restored.layout = old.layout;
+        if (!equal(ir.Function, old, restored)) return error.InvalidContification;
+    }
+    return bases;
+}
+
+fn validateBlocks(
+    original: ir.Program,
+    candidate: ir.Program,
+    witness: Witness,
+    context: Context,
+    bases: []const usize,
+    targets: []const p.Id,
+    budget: *Budget,
+) Error!void {
+    for (original.blocks, candidate.blocks[0..original.blocks.len], 0..) |old, new, bid| {
+        try budget.tick();
+        if (old.terminator == .call and member(
+            witness.helpers,
+            old.terminator.call.function,
+        ) and !member(witness.helpers, old.function)) {
+            var restored = new;
+            restored.terminator = old.terminator;
+            if (!equal(ir.Block, old, restored)) return error.InvalidContification;
+            try checkCall(original, old.terminator.call, new.terminator, 0, bases, targets);
+        } else if (!equal(ir.Block, old, new)) return error.InvalidContification;
+        if (!member(witness.helpers, old.function)) continue;
+        const base = bases[@intCast(old.function)];
+        const copied = candidate.blocks[@intCast(targets[bid])];
+        if (copied.function != witness.caller or
+            copied.custody != old.custody or
+            copied.instructions.len != old.instructions.len)
+            return error.InvalidContification;
+        for (old.instructions, copied.instructions) |op, replacement| {
+            try budget.tick();
+            if (replacement.destination != op.destination + base or
+                replacement.operands.len != op.operands.len)
+                return error.InvalidContification;
+            for (
+                op.operands,
+                replacement.operands,
+            ) |operand, mapped| if (mapped != operand + base) return error.InvalidContification;
+            var restored = replacement;
+            restored.destination = op.destination;
+            restored.operands = op.operands;
+            if (!equal(ir.Instruction, op, restored)) return error.InvalidContification;
+        }
+        try validateTerminator(original, witness, context, old, copied, base, bases, targets);
+    }
+}
+
+fn validateTerminator(
+    original: ir.Program,
+    witness: Witness,
+    context: Context,
+    old: ir.Block,
+    copied: ir.Block,
+    base: usize,
+    bases: []const usize,
+    targets: []const p.Id,
+) Error!void {
+    switch (old.terminator) {
+        .call => |call| try checkCall(original, call, copied.terminator, base, bases, targets),
+        .return_value => |value| {
+            try validateReturn(original, context, copied.terminator, value, base);
+        },
+        .fail => |value| if (copied.terminator != .fail or
+            copied.terminator.fail != value + base)
+            return error.InvalidContification,
+        .jump => |edge| if (copied.terminator != .jump or !edgeCorresponds(
+            original,
+            witness,
+            edge,
+            copied.terminator.jump,
+            base,
+        )) return error.InvalidContification,
+        .branch => |branch| if (copied.terminator != .branch or
+            copied.terminator.branch.condition != branch.condition + base or
+            !edgeCorresponds(
+                original,
+                witness,
+                branch.when_true,
+                copied.terminator.branch.when_true,
+                base,
+            ) or
+            !edgeCorresponds(
+                original,
+                witness,
+                branch.when_false,
+                copied.terminator.branch.when_false,
+                base,
+            ))
+            return error.InvalidContification,
+        else => return error.InvalidContification,
+    }
+}
+
+fn validateReturn(
+    original: ir.Program,
+    context: Context,
+    term: ir.Terminator,
+    value: p.Id,
+    base: usize,
+) Error!void {
+    if (term == .return_value) {
+        const continuation = original.blocks[@intCast(context.continuation.block)];
+        if (continuation.instructions.len != 0 or
+            continuation.terminator != .return_value)
+            return error.InvalidContification;
+        const result = continuation.terminator.return_value;
+        var expected = result;
+        for (context.continuation.assignments) |transfer|
+            if (transfer.destination == result) {
+                expected = switch (transfer.source) {
+                    .returned => value + base,
+                    .slot => |slot| slot,
+                };
+            };
+        if (term.return_value != expected)
+            return error.InvalidContification;
+    } else {
+        if (term != .jump or
+            term.jump.block != context.continuation.block or
+            term.jump.assignments.len !=
+                context.continuation.assignments.len)
+            return error.InvalidContification;
+        for (
+            context.continuation.assignments,
+            term.jump.assignments,
+        ) |transfer, replacement| {
+            var expected = transfer;
+            if (expected.source == .returned) expected.source = .{
+                .slot = value + base,
+            };
+            if (!equal(
+                ir.Assignment,
+                expected,
+                replacement,
+            )) return error.InvalidContification;
+        }
+    }
 }

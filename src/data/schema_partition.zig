@@ -67,46 +67,16 @@ fn computeImpl(
         maps[@backingInt(Kind.schema)] = classes;
         const mapper: relocate.Mapper = .{ .allocator = pass.allocator(), .maps = maps };
         const shapes = try pass.allocator().alloc(p.Schema, classes.len);
-        var distinct: usize = 0;
-        var index: std.HashMapUnmanaged([]const u8, Id, KeyContext(collide, seed), 80) = .empty;
-        const context: KeyContext(collide, seed) = .{ .stats = &stats };
-        var indexed = false;
-        for (shapes, program.schemas, 0..) |*shape, original, i| {
-            shape.* = try mapper.schema(original);
-            next[i] = i;
-            stats.lookups += 1;
-            if (!indexed and distinct <= 16) {
-                var found = false;
-                for (shapes[0..i], 0..) |prior, j| {
-                    stats.comparisons += 1;
-                    if (equal(p.Schema, shape.*, prior)) {
-                        next[i] = next[j];
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found) distinct += 1;
-                continue;
-            }
-            if (!indexed) {
-                for (
-                    shapes[0..i],
-                    0..,
-                ) |prior, j| if (next[j] == j) try index.putContext(
-                    pass.allocator(),
-                    try encodeKey(pass.allocator(), prior),
-                    next[j],
-                    context,
-                );
-                indexed = true;
-            }
-            const encoded = try encodeKey(pass.allocator(), shape.*);
-            const entry = try index.getOrPutContext(pass.allocator(), encoded, context);
-            if (entry.found_existing) {
-                next[i] = entry.value_ptr.*;
-                pass.allocator().free(encoded);
-            } else entry.value_ptr.* = i;
-        }
+        try partitionPass(
+            collide,
+            seed,
+            pass.allocator(),
+            mapper,
+            shapes,
+            program.schemas,
+            next,
+            &stats,
+        );
         changed = !std.mem.eql(Id, classes, next);
         if (changed) std.mem.swap([]Id, &classes, &next);
     }
@@ -118,6 +88,58 @@ fn computeImpl(
     };
     for (classes) |*class| class.* = representatives[@intCast(class.*)];
     return classes;
+}
+
+fn partitionPass(
+    comptime collide: bool,
+    comptime seed: u64,
+    allocator: std.mem.Allocator,
+    mapper: relocate.Mapper,
+    shapes: []p.Schema,
+    schemas: []const p.Schema,
+    next: []Id,
+    stats: *Statistics,
+) Error!void {
+    var distinct: usize = 0;
+    var index: std.HashMapUnmanaged([]const u8, Id, KeyContext(collide, seed), 80) = .empty;
+    const context: KeyContext(collide, seed) = .{ .stats = stats };
+    var indexed = false;
+    for (shapes, schemas, 0..) |*shape, original, i| {
+        shape.* = try mapper.schema(original);
+        next[i] = i;
+        stats.lookups += 1;
+        if (!indexed and distinct <= 16) {
+            var found = false;
+            for (shapes[0..i], 0..) |prior, j| {
+                stats.comparisons += 1;
+                if (equal(p.Schema, shape.*, prior)) {
+                    next[i] = next[j];
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) distinct += 1;
+            continue;
+        }
+        if (!indexed) {
+            for (
+                shapes[0..i],
+                0..,
+            ) |prior, j| if (next[j] == j) try index.putContext(
+                allocator,
+                try encodeKey(allocator, prior),
+                next[j],
+                context,
+            );
+            indexed = true;
+        }
+        const encoded = try encodeKey(allocator, shape.*);
+        const entry = try index.getOrPutContext(allocator, encoded, context);
+        if (entry.found_existing) {
+            next[i] = entry.value_ptr.*;
+            allocator.free(encoded);
+        } else entry.value_ptr.* = i;
+    }
 }
 
 fn reference(a: std.mem.Allocator, program: ir.Program) Error![]const Id {

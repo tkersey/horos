@@ -129,14 +129,7 @@ pub fn run(
     const workers = try a.alloc(?Witness, original.functions.len);
     @memset(selected, null);
     @memset(workers, null);
-    for (original.constructors, 0..) |constructor, id| {
-        if (!domain(original, id, schema_facts.exportable)) continue;
-        const field = observedField(original, id) orelse continue;
-        const witness: Witness = .{ .constructor = id, .field = field };
-        selected[id] = witness;
-        workers[@intCast(constructor.function)] = witness;
-        try witnesses.append(a, witness);
-    }
+    try selectWitnesses(a, original, schema_facts.exportable, selected, workers, &witnesses);
     const functions = try a.dupe(ir.Function, original.functions);
     const constructors = try a.dupe(p.Constructor, original.constructors);
     const layouts = try a.alloc(std.ArrayList(p.Id), functions.len);
@@ -148,7 +141,139 @@ pub fn run(
     var captures: std.ArrayList(p.Capture) = .empty;
     try schemas.appendSlice(a, original.schemas);
     try captures.appendSlice(a, original.scopes.captures);
-    for (witnesses.items) |witness| {
+    try projectCaptures(a, original, witnesses.items, constructors, layouts, &schemas, &captures);
+    const blocks = try a.dupe(ir.Block, original.blocks);
+    try rewriteBlocks(a, original, blocks, workers, selected, layouts, constructors, &stats);
+    for (functions, layouts) |*function, layout| function.layout.slots = layout.items;
+    var candidate = original;
+    candidate.functions = functions;
+    candidate.constructors = constructors;
+    candidate.schemas = schemas.items;
+    candidate.scopes.captures = captures.items;
+    candidate.blocks = blocks;
+    try validate(allocator, original, candidate, witnesses.items);
+    stats.constructors_projected = witnesses.items.len;
+    return coalescing.run(allocator, candidate, options);
+}
+
+pub fn validate(
+    allocator: std.mem.Allocator,
+    original: ir.Program,
+    candidate: ir.Program,
+    witnesses: []const Witness,
+) Error!void {
+    var flow = try ownership.analyze(allocator, original);
+    defer flow.deinit();
+    var checked = try ownership.analyze(allocator, candidate);
+    defer checked.deinit();
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const schema_facts = try admission.schemas(a, original.schemas);
+    try checkShape(original, candidate, witnesses);
+    const selected = try a.alloc(?Witness, original.constructors.len);
+    const workers = try a.alloc(?Witness, original.functions.len);
+    const types = try a.alloc(p.Id, original.constructors.len);
+    const captures = try a.alloc(p.Id, original.constructors.len);
+    @memset(selected, null);
+    @memset(workers, null);
+    for (original.constructors, types, captures) |constructor, *shape, *capture| {
+        shape.* = constructor.schema;
+        capture.* = constructor.capture;
+    }
+    try checkWitnesses(
+        original,
+        candidate,
+        witnesses,
+        schema_facts.exportable,
+        selected,
+        workers,
+        types,
+        captures,
+    );
+    for (
+        original.constructors,
+        candidate.constructors,
+        types,
+        captures,
+    ) |old, new, shape, capture| {
+        var expected = old;
+        expected.schema = shape;
+        expected.capture = capture;
+        if (!equal(p.Constructor, expected, new)) return error.InvalidCaptureProjection;
+    }
+    const layouts = try a.alloc([]p.Id, original.functions.len);
+    const next_slots = try a.alloc(usize, original.functions.len);
+    for (original.functions, layouts, next_slots, workers) |function, *layout, *next, witness| {
+        layout.* = try a.dupe(p.Id, function.layout.slots);
+        next.* = layout.len;
+        if (witness) |item| layout.*[@intCast(function.inputs[0])] = fieldSchema(original, item);
+    }
+    try checkBlocks(original, candidate, workers, selected, next_slots, layouts, types);
+    for (original.functions, candidate.functions, layouts, next_slots) |old, new, layout, count| {
+        var same_function = new;
+        same_function.layout = old.layout;
+        if (!equal(
+            ir.Function,
+            old,
+            same_function,
+        ) or new.layout.slots.len != count or !std.mem.eql(
+            p.Id,
+            layout,
+            new.layout.slots[0..layout.len],
+        )) return error.InvalidCaptureProjection;
+    }
+}
+fn checkInsertion(
+    original: ir.Program,
+    candidate: ir.Program,
+    owner: usize,
+    slot: usize,
+    args: []const p.Id,
+    witness: Witness,
+    op: ir.Instruction,
+) Error!void {
+    if (slot >= candidate.functions[owner].layout.slots.len or
+        args.len == 0 or
+        candidate.functions[owner].layout.slots[slot] != fieldSchema(original, witness))
+        return error.InvalidCaptureProjection;
+    const expected: ir.Instruction = .{
+        .destination = slot,
+        .opcode = .field,
+        .operands = args[0..1],
+        .immediate = witness.field,
+    };
+    if (!equal(ir.Instruction, expected, op)) return error.InvalidCaptureProjection;
+}
+
+fn selectWitnesses(
+    a: std.mem.Allocator,
+    original: ir.Program,
+    exportable: []const bool,
+    selected: []?Witness,
+    workers: []?Witness,
+    witnesses: *std.ArrayList(Witness),
+) Error!void {
+    for (original.constructors, 0..) |constructor, id| {
+        if (!domain(original, id, exportable)) continue;
+        const field = observedField(original, id) orelse continue;
+        const witness: Witness = .{ .constructor = id, .field = field };
+        selected[id] = witness;
+        workers[@intCast(constructor.function)] = witness;
+        try witnesses.append(a, witness);
+    }
+}
+
+fn projectCaptures(
+    a: std.mem.Allocator,
+    original: ir.Program,
+    witnesses: []const Witness,
+    constructors: []p.Constructor,
+    layouts: []std.ArrayList(p.Id),
+    schemas: *std.ArrayList(p.Schema),
+    captures: *std.ArrayList(p.Capture),
+) Error!void {
+    for (witnesses) |witness| {
         const constructor = original.constructors[witness.constructor];
         const field_type = fieldSchema(original, witness);
         var capture = original.scopes.captures[@intCast(constructor.capture)];
@@ -162,7 +287,18 @@ pub fn run(
         const worker = original.functions[@intCast(constructor.function)];
         layouts[@intCast(constructor.function)].items[@intCast(worker.inputs[0])] = field_type;
     }
-    const blocks = try a.dupe(ir.Block, original.blocks);
+}
+
+fn rewriteBlocks(
+    a: std.mem.Allocator,
+    original: ir.Program,
+    blocks: []ir.Block,
+    workers: []const ?Witness,
+    selected: []const ?Witness,
+    layouts: []std.ArrayList(p.Id),
+    constructors: []const p.Constructor,
+    stats: *Statistics,
+) Error!void {
     for (original.blocks, blocks) |block, *out| {
         var instructions: std.ArrayList(ir.Instruction) = .empty;
         const owner: usize = @intCast(block.function);
@@ -202,52 +338,47 @@ pub fn run(
             };
             try instructions.append(a, replacement);
         }
-        if (block.terminator == .call) if (workers[
-            @intCast(block.terminator.call.function)
-        ]) |witness| {
-            const call = block.terminator.call;
-            const slot = layouts[owner].items.len;
-            try layouts[owner].append(a, fieldSchema(original, witness));
-            try instructions.append(
-                a,
-                .{
-                    .destination = slot,
-                    .opcode = .field,
-                    .operands = try a.dupe(p.Id, call.arguments[0..1]),
-                    .immediate = witness.field,
-                },
-            );
-            out.terminator.call.arguments = try arguments(a, call.arguments, slot);
-            stats.direct_projections += 1;
-        };
+        try rewriteCall(a, original, block, out, workers, layouts, &instructions, stats);
         out.instructions = try instructions.toOwnedSlice(a);
     }
-    for (functions, layouts) |*function, layout| function.layout.slots = layout.items;
-    var candidate = original;
-    candidate.functions = functions;
-    candidate.constructors = constructors;
-    candidate.schemas = schemas.items;
-    candidate.scopes.captures = captures.items;
-    candidate.blocks = blocks;
-    try validate(allocator, original, candidate, witnesses.items);
-    stats.constructors_projected = witnesses.items.len;
-    return coalescing.run(allocator, candidate, options);
 }
 
-pub fn validate(
-    allocator: std.mem.Allocator,
+fn rewriteCall(
+    a: std.mem.Allocator,
+    original: ir.Program,
+    block: ir.Block,
+    out: *ir.Block,
+    workers: []const ?Witness,
+    layouts: []std.ArrayList(p.Id),
+    instructions: *std.ArrayList(ir.Instruction),
+    stats: *Statistics,
+) Error!void {
+    const owner: usize = @intCast(block.function);
+    if (block.terminator == .call) if (workers[
+        @intCast(block.terminator.call.function)
+    ]) |witness| {
+        const call = block.terminator.call;
+        const slot = layouts[owner].items.len;
+        try layouts[owner].append(a, fieldSchema(original, witness));
+        try instructions.append(
+            a,
+            .{
+                .destination = slot,
+                .opcode = .field,
+                .operands = try a.dupe(p.Id, call.arguments[0..1]),
+                .immediate = witness.field,
+            },
+        );
+        out.terminator.call.arguments = try arguments(a, call.arguments, slot);
+        stats.direct_projections += 1;
+    };
+}
+
+fn checkShape(
     original: ir.Program,
     candidate: ir.Program,
     witnesses: []const Witness,
 ) Error!void {
-    var flow = try ownership.analyze(allocator, original);
-    defer flow.deinit();
-    var checked = try ownership.analyze(allocator, candidate);
-    defer checked.deinit();
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const schema_facts = try admission.schemas(a, original.schemas);
     var same = candidate;
     same.functions = original.functions;
     same.blocks = original.blocks;
@@ -269,47 +400,30 @@ pub fn validate(
         original.scopes.captures,
         candidate.scopes.captures[0..original.scopes.captures.len],
     ) |old, new| if (!equal(p.Capture, old, new)) return error.InvalidCaptureProjection;
-    const selected = try a.alloc(?Witness, original.constructors.len);
-    const workers = try a.alloc(?Witness, original.functions.len);
-    const types = try a.alloc(p.Id, original.constructors.len);
-    const captures = try a.alloc(p.Id, original.constructors.len);
-    @memset(selected, null);
-    @memset(workers, null);
-    for (original.constructors, types, captures) |constructor, *shape, *capture| {
-        shape.* = constructor.schema;
-        capture.* = constructor.capture;
-    }
+}
+
+fn checkWitnesses(
+    original: ir.Program,
+    candidate: ir.Program,
+    witnesses: []const Witness,
+    exportable: []const bool,
+    selected: []?Witness,
+    workers: []?Witness,
+    types: []p.Id,
+    captures: []p.Id,
+) Error!void {
     for (witnesses, 0..) |witness, index| {
         if (witness.constructor >= selected.len or selected[witness.constructor] != null or !domain(
             original,
             witness.constructor,
-            schema_facts.exportable,
+            exportable,
         )) return error.InvalidCaptureProjection;
         const constructor = original.constructors[witness.constructor];
         const capture = original.scopes.captures[@intCast(constructor.capture)];
         if (witness.field >= original.schemas[
             @intCast(capture.fields[0])
         ].product.len) return error.InvalidCaptureProjection;
-        const worker = original.functions[@intCast(constructor.function)];
-        var count: usize = 0;
-        for (original.blocks) |block| {
-            if (block.function != constructor.function) continue;
-            for (block.instructions) |op| {
-                if (op.destination == worker.inputs[0]) return error.InvalidCaptureProjection;
-                for (op.operands) |slot|
-                    if (slot == worker.inputs[0]) {
-                        if (op.opcode != .field or
-                            op.operands.len != 1 or
-                            op.immediate != witness.field or
-                            op.failures.len != 0)
-                            return error.InvalidCaptureProjection;
-                        count += 1;
-                    };
-            }
-            const uses = access(block.terminator, worker.inputs[0]);
-            if (uses.reads != 0 or uses.writes != 0) return error.InvalidCaptureProjection;
-        }
-        if (count == 0) return error.InvalidCaptureProjection;
+        try checkObservations(original, constructor, witness);
         const field_type = fieldSchema(original, witness);
         var expected_capture = capture;
         expected_capture.fields = &.{field_type};
@@ -327,71 +441,57 @@ pub fn validate(
         types[witness.constructor] = schema_id;
         captures[witness.constructor] = capture_id;
     }
-    for (
-        original.constructors,
-        candidate.constructors,
-        types,
-        captures,
-    ) |old, new, shape, capture| {
-        var expected = old;
-        expected.schema = shape;
-        expected.capture = capture;
-        if (!equal(p.Constructor, expected, new)) return error.InvalidCaptureProjection;
+}
+
+fn checkObservations(
+    original: ir.Program,
+    constructor: p.Constructor,
+    witness: Witness,
+) Error!void {
+    const worker = original.functions[@intCast(constructor.function)];
+    var count: usize = 0;
+    for (original.blocks) |block| {
+        if (block.function != constructor.function) continue;
+        for (block.instructions) |op| {
+            if (op.destination == worker.inputs[0]) return error.InvalidCaptureProjection;
+            for (op.operands) |slot|
+                if (slot == worker.inputs[0]) {
+                    if (op.opcode != .field or
+                        op.operands.len != 1 or
+                        op.immediate != witness.field or
+                        op.failures.len != 0)
+                        return error.InvalidCaptureProjection;
+                    count += 1;
+                };
+        }
+        const uses = access(block.terminator, worker.inputs[0]);
+        if (uses.reads != 0 or uses.writes != 0) return error.InvalidCaptureProjection;
     }
-    const layouts = try a.alloc([]p.Id, original.functions.len);
-    const next_slots = try a.alloc(usize, original.functions.len);
-    for (original.functions, layouts, next_slots, workers) |function, *layout, *next, witness| {
-        layout.* = try a.dupe(p.Id, function.layout.slots);
-        next.* = layout.len;
-        if (witness) |item| layout.*[@intCast(function.inputs[0])] = fieldSchema(original, item);
-    }
+    if (count == 0) return error.InvalidCaptureProjection;
+}
+
+fn checkBlocks(
+    original: ir.Program,
+    candidate: ir.Program,
+    workers: []const ?Witness,
+    selected: []const ?Witness,
+    next_slots: []usize,
+    layouts: []const []p.Id,
+    types: []const p.Id,
+) Error!void {
     for (original.blocks, candidate.blocks) |old, new| {
         const owner: usize = @intCast(old.function);
-        const worker = original.functions[owner];
-        var next: usize = 0;
-        for (old.instructions) |op| {
-            var expected = op;
-            var operand: [1]p.Id = undefined;
-            if (workers[owner] != null and
-                op.opcode == .field and
-                op.operands[0] == worker.inputs[0])
-            {
-                operand[0] = worker.inputs[0];
-                expected = .{
-                    .destination = op.destination,
-                    .opcode = .move,
-                    .operands = &operand,
-                };
-            }
-            if (op.opcode == .computation) if (selected[@intCast(op.immediate)]) |witness| {
-                const slot = next_slots[owner];
-                next_slots[owner] += 1;
-                if (next >= new.instructions.len) return error.InvalidCaptureProjection;
-                try checkInsertion(
-                    original,
-                    candidate,
-                    owner,
-                    slot,
-                    op.operands,
-                    witness,
-                    new.instructions[next],
-                );
-                next += 1;
-                if (next >= new.instructions.len or !sameArguments(
-                    op.operands,
-                    new.instructions[next].operands,
-                    slot,
-                )) return error.InvalidCaptureProjection;
-                expected.operands = new.instructions[next].operands;
-                layouts[owner][@intCast(op.destination)] = types[@intCast(op.immediate)];
-            };
-            if (next >= new.instructions.len or !equal(
-                ir.Instruction,
-                expected,
-                new.instructions[next],
-            )) return error.InvalidCaptureProjection;
-            next += 1;
-        }
+        var next = try checkInstructions(
+            original,
+            candidate,
+            old,
+            new,
+            workers,
+            selected,
+            next_slots,
+            layouts,
+            types,
+        );
         var unchanged = new;
         unchanged.instructions = old.instructions;
         if (old.terminator == .call) if (workers[
@@ -422,38 +522,64 @@ pub fn validate(
             unchanged,
         )) return error.InvalidCaptureProjection;
     }
-    for (original.functions, candidate.functions, layouts, next_slots) |old, new, layout, count| {
-        var same_function = new;
-        same_function.layout = old.layout;
-        if (!equal(
-            ir.Function,
-            old,
-            same_function,
-        ) or new.layout.slots.len != count or !std.mem.eql(
-            p.Id,
-            layout,
-            new.layout.slots[0..layout.len],
-        )) return error.InvalidCaptureProjection;
-    }
 }
-fn checkInsertion(
+
+fn checkInstructions(
     original: ir.Program,
     candidate: ir.Program,
-    owner: usize,
-    slot: usize,
-    args: []const p.Id,
-    witness: Witness,
-    op: ir.Instruction,
-) Error!void {
-    if (slot >= candidate.functions[owner].layout.slots.len or
-        args.len == 0 or
-        candidate.functions[owner].layout.slots[slot] != fieldSchema(original, witness))
-        return error.InvalidCaptureProjection;
-    const expected: ir.Instruction = .{
-        .destination = slot,
-        .opcode = .field,
-        .operands = args[0..1],
-        .immediate = witness.field,
-    };
-    if (!equal(ir.Instruction, expected, op)) return error.InvalidCaptureProjection;
+    old: ir.Block,
+    new: ir.Block,
+    workers: []const ?Witness,
+    selected: []const ?Witness,
+    next_slots: []usize,
+    layouts: []const []p.Id,
+    types: []const p.Id,
+) Error!usize {
+    const owner: usize = @intCast(old.function);
+    const worker = original.functions[owner];
+    var next: usize = 0;
+    for (old.instructions) |op| {
+        var expected = op;
+        var operand: [1]p.Id = undefined;
+        if (workers[owner] != null and
+            op.opcode == .field and
+            op.operands[0] == worker.inputs[0])
+        {
+            operand[0] = worker.inputs[0];
+            expected = .{
+                .destination = op.destination,
+                .opcode = .move,
+                .operands = &operand,
+            };
+        }
+        if (op.opcode == .computation) if (selected[@intCast(op.immediate)]) |witness| {
+            const slot = next_slots[owner];
+            next_slots[owner] += 1;
+            if (next >= new.instructions.len) return error.InvalidCaptureProjection;
+            try checkInsertion(
+                original,
+                candidate,
+                owner,
+                slot,
+                op.operands,
+                witness,
+                new.instructions[next],
+            );
+            next += 1;
+            if (next >= new.instructions.len or !sameArguments(
+                op.operands,
+                new.instructions[next].operands,
+                slot,
+            )) return error.InvalidCaptureProjection;
+            expected.operands = new.instructions[next].operands;
+            layouts[owner][@intCast(op.destination)] = types[@intCast(op.immediate)];
+        };
+        if (next >= new.instructions.len or !equal(
+            ir.Instruction,
+            expected,
+            new.instructions[next],
+        )) return error.InvalidCaptureProjection;
+        next += 1;
+    }
+    return next;
 }

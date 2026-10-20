@@ -137,15 +137,35 @@ pub fn runTarget(
         target,
         work_limit,
         .observations,
-    ) catch |err| switch (err) {
-        error.WorkLimit => {
-            stats.outcome = .work_limit;
-            return p01.run(allocator, original, options);
-        },
-        else => return err,
-    }) orelse return p01.run(allocator, original, options);
+    ) catch |err|
+        switch (err) {
+            error.WorkLimit => {
+                stats.outcome = .work_limit;
+                return p01.run(allocator, original, options);
+            },
+            else => return err,
+        }) orelse return p01.run(allocator, original, options);
     defer candidate.deinit();
-    check.validateTarget(
+    validateCandidate(allocator, original, target, candidate, work_limit) catch |err|
+        switch (err) {
+            error.WorkLimit => {
+                stats.outcome = .work_limit;
+                return p01.run(allocator, original, options);
+            },
+            else => return err,
+        };
+    stats.observation_cost = try cost(candidate.program, target.worker(original));
+    return finishCanonical(allocator, original, target, candidate, &stats, work_limit, options);
+}
+
+fn validateCandidate(
+    allocator: std.mem.Allocator,
+    original: ir.Program,
+    target: Target,
+    candidate: emit.Candidate,
+    work_limit: u64,
+) Error!void {
+    try check.validateTarget(
         allocator,
         original,
         candidate.program,
@@ -153,46 +173,44 @@ pub fn runTarget(
         candidate.basis,
         candidate.input_bias,
         work_limit,
-    ) catch |err| switch (err) {
-        error.WorkLimit => {
-            stats.outcome = .work_limit;
-            return p01.run(allocator, original, options);
-        },
-        else => return err,
-    };
-    stats.observation_cost = try cost(candidate.program, target.worker(original));
+    );
+}
+
+fn finishCanonical(
+    allocator: std.mem.Allocator,
+    original: ir.Program,
+    target: Target,
+    candidate: emit.Candidate,
+    stats: *Statistics,
+    work_limit: u64,
+    options: p01.Options,
+) Error!p01.Owned {
     var canonical = emit.constructTarget(
         allocator,
         original,
         target,
         work_limit,
         .canonical,
-    ) catch |err| switch (err) {
-        error.WorkLimit => {
-            stats.outcome = .work_limit;
-            return p01.run(allocator, original, options);
-        },
-        else => return err,
-    };
+    ) catch |err|
+        switch (err) {
+            error.WorkLimit => {
+                stats.outcome = .work_limit;
+                return p01.run(allocator, original, options);
+            },
+            else => return err,
+        };
     defer if (canonical) |*other| other.deinit();
     var selected = candidate.program;
     if (canonical) |other| {
         if (!std.mem.eql(u128, candidate.basis, other.basis)) {
-            check.validateTarget(
-                allocator,
-                original,
-                other.program,
-                target,
-                other.basis,
-                other.input_bias,
-                work_limit,
-            ) catch |err| switch (err) {
-                error.WorkLimit => {
-                    stats.outcome = .work_limit;
-                    return p01.run(allocator, original, options);
-                },
-                else => return err,
-            };
+            validateCandidate(allocator, original, target, other, work_limit) catch |err|
+                switch (err) {
+                    error.WorkLimit => {
+                        stats.outcome = .work_limit;
+                        return p01.run(allocator, original, options);
+                    },
+                    else => return err,
+                };
             stats.canonical_cost = try cost(other.program, target.worker(original));
             if (cheaper(stats.canonical_cost.?, stats.observation_cost.?)) {
                 selected = other.program;

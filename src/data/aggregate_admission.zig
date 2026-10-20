@@ -13,13 +13,42 @@ pub fn element(shape: p.Schema) a.Error!p.Id {
 }
 
 pub fn instruction(image: anytype, op: anytype, slots: []const p.Id) a.Error!void {
-    const result = image.schemas[@intCast(op.result_type)];
-    const operands = op.operands;
     if (op.opcode != .field and
         op.opcode != .variant and
         op.opcode != .variant_payload and
         op.immediate != 0)
         return error.InvalidProgram;
+    switch (op.opcode) {
+        .product, .field, .variant, .variant_tag, .variant_payload, .select => try fixedAggregate(
+            image,
+            op,
+            slots,
+        ),
+        .sequence, .sequence_length => try sequenceShape(image, op, slots),
+        .sequence_get,
+        .sequence_append,
+        .sequence_concat,
+        .sequence_set,
+        .sequence_take,
+        => try sequenceAccess(
+            image,
+            op,
+            slots,
+        ),
+        .sequence_pop, .sequence_pop_last => try sequencePop(image, op, slots),
+        else => return error.UnsupportedInstruction,
+    }
+}
+
+pub fn optional(image: anytype, shape: p.Schema, item: p.Id) a.Error!void {
+    if (shape != .sum or shape.sum.len != 2 or image.schemas[
+        @intCast(shape.sum[0])
+    ] != .unit or shape.sum[1] != item) return error.TypeMismatch;
+}
+
+fn fixedAggregate(image: anytype, op: anytype, slots: []const p.Id) a.Error!void {
+    const result = image.schemas[@intCast(op.result_type)];
+    const operands = op.operands;
     switch (op.opcode) {
         .product => {
             if (result != .product) return error.TypeMismatch;
@@ -64,6 +93,14 @@ pub fn instruction(image: anytype, op: anytype, slots: []const p.Id) a.Error!voi
                 @intCast(operands[2])
             ] != op.result_type) return error.TypeMismatch;
         },
+        else => return error.UnsupportedInstruction,
+    }
+}
+
+fn sequenceShape(image: anytype, op: anytype, slots: []const p.Id) a.Error!void {
+    const result = image.schemas[@intCast(op.result_type)];
+    const operands = op.operands;
+    switch (op.opcode) {
         .sequence => {
             const item = try element(result);
             if (result == .vector and
@@ -87,6 +124,14 @@ pub fn instruction(image: anytype, op: anytype, slots: []const p.Id) a.Error!voi
                 if (bound > @import("std").math.maxInt(u32)) return error.TypeMismatch;
             }
         },
+        else => return error.UnsupportedInstruction,
+    }
+}
+
+fn sequenceAccess(image: anytype, op: anytype, slots: []const p.Id) a.Error!void {
+    const result = image.schemas[@intCast(op.result_type)];
+    const operands = op.operands;
+    switch (op.opcode) {
         .sequence_get => {
             if (operands.len != 2 or image.schemas[
                 @intCast(slots[
@@ -121,6 +166,14 @@ pub fn instruction(image: anytype, op: anytype, slots: []const p.Id) a.Error!voi
                 if (slots[@intCast(operands[2])] != item) return error.TypeMismatch;
             } else if (result == .array) return error.TypeMismatch;
         },
+        else => return error.UnsupportedInstruction,
+    }
+}
+
+fn sequencePop(image: anytype, op: anytype, slots: []const p.Id) a.Error!void {
+    const result = image.schemas[@intCast(op.result_type)];
+    const operands = op.operands;
+    switch (op.opcode) {
         .sequence_pop => {
             if (operands.len != 1 or result != .sum or result.sum.len != 2 or image.schemas[
                 @intCast(result.sum[0])
@@ -149,10 +202,4 @@ pub fn instruction(image: anytype, op: anytype, slots: []const p.Id) a.Error!voi
         },
         else => return error.UnsupportedInstruction,
     }
-}
-
-pub fn optional(image: anytype, shape: p.Schema, item: p.Id) a.Error!void {
-    if (shape != .sum or shape.sum.len != 2 or image.schemas[
-        @intCast(shape.sum[0])
-    ] != .unit or shape.sum[1] != item) return error.TypeMismatch;
 }

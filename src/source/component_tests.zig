@@ -19,6 +19,27 @@ test "component emission defers coalescing and observation preserves object byte
     }
 }
 
+fn defineDualClient(
+    b: *source.Builder,
+    main: source.Id,
+    integer: source.Id,
+    pair: source.Id,
+    functions: [2]source.Id,
+    arguments: []const source.Id,
+) !void {
+    const left = try b.variable(integer);
+    const right = try b.variable(integer);
+    const first = try b.term(.{ .call = .{ .function = functions[0], .arguments = arguments } });
+    const second = try b.term(.{ .call = .{ .function = functions[1], .arguments = arguments } });
+    const result = try b.primitive(
+        pair,
+        .product,
+        &.{ try b.reference(left), try b.reference(right) },
+        0,
+    );
+    try b.define(main, try b.bind(left, first, try b.bind(right, second, try b.pure(result))));
+}
+
 fn dualClient(external: bool) ![]u8 {
     var b = source.Builder.init(testing.allocator);
     defer b.deinit();
@@ -69,17 +90,7 @@ fn dualClient(external: bool) ![]u8 {
         main,
         0,
     ))};
-    const left = try b.variable(integer);
-    const right = try b.variable(integer);
-    const first = try b.term(.{ .call = .{ .function = functions[0], .arguments = arguments } });
-    const second = try b.term(.{ .call = .{ .function = functions[1], .arguments = arguments } });
-    const result = try b.primitive(
-        pair,
-        .product,
-        &.{ try b.reference(left), try b.reference(right) },
-        0,
-    );
-    try b.define(main, try b.bind(left, first, try b.bind(right, second, try b.pure(result))));
+    try defineDualClient(&b, main, integer, pair, functions, arguments);
     var compiled = try source.component.compile(testing.allocator, b.module(main, unit), .{
         .imports = imports.items,
         .borrows = &.{ .{ .function = functions[0] }, .{ .function = functions[1] } },
@@ -639,6 +650,38 @@ test "component local clause borrowing distinguishes older and fresh capabilitie
     };
 }
 
+fn escapeImportedBorrow(
+    b: *source.Builder,
+    body_value: source.Id,
+    borrowed: source.Id,
+    body_function: source.Id,
+    eliminator: source.Id,
+    original: source.Module,
+    main_bind: @FieldType(source.ast.Term, "bind"),
+    protected: source.Id,
+) !void {
+    var signature = b.schemas.items[
+        @intCast(b.values.items[
+            @intCast(body_value)
+        ].schema)
+    ].internal.computation;
+    signature.result = borrowed;
+    b.values.items[
+        @intCast(body_value)
+    ].schema = try b.schema(.{ .internal = .{ .computation = signature } });
+    b.functions.items[@intCast(body_function)].result = borrowed;
+    const escaped = try b.variable(borrowed);
+    const outside = try b.term(.{ .call = .{
+        .function = eliminator,
+        .arguments = &.{try b.reference(escaped)},
+    } });
+    b.functions.items[@intCast(original.entry)].body = try b.bind(
+        main_bind.variable,
+        main_bind.value,
+        try b.bind(escaped, protected, outside),
+    );
+}
+
 test "local protected borrow checking follows imported result provenance" {
     inline for (.{ false, true }) |escape| {
         var b = source.Builder.init(testing.allocator);
@@ -672,25 +715,15 @@ test "local protected borrow checking follows imported result provenance" {
             if (escape) try b.pure(try b.reference(result)) else read,
         );
         if (escape) {
-            var signature = b.schemas.items[
-                @intCast(b.values.items[
-                    @intCast(body_value)
-                ].schema)
-            ].internal.computation;
-            signature.result = borrowed;
-            b.values.items[
-                @intCast(body_value)
-            ].schema = try b.schema(.{ .internal = .{ .computation = signature } });
-            b.functions.items[@intCast(body_function)].result = borrowed;
-            const escaped = try b.variable(borrowed);
-            const outside = try b.term(.{ .call = .{
-                .function = eliminator,
-                .arguments = &.{try b.reference(escaped)},
-            } });
-            b.functions.items[@intCast(original.entry)].body = try b.bind(
-                main_bind.variable,
-                main_bind.value,
-                try b.bind(escaped, protected, outside),
+            try escapeImportedBorrow(
+                &b,
+                body_value,
+                borrowed,
+                body_function,
+                eliminator,
+                original,
+                main_bind,
+                protected,
             );
         }
         const compiled = source.component.compile(testing.allocator, b.module(

@@ -54,56 +54,74 @@ pub fn dependencies(allocator: std.mem.Allocator, image: anytype) a.Error!Depend
     while (changed) {
         changed = false;
         for (image.schemas, 0..) |shape, schema| {
-            const target = result[schema * width ..][0..width];
-            const fields: []const p.Id = switch (shape) {
-                .product, .sum => |fields| fields,
-                .seq => |*element| element[0..1],
-                .vector => |*vector| (&vector.element)[0..1],
-                .array => |*array| (&array.element)[0..1],
-                .internal => |*internal| switch (internal.*) {
-                    .region, .cell, .borrowed => blk: {
-                        const id = switch (internal.*) {
-                            .region => |id| id,
-                            .cell => |cell| cell.region,
-                            .borrowed => |borrow| borrow.region,
-                            else => unreachable,
-                        };
-                        const index = indices.get(id) orelse return error.InvalidReference;
-                        if (!target[index]) {
-                            target[index] = true;
-                            changed = true;
-                        }
-                        break :blk switch (internal.*) {
-                            .cell => |*cell| (&cell.element)[0..1],
-                            .borrowed => |*borrow| (&borrow.value)[0..1],
-                            else => &.{},
-                        };
-                    },
-                    .computation => |signature| signature.capture_bound,
-                    .resumption => |signature| signature.capture_bound,
-                    .suspension_package => |*inner| inner[0..1],
-                    else => &.{},
-                },
-                else => &.{},
-            };
-            for (fields) |child| for (
-                target,
-                result[@as(usize, @intCast(child)) * width ..][0..width],
-                0..,
-            ) |*to, from, region_id| {
-                if (shape == .internal and shape.internal == .resumption and std.mem.indexOfScalar(
-                    p.Id,
-                    shape.internal.resumption.owned_regions,
-                    regions.items[region_id],
-                ) != null) continue;
-                if (from and !to.*) {
-                    to.* = true;
-                    changed = true;
-                }
-            };
+            changed = try propagateDependencies(
+                shape,
+                result[schema * width ..][0..width],
+                result,
+                regions.items,
+                indices,
+            ) or changed;
         }
     }
     return .{ .regions = regions.items, .values = result };
+}
+
+fn propagateDependencies(
+    shape: p.Schema,
+    target: []bool,
+    result: []const bool,
+    regions: []const p.Id,
+    indices: std.AutoHashMapUnmanaged(p.Id, usize),
+) a.Error!bool {
+    const width = regions.len;
+    var changed = false;
+    const fields: []const p.Id = switch (shape) {
+        .product, .sum => |fields| fields,
+        .seq => |*element| element[0..1],
+        .vector => |*vector| (&vector.element)[0..1],
+        .array => |*array| (&array.element)[0..1],
+        .internal => |*internal| switch (internal.*) {
+            .region, .cell, .borrowed => blk: {
+                const id = switch (internal.*) {
+                    .region => |id| id,
+                    .cell => |cell| cell.region,
+                    .borrowed => |borrow| borrow.region,
+                    else => unreachable,
+                };
+                const index = indices.get(id) orelse return error.InvalidReference;
+                if (!target[index]) {
+                    target[index] = true;
+                    changed = true;
+                }
+                break :blk switch (internal.*) {
+                    .cell => |*cell| (&cell.element)[0..1],
+                    .borrowed => |*borrow| (&borrow.value)[0..1],
+                    else => &.{},
+                };
+            },
+            .computation => |signature| signature.capture_bound,
+            .resumption => |signature| signature.capture_bound,
+            .suspension_package => |*inner| inner[0..1],
+            else => &.{},
+        },
+        else => &.{},
+    };
+    for (fields) |child| for (
+        target,
+        result[@as(usize, @intCast(child)) * width ..][0..width],
+        0..,
+    ) |*to, from, region_id| {
+        if (shape == .internal and shape.internal == .resumption and std.mem.indexOfScalar(
+            p.Id,
+            shape.internal.resumption.owned_regions,
+            regions[region_id],
+        ) != null) continue;
+        if (from and !to.*) {
+            to.* = true;
+            changed = true;
+        }
+    };
+    return changed;
 }
 
 pub fn validate(allocator: std.mem.Allocator, image: anytype) a.Error!void {

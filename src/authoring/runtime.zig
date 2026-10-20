@@ -561,7 +561,7 @@ pub const Context = opaque {
     }
     // Shared runtime construction for the replacement interface. This method
     // moves with this erased implementation into its private runtime owner.
-    pub fn nativeSchema(
+    pub inline fn nativeSchema(
         self: *Context,
         comptime description: @import("horos_data").schema.native.Info,
     ) Error!*const Schema {
@@ -1392,42 +1392,8 @@ pub const Context = opaque {
             existing,
         );
         const shape = contextData(self).raw.schemas.items[@intCast(id)];
-        if (shape != .internal or shape.internal != .computation) return captureError(
-            &returned_error,
-            @as(
-                Error!*const Function,
-                self.reject(
-                    error.InvalidCategory,
-                    "twice",
-                    "requires a reusable zero-argument callable",
-                ),
-            ),
-        );
+        const element = try captureError(&returned_error, self.twiceElement(schema, shape));
         const signature = shape.internal.computation;
-        if (signature.parameters.len != 0 or signature.use != .reusable)
-            return captureError(
-                &returned_error,
-                @as(
-                    Error!*const Function,
-                    self.reject(
-                        error.InvalidOwnership,
-                        "twice",
-                        "requires a reusable zero-argument callable",
-                    ),
-                ),
-            );
-        const info = data(SchemaData, schema);
-        const element = info.result orelse return captureError(
-            &returned_error,
-            @as(
-                Error!*const Function,
-                self.reject(
-                    error.InvalidSchema,
-                    "twice",
-                    "requires a reusable zero-argument callable",
-                ),
-            ),
-        );
         const pair = try captureError(&returned_error, self.record(&.{
             .{ .name = "first", .schema = element },
             .{ .name = "second", .schema = element },
@@ -1467,6 +1433,24 @@ pub const Context = opaque {
             function_handle,
         ));
         return captureError(&returned_error, function_handle);
+    }
+    fn twiceElement(self: *Context, schema: *const Schema, shape: p.Schema) Error!*const Schema {
+        if (shape != .internal or shape.internal != .computation) return self.reject(
+            error.InvalidCategory,
+            "twice",
+            "requires a reusable zero-argument callable",
+        );
+        const signature = shape.internal.computation;
+        if (signature.parameters.len != 0 or signature.use != .reusable) return self.reject(
+            error.InvalidOwnership,
+            "twice",
+            "requires a reusable zero-argument callable",
+        );
+        return data(SchemaData, schema).result orelse self.reject(
+            error.InvalidSchema,
+            "twice",
+            "requires a reusable zero-argument callable",
+        );
     }
     fn handlerReturn(
         self: *Context,
@@ -1543,6 +1527,60 @@ pub const Context = opaque {
         options: HandlerOptions,
     ) Error!*const Handler {
         try self.ready();
+        try self.validateHandlerOperations(operations, options);
+        const allocator = contextData(self).raw.allocator();
+        var returned_error: anyerror = undefined;
+        errdefer self.poison(returned_error);
+        const handled = try captureError(&returned_error, allocator.alloc(p.Id, operations.len));
+        const body_schema = try captureError(
+            &returned_error,
+            self.handlerBodySchema(operations, input, options, handled),
+        );
+        const residual = try captureError(&returned_error, self.row(options.residual));
+        const answer_id = try captureError(&returned_error, self.schemaId(answer));
+        const resume_answer = if (options.mode == .deep) answer else input;
+        const returns = try captureError(
+            &returned_error,
+            self.handlerReturn(input, answer, options),
+        );
+        const arms = try captureError(
+            &returned_error,
+            self.handlerArms(operations, answer, resume_answer, options, residual, handled),
+        );
+        const state_ids = try captureError(
+            &returned_error,
+            allocator.alloc(p.Id, options.state.len),
+        );
+        for (
+            options.state,
+            state_ids,
+        ) |item, *id| id.* = try captureError(&returned_error, self.schemaId(item.schema));
+        const result = handle(Handler, try captureError(&returned_error, self.save(HandlerData, .{
+            .owner = self,
+            .id = try captureError(&returned_error, contextData(self).raw.handler(.{
+                .mode = options.mode,
+                .input = try captureError(&returned_error, self.schemaId(input)),
+                .answer = answer_id,
+                .return_function = data(FunctionData, returns).id,
+                .clauses = arms.clauses,
+                .state = state_ids,
+                .effects = residual,
+            })),
+            .clauses = arms.metadata,
+            .input = input,
+            .answer = answer,
+            .body_schema = body_schema,
+            .returns = returns,
+            .state = try captureError(&returned_error, self.fields(options.state)),
+        })));
+        try captureError(&returned_error, contextData(self).handlers.append(allocator, result));
+        return captureError(&returned_error, result);
+    }
+    fn validateHandlerOperations(
+        self: *Context,
+        operations: []const HandledOperation,
+        options: HandlerOptions,
+    ) Error!void {
         if (operations.len == 0) return self.reject(
             error.InvalidCategory,
             "handler",
@@ -1587,10 +1625,16 @@ pub const Context = opaque {
                     );
             }
         }
+    }
+    fn handlerBodySchema(
+        self: *Context,
+        operations: []const HandledOperation,
+        input: *const Schema,
+        options: HandlerOptions,
+        handled: []p.Id,
+    ) Error!*const Schema {
         const allocator = contextData(self).raw.allocator();
         var returned_error: anyerror = undefined;
-        errdefer self.poison(returned_error);
-        const handled = try captureError(&returned_error, allocator.alloc(p.Id, operations.len));
         const parameters = try captureError(
             &returned_error,
             allocator.alloc(Field, operations.len + options.body_parameters.len),
@@ -1615,7 +1659,7 @@ pub const Context = opaque {
             body_effects[options.residual.len + index] = item.operation;
         }
         @memcpy(parameters[operations.len..], options.body_parameters);
-        const body_schema = try captureError(
+        return captureError(
             &returned_error,
             self.callable(
                 parameters,
@@ -1628,13 +1672,19 @@ pub const Context = opaque {
                 },
             ),
         );
-        const residual = try captureError(&returned_error, self.row(options.residual));
-        const answer_id = try captureError(&returned_error, self.schemaId(answer));
-        const resume_answer = if (options.mode == .deep) answer else input;
-        const returns = try captureError(
-            &returned_error,
-            self.handlerReturn(input, answer, options),
-        );
+    }
+    const HandlerArms = struct { clauses: []p.Clause, metadata: []HandlerClauseData };
+    fn handlerArms(
+        self: *Context,
+        operations: []const HandledOperation,
+        answer: *const Schema,
+        resume_answer: *const Schema,
+        options: HandlerOptions,
+        residual: []const p.Id,
+        handled: []const p.Id,
+    ) Error!HandlerArms {
+        const allocator = contextData(self).raw.allocator();
+        var returned_error: anyerror = undefined;
         const clauses = try captureError(
             &returned_error,
             allocator.alloc(p.Clause, operations.len),
@@ -1645,50 +1695,10 @@ pub const Context = opaque {
         );
         for (operations, clauses, metadata, 0..) |item, *clause, *meta, index| {
             const op = data(OperationData, item.operation);
-            const resume_shape: p.Schema = .{ .internal = .{ .resumption = .{
-                .effect = op.id,
-                .input = try captureError(&returned_error, self.schemaId(op.result)),
-                .answer = try captureError(&returned_error, self.schemaId(resume_answer)),
-                .effects = residual,
-                .escaping = try captureError(&returned_error, self.row(options.escaping)),
-                .capture_bound = try captureError(
-                    &returned_error,
-                    self.schemaIds(options.captures),
-                ),
-                .handled = handled,
-                .mode = options.mode,
-                .use = options.use,
-                .owned_regions = try captureError(
-                    &returned_error,
-                    self.regionIds(options.owned_regions),
-                ),
-                .obligations = options.obligations,
-            } } };
-            const resumption = if (options.resumption_slots) |slots|
-                try captureError(
-                    &returned_error,
-                    self.bindSchema(
-                        slots[index],
-                        .resumption,
-                        resume_shape,
-                        &.{.{ .name = "reply", .schema = op.result }},
-                        resume_answer,
-                        options.captures,
-                    ),
-                )
-            else
-                try captureError(
-                    &returned_error,
-                    self.internComplete(
-                        try captureError(
-                            &returned_error,
-                            contextData(self).raw.schema(resume_shape),
-                        ),
-                        &.{.{ .name = "reply", .schema = op.result }},
-                        resume_answer,
-                        options.captures,
-                    ),
-                );
+            const resumption = try captureError(
+                &returned_error,
+                self.handlerResumption(op, index, resume_answer, options, residual, handled),
+            );
             const resume_id = try captureError(&returned_error, self.schemaId(resumption));
             const function_handle = try captureError(
                 &returned_error,
@@ -1705,34 +1715,62 @@ pub const Context = opaque {
                 .resumption = resumption,
             };
         }
-        const state_ids = try captureError(
-            &returned_error,
-            allocator.alloc(p.Id, options.state.len),
-        );
-        for (
-            options.state,
-            state_ids,
-        ) |item, *id| id.* = try captureError(&returned_error, self.schemaId(item.schema));
-        const result = handle(Handler, try captureError(&returned_error, self.save(HandlerData, .{
-            .owner = self,
-            .id = try captureError(&returned_error, contextData(self).raw.handler(.{
-                .mode = options.mode,
-                .input = try captureError(&returned_error, self.schemaId(input)),
-                .answer = answer_id,
-                .return_function = data(FunctionData, returns).id,
-                .clauses = clauses,
-                .state = state_ids,
-                .effects = residual,
-            })),
-            .clauses = metadata,
-            .input = input,
-            .answer = answer,
-            .body_schema = body_schema,
-            .returns = returns,
-            .state = try captureError(&returned_error, self.fields(options.state)),
-        })));
-        try captureError(&returned_error, contextData(self).handlers.append(allocator, result));
-        return captureError(&returned_error, result);
+        return .{ .clauses = clauses, .metadata = metadata };
+    }
+    fn handlerResumption(
+        self: *Context,
+        op: *const OperationData,
+        index: usize,
+        resume_answer: *const Schema,
+        options: HandlerOptions,
+        residual: []const p.Id,
+        handled: []const p.Id,
+    ) Error!*const Schema {
+        var returned_error: anyerror = undefined;
+        const resume_shape: p.Schema = .{ .internal = .{ .resumption = .{
+            .effect = op.id,
+            .input = try captureError(&returned_error, self.schemaId(op.result)),
+            .answer = try captureError(&returned_error, self.schemaId(resume_answer)),
+            .effects = residual,
+            .escaping = try captureError(&returned_error, self.row(options.escaping)),
+            .capture_bound = try captureError(
+                &returned_error,
+                self.schemaIds(options.captures),
+            ),
+            .handled = handled,
+            .mode = options.mode,
+            .use = options.use,
+            .owned_regions = try captureError(
+                &returned_error,
+                self.regionIds(options.owned_regions),
+            ),
+            .obligations = options.obligations,
+        } } };
+        return if (options.resumption_slots) |slots|
+            try captureError(
+                &returned_error,
+                self.bindSchema(
+                    slots[index],
+                    .resumption,
+                    resume_shape,
+                    &.{.{ .name = "reply", .schema = op.result }},
+                    resume_answer,
+                    options.captures,
+                ),
+            )
+        else
+            try captureError(
+                &returned_error,
+                self.internComplete(
+                    try captureError(
+                        &returned_error,
+                        contextData(self).raw.schema(resume_shape),
+                    ),
+                    &.{.{ .name = "reply", .schema = op.result }},
+                    resume_answer,
+                    options.captures,
+                ),
+            );
     }
     /// Derive the resumption clause from a responder with an explicit residual contract.
     pub fn responder(
@@ -2892,26 +2930,8 @@ pub const Body = opaque {
             .divide => .integer_div,
             .remainder => .integer_rem,
         };
-        const overflow = data(FailureLiteralData, failures.overflow);
-        try c.origin(overflow.owner);
-        var faults: [2]p.InstructionFailure = undefined;
-        faults[0] = .{ .kind = .arithmetic_overflow, .value = overflow.literal };
         const division = operation == .divide or operation == .remainder;
-        if (division) {
-            const zero = data(FailureLiteralData, failures.division_by_zero orelse
-                return c.reject(
-                    error.InvalidCategory,
-                    "division",
-                    "requires an authored zero-divisor failure",
-                ));
-            try c.origin(zero.owner);
-            faults[1] = .{ .kind = .division_by_zero, .value = zero.literal };
-        } else if (failures.division_by_zero != null)
-            return c.reject(
-                error.InvalidCategory,
-                "arithmetic",
-                "zero-divisor failure only applies to division or remainder",
-            );
+        const faults = try arithmeticFailures(c, division, failures);
         var returned_error: anyerror = undefined;
         errdefer c.poison(returned_error);
         const value_id = try captureError(
@@ -2929,6 +2949,23 @@ pub const Body = opaque {
                 },
             ),
         );
+        try captureError(&returned_error, arithmeticPublication(c, value_id, failures, division));
+        return captureError(
+            &returned_error,
+            self.bind(
+                try captureError(&returned_error, contextData(c).raw.pure(value_id)),
+                a.schema,
+            ),
+        );
+    }
+    fn arithmeticPublication(
+        c: *Context,
+        value_id: p.Id,
+        failures: ArithmeticFailures,
+        division: bool,
+    ) Error!void {
+        var returned_error: anyerror = undefined;
+        const overflow = data(FailureLiteralData, failures.overflow);
         try captureError(
             &returned_error,
             c.notePublication(.{
@@ -2946,13 +2983,32 @@ pub const Body = opaque {
                 ).schema },
             }),
         );
-        return captureError(
-            &returned_error,
-            self.bind(
-                try captureError(&returned_error, contextData(c).raw.pure(value_id)),
-                a.schema,
-            ),
-        );
+    }
+    fn arithmeticFailures(
+        c: *Context,
+        division: bool,
+        failures: ArithmeticFailures,
+    ) Error![2]p.InstructionFailure {
+        const overflow = data(FailureLiteralData, failures.overflow);
+        try c.origin(overflow.owner);
+        var faults: [2]p.InstructionFailure = undefined;
+        faults[0] = .{ .kind = .arithmetic_overflow, .value = overflow.literal };
+        if (division) {
+            const zero = data(FailureLiteralData, failures.division_by_zero orelse
+                return c.reject(
+                    error.InvalidCategory,
+                    "division",
+                    "requires an authored zero-divisor failure",
+                ));
+            try c.origin(zero.owner);
+            faults[1] = .{ .kind = .division_by_zero, .value = zero.literal };
+        } else if (failures.division_by_zero != null)
+            return c.reject(
+                error.InvalidCategory,
+                "arithmetic",
+                "zero-divisor failure only applies to division or remainder",
+            );
+        return faults;
     }
     /// Consume one product and bind its fields in the current lexical body.
     pub fn destructure(self: *Body, product_value: *const Value) Error!*const ProductParts {
@@ -3509,15 +3565,7 @@ pub const Body = opaque {
         var returned_error: anyerror = undefined;
         errdefer c.poison(returned_error);
         const allocator = raw.allocator();
-        const ids = try captureError(&returned_error, allocator.alloc(p.Id, operands.len));
-        const types = try captureError(&returned_error, allocator.alloc(p.Id, operands.len));
-        const indices = try captureError(&returned_error, allocator.alloc(p.Id, operands.len));
-        for (operands, ids, types, indices, 0..) |operand, *id, *ty, *index, i| {
-            const v = try captureError(&returned_error, self.useValue(operand));
-            id.* = v.id;
-            ty.* = try captureError(&returned_error, c.schemaId(v.schema));
-            index.* = i;
-        }
+        const inputs = try captureError(&returned_error, self.primitiveOperands(operands));
         const faults = try captureError(
             &returned_error,
             allocator.alloc(p.InstructionFailure, failures.len),
@@ -3542,17 +3590,17 @@ pub const Body = opaque {
         }, 0, .{
             .opcode = opcode,
             .result_type = result_id,
-            .operands = indices,
+            .operands = inputs.indices,
             .immediate = @as(u64, 0),
             .failures = faults,
-        }, types, undefined));
+        }, inputs.types, undefined));
         const id = try captureError(
             &returned_error,
             raw.value(.{
                 .schema = result_id,
                 .expression = .{ .primitive = .{
                     .opcode = opcode,
-                    .operands = ids,
+                    .operands = inputs.ids,
                     .immediate = 0,
                     .failures = faults,
                 } },
@@ -3566,6 +3614,21 @@ pub const Body = opaque {
             &returned_error,
             self.bind(try captureError(&returned_error, raw.pure(id)), result),
         );
+    }
+    const PrimitiveOperands = struct { ids: []p.Id, types: []p.Id, indices: []p.Id };
+    fn primitiveOperands(self: *Body, operands: []const *const Value) Error!PrimitiveOperands {
+        const c = bodyData(self).context;
+        const allocator = contextData(c).raw.allocator();
+        const ids = try allocator.alloc(p.Id, operands.len);
+        const types = try allocator.alloc(p.Id, operands.len);
+        const indices = try allocator.alloc(p.Id, operands.len);
+        for (operands, ids, types, indices, 0..) |operand, *id, *ty, *index, i| {
+            const v = try self.useValue(operand);
+            id.* = v.id;
+            ty.* = try c.schemaId(v.schema);
+            index.* = i;
+        }
+        return .{ .ids = ids, .types = types, .indices = indices };
     }
     pub fn convertInteger(
         self: *Body,
@@ -4071,6 +4134,38 @@ pub const Body = opaque {
             contextData(c).raw.allocator().alloc(bool, cases.len),
         );
         @memset(seen, false);
+        const result = try captureError(
+            &returned_error,
+            self.matchArms(cases, sum, schema, raw_cases, seen, named),
+        );
+        return captureError(
+            &returned_error,
+            self.bind(
+                try captureError(
+                    &returned_error,
+                    contextData(c).raw.term(.{ .match_sum = .{
+                        .value = v.id,
+                        .cases = raw_cases,
+                    } }),
+                ),
+                result,
+            ),
+        );
+    }
+    fn matchArms(
+        self: *Body,
+        cases: anytype,
+        sum: *const Value,
+        schema: *const SchemaData,
+        raw_cases: []@typeInfo(@FieldType(
+            @FieldType(source.ast.Term, "match_sum"),
+            "cases",
+        )).pointer.child,
+        seen: []bool,
+        comptime named: bool,
+    ) Error!*const Schema {
+        const c = bodyData(self).context;
+        var returned_error: anyerror = undefined;
         var result: ?*const Schema = null;
         for (cases) |entry| {
             const finished = if (named) entry.value else entry;
@@ -4082,7 +4177,7 @@ pub const Body = opaque {
                 arm.index >= cases.len or seen[arm.index]) return captureError(
                 &returned_error,
                 @as(
-                    Error!*const Value,
+                    Error!*const Schema,
                     c.reject(
                         error.InvalidBranch,
                         "match",
@@ -4094,7 +4189,7 @@ pub const Body = opaque {
                 return captureError(
                     &returned_error,
                     @as(
-                        Error!*const Value,
+                        Error!*const Schema,
                         c.reject(
                             error.InvalidBranch,
                             "match",
@@ -4110,19 +4205,7 @@ pub const Body = opaque {
             seen[arm.index] = true;
             raw_cases[arm.index] = .{ .variable = arm.variable, .body = computation.id };
         }
-        return captureError(
-            &returned_error,
-            self.bind(
-                try captureError(
-                    &returned_error,
-                    contextData(c).raw.term(.{ .match_sum = .{
-                        .value = v.id,
-                        .cases = raw_cases,
-                    } }),
-                ),
-                result.?,
-            ),
-        );
+        return result.?;
     }
     pub fn resumeWith(
         self: *Body,
@@ -4940,101 +5023,165 @@ pub const interop = struct {
         if (contextData(c).imported.get(id)) |present| return present;
         var returned_error: anyerror = undefined;
         errdefer c.poison(returned_error);
-        const shape = contextData(c).raw.schemas.items[@intCast(id)];
-        switch (shape) {
-            .product, .sum, .seq, .vector, .array => {},
-            .internal => |inner| switch (inner) {
-                .computation,
-                .resumption,
-                .borrowed,
-                .suspension_package,
-                .cell,
-                .abstract_resource,
-                => {},
-                else => return captureError(&returned_error, c.intern(id, &.{})),
-            },
-            else => return captureError(&returned_error, c.intern(id, &.{})),
-        }
-        // Install a stable placeholder before following recursive schema edges.
-        const info = try captureError(
-            &returned_error,
-            c.save(SchemaData, .{ .owner = c, .id = id, .positional_import = true }),
-        );
-        const result = handle(Schema, info);
-        try captureError(
-            &returned_error,
-            contextData(c).imported.put(contextData(c).raw.allocator(), id, result),
-        );
-        const ids: []const p.Id = switch (shape) {
-            .product => |v| v,
-            .sum => |v| v,
-            .internal => |v| if (v == .computation) v.computation.parameters else &.{},
-            else => &.{},
-        };
-        info.fields = try captureError(&returned_error, positionalFields(c, ids));
-        info.result = switch (shape) {
-            .seq => |element| try captureError(&returned_error, schema(c, element)),
-            .vector => |vector| try captureError(&returned_error, schema(c, vector.element)),
-            .array => |array| try captureError(&returned_error, schema(c, array.element)),
-            .internal => |v| switch (v) {
-                .computation => |signature| try captureError(
-                    &returned_error,
-                    schema(c, signature.result),
-                ),
-                .resumption => |signature| try captureError(
-                    &returned_error,
-                    schema(c, signature.answer),
-                ),
-                .borrowed => |borrow| try captureError(&returned_error, schema(c, borrow.value)),
-                .suspension_package => |token| try captureError(&returned_error, schema(c, token)),
-                .cell => |cell_shape| try captureError(
-                    &returned_error,
-                    schema(c, cell_shape.element),
-                ),
-                .abstract_resource => |resource_id| if (resource_id < contextData(
-                    c,
-                ).raw.resources.items.len)
-                    try captureError(
-                        &returned_error,
-                        schema(
-                            c,
-                            contextData(c).raw.resources.items[
-                                @intCast(resource_id)
-                            ].representation,
-                        ),
-                    )
-                else
-                    return captureError(&returned_error, error.InvalidReference),
-                else => null,
-            },
-            else => null,
-        };
-        if (shape == .internal and shape.internal == .resumption) {
-            const input = try captureError(
-                &returned_error,
-                schema(c, shape.internal.resumption.input),
-            );
-            info.fields = try captureError(
-                &returned_error,
-                c.fields(&.{.{ .name = "reply", .schema = input }}),
-            );
-        }
-        const capture_ids: []const p.Id = if (shape == .internal) switch (shape.internal) {
-            .computation => |signature| signature.capture_bound,
-            .resumption => |signature| signature.capture_bound,
-            else => &.{},
-        } else &.{};
-        const captures = try captureError(
-            &returned_error,
-            contextData(c).raw.allocator().alloc(*const Schema, capture_ids.len),
-        );
-        for (
-            capture_ids,
-            captures,
-        ) |child, *item| item.* = try captureError(&returned_error, schema(c, child));
-        info.captures = captures;
-        return captureError(&returned_error, result);
+        var importer: SchemaImport = .{ .context = c };
+        defer importer.pending.deinit(contextData(c).raw.allocator());
+        const result = try captureError(&returned_error, importer.begin(id));
+        while (importer.pending.items.len != 0)
+            try captureError(&returned_error, importer.advance());
+        return result;
     }
+
+    const SchemaImport = struct {
+        const Phase = enum { fields, result, reply, reply_fields, captures_init, captures };
+        const Frame = struct {
+            info: *SchemaData,
+            shape: p.Schema,
+            fields: []Field,
+            captures: []*const Schema = &.{},
+            reply: ?*const Schema = null,
+            index: usize = 0,
+            phase: Phase = .fields,
+        };
+        context: *Context,
+        pending: std.ArrayList(Frame) = .empty,
+
+        fn begin(self: *SchemaImport, id: p.Id) Error!*const Schema {
+            const c = self.context;
+            try c.ready();
+            if (id >= contextData(c).raw.schemas.items.len) return error.InvalidSchema;
+            if (contextData(c).imported.get(id)) |present| return present;
+            const shape = contextData(c).raw.schemas.items[@intCast(id)];
+            if (!hasChildren(shape)) return c.intern(id, &.{});
+            const info = try c.save(SchemaData, .{
+                .owner = c,
+                .id = id,
+                .positional_import = true,
+            });
+            const result = handle(Schema, info);
+            const allocator = contextData(c).raw.allocator();
+            try contextData(c).imported.put(allocator, id, result);
+            const fields = try allocator.alloc(Field, parameterIds(shape).len);
+            try self.pending.append(allocator, .{ .info = info, .shape = shape, .fields = fields });
+            return result;
+        }
+
+        fn hasChildren(shape: p.Schema) bool {
+            return switch (shape) {
+                .product, .sum, .seq, .vector, .array => true,
+                .internal => |inner| switch (inner) {
+                    .computation,
+                    .resumption,
+                    .borrowed,
+                    .suspension_package,
+                    .cell,
+                    .abstract_resource,
+                    => true,
+                    else => false,
+                },
+                else => false,
+            };
+        }
+
+        fn parameterIds(shape: p.Schema) []const p.Id {
+            return switch (shape) {
+                .product => |v| v,
+                .sum => |v| v,
+                .internal => |v| if (v == .computation) v.computation.parameters else &.{},
+                else => &.{},
+            };
+        }
+
+        fn captureIds(shape: p.Schema) []const p.Id {
+            return if (shape == .internal) switch (shape.internal) {
+                .computation => |signature| signature.capture_bound,
+                .resumption => |signature| signature.capture_bound,
+                else => &.{},
+            } else &.{};
+        }
+
+        fn resultId(self: *SchemaImport, shape: p.Schema) Error!?p.Id {
+            return switch (shape) {
+                .seq => |element| element,
+                .vector => |vector| vector.element,
+                .array => |array| array.element,
+                .internal => |v| switch (v) {
+                    .computation => |signature| signature.result,
+                    .resumption => |signature| signature.answer,
+                    .borrowed => |borrow| borrow.value,
+                    .suspension_package => |token| token,
+                    .cell => |cell_shape| cell_shape.element,
+                    .abstract_resource => |id| blk: {
+                        const resources = contextData(self.context).raw.resources.items;
+                        if (id >= resources.len) return error.InvalidReference;
+                        break :blk resources[@intCast(id)].representation;
+                    },
+                    else => null,
+                },
+                else => null,
+            };
+        }
+
+        fn advance(self: *SchemaImport) Error!void {
+            const at = self.pending.items.len - 1;
+            const frame = self.pending.items[at];
+            const allocator = contextData(self.context).raw.allocator();
+            switch (frame.phase) {
+                .fields => try self.nextField(at, frame),
+                .result => {
+                    self.pending.items[at].phase = .reply;
+                    if (try self.resultId(frame.shape)) |id|
+                        frame.info.result = try self.begin(id);
+                },
+                .reply => {
+                    self.pending.items[at].phase = .reply_fields;
+                    if (frame.shape == .internal and frame.shape.internal == .resumption) {
+                        const input = try self.begin(frame.shape.internal.resumption.input);
+                        self.pending.items[at].reply = input;
+                    }
+                },
+                .reply_fields => {
+                    if (frame.reply) |input| frame.info.fields = try self.context.fields(
+                        &.{.{ .name = "reply", .schema = input }},
+                    );
+                    self.pending.items[at].phase = .captures_init;
+                },
+                .captures_init => {
+                    self.pending.items[at].captures = try allocator.alloc(
+                        *const Schema,
+                        captureIds(frame.shape).len,
+                    );
+                    self.pending.items[at].index = 0;
+                    self.pending.items[at].phase = .captures;
+                },
+                .captures => try self.nextCapture(at, frame),
+            }
+        }
+
+        fn nextField(self: *SchemaImport, at: usize, frame: Frame) Error!void {
+            const ids = parameterIds(frame.shape);
+            if (frame.index == ids.len) {
+                frame.info.fields = frame.fields;
+                self.pending.items[at].phase = .result;
+                return;
+            }
+            const allocator = contextData(self.context).raw.allocator();
+            const name = try allocator.print("{d}", .{frame.index});
+            self.pending.items[at].index += 1;
+            const child = try self.begin(ids[frame.index]);
+            frame.fields[frame.index] = .{ .name = name, .schema = child };
+        }
+
+        fn nextCapture(self: *SchemaImport, at: usize, frame: Frame) Error!void {
+            const ids = captureIds(frame.shape);
+            if (frame.index == ids.len) {
+                frame.info.captures = frame.captures;
+                _ = self.pending.pop();
+                return;
+            }
+            self.pending.items[at].index += 1;
+            frame.captures[frame.index] = try self.begin(ids[frame.index]);
+        }
+    };
     pub fn namedCallable(c: *Context, id: p.Id, names: []const []const u8) Error!*const Schema {
         const imported = try schema(c, id);
         const shape = contextData(c).raw.schemas.items[@intCast(id)];
@@ -5226,4 +5373,57 @@ pub fn sourceError(err: Error) source.Error {
         => error.InvalidSource,
         else => |other| other,
     };
+}
+
+test "schema imports complete deep cycles with stable metadata identities" {
+    var raw = source.Builder.init(std.testing.allocator);
+    defer raw.deinit();
+    const c = try Context.init(&raw);
+    const depth = 2048;
+    var ids: [depth]p.Id = undefined;
+    for (&ids) |*id| id.* = try raw.reserveSchema();
+    for (ids, 0..) |id, index|
+        try raw.defineSchema(id, .{ .seq = ids[(index + 1) % depth] });
+    const first = try interop.schema(c, ids[0]);
+    var cursor = first;
+    for (ids) |id| {
+        try std.testing.expectEqual(id, try interop.schemaId(c, cursor));
+        try std.testing.expectEqual(cursor, try interop.schema(c, id));
+        cursor = (try cursor.checkedResult()).?;
+    }
+    try std.testing.expectEqual(first, cursor);
+    try std.testing.expectEqual(depth, contextData(c).imported.count());
+}
+
+test "recursive schema import allocation failures poison the partial context" {
+    try @import("../allocation_testing.zig").check(
+        std.testing.allocator,
+        recursiveImportAllocation,
+        .{},
+    );
+}
+
+fn recursiveImportAllocation(allocator: std.mem.Allocator) !void {
+    var raw = source.Builder.init(allocator);
+    defer raw.deinit();
+    const c = try Context.init(&raw);
+    const root = try raw.reserveSchema();
+    const unit = try raw.schema(.unit);
+    try raw.defineSchema(root, .{ .internal = .{ .computation = .{
+        .parameters = &.{root},
+        .result = unit,
+        .capture_bound = &.{root},
+    } } });
+    const imported = interop.schema(c, root) catch |err| {
+        try std.testing.expectEqual(error.OutOfMemory, err);
+        try std.testing.expectEqual(error.OutOfMemory, c.lastDiagnostic().code.?);
+        try std.testing.expectError(error.PoisonedAuthoring, c.ready());
+        return err;
+    };
+    const fields = try imported.checkedFields();
+    try std.testing.expectEqual(@as(usize, 1), fields.len);
+    try std.testing.expectEqualStrings("0", fields[0].name);
+    try std.testing.expectEqual(imported, fields[0].schema);
+    try std.testing.expectEqual(unit, try interop.schemaId(c, (try imported.checkedResult()).?));
+    try std.testing.expectEqual(imported, data(SchemaData, imported).captures[0]);
 }

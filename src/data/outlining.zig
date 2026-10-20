@@ -207,6 +207,17 @@ pub fn construct(
         if (sites.items.len == options.max_sites) return error.OutliningLimit;
         try sites.append(a, .{ .block = id, .arguments = found.arguments });
     }
+    const program = try outlineSites(a, original, form, sites.items);
+    const owned_sites = try sites.toOwnedSlice(a);
+    keep = true;
+    return .{ .arena = arena, .program = program, .sites = owned_sites };
+}
+fn outlineSites(
+    a: std.mem.Allocator,
+    original: ir.Program,
+    form: Form,
+    sites: []const Site,
+) Error!ir.Program {
     const function_id = original.functions.len;
     const body_id = original.blocks.len;
     const functions = try a.alloc(ir.Function, original.functions.len + 1);
@@ -217,14 +228,14 @@ pub fn construct(
         .layout = .{ .slots = form.slots },
         .result = form.slots[@intCast(form.result)],
     };
-    const blocks = try a.alloc(ir.Block, original.blocks.len + 1 + sites.items.len);
+    const blocks = try a.alloc(ir.Block, original.blocks.len + 1 + sites.len);
     @memcpy(blocks[0..original.blocks.len], original.blocks);
     blocks[body_id] = .{
         .function = function_id,
         .instructions = form.instructions,
         .terminator = .{ .return_value = form.result },
     };
-    for (sites.items, 0..) |site, index| {
+    for (sites, 0..) |site, index| {
         const old = original.blocks[site.block];
         const continuation = body_id + 1 + index;
         blocks[site.block] = .{
@@ -253,9 +264,7 @@ pub fn construct(
     var program = original;
     program.functions = functions;
     program.blocks = blocks;
-    const owned_sites = try sites.toOwnedSlice(a);
-    keep = true;
-    return .{ .arena = arena, .program = program, .sites = owned_sites };
+    return program;
 }
 pub fn validate(
     allocator: std.mem.Allocator,
@@ -296,6 +305,38 @@ pub fn validate(
         body.custody != 0 or
         body.terminator != .return_value)
         return error.InvalidOutlining;
+    try validateSites(
+        a,
+        original,
+        candidate,
+        sites,
+        options,
+        permissions,
+        schemas.exportable,
+        worker,
+        body,
+        &budget,
+    );
+    for (original.blocks, candidate.blocks[0..original.blocks.len], 0..) |old, new, id| {
+        var selected = false;
+        for (sites) |site| if (site.block == id) {
+            selected = true;
+        };
+        if (!selected and !equal(ir.Block, old, new)) return error.InvalidOutlining;
+    }
+}
+fn validateSites(
+    a: std.mem.Allocator,
+    original: ir.Program,
+    candidate: ir.Program,
+    sites: []const Site,
+    options: Options,
+    permissions: traits.Facts,
+    exportable: []const bool,
+    worker: ir.Function,
+    body: ir.Block,
+    budget: *Budget,
+) Error!void {
     for (sites, 0..) |site, index| {
         try budget.tick();
         if (site.block >= original.blocks.len) return error.InvalidOutlining;
@@ -304,56 +345,12 @@ pub fn validate(
                 return error.InvalidOutlining;
         const old = original.blocks[site.block];
         const caller = candidate.blocks[site.block];
-        if (!try eligible(original, old, permissions, schemas.exportable, options, &budget) or
+        if (!try eligible(original, old, permissions, exportable, options, budget) or
             site.arguments.len != worker.inputs.len or
             body.instructions.len != old.instructions.len or
             worker.layout.slots.len != worker.inputs.len + body.instructions.len)
             return error.InvalidOutlining;
-        const old_slots = original.functions[@intCast(old.function)].layout.slots;
-        const map = try a.alloc(p.Id, old_slots.len);
-        @memset(map, std.math.maxInt(p.Id));
-        const used = try a.alloc(bool, worker.layout.slots.len);
-        @memset(used, false);
-        for (site.arguments, worker.inputs) |argument, parameter| {
-            if (argument >= old_slots.len or map[
-                @intCast(argument)
-            ] != std.math.maxInt(p.Id) or used[
-                @intCast(parameter)
-            ] or old_slots[
-                @intCast(argument)
-            ] != worker.layout.slots[
-                @intCast(parameter)
-            ]) return error.InvalidOutlining;
-            map[@intCast(argument)] = parameter;
-            used[@intCast(parameter)] = true;
-        }
-        // Reconstruct the substitution through actual original definitions;
-        // discovery's normalized body and parameter map are not consumed.
-        for (old.instructions, body.instructions) |op, replacement| {
-            try budget.tick();
-            if (map[
-                @intCast(op.destination)
-            ] != std.math.maxInt(p.Id) or used[
-                @intCast(replacement.destination)
-            ] or old_slots[
-                @intCast(op.destination)
-            ] != worker.layout.slots[
-                @intCast(replacement.destination)
-            ] or op.operands.len != replacement.operands.len) return error.InvalidOutlining;
-            for (op.operands, replacement.operands) |operand, mapped| {
-                try budget.tick();
-                if (map[@intCast(operand)] != mapped) return error.InvalidOutlining;
-            }
-            var restored = replacement;
-            restored.destination = op.destination;
-            restored.operands = op.operands;
-            if (!equal(ir.Instruction, op, restored)) return error.InvalidOutlining;
-            map[@intCast(op.destination)] = replacement.destination;
-            used[@intCast(replacement.destination)] = true;
-        }
-        if (map[
-            @intCast(old.terminator.return_value)
-        ] != body.terminator.return_value) return error.InvalidOutlining;
+        try validateSubstitution(a, original, old, worker, body, site.arguments, budget);
         if (caller.function != old.function or
             caller.custody != old.custody or
             caller.instructions.len != 0 or
@@ -374,13 +371,61 @@ pub fn validate(
             !equal(ir.Terminator, continuation.terminator, old.terminator))
             return error.InvalidOutlining;
     }
-    for (original.blocks, candidate.blocks[0..original.blocks.len], 0..) |old, new, id| {
-        var selected = false;
-        for (sites) |site| if (site.block == id) {
-            selected = true;
-        };
-        if (!selected and !equal(ir.Block, old, new)) return error.InvalidOutlining;
+}
+fn validateSubstitution(
+    a: std.mem.Allocator,
+    original: ir.Program,
+    old: ir.Block,
+    worker: ir.Function,
+    body: ir.Block,
+    arguments: []const p.Id,
+    budget: *Budget,
+) Error!void {
+    const old_slots = original.functions[@intCast(old.function)].layout.slots;
+    const map = try a.alloc(p.Id, old_slots.len);
+    @memset(map, std.math.maxInt(p.Id));
+    const used = try a.alloc(bool, worker.layout.slots.len);
+    @memset(used, false);
+    for (arguments, worker.inputs) |argument, parameter| {
+        if (argument >= old_slots.len or map[
+            @intCast(argument)
+        ] != std.math.maxInt(p.Id) or used[
+            @intCast(parameter)
+        ] or old_slots[
+            @intCast(argument)
+        ] != worker.layout.slots[
+            @intCast(parameter)
+        ]) return error.InvalidOutlining;
+        map[@intCast(argument)] = parameter;
+        used[@intCast(parameter)] = true;
     }
+    // Reconstruct the substitution through actual original definitions;
+    // discovery's normalized body and parameter map are not consumed.
+    for (old.instructions, body.instructions) |op, replacement| {
+        try budget.tick();
+        if (map[
+            @intCast(op.destination)
+        ] != std.math.maxInt(p.Id) or used[
+            @intCast(replacement.destination)
+        ] or old_slots[
+            @intCast(op.destination)
+        ] != worker.layout.slots[
+            @intCast(replacement.destination)
+        ] or op.operands.len != replacement.operands.len) return error.InvalidOutlining;
+        for (op.operands, replacement.operands) |operand, mapped| {
+            try budget.tick();
+            if (map[@intCast(operand)] != mapped) return error.InvalidOutlining;
+        }
+        var restored = replacement;
+        restored.destination = op.destination;
+        restored.operands = op.operands;
+        if (!equal(ir.Instruction, op, restored)) return error.InvalidOutlining;
+        map[@intCast(op.destination)] = replacement.destination;
+        used[@intCast(replacement.destination)] = true;
+    }
+    if (map[
+        @intCast(old.terminator.return_value)
+    ] != body.terminator.return_value) return error.InvalidOutlining;
 }
 pub fn run(
     allocator: std.mem.Allocator,

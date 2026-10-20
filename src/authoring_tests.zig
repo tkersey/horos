@@ -1000,14 +1000,7 @@ fn suspensionRoundtrip(
     try c.define(returns, try returned.ret(try returned.parameter("result")));
     const clause = try c.clauseFunction(handler);
     const body = try c.body(clause);
-    const ordinary = try body.constant(void, {});
-    try testing.expectError(error.InvalidCategory, body.package(a.interop.erase(ordinary)));
-    try testing.expectError(error.InvalidCategory, body.unpack(a.interop.erase(ordinary)));
-    try testing.expectError(
-        error.InvalidCategory,
-        body.resumePackage(a.interop.erase(ordinary), ordinary),
-    );
-    try testing.expectError(error.InvalidCategory, body.disposePackage(ordinary));
+    try expectPackageCategories(body);
     const packaged = try body.package(try body.parameter("resumption"));
     const box_schema = try c.record(
         .{ .future = try c.suspensionPackage(try a.interop.resumptionSchema(c, handler)) },
@@ -1018,36 +1011,17 @@ fn suspensionRoundtrip(
         parts,
         "future",
     ) else try parts.get("future");
-    if (direct) {
-        var selected = future;
-        if (duplicate or duplicate_product) _ = try body.disposePackage(future);
-        if (duplicate_product) {
-            const again = try body.destructure(box);
-            selected = if (runtime_name) try a.interop.get(
-                again,
-                "future",
-            ) else try again.get("future");
-        }
-        try c.define(
-            clause,
-            try body.ret(try body.resumePackage(selected, try body.parameter("payload"))),
-        );
-    } else {
-        var token = try body.unpack(future);
-        if (duplicate) {
-            _ = try body.dispose(token);
-            token = try body.unpack(future);
-        }
-        if (duplicate_product) {
-            _ = try body.dispose(token);
-            const again = try body.destructure(box);
-            token = try body.unpack(try again.get("future"));
-        }
-        try c.define(
-            clause,
-            try body.ret(try body.resumeValue(token, try body.parameter("payload"))),
-        );
-    }
+    try defineSuspensionClause(
+        c,
+        body,
+        future,
+        duplicate,
+        duplicate_product,
+        direct,
+        runtime_name,
+        box,
+        clause,
+    );
     const work_schema = try c.handledSchema(handler);
     const work = try c.functionFor("work", work_schema);
     const working = try c.body(work);
@@ -1370,26 +1344,7 @@ fn namedContinuationRoute(
             try clause.constant(u64, 42),
         )),
     );
-    if (unused_narrow) {
-        const unused = try c.handler(op, integer, integer, .{
-            .mode = .deep,
-            .use = .linear,
-            .residual = &.{},
-            .captures = &.{integer},
-        });
-        const unused_return = try c.returnFunction(unused);
-        const unused_returns = try c.body(unused_return);
-        try c.define(unused_return, try unused_returns.ret(try unused_returns.parameter("result")));
-        const unused_clause = try c.clauseFunction(unused);
-        const unused_body = try c.body(unused_clause);
-        try c.define(
-            unused_clause,
-            try unused_body.ret(try unused_body.resumeValue(
-                try unused_body.parameter("resumption"),
-                try unused_body.constant(u64, 42),
-            )),
-        );
-    }
+    try defineUnusedHandler(c, unused_narrow, op, integer);
     const entry = try c.function("entry", .{ .record = left }, integer, &.{});
     const body = try c.body(entry);
     const record = try body.parameter("record");
@@ -1397,30 +1352,7 @@ fn namedContinuationRoute(
     const work_fn = try c.functionFor("work", shape);
     const work = try body.closureBody(work_fn);
     const before = if (retained) null else try work.field(record, "left");
-    if (direct_helper) {
-        const helper = try c.function(
-            "forward",
-            .{ .capability = try c.capability(op) },
-            integer,
-            &.{op},
-        );
-        const forward = try c.body(helper);
-        try c.define(
-            helper,
-            try forward.ret(try forward.performLocal(
-                op,
-                try forward.parameter("capability"),
-                try forward.constant(void, {}),
-            )),
-        );
-        _ = try work.call(helper, .{ .capability = try work.parameter("capability") });
-    } else {
-        _ = try work.performLocal(
-            op,
-            try work.parameter("capability"),
-            try work.constant(void, {}),
-        );
-    }
+    try performContinuationOperation(c, direct_helper, integer, op, work);
     const result = before orelse try work.field(record, "left");
     try c.define(work_fn, try work.ret(result));
     try c.define(entry, try body.ret(try body.handleWith(h, try body.lambda(work_fn, shape), .{})));
@@ -2020,32 +1952,7 @@ fn librarySharing(allocator: std.mem.Allocator) !void {
     try testing.expect(
         a.interop.erase(first_raise.handler) != a.interop.erase(second_raise.handler),
     );
-    const count = raw.functions.items.len;
-    for (0..64) |_| {
-        try testing.expectEqual(
-            first_writer.handler,
-            (try writer.interpret(
-                c,
-                logs,
-                left,
-                region,
-                .{ .continuation = &.{} },
-                &.{},
-            )).handler,
-        );
-        try testing.expectEqual(
-            first_raise.handler,
-            (try raise.catching(
-                c,
-                failures,
-                left,
-                .{ .continuation = &.{} },
-                &.{},
-                &.{},
-            )).handler,
-        );
-    }
-    try testing.expectEqual(count, raw.functions.items.len);
+    try expectWriterRaiseSharing(&raw, c, first_writer, first_raise, logs, left, region, failures);
     const other = try a.Context.init(&raw);
     try testing.expectError(
         error.ForeignHandle,
@@ -2076,26 +1983,7 @@ fn groupedHandler(allocator: std.mem.Allocator, negative: bool, older_capture: b
         .captures = captures,
         .body_captures = if (older_capture) &.{try c.capability(first)} else &.{},
     };
-    if (negative) {
-        try testing.expectError(
-            error.InvalidEffect,
-            c.handlerSet(.{ .one = first, .alias = alias }, integer, integer, options),
-        );
-        try testing.expectError(
-            error.DuplicateName,
-            a.interop.RuntimeNamed(.operation).init(
-                c,
-                &.{
-                    .{ .name = "same", .handle = a.interop.erase(first) },
-                    .{ .name = "same", .handle = a.interop.erase(second) },
-                },
-            ),
-        );
-        try testing.expectError(
-            error.InvalidCategory,
-            c.handlerSet(.{}, integer, integer, options),
-        );
-    }
+    try expectAmbiguousHandlers(c, negative, first, alias, second, integer, options);
     // Reverse nominal-ID order: the body parameters and continuation evidence
     // retain caller order, independently of canonical sorted effect rows.
     const h = try c.handlerSet(.{ .second = second, .first = first }, integer, integer, options);
@@ -2188,46 +2076,7 @@ fn stateSharing(allocator: std.mem.Allocator) !void {
         @intCast(try a.interop.schemaId(c, try c.handledSchema(value.handler)))
     ].internal.computation;
     try testing.expectEqual(@as(usize, 0), body_schema.capture_bound.len);
-    const count = raw.functions.items.len;
-    for (0..64) |_| {
-        try testing.expectEqual(
-            value.handler,
-            ((try state.interpret(
-                c,
-                family,
-                integer,
-                region,
-                bound,
-                &.{},
-                .value,
-            )).value).handler,
-        );
-        try testing.expectEqual(
-            optional.handler,
-            ((try state.interpret(
-                c,
-                family,
-                integer,
-                region,
-                bound,
-                &.{},
-                .optional,
-            )).optional).handler,
-        );
-        try testing.expectEqual(
-            paired.handler,
-            ((try state.interpret(
-                c,
-                family,
-                integer,
-                region,
-                bound,
-                &.{},
-                .with_state,
-            )).with_state).handler,
-        );
-    }
-    try testing.expectEqual(count, raw.functions.items.len);
+    try expectStateSharing(&raw, c, value, optional, paired, family, integer, region, bound);
     const other = try a.Context.init(&raw);
     try testing.expectError(
         error.ForeignHandle,
@@ -2337,31 +2186,7 @@ fn resourceConstruction(allocator: std.mem.Allocator, comptime mode: ResourceCas
             release,
         },
     );
-    const acquire_body = try c.body(acquire);
-    const payload_schema = if (mode == .wrong_names) try c.record(
-        .{ .other = integer },
-    ) else representation;
-    const payload = if (mode == .wrong_names) try acquire_body.product(
-        payload_schema,
-        .{ .other = try acquire_body.constant(u64, 42) },
-    ) else try acquire_body.product(
-        payload_schema,
-        .{ .number = try acquire_body.constant(u64, 42) },
-    );
-    try c.define(
-        acquire,
-        try acquire_body.ret(try acquire_body.packResource(owned, a.interop.erase(payload))),
-    );
-    const release_body = try c.body(release);
-    _ = try release_body.unpackResource(try release_body.parameter("resource"));
-    try c.define(release, try release_body.ret(try release_body.constant(void, {})));
-    const work = try c.body(work_fn);
-    const view = try work.parameter("loan");
-    const result = if (mode == .escaping_loan) view else try work.field(
-        try work.unpackResource(view),
-        "number",
-    );
-    try c.define(work_fn, try work.ret(result));
+    try defineResourceBodies(c, mode, acquire, integer, representation, owned, release, work_fn);
     const cleanup_schema = try c.callable(
         .{ .exit = try c.cleanupInfo(unit), .resource = owned },
         unit,
@@ -3483,4 +3308,283 @@ test "typed and source compilation preserve supplied profile validation and use"
             );
         }
     }
+}
+
+fn defineSuspensionClause(
+    c: *a.Context,
+    body: anytype,
+    future: anytype,
+    duplicate: bool,
+    duplicate_product: bool,
+    direct: bool,
+    comptime runtime_name: bool,
+    box: anytype,
+    clause: anytype,
+) !void {
+    if (direct) {
+        var selected = future;
+        if (duplicate or duplicate_product) _ = try body.disposePackage(future);
+        if (duplicate_product) {
+            const again = try body.destructure(box);
+            selected = if (runtime_name) try a.interop.get(
+                again,
+                "future",
+            ) else try again.get("future");
+        }
+        try c.define(
+            clause,
+            try body.ret(try body.resumePackage(selected, try body.parameter("payload"))),
+        );
+    } else {
+        var token = try body.unpack(future);
+        if (duplicate) {
+            _ = try body.dispose(token);
+            token = try body.unpack(future);
+        }
+        if (duplicate_product) {
+            _ = try body.dispose(token);
+            const again = try body.destructure(box);
+            token = try body.unpack(try again.get("future"));
+        }
+        try c.define(
+            clause,
+            try body.ret(try body.resumeValue(token, try body.parameter("payload"))),
+        );
+    }
+}
+
+fn defineUnusedHandler(
+    c: *a.Context,
+    unused_narrow: bool,
+    op: anytype,
+    integer: anytype,
+) !void {
+    if (unused_narrow) {
+        const unused = try c.handler(op, integer, integer, .{
+            .mode = .deep,
+            .use = .linear,
+            .residual = &.{},
+            .captures = &.{integer},
+        });
+        const unused_return = try c.returnFunction(unused);
+        const unused_returns = try c.body(unused_return);
+        try c.define(unused_return, try unused_returns.ret(try unused_returns.parameter("result")));
+        const unused_clause = try c.clauseFunction(unused);
+        const unused_body = try c.body(unused_clause);
+        try c.define(
+            unused_clause,
+            try unused_body.ret(try unused_body.resumeValue(
+                try unused_body.parameter("resumption"),
+                try unused_body.constant(u64, 42),
+            )),
+        );
+    }
+}
+
+fn performContinuationOperation(
+    c: *a.Context,
+    direct_helper: bool,
+    integer: anytype,
+    op: anytype,
+    work: anytype,
+) !void {
+    if (direct_helper) {
+        const helper = try c.function(
+            "forward",
+            .{ .capability = try c.capability(op) },
+            integer,
+            &.{op},
+        );
+        const forward = try c.body(helper);
+        try c.define(
+            helper,
+            try forward.ret(try forward.performLocal(
+                op,
+                try forward.parameter("capability"),
+                try forward.constant(void, {}),
+            )),
+        );
+        _ = try work.call(helper, .{ .capability = try work.parameter("capability") });
+    } else {
+        _ = try work.performLocal(
+            op,
+            try work.parameter("capability"),
+            try work.constant(void, {}),
+        );
+    }
+}
+
+fn expectWriterRaiseSharing(
+    raw: *source.Builder,
+    c: *a.Context,
+    first_writer: anytype,
+    first_raise: anytype,
+    logs: anytype,
+    left: anytype,
+    region: anytype,
+    failures: anytype,
+) !void {
+    const writer = @import("library/writer.zig");
+    const raise = @import("library/raise.zig");
+    const count = raw.functions.items.len;
+    for (0..64) |_| {
+        try testing.expectEqual(
+            first_writer.handler,
+            (try writer.interpret(
+                c,
+                logs,
+                left,
+                region,
+                .{ .continuation = &.{} },
+                &.{},
+            )).handler,
+        );
+        try testing.expectEqual(
+            first_raise.handler,
+            (try raise.catching(
+                c,
+                failures,
+                left,
+                .{ .continuation = &.{} },
+                &.{},
+                &.{},
+            )).handler,
+        );
+    }
+    try testing.expectEqual(count, raw.functions.items.len);
+}
+
+fn expectAmbiguousHandlers(
+    c: *a.Context,
+    negative: bool,
+    first: anytype,
+    alias: anytype,
+    second: anytype,
+    integer: anytype,
+    options: anytype,
+) !void {
+    if (negative) {
+        try testing.expectError(
+            error.InvalidEffect,
+            c.handlerSet(.{ .one = first, .alias = alias }, integer, integer, options),
+        );
+        try testing.expectError(
+            error.DuplicateName,
+            a.interop.RuntimeNamed(.operation).init(
+                c,
+                &.{
+                    .{ .name = "same", .handle = a.interop.erase(first) },
+                    .{ .name = "same", .handle = a.interop.erase(second) },
+                },
+            ),
+        );
+        try testing.expectError(
+            error.InvalidCategory,
+            c.handlerSet(.{}, integer, integer, options),
+        );
+    }
+}
+
+fn expectStateSharing(
+    raw: *source.Builder,
+    c: *a.Context,
+    value: anytype,
+    optional: anytype,
+    paired: anytype,
+    family: anytype,
+    integer: anytype,
+    region: anytype,
+    bound: anytype,
+) !void {
+    const state = @import("library/state.zig");
+    const count = raw.functions.items.len;
+    for (0..64) |_| {
+        try testing.expectEqual(
+            value.handler,
+            ((try state.interpret(
+                c,
+                family,
+                integer,
+                region,
+                bound,
+                &.{},
+                .value,
+            )).value).handler,
+        );
+        try testing.expectEqual(
+            optional.handler,
+            ((try state.interpret(
+                c,
+                family,
+                integer,
+                region,
+                bound,
+                &.{},
+                .optional,
+            )).optional).handler,
+        );
+        try testing.expectEqual(
+            paired.handler,
+            ((try state.interpret(
+                c,
+                family,
+                integer,
+                region,
+                bound,
+                &.{},
+                .with_state,
+            )).with_state).handler,
+        );
+    }
+    try testing.expectEqual(count, raw.functions.items.len);
+}
+
+fn defineResourceBodies(
+    c: *a.Context,
+    comptime mode: ResourceCase,
+    acquire: anytype,
+    integer: anytype,
+    representation: anytype,
+    owned: anytype,
+    release: anytype,
+    work_fn: anytype,
+) !void {
+    const acquire_body = try c.body(acquire);
+    const payload_schema = if (mode == .wrong_names) try c.record(
+        .{ .other = integer },
+    ) else representation;
+    const payload = if (mode == .wrong_names) try acquire_body.product(
+        payload_schema,
+        .{ .other = try acquire_body.constant(u64, 42) },
+    ) else try acquire_body.product(
+        payload_schema,
+        .{ .number = try acquire_body.constant(u64, 42) },
+    );
+    try c.define(
+        acquire,
+        try acquire_body.ret(try acquire_body.packResource(owned, a.interop.erase(payload))),
+    );
+    const release_body = try c.body(release);
+    _ = try release_body.unpackResource(try release_body.parameter("resource"));
+    try c.define(release, try release_body.ret(try release_body.constant(void, {})));
+    const work = try c.body(work_fn);
+    const view = try work.parameter("loan");
+    const result = if (mode == .escaping_loan) view else try work.field(
+        try work.unpackResource(view),
+        "number",
+    );
+    try c.define(work_fn, try work.ret(result));
+}
+
+fn expectPackageCategories(
+    body: anytype,
+) !void {
+    const ordinary = try body.constant(void, {});
+    try testing.expectError(error.InvalidCategory, body.package(a.interop.erase(ordinary)));
+    try testing.expectError(error.InvalidCategory, body.unpack(a.interop.erase(ordinary)));
+    try testing.expectError(
+        error.InvalidCategory,
+        body.resumePackage(a.interop.erase(ordinary), ordinary),
+    );
+    try testing.expectError(error.InvalidCategory, body.disposePackage(ordinary));
 }

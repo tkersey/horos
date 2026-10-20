@@ -300,56 +300,7 @@ pub fn parityFixture(allocator: std.mem.Allocator, n: usize) !ir.Program {
         @import("program.zig").Capture,
         &.{.{ .fields = fields, .use = .reusable }},
     );
-    program.blocks = try allocator.dupe(ir.Block, &.{
-        .{
-            .function = 0,
-            .instructions = try allocator.dupe(
-                ir.Instruction,
-                &.{.{ .destination = n + 2, .opcode = .computation, .operands = captures }},
-            ),
-            .terminator = .{ .apply = .{
-                .computation = n + 2,
-                .arguments = try allocator.dupe(u64, &.{ n, n + 1 }),
-                .next = .{
-                    .block = 1,
-                    .assignments = try allocator.dupe(
-                        ir.Assignment,
-                        &.{.{ .destination = n + 3, .source = .returned }},
-                    ),
-                },
-            } },
-        },
-        .{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = n + 3 } },
-        .{
-            .function = 1,
-            .instructions = &.{},
-            .terminator = .{ .branch = .{
-                .condition = n + 1,
-                .when_true = .{ .block = 3 },
-                .when_false = .{ .block = 5 },
-            } },
-        },
-        .{ .function = 1, .instructions = try allocator.dupe(ir.Instruction, &.{
-            .{
-                .destination = n + 2,
-                .opcode = .integer_bit_xor,
-                .operands = try allocator.dupe(u64, &.{ 0, n }),
-            },
-            .{ .destination = n + 3, .opcode = .constant, .immediate = 0 },
-        }), .terminator = .{ .call = .{
-            .function = 1,
-            .arguments = call_args,
-            .next = .{
-                .block = 4,
-                .assignments = try allocator.dupe(
-                    ir.Assignment,
-                    &.{.{ .destination = n + 4, .source = .returned }},
-                ),
-            },
-        } } },
-        .{ .function = 1, .instructions = &.{}, .terminator = .{ .return_value = n + 4 } },
-        .{ .function = 1, .instructions = observations, .terminator = .{ .return_value = n + 2 } },
-    });
+    program.blocks = try parityBlocks(allocator, n, captures, call_args, observations);
     return program;
 }
 
@@ -585,62 +536,7 @@ test "unseen admitted affine matrices use record semantics rather than fixture n
                 .{ .schema = 0, .bytes = &.{ 0x37, 0, 0, 0, 0, 0, 0, 0 } },
             },
         );
-        // Equal row parity preserves the all-ones unobservable direction of
-        // the two-dimensional even-parity observation space. Rows are not
-        // restricted to permutations: some combine all original coordinates.
-        for (0..3) |row| {
-            random = random *% 6364136223846793005 +% 1442695040888963407;
-            const mask = ([_]u8{ 1, 2, 4, 7 })[@intCast(random >> 62)];
-            var value: ?u64 = null;
-            for (0..3) |column| if (mask & (@as(u8, 1) << @intCast(column)) != 0) {
-                if (value) |previous| {
-                    const slot = layout.items.len;
-                    try layout.append(storage, 0);
-                    try operations.append(
-                        storage,
-                        .{
-                            .destination = slot,
-                            .opcode = .integer_bit_xor,
-                            .operands = try storage.dupe(u64, &.{ previous, column }),
-                        },
-                    );
-                    value = slot;
-                } else value = column;
-            };
-            if (random & 1 != 0) {
-                const slot = layout.items.len;
-                try layout.append(storage, 0);
-                try operations.append(
-                    storage,
-                    .{
-                        .destination = slot,
-                        .opcode = .integer_bit_xor,
-                        .operands = try storage.dupe(u64, &.{ value.?, 3 }),
-                    },
-                );
-                value = slot;
-            }
-            if (random & 2 != 0) {
-                const constant_slot = layout.items.len;
-                try layout.append(storage, 0);
-                try operations.append(
-                    storage,
-                    .{ .destination = constant_slot, .opcode = .constant, .immediate = 2 },
-                );
-                const slot = layout.items.len;
-                try layout.append(storage, 0);
-                try operations.append(
-                    storage,
-                    .{
-                        .destination = slot,
-                        .opcode = .integer_bit_xor,
-                        .operands = try storage.dupe(u64, &.{ value.?, constant_slot }),
-                    },
-                );
-                value = slot;
-            }
-            arguments[row] = value.?;
-        }
+        try randomAffineRows(storage, &random, &layout, &operations, arguments);
         try operations.append(storage, .{ .destination = 6, .opcode = .constant, .immediate = 0 });
         blocks[3].instructions = operations.items;
         blocks[3].terminator.call.arguments = arguments;
@@ -1249,4 +1145,128 @@ test "adding a third legal update mode invalidates a two-mode summary" {
     var retained = try @import("affine_state.zig").run(a, expanded, 0, &stats, 1000000, .{});
     defer retained.deinit();
     try std.testing.expectEqual(.no_change, stats.outcome);
+}
+
+fn parityBlocks(
+    allocator: std.mem.Allocator,
+    n: usize,
+    captures: []const u64,
+    call_args: []const u64,
+    observations: []const ir.Instruction,
+) ![]const ir.Block {
+    return try allocator.dupe(ir.Block, &.{
+        .{
+            .function = 0,
+            .instructions = try allocator.dupe(
+                ir.Instruction,
+                &.{.{ .destination = n + 2, .opcode = .computation, .operands = captures }},
+            ),
+            .terminator = .{ .apply = .{
+                .computation = n + 2,
+                .arguments = try allocator.dupe(u64, &.{ n, n + 1 }),
+                .next = .{
+                    .block = 1,
+                    .assignments = try allocator.dupe(
+                        ir.Assignment,
+                        &.{.{ .destination = n + 3, .source = .returned }},
+                    ),
+                },
+            } },
+        },
+        .{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = n + 3 } },
+        .{
+            .function = 1,
+            .instructions = &.{},
+            .terminator = .{ .branch = .{
+                .condition = n + 1,
+                .when_true = .{ .block = 3 },
+                .when_false = .{ .block = 5 },
+            } },
+        },
+        .{ .function = 1, .instructions = try allocator.dupe(ir.Instruction, &.{
+            .{
+                .destination = n + 2,
+                .opcode = .integer_bit_xor,
+                .operands = try allocator.dupe(u64, &.{ 0, n }),
+            },
+            .{ .destination = n + 3, .opcode = .constant, .immediate = 0 },
+        }), .terminator = .{ .call = .{
+            .function = 1,
+            .arguments = call_args,
+            .next = .{
+                .block = 4,
+                .assignments = try allocator.dupe(
+                    ir.Assignment,
+                    &.{.{ .destination = n + 4, .source = .returned }},
+                ),
+            },
+        } } },
+        .{ .function = 1, .instructions = &.{}, .terminator = .{ .return_value = n + 4 } },
+        .{ .function = 1, .instructions = observations, .terminator = .{ .return_value = n + 2 } },
+    });
+}
+
+fn randomAffineRows(
+    storage: std.mem.Allocator,
+    random: *u64,
+    layout: *std.ArrayList(u64),
+    operations: *std.ArrayList(ir.Instruction),
+    arguments: []u64,
+) !void {
+    // Equal row parity preserves the all-ones unobservable direction of
+    // the two-dimensional even-parity observation space. Rows are not
+    // restricted to permutations: some combine all original coordinates.
+    for (0..3) |row| {
+        random.* = random.* *% 6364136223846793005 +% 1442695040888963407;
+        const mask = ([_]u8{ 1, 2, 4, 7 })[@intCast(random.* >> 62)];
+        var value: ?u64 = null;
+        for (0..3) |column| if (mask & (@as(u8, 1) << @intCast(column)) != 0) {
+            if (value) |previous| {
+                const slot = layout.items.len;
+                try layout.append(storage, 0);
+                try operations.append(
+                    storage,
+                    .{
+                        .destination = slot,
+                        .opcode = .integer_bit_xor,
+                        .operands = try storage.dupe(u64, &.{ previous, column }),
+                    },
+                );
+                value = slot;
+            } else value = column;
+        };
+        if (random.* & 1 != 0) {
+            const slot = layout.items.len;
+            try layout.append(storage, 0);
+            try operations.append(
+                storage,
+                .{
+                    .destination = slot,
+                    .opcode = .integer_bit_xor,
+                    .operands = try storage.dupe(u64, &.{ value.?, 3 }),
+                },
+            );
+            value = slot;
+        }
+        if (random.* & 2 != 0) {
+            const constant_slot = layout.items.len;
+            try layout.append(storage, 0);
+            try operations.append(
+                storage,
+                .{ .destination = constant_slot, .opcode = .constant, .immediate = 2 },
+            );
+            const slot = layout.items.len;
+            try layout.append(storage, 0);
+            try operations.append(
+                storage,
+                .{
+                    .destination = slot,
+                    .opcode = .integer_bit_xor,
+                    .operands = try storage.dupe(u64, &.{ value.?, constant_slot }),
+                },
+            );
+            value = slot;
+        }
+        arguments[row] = value.?;
+    }
 }

@@ -36,19 +36,24 @@ const Budget = struct {
         self.left -= amount;
     }
     fn record(self: *Budget, comptime T: type, value: T) Error!void {
+        @setEvalBranchQuota(10000);
+        return self.recordFields(T, value);
+    }
+
+    inline fn recordFields(self: *Budget, comptime T: type, value: T) Error!void {
         try self.take(1);
         switch (@typeInfo(T)) {
             .@"struct" => |info| inline for (
                 info.field_names,
                 info.field_types,
-            ) |field_name, FieldType| try self.record(FieldType, @field(value, field_name)),
+            ) |field_name, FieldType| try self.recordFields(FieldType, @field(value, field_name)),
             .@"union" => switch (value) {
-                inline else => |payload| try self.record(@TypeOf(payload), payload),
+                inline else => |payload| try self.recordFields(@TypeOf(payload), payload),
             },
             .optional => |info| if (value) |payload| {
-                try self.record(info.child, payload);
+                try self.recordFields(info.child, payload);
             },
-            .pointer => |info| for (value) |item| try self.record(info.child, item),
+            .pointer => |info| for (value) |item| try self.recordFields(info.child, item),
             else => {},
         }
     }
@@ -240,45 +245,53 @@ fn validateObserved(
                     prior.remove == pair.keep))
                 return error.InvalidEvidenceForwarding;
     }
-    for (original.blocks, candidate.blocks) |old, new| {
-        try budget.record(ir.Block, old);
-        try budget.record(ir.Block, new);
-        if (old.terminator != .perform) {
-            if (!equal(ir.Block, old, new)) return error.InvalidEvidenceForwarding;
-            continue;
-        }
-        if (new.terminator != .perform) return error.InvalidEvidenceForwarding;
-        var metadata = new;
-        metadata.terminator = old.terminator;
-        if (!equal(ir.Block, old, metadata)) return error.InvalidEvidenceForwarding;
-        const old_op = old.terminator.perform;
-        const new_op = new.terminator.perform;
-        var op_metadata = new_op;
-        op_metadata.capability = old_op.capability;
-        op_metadata.use_site_capabilities = old_op.use_site_capabilities;
-        if (!equal(ir.Perform, old_op, op_metadata) or
-            old_op.use_site_capabilities.len != new_op.use_site_capabilities.len)
-            return error.InvalidEvidenceForwarding;
-        var expected = old_op.capability;
+    for (original.blocks, candidate.blocks) |old, new|
+        try validateBlock(original, old, new, pairs, &budget);
+}
+fn validateBlock(
+    original: ir.Program,
+    old: ir.Block,
+    new: ir.Block,
+    pairs: []const Pair,
+    budget: *Budget,
+) Error!void {
+    try budget.record(ir.Block, old);
+    try budget.record(ir.Block, new);
+    if (old.terminator != .perform) {
+        if (!equal(ir.Block, old, new)) return error.InvalidEvidenceForwarding;
+        return;
+    }
+    if (new.terminator != .perform) return error.InvalidEvidenceForwarding;
+    var metadata = new;
+    metadata.terminator = old.terminator;
+    if (!equal(ir.Block, old, metadata)) return error.InvalidEvidenceForwarding;
+    const old_op = old.terminator.perform;
+    const new_op = new.terminator.perform;
+    var op_metadata = new_op;
+    op_metadata.capability = old_op.capability;
+    op_metadata.use_site_capabilities = old_op.use_site_capabilities;
+    if (!equal(ir.Perform, old_op, op_metadata) or
+        old_op.use_site_capabilities.len != new_op.use_site_capabilities.len)
+        return error.InvalidEvidenceForwarding;
+    var expected = old_op.capability;
+    for (pairs) |pair|
+        if (pair.function == old.function) {
+            try budget.take(1);
+            const function = original.functions[@intCast(pair.function)];
+            if (old_op.capability == function.inputs[pair.remove])
+                expected = function.inputs[pair.keep];
+        };
+    if (new_op.capability != expected) return error.InvalidEvidenceForwarding;
+    for (old_op.use_site_capabilities, new_op.use_site_capabilities) |old_slot, new_slot| {
+        var expected_slot = old_slot;
         for (pairs) |pair|
             if (pair.function == old.function) {
                 try budget.take(1);
                 const function = original.functions[@intCast(pair.function)];
-                if (old_op.capability == function.inputs[pair.remove])
-                    expected = function.inputs[pair.keep];
+                if (old_slot == function.inputs[pair.remove])
+                    expected_slot = function.inputs[pair.keep];
             };
-        if (new_op.capability != expected) return error.InvalidEvidenceForwarding;
-        for (old_op.use_site_capabilities, new_op.use_site_capabilities) |old_slot, new_slot| {
-            var expected_slot = old_slot;
-            for (pairs) |pair|
-                if (pair.function == old.function) {
-                    try budget.take(1);
-                    const function = original.functions[@intCast(pair.function)];
-                    if (old_slot == function.inputs[pair.remove])
-                        expected_slot = function.inputs[pair.keep];
-                };
-            if (new_slot != expected_slot) return error.InvalidEvidenceForwarding;
-        }
+        if (new_slot != expected_slot) return error.InvalidEvidenceForwarding;
     }
 }
 pub fn run(

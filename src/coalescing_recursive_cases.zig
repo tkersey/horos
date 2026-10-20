@@ -30,6 +30,32 @@ pub fn compile(
     for (&groups) |*group| for (group) |*function| {
         function.* = try b.declare(&.{integer}, integer, row, &.{});
     };
+    try defineRecursiveGroups(&b, groups, kind, effect, integer, boolean, unit);
+    const entry = try b.declare(&.{integer}, pair, row, &.{});
+    const n = try b.reference(b.parameter(entry, 0));
+    const left = try b.variable(integer);
+    const right = try b.variable(integer);
+    const first = try b.term(.{ .call = .{ .function = groups[0][0], .arguments = &.{n} } });
+    const second = try b.term(.{ .call = .{ .function = groups[1][0], .arguments = &.{n} } });
+    const result = try b.primitive(
+        pair,
+        .product,
+        &.{ try b.reference(left), try b.reference(right) },
+        0,
+    );
+    try b.define(entry, try b.bind(left, first, try b.bind(right, second, try b.pure(result))));
+    return source.lowerObserved(allocator, b.module(entry, unit), .{ .coalescing = options });
+}
+
+fn defineRecursiveGroups(
+    b: *source.Builder,
+    groups: [2][2]Id,
+    kind: Kind,
+    effect: ?Id,
+    integer: Id,
+    boolean: Id,
+    unit: Id,
+) source.Error!void {
     for (groups, 0..) |group, side| for (group, 0..) |function, role| {
         const n = try b.reference(b.parameter(function, 0));
         const base: u64 = if (kind == .recursive_near and side == 1 and role == 1)
@@ -64,18 +90,4 @@ pub fn compile(
             } }));
         }
     };
-    const entry = try b.declare(&.{integer}, pair, row, &.{});
-    const n = try b.reference(b.parameter(entry, 0));
-    const left = try b.variable(integer);
-    const right = try b.variable(integer);
-    const first = try b.term(.{ .call = .{ .function = groups[0][0], .arguments = &.{n} } });
-    const second = try b.term(.{ .call = .{ .function = groups[1][0], .arguments = &.{n} } });
-    const result = try b.primitive(
-        pair,
-        .product,
-        &.{ try b.reference(left), try b.reference(right) },
-        0,
-    );
-    try b.define(entry, try b.bind(left, first, try b.bind(right, second, try b.pure(result))));
-    return source.lowerObserved(allocator, b.module(entry, unit), .{ .coalescing = options });
 }

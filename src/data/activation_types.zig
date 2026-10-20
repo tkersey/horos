@@ -85,28 +85,7 @@ pub fn validateWithObservedFacts(
     const exportable = try catalogs(scratch, image, component);
     const uses = try contracts.validateDiagnosed(scratch, image, diagnostic);
     const effects = try effect_scope.deriveComponent(scratch, image, imports);
-    for (image.blocks, 0..) |block, block_id| {
-        if (diagnostic) |d| d.* = .{
-            .phase = .block,
-            .function = block.function,
-            .block = block_id,
-        };
-        const layout = image.functions[@intCast(block.function)].layout.slots;
-        for (block.instructions) |instruction| {
-            // A single-operation typing view, not a predecessor Program or block.
-            // Its result schema is always derived from the owning layout.
-            const operation = .{
-                .opcode = instruction.opcode,
-                .result_type = layout[@intCast(instruction.destination)],
-                .operands = instruction.operands,
-                .immediate = instruction.immediate,
-                .failures = instruction.failures,
-            };
-            try a.validateInstruction(image, block.function, operation, layout, uses);
-            try instructionUses(image, operation, layout, uses);
-        }
-        try terminator(image, block, layout, effects, null);
-    }
+    try validateBlockTypes(image, uses, effects, diagnostic);
     try @import("region_admission.zig").validate(scratch, image);
     const control = try provenance.deriveObserved(scratch, image, imports, component, explanations);
     for (image.blocks, 0..) |block, block_id| {
@@ -147,6 +126,36 @@ pub fn validateWithObservedFacts(
         control,
     );
     return .{ .uses = uses, .effects = effects, .control = control };
+}
+
+fn validateBlockTypes(
+    image: ir.Program,
+    uses: @import("traits.zig").Facts,
+    effects: effect_scope.Facts,
+    diagnostic: ?*a.Diagnostic,
+) Error!void {
+    for (image.blocks, 0..) |block, block_id| {
+        if (diagnostic) |d| d.* = .{
+            .phase = .block,
+            .function = block.function,
+            .block = block_id,
+        };
+        const layout = image.functions[@intCast(block.function)].layout.slots;
+        for (block.instructions) |instruction| {
+            // A single-operation typing view, not a predecessor Program or block.
+            // Its result schema is always derived from the owning layout.
+            const operation = .{
+                .opcode = instruction.opcode,
+                .result_type = layout[@intCast(instruction.destination)],
+                .operands = instruction.operands,
+                .immediate = instruction.immediate,
+                .failures = instruction.failures,
+            };
+            try a.validateInstruction(image, block.function, operation, layout, uses);
+            try instructionUses(image, operation, layout, uses);
+        }
+        try terminator(image, block, layout, effects, null);
+    }
 }
 
 /// Exportability remains valid for the immutable image throughout this call.

@@ -191,7 +191,12 @@ const Statistics = struct {
         }
     }
 
-    fn targets(self: *Statistics, program: Program, control: *const provenance.Analysis, explain: bool) !void {
+    fn targets(
+        self: *Statistics,
+        program: Program,
+        control: *const provenance.Analysis,
+        explain: bool,
+    ) !void {
         for (program.blocks, 0..) |block, index|
             if (block.terminator == .perform) {
                 self.recipients += control.targets(
@@ -213,7 +218,11 @@ const Statistics = struct {
             };
     }
 
-    fn interaction(self: *Statistics, allocator: std.mem.Allocator, control: *const provenance.Analysis) !void {
+    fn interaction(
+        self: *Statistics,
+        allocator: std.mem.Allocator,
+        control: *const provenance.Analysis,
+    ) !void {
         const Probe = struct {
             fn project(
                 _: *const anyopaque,
@@ -257,7 +266,11 @@ const Statistics = struct {
         self.queries = 1;
     }
 
-    fn service(self: *Statistics, allocator: std.mem.Allocator, control: *const provenance.Analysis) !void {
+    fn service(
+        self: *Statistics,
+        allocator: std.mem.Allocator,
+        control: *const provenance.Analysis,
+    ) !void {
         const report = try @import("data/service_interactions.zig").observe(
             allocator,
             control,

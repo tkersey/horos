@@ -32,18 +32,23 @@ const Budget = struct {
     }
 };
 fn charge(comptime T: type, value: T, budget: *Budget) Error!void {
+    @setEvalBranchQuota(10000);
+    return chargeFields(T, value, budget);
+}
+
+inline fn chargeFields(comptime T: type, value: T, budget: *Budget) Error!void {
     try budget.tick();
     switch (@typeInfo(T)) {
         .@"struct" => |info| inline for (
             info.field_names,
             info.field_types,
-        ) |field_name, FieldType| try charge(FieldType, @field(value, field_name), budget),
+        ) |field_name, FieldType| try chargeFields(FieldType, @field(value, field_name), budget),
         .@"union" => switch (value) {
-            inline else => |payload| try charge(@TypeOf(payload), payload, budget),
+            inline else => |payload| try chargeFields(@TypeOf(payload), payload, budget),
         },
-        .pointer => |info| for (value) |item| try charge(info.child, item, budget),
+        .pointer => |info| for (value) |item| try chargeFields(info.child, item, budget),
         .optional => |info| if (value) |item| {
-            try charge(info.child, item, budget);
+            try chargeFields(info.child, item, budget);
         },
         else => {},
     }
@@ -191,8 +196,17 @@ pub fn validate(
             restored,
         )) return error.InvalidCommonTail;
     }
+    try validateBlocks(original, candidate, map, eligible, &budget);
+}
+fn validateBlocks(
+    original: ir.Program,
+    candidate: ir.Program,
+    map: []const p.Id,
+    eligible: []const bool,
+    budget: *Budget,
+) Error!void {
     for (original.blocks, candidate.blocks) |old, new| {
-        try charge(ir.Block, old, &budget);
+        try charge(ir.Block, old, budget);
         var restored = new;
         restored.terminator = old.terminator;
         if (!equal(ir.Block, old, restored)) return error.InvalidCommonTail;

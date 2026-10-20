@@ -105,6 +105,22 @@ pub fn interpret(
         .borrowed_regions = &.{region},
         .state = &.{.{ .name = "state", .schema = cell }},
     });
+    try defineState(c, f, handler, answer, disposition);
+    const value: Interpretation = .{ .handler = handler, .answer = answer, .cell = cell };
+    try f.interpretations.append(
+        allocator,
+        .{ .key = try KeyOps.snapshot(allocator, key), .value = value },
+    );
+    return value;
+}
+
+fn defineState(
+    c: *a.Context,
+    f: *const FamilyData,
+    handler: *const a.Handler,
+    answer: *const a.Schema,
+    disposition: Answer,
+) a.Error!void {
     const returns_fn = try c.returnFunction(handler);
     const returns = try c.body(returns_fn);
     const returned = try returns.parameter("result");
@@ -135,10 +151,4 @@ pub fn interpret(
             try clause.ret(try clause.resumeValue(try clause.parameter("resumption"), reply)),
         );
     }
-    const value: Interpretation = .{ .handler = handler, .answer = answer, .cell = cell };
-    try f.interpretations.append(
-        allocator,
-        .{ .key = try KeyOps.snapshot(allocator, key), .value = value },
-    );
-    return value;
 }

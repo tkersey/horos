@@ -65,19 +65,7 @@ fn expression(
             .when_false = try b.pure(try b.constant(u64, 2)),
         } }),
         .call, .temporary_call, .apply, .temporary_apply => {
-            const identity = try b.declare(&.{integer}, integer, &.{}, &.{});
-            try b.define(identity, try b.pure(try b.reference(b.parameter(identity, 0))));
-            if (kind == .call or kind == .temporary_call)
-                return b.term(.{ .call = .{ .function = identity, .arguments = &.{length} } });
-            const signature = try b.schema(.{ .internal = .{ .computation = .{
-                .parameters = &.{integer},
-                .result = integer,
-                .effects = &.{},
-            } } });
-            return b.term(.{ .apply = .{
-                .computation = try b.lambda(identity, signature),
-                .arguments = &.{length},
-            } });
+            return invokeIdentity(b, kind, integer, length);
         },
         .returned_owner => {
             const factory = try b.declare(&.{}, queue, &.{}, &.{});
@@ -114,4 +102,25 @@ fn expression(
             } });
         },
     }
+}
+
+fn invokeIdentity(
+    b: *source.Builder,
+    kind: Kind,
+    integer: p.Id,
+    length: p.Id,
+) source.Error!p.Id {
+    const identity = try b.declare(&.{integer}, integer, &.{}, &.{});
+    try b.define(identity, try b.pure(try b.reference(b.parameter(identity, 0))));
+    if (kind == .call or kind == .temporary_call)
+        return b.term(.{ .call = .{ .function = identity, .arguments = &.{length} } });
+    const signature = try b.schema(.{ .internal = .{ .computation = .{
+        .parameters = &.{integer},
+        .result = integer,
+        .effects = &.{},
+    } } });
+    return b.term(.{ .apply = .{
+        .computation = try b.lambda(identity, signature),
+        .arguments = &.{length},
+    } });
 }

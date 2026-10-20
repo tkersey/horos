@@ -28,16 +28,10 @@ jobs:
         run: |
           git ls-files '*.zig' | LC_ALL=C sort | diff -u repo_zig_paths.txt -
           xargs zig fmt --check < repo_zig_paths.txt
-      - name: Enforce TigerStyle on the committed change
+      - name: Enforce TigerStyle on all tracked Zig source
         env:
-          BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before }}
           HEAD_REF: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: |
-          set -euo pipefail
-          if [ -z "$BASE_REF" ] || [ "$BASE_REF" = 0000000000000000000000000000000000000000 ]; then
-            BASE_REF=6c3a7e9a225e5733f5971f6da907a14e0997a318
-          fi
-          bash tools/tiger-style.sh "$BASE_REF" "$HEAD_REF"
+        run: bash tools/tiger-style.sh --all "$HEAD_REF"
       - name: Verify TigerStyle selection and failure behavior
         run: bash tools/test-tiger-style.sh
   qualify:

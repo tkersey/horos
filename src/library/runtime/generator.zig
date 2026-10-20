@@ -243,23 +243,7 @@ fn makeExchange(
         answer_declaration,
         &.{ .{ .name = "done", .schema = result }, .{ .name = "yielded", .schema = yielded } },
     );
-    const returns_fn = try c.returnFunction(handler);
-    const returns = try c.body(returns_fn);
-    try c.define(
-        returns_fn,
-        try returns.ret(try returns.variant(answer, "done", try returns.parameter("result"))),
-    );
-    const clause_fn = try c.clauseFunction(handler);
-    const clause = try c.body(clause_fn);
-    const suspended = try clause.package(try clause.parameter("resumption"));
-    const offered = try clause.product(
-        yielded,
-        &.{
-            .{ .name = "value", .value = try clause.parameter("payload") },
-            .{ .name = "future", .value = suspended },
-        },
-    );
-    try c.define(clause_fn, try clause.ret(try clause.variant(answer, "yielded", offered)));
+    try defineExchangeHandler(c, handler, answer, yielded);
     const saved = try a.interop.builder(c).allocator().create(ExchangeData);
     saved.* = .{
         .owner = c,
@@ -408,20 +392,7 @@ fn composeIn(
     const input = left.input;
     const result = left.result;
     const element = right.element;
-    const left_answer_schema = (lp.resultSchema() orelse
-        return error.InvalidCategory).resultSchema() orelse
-        return error.InvalidSchema;
-    const right_answer_schema = (rp.resultSchema() orelse
-        return error.InvalidCategory).resultSchema() orelse
-        return error.InvalidSchema;
-    if (left_answer_schema.fields().len != 2 or
-        right_answer_schema.fields().len != 2)
-        return error.InvalidSchema;
-    const left_parts_schema = left_answer_schema.fields()[1].schema;
-    const right_parts_schema = right_answer_schema.fields()[1].schema;
-    if (left_parts_schema.fields().len != 2 or
-        right_parts_schema.fields().len != 2)
-        return error.InvalidSchema;
+    const shapes = try pipelineShapes(lp, rp);
     const effects = try operations(c, residual.effects);
     const borrowed = try regionHandles(c, borrowed_regions);
     const parameters = &[_]a.Field{
@@ -444,62 +415,9 @@ fn composeIn(
         .linear,
     );
     const g = exchangeData(generated);
-    const loop_schema = try c.handledSchema(g.handler);
-    const loop_fn = try c.functionFor("exchange pipeline", loop_schema);
-    const loop = try c.body(loop_fn);
-    const capability = try loop.parameter("capability");
-    const right_package = try loop.parameter("right");
-    const left_answer = try loop.resumeValue(
-        try loop.unpack(try loop.parameter("left")),
-        try loop.parameter("input"),
-    );
-    const left_done = try loop.caseOf(left_answer, left_answer_schema.fields()[0].name);
-    _ = try left_done.body().dispose(try left_done.body().unpack(right_package));
-    const left_yield = try loop.caseOf(left_answer, left_answer_schema.fields()[1].name);
-    const left_parts = try left_yield.body().destructure(left_yield.payload());
-    const next_left = try left_parts.get(left_parts_schema.fields()[1].name);
-    const right_answer = try left_yield.body().resumeValue(
-        try left_yield.body().unpack(right_package),
-        try left_parts.get(left_parts_schema.fields()[0].name),
-    );
-    const right_done = try left_yield.body().caseOf(
-        right_answer,
-        right_answer_schema.fields()[0].name,
-    );
-    _ = try right_done.body().dispose(try right_done.body().unpack(next_left));
-    const right_yield = try left_yield.body().caseOf(
-        right_answer,
-        right_answer_schema.fields()[1].name,
-    );
-    const right_parts = try right_yield.body().destructure(right_yield.payload());
-    const next_input = try right_yield.body().performLocal(
-        g.effect,
-        capability,
-        try right_parts.get(right_parts_schema.fields()[0].name),
-    );
-    const continued = try right_yield.body().call(
-        loop_fn,
-        &.{
-            .{ .name = "capability", .value = capability },
-            .{ .name = "left", .value = next_left },
-            .{
-                .name = "right",
-                .value = try right_parts.get(right_parts_schema.fields()[1].name),
-            },
-            .{ .name = "input", .value = next_input },
-        },
-    );
-    const after_right = try left_yield.body().match(
-        right_answer,
-        &.{ try right_done.ret(right_done.payload()), try right_yield.ret(continued) },
-    );
-    try c.define(
-        loop_fn,
-        try loop.ret(try loop.match(
-            left_answer,
-            &.{ try left_done.ret(left_done.payload()), try left_yield.ret(after_right) },
-        )),
-    );
+    const loop_definition = try definePipelineLoop(c, g, shapes);
+    const loop_fn = loop_definition.function;
+    const loop_schema = loop_definition.schema;
     const entry_schema = try c.callable(
         parameters,
         g.answer,
@@ -517,6 +435,116 @@ fn composeIn(
         .{ .name = "input", .value = try entry.parameter("input") },
     }, &.{})));
     return .{ .generator = generated, .start = entry_fn };
+}
+
+const PipelineLoop = struct { function: *const a.Function, schema: *const a.Schema };
+fn definePipelineLoop(
+    c: *a.Context,
+    g: *const ExchangeData,
+    shapes: PipelineShapes,
+) a.Error!PipelineLoop {
+    const loop_schema = try c.handledSchema(g.handler);
+    const loop_fn = try c.functionFor("exchange pipeline", loop_schema);
+    const loop = try c.body(loop_fn);
+    const capability = try loop.parameter("capability");
+    const right_package = try loop.parameter("right");
+    const left_answer = try loop.resumeValue(
+        try loop.unpack(try loop.parameter("left")),
+        try loop.parameter("input"),
+    );
+    const left_done = try loop.caseOf(left_answer, shapes.left.answer.fields()[0].name);
+    _ = try left_done.body().dispose(try left_done.body().unpack(right_package));
+    const left_yield = try loop.caseOf(left_answer, shapes.left.answer.fields()[1].name);
+    const left_parts = try left_yield.body().destructure(left_yield.payload());
+    const next_left = try left_parts.get(shapes.left.parts.fields()[1].name);
+    const after_right = try advanceRight(
+        g,
+        shapes,
+        loop_fn,
+        capability,
+        right_package,
+        left_yield,
+        left_parts,
+        next_left,
+    );
+    try c.define(
+        loop_fn,
+        try loop.ret(try loop.match(
+            left_answer,
+            &.{ try left_done.ret(left_done.payload()), try left_yield.ret(after_right) },
+        )),
+    );
+    return .{ .function = loop_fn, .schema = loop_schema };
+}
+
+fn advanceRight(
+    g: *const ExchangeData,
+    shapes: PipelineShapes,
+    loop_fn: *const a.Function,
+    capability: *const a.Value,
+    right_package: *const a.Value,
+    left_yield: *const a.Case,
+    left_parts: *const a.ProductParts,
+    next_left: *const a.Value,
+) a.Error!*const a.Value {
+    const right_answer = try left_yield.body().resumeValue(
+        try left_yield.body().unpack(right_package),
+        try left_parts.get(shapes.left.parts.fields()[0].name),
+    );
+    const right_done = try left_yield.body().caseOf(
+        right_answer,
+        shapes.right.answer.fields()[0].name,
+    );
+    _ = try right_done.body().dispose(try right_done.body().unpack(next_left));
+    const right_yield = try left_yield.body().caseOf(
+        right_answer,
+        shapes.right.answer.fields()[1].name,
+    );
+    const right_parts = try right_yield.body().destructure(right_yield.payload());
+    const next_input = try right_yield.body().performLocal(
+        g.effect,
+        capability,
+        try right_parts.get(shapes.right.parts.fields()[0].name),
+    );
+    const continued = try right_yield.body().call(
+        loop_fn,
+        &.{
+            .{ .name = "capability", .value = capability },
+            .{ .name = "left", .value = next_left },
+            .{
+                .name = "right",
+                .value = try right_parts.get(shapes.right.parts.fields()[1].name),
+            },
+            .{ .name = "input", .value = next_input },
+        },
+    );
+    return try left_yield.body().match(
+        right_answer,
+        &.{ try right_done.ret(right_done.payload()), try right_yield.ret(continued) },
+    );
+}
+
+const ExchangeShape = struct { answer: *const a.Schema, parts: *const a.Schema };
+const PipelineShapes = struct { left: ExchangeShape, right: ExchangeShape };
+fn pipelineShapes(lp: *const a.Schema, rp: *const a.Schema) a.Error!PipelineShapes {
+    const left_answer_schema = (lp.resultSchema() orelse
+        return error.InvalidCategory).resultSchema() orelse
+        return error.InvalidSchema;
+    const right_answer_schema = (rp.resultSchema() orelse
+        return error.InvalidCategory).resultSchema() orelse
+        return error.InvalidSchema;
+    if (left_answer_schema.fields().len != 2 or
+        right_answer_schema.fields().len != 2)
+        return error.InvalidSchema;
+    const left_parts_schema = left_answer_schema.fields()[1].schema;
+    const right_parts_schema = right_answer_schema.fields()[1].schema;
+    if (left_parts_schema.fields().len != 2 or
+        right_parts_schema.fields().len != 2)
+        return error.InvalidSchema;
+    return .{
+        .left = .{ .answer = left_answer_schema, .parts = left_parts_schema },
+        .right = .{ .answer = right_answer_schema, .parts = right_parts_schema },
+    };
 }
 
 fn borrowedRegions(b: *source.Builder, g: Generator) Error![]const p.Id {
@@ -578,4 +606,29 @@ test "typed exchange pipelines preserve ownership, compatibility and definition 
         }},
     }, .{});
     defer compiled.deinit();
+}
+
+fn defineExchangeHandler(
+    c: *a.Context,
+    handler: *const a.Handler,
+    answer: *const a.Schema,
+    yielded: *const a.Schema,
+) a.Error!void {
+    const returns_fn = try c.returnFunction(handler);
+    const returns = try c.body(returns_fn);
+    try c.define(
+        returns_fn,
+        try returns.ret(try returns.variant(answer, "done", try returns.parameter("result"))),
+    );
+    const clause_fn = try c.clauseFunction(handler);
+    const clause = try c.body(clause_fn);
+    const suspended = try clause.package(try clause.parameter("resumption"));
+    const offered = try clause.product(
+        yielded,
+        &.{
+            .{ .name = "value", .value = try clause.parameter("payload") },
+            .{ .name = "future", .value = suspended },
+        },
+    );
+    try c.define(clause_fn, try clause.ret(try clause.variant(answer, "yielded", offered)));
 }

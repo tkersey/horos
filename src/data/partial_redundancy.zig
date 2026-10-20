@@ -160,6 +160,95 @@ pub fn construct(
     var budget: Budget = .{ .remaining = work_limit };
     return constructWithBudget(allocator, original, &budget);
 }
+fn discoverPaths(
+    a: std.mem.Allocator,
+    original: ir.Program,
+    join_id: usize,
+    flow: *@import("activation_flow.zig").Facts,
+    budget: *Budget,
+) Error!?std.ArrayList(Placement) {
+    const join = original.blocks[join_id];
+    const op = join.instructions[0];
+    var paths: std.ArrayList(Placement) = .empty;
+    var reusable: usize = 0;
+    var allowed = true;
+    for (original.blocks, 0..) |predecessor, id| {
+        var index: usize = 0;
+        while (edgeValue(predecessor.terminator, index)) |edge| : (index += 1) {
+            try budget.tick();
+            if (edge.block != join_id) continue;
+            if (!transparent(predecessor.terminator) or
+                id == join_id or
+                predecessor.function != join.function or
+                predecessor.custody != join.custody or
+                flow.positions[id].len <= predecessor.instructions.len)
+            {
+                allowed = false;
+                break;
+            }
+            const source = try localSource(original, predecessor, op, edge, budget);
+            if (source != null) reusable += 1;
+            try paths.append(a, .{ .predecessor = id, .edge = index, .source = source });
+        }
+        if (!allowed) break;
+    }
+    if (!allowed or paths.items.len < 2 or reusable == 0) return null;
+    return paths;
+}
+fn emitPaths(
+    a: std.mem.Allocator,
+    original: ir.Program,
+    join_id: usize,
+    paths: []const Placement,
+    budget: *Budget,
+) Error![]ir.Block {
+    const join = original.blocks[join_id];
+    const op = join.instructions[0];
+    var split_count: usize = 0;
+    for (paths) |path| if (path.source == null and !appendAtPredecessor(
+        original.blocks[path.predecessor],
+        edgeValue(original.blocks[path.predecessor].terminator, path.edge).?,
+    )) {
+        split_count += 1;
+    };
+    const blocks = try a.alloc(ir.Block, original.blocks.len + split_count);
+    @memcpy(blocks[0..original.blocks.len], original.blocks);
+    blocks[join_id].instructions = join.instructions[1..];
+    var next = original.blocks.len;
+    for (paths) |path| {
+        try budget.tick();
+        const before = original.blocks[path.predecessor];
+        const selected = edgeAt(&blocks[path.predecessor].terminator, path.edge).?;
+        if (path.source) |index| {
+            const source = before.instructions[index].destination;
+            var assignments: std.ArrayList(ir.Assignment) = .empty;
+            for (selected.assignments) |assignment|
+                if (assignment.destination != op.destination) {
+                    try assignments.append(a, assignment);
+                };
+            if (source != op.destination) try assignments.append(
+                a,
+                .{ .destination = op.destination, .source = .{ .slot = source } },
+            );
+            selected.assignments = try assignments.toOwnedSlice(a);
+        } else if (appendAtPredecessor(before, selected.*)) {
+            const instructions = try a.alloc(ir.Instruction, before.instructions.len + 1);
+            @memcpy(instructions[0..before.instructions.len], before.instructions);
+            instructions[before.instructions.len] = op;
+            blocks[path.predecessor].instructions = instructions;
+        } else {
+            selected.block = next;
+            blocks[next] = .{
+                .function = join.function,
+                .custody = join.custody,
+                .instructions = try a.dupe(ir.Instruction, &.{op}),
+                .terminator = .{ .jump = .{ .block = join_id } },
+            };
+            next += 1;
+        }
+    }
+    return blocks;
+}
 fn constructWithBudget(
     allocator: std.mem.Allocator,
     original: ir.Program,
@@ -178,73 +267,8 @@ fn constructWithBudget(
         ].entry == join_id) continue;
         const op = join.instructions[0];
         if (!eligible(original, join, op)) continue;
-        var paths: std.ArrayList(Placement) = .empty;
-        var reusable: usize = 0;
-        var allowed = true;
-        for (original.blocks, 0..) |predecessor, id| {
-            var index: usize = 0;
-            while (edgeValue(predecessor.terminator, index)) |edge| : (index += 1) {
-                try budget.tick();
-                if (edge.block != join_id) continue;
-                if (!transparent(predecessor.terminator) or
-                    id == join_id or
-                    predecessor.function != join.function or
-                    predecessor.custody != join.custody or
-                    flow.positions[id].len <= predecessor.instructions.len)
-                {
-                    allowed = false;
-                    break;
-                }
-                const source = try localSource(original, predecessor, op, edge, budget);
-                if (source != null) reusable += 1;
-                try paths.append(a, .{ .predecessor = id, .edge = index, .source = source });
-            }
-            if (!allowed) break;
-        }
-        if (!allowed or paths.items.len < 2 or reusable == 0) continue;
-        var split_count: usize = 0;
-        for (paths.items) |path| if (path.source == null and !appendAtPredecessor(
-            original.blocks[path.predecessor],
-            edgeValue(original.blocks[path.predecessor].terminator, path.edge).?,
-        )) {
-            split_count += 1;
-        };
-        const blocks = try a.alloc(ir.Block, original.blocks.len + split_count);
-        @memcpy(blocks[0..original.blocks.len], original.blocks);
-        blocks[join_id].instructions = join.instructions[1..];
-        var next = original.blocks.len;
-        for (paths.items) |path| {
-            try budget.tick();
-            const before = original.blocks[path.predecessor];
-            const selected = edgeAt(&blocks[path.predecessor].terminator, path.edge).?;
-            if (path.source) |index| {
-                const source = before.instructions[index].destination;
-                var assignments: std.ArrayList(ir.Assignment) = .empty;
-                for (selected.assignments) |assignment|
-                    if (assignment.destination != op.destination) {
-                        try assignments.append(a, assignment);
-                    };
-                if (source != op.destination) try assignments.append(
-                    a,
-                    .{ .destination = op.destination, .source = .{ .slot = source } },
-                );
-                selected.assignments = try assignments.toOwnedSlice(a);
-            } else if (appendAtPredecessor(before, selected.*)) {
-                const instructions = try a.alloc(ir.Instruction, before.instructions.len + 1);
-                @memcpy(instructions[0..before.instructions.len], before.instructions);
-                instructions[before.instructions.len] = op;
-                blocks[path.predecessor].instructions = instructions;
-            } else {
-                selected.block = next;
-                blocks[next] = .{
-                    .function = join.function,
-                    .custody = join.custody,
-                    .instructions = try a.dupe(ir.Instruction, &.{op}),
-                    .terminator = .{ .jump = .{ .block = join_id } },
-                };
-                next += 1;
-            }
-        }
+        var paths = (try discoverPaths(a, original, join_id, &flow, budget)) orelse continue;
+        const blocks = try emitPaths(a, original, join_id, paths.items, budget);
         var program = original;
         program.blocks = blocks;
         const witness_paths = try paths.toOwnedSlice(a);
@@ -344,126 +368,204 @@ fn validateWithBudget(
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var path_index: usize = 0;
-    var appended = original.blocks.len;
-    var reused: usize = 0;
-    for (original.blocks, candidate.blocks[0..original.blocks.len], 0..) |before, after, bid| {
-        try budget.tick();
-        var normalized = after;
-        if (bid == witness.join) {
-            if (!equal(
-                []const ir.Instruction,
-                before.instructions[1..],
-                after.instructions,
-            )) return error.InvalidPartialRedundancy;
-            normalized.instructions = before.instructions;
-        }
-        var index: usize = 0;
-        var insertion = false;
-        while (edgeValue(before.terminator, index)) |edge| : (index += 1) {
-            try budget.tick();
-            if (edge.block != witness.join) continue;
-            if (path_index >= witness.paths.len or
-                !transparent(before.terminator) or
-                bid == witness.join or
-                before.function != join.function or
-                before.custody != join.custody)
-                return error.InvalidPartialRedundancy;
-            const path = witness.paths[path_index];
-            path_index += 1;
-            if (path.predecessor != bid or
-                path.edge != index)
-                return error.InvalidPartialRedundancy;
-            const actual = edgeAt(
-                &normalized.terminator,
-                index,
-            ) orelse return error.InvalidPartialRedundancy;
-            if (path.source) |source_index| {
-                if (!try provesSource(
-                    a,
-                    original,
-                    before,
-                    op,
-                    edge,
-                    source_index,
-                    budget,
-                )) return error.InvalidPartialRedundancy;
-                const source = before.instructions[source_index].destination;
-                if (before_flow.positions[bid].len <= before.instructions.len or
-                    !before_flow.pool.contains(
-                        before_flow.positions[bid][before.instructions.len].available,
-                        source,
-                    ))
-                    return error.InvalidPartialRedundancy;
-                if (actual.block != witness.join) return error.InvalidPartialRedundancy;
-                var at: usize = 0;
-                for (edge.assignments) |assignment| {
-                    if (assignment.destination == op.destination) continue;
-                    if (at >= actual.assignments.len or !equal(
-                        ir.Assignment,
-                        assignment,
-                        actual.assignments[at],
-                    )) return error.InvalidPartialRedundancy;
-                    at += 1;
-                }
-                if (source != op.destination) {
-                    const expected: ir.Assignment = .{
-                        .destination = op.destination,
-                        .source = .{ .slot = source },
-                    };
-                    if (at >= actual.assignments.len or !equal(
-                        ir.Assignment,
-                        expected,
-                        actual.assignments[at],
-                    )) return error.InvalidPartialRedundancy;
-                    at += 1;
-                }
-                if (at != actual.assignments.len) return error.InvalidPartialRedundancy;
-                reused += 1;
-            } else if (appendAtPredecessor(before, edge)) {
-                if (!equal(
-                    ir.Edge,
-                    edge,
-                    actual.*,
-                ) or after.instructions.len != before.instructions.len + 1 or !equal(
-                    []const ir.Instruction,
-                    before.instructions,
-                    after.instructions[0..before.instructions.len],
-                ) or !equal(
-                    ir.Instruction,
-                    op,
-                    after.instructions[before.instructions.len],
-                )) return error.InvalidPartialRedundancy;
-                insertion = true;
-            } else {
-                if (appended >= candidate.blocks.len or actual.block != appended or !equal(
-                    []const ir.Assignment,
-                    edge.assignments,
-                    actual.assignments,
-                )) return error.InvalidPartialRedundancy;
-                const expected: ir.Block = .{
-                    .function = join.function,
-                    .custody = join.custody,
-                    .instructions = &.{op},
-                    .terminator = .{ .jump = .{ .block = witness.join } },
-                };
-                if (!equal(
-                    ir.Block,
-                    expected,
-                    candidate.blocks[appended],
-                )) return error.InvalidPartialRedundancy;
-                appended += 1;
-            }
-            actual.* = edge;
-        }
-        if (insertion) normalized.instructions = before.instructions;
-        if (!equal(ir.Block, before, normalized)) return error.InvalidPartialRedundancy;
+    var state: ValidationProgress = .{ .appended = original.blocks.len };
+    for (original.blocks, 0..) |_, bid| {
+        try validateBlock(a, original, candidate, witness, &before_flow, budget, &state, bid);
     }
-    if (path_index != witness.paths.len or
-        appended != candidate.blocks.len or
-        reused == 0)
+    if (state.path_index != witness.paths.len or
+        state.appended != candidate.blocks.len or
+        state.reused == 0)
         return error.InvalidPartialRedundancy;
 }
+const ValidationProgress = struct { path_index: usize = 0, appended: usize, reused: usize = 0 };
+fn validateReusedSource(
+    a: std.mem.Allocator,
+    original: ir.Program,
+    before: ir.Block,
+    op: ir.Instruction,
+    edge: ir.Edge,
+    actual: ir.Edge,
+    source_index: usize,
+    bid: usize,
+    before_flow: *@import("activation_flow.zig").Facts,
+    budget: *Budget,
+) Error!void {
+    const witness_join = edge.block;
+    if (!try provesSource(
+        a,
+        original,
+        before,
+        op,
+        edge,
+        source_index,
+        budget,
+    )) return error.InvalidPartialRedundancy;
+    const source = before.instructions[source_index].destination;
+    if (before_flow.positions[bid].len <= before.instructions.len or
+        !before_flow.pool.contains(
+            before_flow.positions[bid][before.instructions.len].available,
+            source,
+        ))
+        return error.InvalidPartialRedundancy;
+    if (actual.block != witness_join) return error.InvalidPartialRedundancy;
+    var at: usize = 0;
+    for (edge.assignments) |assignment| {
+        if (assignment.destination == op.destination) continue;
+        if (at >= actual.assignments.len or !equal(
+            ir.Assignment,
+            assignment,
+            actual.assignments[at],
+        )) return error.InvalidPartialRedundancy;
+        at += 1;
+    }
+    if (source != op.destination) {
+        const expected: ir.Assignment = .{
+            .destination = op.destination,
+            .source = .{ .slot = source },
+        };
+        if (at >= actual.assignments.len or !equal(
+            ir.Assignment,
+            expected,
+            actual.assignments[at],
+        )) return error.InvalidPartialRedundancy;
+        at += 1;
+    }
+    if (at != actual.assignments.len) return error.InvalidPartialRedundancy;
+}
+fn validateComputedPath(
+    before: ir.Block,
+    after: ir.Block,
+    candidate: ir.Program,
+    witness: Witness,
+    join: ir.Block,
+    edge: ir.Edge,
+    actual: ir.Edge,
+    state: *ValidationProgress,
+) Error!bool {
+    const op = join.instructions[0];
+    if (appendAtPredecessor(before, edge)) {
+        if (!equal(
+            ir.Edge,
+            edge,
+            actual,
+        ) or after.instructions.len != before.instructions.len + 1 or !equal(
+            []const ir.Instruction,
+            before.instructions,
+            after.instructions[0..before.instructions.len],
+        ) or !equal(
+            ir.Instruction,
+            op,
+            after.instructions[before.instructions.len],
+        )) return error.InvalidPartialRedundancy;
+        return true;
+    } else {
+        if (state.appended >= candidate.blocks.len or actual.block != state.appended or !equal(
+            []const ir.Assignment,
+            edge.assignments,
+            actual.assignments,
+        )) return error.InvalidPartialRedundancy;
+        const expected: ir.Block = .{
+            .function = join.function,
+            .custody = join.custody,
+            .instructions = &.{op},
+            .terminator = .{ .jump = .{ .block = witness.join } },
+        };
+        if (!equal(
+            ir.Block,
+            expected,
+            candidate.blocks[state.appended],
+        )) return error.InvalidPartialRedundancy;
+        state.appended += 1;
+    }
+    return false;
+}
+fn validatePath(
+    before: ir.Block,
+    join: ir.Block,
+    witness: Witness,
+    bid: usize,
+    index: usize,
+    state: *ValidationProgress,
+) Error!Placement {
+    if (state.path_index >= witness.paths.len or
+        !transparent(before.terminator) or
+        bid == witness.join or
+        before.function != join.function or
+        before.custody != join.custody)
+        return error.InvalidPartialRedundancy;
+    const path = witness.paths[state.path_index];
+    state.path_index += 1;
+    if (path.predecessor != bid or
+        path.edge != index)
+        return error.InvalidPartialRedundancy;
+    return path;
+}
+fn validateBlock(
+    a: std.mem.Allocator,
+    original: ir.Program,
+    candidate: ir.Program,
+    witness: Witness,
+    before_flow: *@import("activation_flow.zig").Facts,
+    budget: *Budget,
+    state: *ValidationProgress,
+    bid: usize,
+) Error!void {
+    const before = original.blocks[bid];
+    const after = candidate.blocks[bid];
+    const join = original.blocks[witness.join];
+    const op = join.instructions[0];
+    try budget.tick();
+    var normalized = after;
+    if (bid == witness.join) {
+        if (!equal(
+            []const ir.Instruction,
+            before.instructions[1..],
+            after.instructions,
+        )) return error.InvalidPartialRedundancy;
+        normalized.instructions = before.instructions;
+    }
+    var index: usize = 0;
+    var insertion = false;
+    while (edgeValue(before.terminator, index)) |edge| : (index += 1) {
+        try budget.tick();
+        if (edge.block != witness.join) continue;
+        const path = try validatePath(before, join, witness, bid, index, state);
+        const actual = edgeAt(
+            &normalized.terminator,
+            index,
+        ) orelse return error.InvalidPartialRedundancy;
+        if (path.source) |source_index| {
+            try validateReusedSource(
+                a,
+                original,
+                before,
+                op,
+                edge,
+                actual.*,
+                source_index,
+                bid,
+                before_flow,
+                budget,
+            );
+            state.reused += 1;
+        } else if (try validateComputedPath(
+            before,
+            after,
+            candidate,
+            witness,
+            join,
+            edge,
+            actual.*,
+            state,
+        )) {
+            insertion = true;
+        }
+        actual.* = edge;
+    }
+    if (insertion) normalized.instructions = before.instructions;
+    if (!equal(ir.Block, before, normalized)) return error.InvalidPartialRedundancy;
+}
+
 pub fn run(
     allocator: std.mem.Allocator,
     original: ir.Program,

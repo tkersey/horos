@@ -182,6 +182,29 @@ fn cloneTerm(a: std.mem.Allocator, c: Copies, term: ir.Terminator, arm: usize) !
         else => unreachable,
     };
 }
+fn orderedFunctions(
+    a: std.mem.Allocator,
+    original: ir.Program,
+    order: ?[]const usize,
+) Error!?[]const usize {
+    return if (order) |ids| blk: {
+        const result = try a.alloc(usize, original.functions.len);
+        const seen = try a.alloc(bool, original.functions.len);
+        @memset(seen, false);
+        var count: usize = 0;
+        for (ids) |bid| {
+            const fid: usize = @intCast(original.blocks[bid].function);
+            if (!seen[fid]) {
+                seen[fid] = true;
+                result[count] = fid;
+                count += 1;
+            }
+        }
+        // Admission gives every function an entry block.
+        if (count != result.len) return error.InvalidLoopUnswitch;
+        break :blk result;
+    } else null;
+}
 pub fn construct(
     allocator: std.mem.Allocator,
     original: ir.Program,
@@ -206,90 +229,96 @@ pub fn construct(
         ) catch return error.LoopWorkLimit);
         break :blk try profiles.orderedBlocks(a, original, record);
     } else null;
-    const function_order = if (order) |ids| blk: {
-        const result = try a.alloc(usize, original.functions.len);
-        const seen = try a.alloc(bool, original.functions.len);
-        @memset(seen, false);
-        var count: usize = 0;
-        for (ids) |bid| {
-            const fid: usize = @intCast(original.blocks[bid].function);
-            if (!seen[fid]) {
-                seen[fid] = true;
-                result[count] = fid;
-                count += 1;
-            }
-        }
-        // Admission gives every function an entry block.
-        if (count != result.len) return error.InvalidLoopUnswitch;
-        break :blk result;
-    } else null;
+    const function_order = try orderedFunctions(a, original, order);
     for (0..original.functions.len) |ordinal| {
         const fid = if (function_order) |ids| ids[ordinal] else ordinal;
         if (!try allowed(original, fid, permissions, schemas.exportable, &budget)) continue;
-        const graph = (try loops.Graph.init(a, original, fid, &budget)) orelse continue;
-        if (!try graph.cyclic(&budget)) continue;
-        const dom = try graph.dominators(&budget);
-        const headers = if (order) |ids| blk: {
-            const result = try a.alloc(usize, graph.blocks.len);
-            var count: usize = 0;
-            for (ids) |bid| if (original.blocks[bid].function == fid) {
-                try budget.take(1);
-                result[count] = bid;
-                count += 1;
-            };
-            if (count != result.len) return error.InvalidLoopUnswitch;
-            break :blk result;
-        } else graph.blocks;
-        for (headers) |header| {
-            const h = graph.local[header];
-            try budget.take(1);
-            if (!graph.reachable[h]) continue;
-            const dominated = try a.alloc(bool, graph.blocks.len);
-            for (dominated, 0..) |*v, node| v.* = dom[node * graph.blocks.len + h];
-            const members = (try graph.region(h, dominated, &budget)) orelse continue;
-            const dispatch = dispatchFor(original, graph, members, header) orelse continue;
-            const branch = original.blocks[dispatch].terminator.branch;
-            if (!try immutableCondition(
-                original,
-                graph,
-                members,
-                branch.condition,
-                &budget,
-            )) continue;
-            const c = try copies(a, graph, members, dispatch, &budget);
-            const added = std.math.mul(usize, c.originals.len, 2) catch return error.Capacity;
-            try budget.take(added);
-            const blocks = try a.alloc(
-                ir.Block,
-                std.math.add(usize, original.blocks.len, added) catch return error.Capacity,
-            );
-            @memcpy(blocks[0..original.blocks.len], original.blocks);
-            blocks[dispatch].terminator = .{ .branch = .{
-                .condition = branch.condition,
-                .when_true = mappedEdge(c, branch.when_true, 0),
-                .when_false = mappedEdge(c, branch.when_false, 1),
-            } };
-            for (0..2) |arm| for (c.originals) |bid| {
-                try budget.record(ir.Block, original.blocks[bid]);
-                const copy = &blocks[@intCast(c.copy(bid, arm))];
-                copy.* = original.blocks[bid];
-                copy.terminator = if (bid == dispatch) .{ .jump = mappedEdge(
-                    c,
-                    if (arm == 0) branch.when_true else branch.when_false,
-                    arm,
-                ) } else try cloneTerm(a, c, original.blocks[bid].terminator, arm);
-            };
-            var program = original;
-            program.blocks = blocks;
-            keep = true;
-            return .{
-                .arena = arena,
-                .program = program,
-                .witness = .{ .header = header, .dispatch = dispatch },
-            };
-        }
+        const result = (try constructFunction(a, original, fid, order, &budget)) orelse continue;
+        keep = true;
+        return .{ .arena = arena, .program = result.program, .witness = result.witness };
     }
     return null;
+}
+const Rewrite = struct { program: ir.Program, witness: Witness };
+fn constructFunction(
+    a: std.mem.Allocator,
+    original: ir.Program,
+    fid: usize,
+    order: ?[]const usize,
+    budget: *loops.Budget,
+) Error!?Rewrite {
+    const graph = (try loops.Graph.init(a, original, fid, budget)) orelse return null;
+    if (!try graph.cyclic(budget)) return null;
+    const dom = try graph.dominators(budget);
+    const headers = if (order) |ids| blk: {
+        const result = try a.alloc(usize, graph.blocks.len);
+        var count: usize = 0;
+        for (ids) |bid| if (original.blocks[bid].function == fid) {
+            try budget.take(1);
+            result[count] = bid;
+            count += 1;
+        };
+        if (count != result.len) return error.InvalidLoopUnswitch;
+        break :blk result;
+    } else graph.blocks;
+    for (headers) |header| {
+        const h = graph.local[header];
+        try budget.take(1);
+        if (!graph.reachable[h]) continue;
+        const dominated = try a.alloc(bool, graph.blocks.len);
+        for (dominated, 0..) |*v, node| v.* = dom[node * graph.blocks.len + h];
+        const members = (try graph.region(h, dominated, budget)) orelse continue;
+        const dispatch = dispatchFor(original, graph, members, header) orelse continue;
+        const branch = original.blocks[dispatch].terminator.branch;
+        if (!try immutableCondition(
+            original,
+            graph,
+            members,
+            branch.condition,
+            budget,
+        )) continue;
+        const c = try copies(a, graph, members, dispatch, budget);
+        const program = try emitCopies(a, original, c, budget);
+        return .{
+            .program = program,
+            .witness = .{ .header = header, .dispatch = dispatch },
+        };
+    }
+    return null;
+}
+fn emitCopies(
+    a: std.mem.Allocator,
+    original: ir.Program,
+    c: Copies,
+    budget: *loops.Budget,
+) Error!ir.Program {
+    const dispatch = c.dispatch;
+    const branch = original.blocks[dispatch].terminator.branch;
+    const added = std.math.mul(usize, c.originals.len, 2) catch return error.Capacity;
+    try budget.take(added);
+    const blocks = try a.alloc(
+        ir.Block,
+        std.math.add(usize, original.blocks.len, added) catch return error.Capacity,
+    );
+    @memcpy(blocks[0..original.blocks.len], original.blocks);
+    blocks[dispatch].terminator = .{ .branch = .{
+        .condition = branch.condition,
+        .when_true = mappedEdge(c, branch.when_true, 0),
+        .when_false = mappedEdge(c, branch.when_false, 1),
+    } };
+    for (0..2) |arm| for (c.originals) |bid| {
+        try budget.record(ir.Block, original.blocks[bid]);
+        const copy = &blocks[@intCast(c.copy(bid, arm))];
+        copy.* = original.blocks[bid];
+        copy.terminator = if (bid == dispatch) .{ .jump = mappedEdge(
+            c,
+            if (arm == 0) branch.when_true else branch.when_false,
+            arm,
+        ) } else try cloneTerm(a, c, original.blocks[bid].terminator, arm);
+    };
+    var program = original;
+    program.blocks = blocks;
+    return program;
 }
 fn checkEdge(c: Copies, before: ir.Edge, after: ir.Edge, arm: usize) bool {
     // Independent scalar correspondence: no emitter is invoked by acceptance.
@@ -383,35 +412,18 @@ pub fn validate(
         members,
         witness.header,
     ) != witness.dispatch) return error.InvalidLoopUnswitch;
-    const branch = original.blocks[witness.dispatch].terminator.branch;
-    const dispatch_end = original.blocks[witness.dispatch].instructions.len;
-    // The selector is a definite Boolean version at every original dispatch.
-    if (before.positions[witness.dispatch].len == 0 or
-        !before.pool.contains(
-            before.positions[witness.dispatch][dispatch_end].available,
-            branch.condition,
-        ))
-        return error.InvalidLoopUnswitch;
-    var writes: usize = 0;
-    for (members, graph.blocks) |inside, bid|
-        if (inside) {
-            for (original.blocks[bid].instructions) |op| {
-                try budget.take(1);
-                writes += @intFromBool(op.destination == branch.condition);
-            }
-            var ordinal: usize = 0;
-            while (loops.edge(original.blocks[bid].terminator, ordinal)) |e| : (ordinal += 1)
-                for (e.assignments) |assignment| {
-                    try budget.take(1);
-                    writes += @intFromBool(
-                        assignment.destination == branch.condition and
-                            (assignment.source != .slot or
-                                assignment.source.slot != branch.condition),
-                    );
-                };
-        };
-    if (writes != 0) return error.InvalidLoopUnswitch;
+    try validateSelector(original, witness, graph, members, &before, &budget);
     const c = try copies(a, graph, members, witness.dispatch, &budget);
+    try validateCopies(original, candidate, witness, c, &budget);
+}
+fn validateCopies(
+    original: ir.Program,
+    candidate: ir.Program,
+    witness: Witness,
+    c: Copies,
+    budget: *loops.Budget,
+) Error!void {
+    const branch = original.blocks[witness.dispatch].terminator.branch;
     if (candidate.blocks.len != original.blocks.len + 2 * c.originals.len)
         return error.InvalidLoopUnswitch;
     var rest = candidate;
@@ -441,6 +453,15 @@ pub fn validate(
             1,
         )) return error.InvalidLoopUnswitch;
     }
+    try validateArms(original, candidate, c, budget);
+}
+fn validateArms(
+    original: ir.Program,
+    candidate: ir.Program,
+    c: Copies,
+    budget: *loops.Budget,
+) Error!void {
+    const branch = original.blocks[c.dispatch].terminator.branch;
     for (0..2) |arm| for (c.originals, 0..) |bid, index| {
         try budget.take(1);
         const old = original.blocks[bid];
@@ -452,7 +473,7 @@ pub fn validate(
             old.instructions,
             copy.instructions,
         )) return error.InvalidLoopUnswitch;
-        if (bid == witness.dispatch) {
+        if (bid == c.dispatch) {
             if (copy.terminator != .jump or !checkEdge(
                 c,
                 if (arm == 0) branch.when_true else branch.when_false,
@@ -466,6 +487,43 @@ pub fn validate(
             arm,
         )) return error.InvalidLoopUnswitch;
     };
+}
+fn validateSelector(
+    original: ir.Program,
+    witness: Witness,
+    graph: loops.Graph,
+    members: []const bool,
+    before: *@import("activation_flow.zig").Facts,
+    budget: *loops.Budget,
+) Error!void {
+    const branch = original.blocks[witness.dispatch].terminator.branch;
+    const dispatch_end = original.blocks[witness.dispatch].instructions.len;
+    // The selector is a definite Boolean version at every original dispatch.
+    if (before.positions[witness.dispatch].len == 0 or
+        !before.pool.contains(
+            before.positions[witness.dispatch][dispatch_end].available,
+            branch.condition,
+        ))
+        return error.InvalidLoopUnswitch;
+    var writes: usize = 0;
+    for (members, graph.blocks) |inside, bid|
+        if (inside) {
+            for (original.blocks[bid].instructions) |op| {
+                try budget.take(1);
+                writes += @intFromBool(op.destination == branch.condition);
+            }
+            var ordinal: usize = 0;
+            while (loops.edge(original.blocks[bid].terminator, ordinal)) |e| : (ordinal += 1)
+                for (e.assignments) |assignment| {
+                    try budget.take(1);
+                    writes += @intFromBool(
+                        assignment.destination == branch.condition and
+                            (assignment.source != .slot or
+                                assignment.source.slot != branch.condition),
+                    );
+                };
+        };
+    if (writes != 0) return error.InvalidLoopUnswitch;
 }
 pub fn possible(program: ir.Program) bool {
     for (program.blocks) |block| if (block.terminator == .branch) {

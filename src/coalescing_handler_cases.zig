@@ -29,41 +29,18 @@ pub fn build(b: *source.Builder, kind: Kind) !source.Module {
         .use = .reusable,
         .effects = effects,
     } } });
-    var handlers: [2]p.Id = undefined;
-    var bodies: [2]p.Id = undefined;
-    for (&handlers, &bodies, 0..) |*handler, *body, index| {
-        const returns = try b.declare(&.{ integer, integer }, integer, &.{}, &.{});
-        const sum = try b.value(.{ .schema = integer, .expression = .{ .primitive = .{
-            .opcode = .integer_add,
-            .operands = &.{
-                try b.reference(b.parameter(returns, 0)),
-                try b.reference(b.parameter(returns, 1)),
-            },
-            .failures = &.{.{
-                .kind = .arithmetic_overflow,
-                .value = try b.failureLiteral(try b.constant(void, {})),
-            }},
-        } } });
-        try b.define(returns, try b.pure(sum));
-        handler.* = try b.handler(.{
-            .mode = if (kind == .mixed_mode and index == 1) .shallow else .deep,
-            .input = integer,
-            .answer = integer,
-            .state = &.{integer},
-            .return_function = returns,
-            .clauses = if (effect) |id|
-                try clauses(b, unit, integer, cap.?, id)
-            else
-                &.{},
-        });
-        body.* = try b.declare(parameters, integer, effects, &.{});
-        const body_term = if (effect) |id| try b.term(.{ .perform = .{
-            .effect = id,
-            .capability = try b.reference(b.parameter(body.*, 0)),
-            .payload = try b.constant(void, {}),
-        } }) else try b.pure(try b.constant(u64, 10));
-        try b.define(body.*, body_term);
-    }
+    const definitions = try defineHandlers(
+        b,
+        kind,
+        integer,
+        unit,
+        effect,
+        cap,
+        parameters,
+        effects,
+    );
+    const handlers = definitions.handlers;
+    const bodies = definitions.bodies;
     const entry = try b.declare(&.{ integer, integer }, pair, &.{}, &.{});
     const results = [_]p.Id{ try b.variable(integer), try b.variable(integer) };
     var next = try b.pure(try b.primitive(
@@ -111,4 +88,52 @@ fn clauses(
         p.Clause,
         &.{.{ .effect = effect, .function = function, .resumption = token }},
     );
+}
+
+fn defineHandlers(
+    b: *source.Builder,
+    kind: Kind,
+    integer: p.Id,
+    unit: p.Id,
+    effect: ?p.Id,
+    cap: ?p.Id,
+    parameters: []const p.Id,
+    effects: []const p.Id,
+) source.Error!struct { handlers: [2]p.Id, bodies: [2]p.Id } {
+    var handlers: [2]p.Id = undefined;
+    var bodies: [2]p.Id = undefined;
+    for (&handlers, &bodies, 0..) |*handler, *body, index| {
+        const returns = try b.declare(&.{ integer, integer }, integer, &.{}, &.{});
+        const sum = try b.value(.{ .schema = integer, .expression = .{ .primitive = .{
+            .opcode = .integer_add,
+            .operands = &.{
+                try b.reference(b.parameter(returns, 0)),
+                try b.reference(b.parameter(returns, 1)),
+            },
+            .failures = &.{.{
+                .kind = .arithmetic_overflow,
+                .value = try b.failureLiteral(try b.constant(void, {})),
+            }},
+        } } });
+        try b.define(returns, try b.pure(sum));
+        handler.* = try b.handler(.{
+            .mode = if (kind == .mixed_mode and index == 1) .shallow else .deep,
+            .input = integer,
+            .answer = integer,
+            .state = &.{integer},
+            .return_function = returns,
+            .clauses = if (effect) |id|
+                try clauses(b, unit, integer, cap.?, id)
+            else
+                &.{},
+        });
+        body.* = try b.declare(parameters, integer, effects, &.{});
+        const body_term = if (effect) |id| try b.term(.{ .perform = .{
+            .effect = id,
+            .capability = try b.reference(b.parameter(body.*, 0)),
+            .payload = try b.constant(void, {}),
+        } }) else try b.pure(try b.constant(u64, 10));
+        try b.define(body.*, body_term);
+    }
+    return .{ .handlers = handlers, .bodies = bodies };
 }

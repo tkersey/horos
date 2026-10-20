@@ -20,7 +20,12 @@ const families = .{
     invocation.Control,
     invocation.Outcome,
 };
-fn sample(comptime T: type, allocator: std.mem.Allocator, mode: usize) std.mem.Allocator.Error!T {
+inline fn sample(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    mode: usize,
+) std.mem.Allocator.Error!T {
+    @setEvalBranchQuota(10000);
     return switch (@typeInfo(T)) {
         .void => {},
         .bool => mode % 2 != 0,

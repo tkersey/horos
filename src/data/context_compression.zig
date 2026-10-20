@@ -20,19 +20,24 @@ const Budget = struct {
         self.left -= n;
     }
     fn record(self: *@This(), comptime T: type, value: T) Error!void {
+        @setEvalBranchQuota(10000);
+        return self.recordFields(T, value);
+    }
+
+    inline fn recordFields(self: *@This(), comptime T: type, value: T) Error!void {
         try self.take(1);
         switch (@typeInfo(T)) {
             .@"struct" => |info| inline for (
                 info.field_names,
                 info.field_types,
-            ) |field_name, FieldType| try self.record(FieldType, @field(value, field_name)),
+            ) |field_name, FieldType| try self.recordFields(FieldType, @field(value, field_name)),
             .@"union" => switch (value) {
-                inline else => |v| try self.record(@TypeOf(v), v),
+                inline else => |v| try self.recordFields(@TypeOf(v), v),
             },
             .optional => |info| if (value) |v| {
-                try self.record(info.child, v);
+                try self.recordFields(info.child, v);
             },
-            .pointer => |info| for (value) |v| try self.record(info.child, v),
+            .pointer => |info| for (value) |v| try self.recordFields(info.child, v),
             else => {},
         }
     }
@@ -123,6 +128,18 @@ fn recognize(
         &.{pop},
         0,
     ))) return null;
+    return recognizeStep(program, id, sequence, seed, pop, branch, law, budget);
+}
+fn recognizeStep(
+    program: ir.Program,
+    id: p.Id,
+    sequence: p.Id,
+    seed: p.Id,
+    pop: p.Id,
+    branch: @FieldType(ir.Terminator, "switch_variant"),
+    law: laws.Law,
+    budget: *Budget,
+) Error!?Shape {
     const step = program.blocks[@intCast(branch.cases[1].block)];
     if (step.terminator != .call) return null;
     const bound_payload = branch.cases[1].assignments.len == 1;
@@ -148,6 +165,42 @@ fn recognize(
     const finish = program.blocks[@intCast(call.next.block)];
     if (!laws.matches(law, finish, mask, returned)) return null;
     const result = finish.terminator.return_value;
+    return recognizeRoles(
+        program,
+        id,
+        sequence,
+        seed,
+        pop,
+        pair,
+        mask,
+        tail,
+        returned,
+        result,
+        finish,
+        branch,
+        call,
+        law,
+        budget,
+    );
+}
+fn recognizeRoles(
+    program: ir.Program,
+    id: p.Id,
+    sequence: p.Id,
+    seed: p.Id,
+    pop: p.Id,
+    pair: p.Id,
+    mask: p.Id,
+    tail: p.Id,
+    returned: p.Id,
+    result: p.Id,
+    finish: ir.Block,
+    branch: @FieldType(ir.Terminator, "switch_variant"),
+    call: @FieldType(ir.Terminator, "call"),
+    law: laws.Law,
+    budget: *Budget,
+) Error!?Shape {
+    const f = program.functions[@intCast(id)];
     const ids = [_]p.Id{ f.entry, branch.cases[0].block, branch.cases[1].block, call.next.block };
     if (!distinct(&ids) or !distinct(&.{
         sequence,
@@ -261,44 +314,7 @@ pub fn construct(
     const constants = try a.alloc(p.Literal, constant_count);
     var constant_offset = original.constants.len;
     @memcpy(constants[0..original.constants.len], original.constants);
-    for (shapes.items, 0..) |s, index| {
-        const b = bindings(original, s);
-        const header = original.blocks.len + index;
-        blocks[header] = original.blocks[@intCast(s.entry)];
-        const init_ops = try a.alloc(ir.Instruction, laws.stateCount(s.law));
-        for (init_ops, 0..) |*instruction, i| {
-            constants[constant_offset + i] = .{
-                .schema = s.law.value,
-                .bytes = laws.identity(s.law, i),
-            };
-            instruction.* = .{
-                .destination = if (i == 0) b.summary else b.summary_high,
-                .opcode = .constant,
-                .immediate = constant_offset + i,
-            };
-        }
-        constant_offset += init_ops.len;
-        blocks[@intCast(s.entry)].instructions = init_ops;
-        blocks[@intCast(s.entry)].terminator = .{ .jump = .{ .block = header } };
-        blocks[@intCast(s.base)].instructions = try laws.apply(a, s.law, b);
-        blocks[@intCast(s.base)].terminator = .{ .return_value = s.result };
-        const compose = try laws.compose(a, s.law, b);
-        const prefix = original.blocks[@intCast(s.step)].instructions;
-        const operations = try a.alloc(ir.Instruction, prefix.len + compose.len);
-        @memcpy(operations[0..prefix.len], prefix);
-        @memcpy(operations[prefix.len..], compose);
-        blocks[@intCast(s.step)].instructions = operations;
-        const advance = try a.alloc(ir.Assignment, if (s.law.kind == .boolean_table) 3 else 1);
-        advance[0] = .{ .destination = s.sequence, .source = .{ .slot = s.tail } };
-        if (s.law.kind == .boolean_table) {
-            advance[1] = .{ .destination = b.summary, .source = .{ .slot = b.scratch } };
-            advance[2] = .{ .destination = b.summary_high, .source = .{ .slot = b.scratch_high } };
-        }
-        blocks[@intCast(s.step)].terminator = .{ .jump = .{
-            .block = header,
-            .assignments = advance,
-        } };
-    }
+    try rewriteShapes(a, original, blocks, shapes.items, constants, &constant_offset);
     var program = original;
     program.blocks = blocks;
     program.constants = constants;
@@ -372,6 +388,16 @@ pub fn validate(
         original.functions,
         candidate.functions,
     )) return error.InvalidContextCompression;
+    try validateBlocks(original, candidate, sites, shapes, constant_offsets, &budget);
+}
+fn validateBlocks(
+    original: ir.Program,
+    candidate: ir.Program,
+    sites: []const p.Id,
+    shapes: []const Shape,
+    constant_offsets: []const usize,
+    budget: *Budget,
+) Error!void {
     for (original.blocks, candidate.blocks[0..original.blocks.len], 0..) |old, new, bid| {
         try budget.take(1);
         if (old.function != new.function or
@@ -384,64 +410,7 @@ pub fn validate(
         const s = shapes[index];
         const b = bindings(original, s);
         const header = original.blocks.len + index;
-        if (bid == s.entry) {
-            if (new.instructions.len != laws.stateCount(s.law) or !equal(
-                ir.Terminator,
-                .{ .jump = .{ .block = header } },
-                new.terminator,
-            )) return error.InvalidContextCompression;
-            for (
-                new.instructions,
-                0..,
-            ) |instruction, i| if (!equal(
-                ir.Instruction,
-                .{
-                    .destination = if (i == 0) b.summary else b.summary_high,
-                    .opcode = .constant,
-                    .immediate = constant_offsets[index] + i,
-                },
-                instruction,
-            )) return error.InvalidContextCompression;
-        } else if (bid == s.base) {
-            if (!laws.checkApplication(s.law, b, new.instructions) or !equal(
-                ir.Terminator,
-                .{ .return_value = s.result },
-                new.terminator,
-            )) return error.InvalidContextCompression;
-        } else if (bid == s.step) {
-            if (new.instructions.len < old.instructions.len or !equal(
-                []const ir.Instruction,
-                old.instructions,
-                new.instructions[0..old.instructions.len],
-            ) or !laws.checkComposition(
-                s.law,
-                b,
-                new.instructions[old.instructions.len..],
-            )) return error.InvalidContextCompression;
-            if (new.terminator != .jump or
-                new.terminator.jump.block != header)
-                return error.InvalidContextCompression;
-            const transfers = new.terminator.jump.assignments;
-            if (transfers.len != (if (s.law.kind == .boolean_table) @as(
-                usize,
-                3,
-            ) else 1) or !equal(
-                ir.Assignment,
-                .{ .destination = s.sequence, .source = .{ .slot = s.tail } },
-                transfers[0],
-            )) return error.InvalidContextCompression;
-            if (s.law.kind == .boolean_table) {
-                if (!equal(
-                    ir.Assignment,
-                    .{ .destination = b.summary, .source = .{ .slot = b.scratch } },
-                    transfers[1],
-                ) or !equal(
-                    ir.Assignment,
-                    .{ .destination = b.summary_high, .source = .{ .slot = b.scratch_high } },
-                    transfers[2],
-                )) return error.InvalidContextCompression;
-            }
-        } else if (!equal(ir.Block, old, new)) return error.InvalidContextCompression;
+        try validateBlock(old, new, bid, s, b, header, constant_offsets[index]);
     }
     for (shapes, 0..) |s, index| {
         if (!equal(
@@ -500,4 +469,121 @@ pub fn run(
     const result = try p01.run(allocator, candidate.program, options.coalescing);
     stats.contexts_compressed = candidate.sites.len;
     return result;
+}
+
+fn rewriteShapes(
+    a: std.mem.Allocator,
+    original: ir.Program,
+    blocks: []ir.Block,
+    shapes: []const Shape,
+    constants: []p.Literal,
+    constant_offset: *usize,
+) Error!void {
+    for (shapes, 0..) |s, index| {
+        const b = bindings(original, s);
+        const header = original.blocks.len + index;
+        blocks[header] = original.blocks[@intCast(s.entry)];
+        const init_ops = try a.alloc(ir.Instruction, laws.stateCount(s.law));
+        for (init_ops, 0..) |*instruction, i| {
+            constants[constant_offset.* + i] = .{
+                .schema = s.law.value,
+                .bytes = laws.identity(s.law, i),
+            };
+            instruction.* = .{
+                .destination = if (i == 0) b.summary else b.summary_high,
+                .opcode = .constant,
+                .immediate = constant_offset.* + i,
+            };
+        }
+        constant_offset.* += init_ops.len;
+        blocks[@intCast(s.entry)].instructions = init_ops;
+        blocks[@intCast(s.entry)].terminator = .{ .jump = .{ .block = header } };
+        blocks[@intCast(s.base)].instructions = try laws.apply(a, s.law, b);
+        blocks[@intCast(s.base)].terminator = .{ .return_value = s.result };
+        const compose = try laws.compose(a, s.law, b);
+        const prefix = original.blocks[@intCast(s.step)].instructions;
+        const operations = try a.alloc(ir.Instruction, prefix.len + compose.len);
+        @memcpy(operations[0..prefix.len], prefix);
+        @memcpy(operations[prefix.len..], compose);
+        blocks[@intCast(s.step)].instructions = operations;
+        const advance = try a.alloc(ir.Assignment, if (s.law.kind == .boolean_table) 3 else 1);
+        advance[0] = .{ .destination = s.sequence, .source = .{ .slot = s.tail } };
+        if (s.law.kind == .boolean_table) {
+            advance[1] = .{ .destination = b.summary, .source = .{ .slot = b.scratch } };
+            advance[2] = .{ .destination = b.summary_high, .source = .{ .slot = b.scratch_high } };
+        }
+        blocks[@intCast(s.step)].terminator = .{ .jump = .{
+            .block = header,
+            .assignments = advance,
+        } };
+    }
+}
+
+fn validateBlock(
+    old: ir.Block,
+    new: ir.Block,
+    bid: usize,
+    s: Shape,
+    b: laws.Bindings,
+    header: usize,
+    constant_offset: usize,
+) Error!void {
+    if (bid == s.entry) {
+        if (new.instructions.len != laws.stateCount(s.law) or !equal(
+            ir.Terminator,
+            .{ .jump = .{ .block = header } },
+            new.terminator,
+        )) return error.InvalidContextCompression;
+        for (
+            new.instructions,
+            0..,
+        ) |instruction, i| if (!equal(
+            ir.Instruction,
+            .{
+                .destination = if (i == 0) b.summary else b.summary_high,
+                .opcode = .constant,
+                .immediate = constant_offset + i,
+            },
+            instruction,
+        )) return error.InvalidContextCompression;
+    } else if (bid == s.base) {
+        if (!laws.checkApplication(s.law, b, new.instructions) or !equal(
+            ir.Terminator,
+            .{ .return_value = s.result },
+            new.terminator,
+        )) return error.InvalidContextCompression;
+    } else if (bid == s.step) {
+        if (new.instructions.len < old.instructions.len or !equal(
+            []const ir.Instruction,
+            old.instructions,
+            new.instructions[0..old.instructions.len],
+        ) or !laws.checkComposition(
+            s.law,
+            b,
+            new.instructions[old.instructions.len..],
+        )) return error.InvalidContextCompression;
+        if (new.terminator != .jump or
+            new.terminator.jump.block != header)
+            return error.InvalidContextCompression;
+        const transfers = new.terminator.jump.assignments;
+        if (transfers.len != (if (s.law.kind == .boolean_table) @as(
+            usize,
+            3,
+        ) else 1) or !equal(
+            ir.Assignment,
+            .{ .destination = s.sequence, .source = .{ .slot = s.tail } },
+            transfers[0],
+        )) return error.InvalidContextCompression;
+        if (s.law.kind == .boolean_table) {
+            if (!equal(
+                ir.Assignment,
+                .{ .destination = b.summary, .source = .{ .slot = b.scratch } },
+                transfers[1],
+            ) or !equal(
+                ir.Assignment,
+                .{ .destination = b.summary_high, .source = .{ .slot = b.scratch_high } },
+                transfers[2],
+            )) return error.InvalidContextCompression;
+        }
+    } else if (!equal(ir.Block, old, new)) return error.InvalidContextCompression;
 }

@@ -48,62 +48,25 @@ pub fn run(
         const a = next_arena.allocator();
         const permissions = try traits.derive(a, current.schemas);
         const blocks = try a.dupe(ir.Block, current.blocks);
-        var witnesses: std.ArrayList(Witness) = .empty;
-        var removed_count: usize = 0;
-        var removed_constructions: usize = 0;
-        for (current.blocks, blocks, 0..) |block, *out, id| {
-            const remove = try a.alloc(bool, block.instructions.len);
-            @memset(remove, false);
-            if (flow.live[id].len != 0) {
-                var demand = flow.live[id][block.instructions.len];
-                var index = block.instructions.len;
-                while (index != 0) {
-                    if (stats.work == options.work_limit) {
-                        stats.work_limit = true;
-                        stats.instructions_removed = 0;
-                        stats.constructions_removed = 0;
-                        stats.rounds = 0;
-                        // No partly searched candidate or partial facts escape.
-                        return coalescing.run(allocator, original, options.coalescing);
-                    }
-                    stats.work += 1;
-                    index -= 1;
-                    const instruction = block.instructions[index];
-                    if (!flow.pool.contains(demand, instruction.destination) and
-                        totalDroppable(current, block.function, instruction, permissions))
-                    {
-                        remove[index] = true;
-                        removed_count += 1;
-                        if (instruction.opcode == .computation) removed_constructions += 1;
-                    } else {
-                        demand = try flow.pool.remove(demand, instruction.destination);
-                        for (instruction.operands) |slot| demand = try flow.pool.insert(
-                            demand,
-                            slot,
-                        );
-                    }
-                }
-            }
-            var instructions: std.ArrayList(ir.Instruction) = .empty;
-            var removed: std.ArrayList(usize) = .empty;
-            for (block.instructions, remove, 0..) |instruction, discard, index| {
-                if (discard)
-                    try removed.append(a, index)
-                else
-                    try instructions.append(a, instruction);
-            }
-            out.instructions = try instructions.toOwnedSlice(a);
-            if (removed.items.len != 0) try witnesses.append(
-                a,
-                .{ .block = id, .removed = try removed.toOwnedSlice(a) },
-            );
-        }
-        if (removed_count == 0) return coalescing.run(allocator, current, options.coalescing);
+        const removed = (try collectDeletions(
+            a,
+            current,
+            &flow,
+            permissions,
+            blocks,
+            &stats,
+            options.work_limit,
+        )) orelse {
+            resetProgress(&stats);
+            return coalescing.run(allocator, original, options.coalescing);
+        };
+        if (removed.removed_count == 0)
+            return coalescing.run(allocator, current, options.coalescing);
         var candidate = current;
         candidate.blocks = blocks;
-        try validate(allocator, current, candidate, witnesses.items);
-        stats.instructions_removed += removed_count;
-        stats.constructions_removed += removed_constructions;
+        try validate(allocator, current, candidate, removed.witnesses.items);
+        stats.instructions_removed += removed.removed_count;
+        stats.constructions_removed += removed.removed_constructions;
         stats.rounds += 1;
         // All metadata and operands still borrow the immutable original;
         // instruction/block arrays are copied completely into the next owner.
@@ -112,11 +75,96 @@ pub fn run(
         next_arena = std.heap.ArenaAllocator.init(allocator);
         current = candidate;
     }
+    resetProgress(&stats);
+    return coalescing.run(allocator, original, options.coalescing);
+}
+
+const Deletions = struct {
+    witnesses: std.ArrayList(Witness) = .empty,
+    removed_count: usize = 0,
+    removed_constructions: usize = 0,
+};
+fn resetProgress(stats: *Statistics) void {
     stats.work_limit = true;
     stats.instructions_removed = 0;
     stats.constructions_removed = 0;
     stats.rounds = 0;
-    return coalescing.run(allocator, original, options.coalescing);
+}
+fn collectDeletions(
+    a: std.mem.Allocator,
+    current: ir.Program,
+    flow: *@import("activation_flow.zig").Facts,
+    permissions: traits.Facts,
+    blocks: []ir.Block,
+    stats: *Statistics,
+    work_limit: u64,
+) Error!?Deletions {
+    var result: Deletions = .{};
+    for (current.blocks, blocks, 0..) |block, *out, id| {
+        const remove = try a.alloc(bool, block.instructions.len);
+        @memset(remove, false);
+        if (!try markDeletions(
+            current,
+            block,
+            id,
+            flow,
+            permissions,
+            remove,
+            stats,
+            work_limit,
+            &result,
+        )) return null;
+        var instructions: std.ArrayList(ir.Instruction) = .empty;
+        var removed: std.ArrayList(usize) = .empty;
+        for (block.instructions, remove, 0..) |instruction, discard, index| {
+            if (discard)
+                try removed.append(a, index)
+            else
+                try instructions.append(a, instruction);
+        }
+        out.instructions = try instructions.toOwnedSlice(a);
+        if (removed.items.len != 0) try result.witnesses.append(
+            a,
+            .{ .block = id, .removed = try removed.toOwnedSlice(a) },
+        );
+    }
+    return result;
+}
+fn markDeletions(
+    current: ir.Program,
+    block: ir.Block,
+    id: usize,
+    flow: *@import("activation_flow.zig").Facts,
+    permissions: traits.Facts,
+    remove: []bool,
+    stats: *Statistics,
+    work_limit: u64,
+    result: *Deletions,
+) Error!bool {
+    if (flow.live[id].len != 0) {
+        var demand = flow.live[id][block.instructions.len];
+        var index = block.instructions.len;
+        while (index != 0) {
+            if (stats.work == work_limit) return false;
+            stats.work += 1;
+            index -= 1;
+            const instruction = block.instructions[index];
+            if (!flow.pool.contains(demand, instruction.destination) and
+                totalDroppable(current, block.function, instruction, permissions))
+            {
+                remove[index] = true;
+                result.removed_count += 1;
+                if (instruction.opcode == .computation) result.removed_constructions += 1;
+            } else {
+                demand = try flow.pool.remove(demand, instruction.destination);
+                for (instruction.operands) |slot| demand = try flow.pool.insert(
+                    demand,
+                    slot,
+                );
+            }
+        }
+    }
+    return true;
 }
 
 fn totalDroppable(

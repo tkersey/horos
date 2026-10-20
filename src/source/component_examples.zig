@@ -104,39 +104,7 @@ fn caller(b: *source.Builder, c: Common) !Built {
 }
 fn stateful(b: *source.Builder, c: Common) !Built {
     const twice = try b.declare(&.{c.callback}, c.pair, &.{c.read}, &.{});
-    const token = try b.schema(.{ .internal = .{ .resumption = .{
-        .effect = c.read,
-        .input = c.integer,
-        .answer = c.pair,
-        .effects = &.{c.read},
-        .capture_bound = &.{ c.unit, c.integer, c.cap, c.callback, c.pair },
-        .handled = &.{c.read},
-        .escaping = &.{c.read},
-        .mode = .shallow,
-        .use = .linear,
-    } } });
-    const returns = try b.declare(&.{ c.integer, c.pair }, c.pair, &.{}, &.{});
-    try b.define(returns, try b.pure(try b.reference(b.parameter(returns, 1))));
-    const clause = try b.declare(&.{ c.integer, c.unit, token }, c.pair, &.{c.read}, &.{});
-    const handler = try b.handler(.{
-        .mode = .shallow,
-        .input = c.pair,
-        .answer = c.pair,
-        .return_function = returns,
-        .state = &.{c.integer},
-        .effects = &.{c.read},
-        .clauses = &.{.{ .effect = c.read, .function = clause, .resumption = token }},
-    });
-    const current = try b.reference(b.parameter(clause, 0));
-    try b.define(
-        clause,
-        try b.term(.{ .resume_with = .{
-            .resumption = try b.reference(b.parameter(clause, 2)),
-            .argument = current,
-            .handler = handler,
-            .state = &.{try add(b, c.integer, current, try b.constant(u64, 1))},
-        } }),
-    );
+    const handler = try defineStateHandler(b, c);
     const body = try b.declare(&.{c.cap}, c.pair, &.{c.read}, &.{});
     const callback = try b.declare(&.{}, c.integer, &.{c.read}, &.{});
     try b.define(
@@ -210,34 +178,7 @@ fn suspension(b: *source.Builder, common_types: Common) !Built {
     const start_type = try c.handledSchema(generator.handler());
     const start_fn = try c.functionFor("component producer", start_type);
     const start = try main_body.closureBody(start_fn);
-    const capability = try start.parameter("capability");
-    const body_type = try c.callable(
-        .{},
-        unit,
-        &.{generator.effect()},
-        .{ .use = .reusable, .captures = &.{ generator.capability(), integer } },
-    );
-    const body_fn = try c.functionFor("component suspension", body_type);
-    const body = try start.closureBody(body_fn);
-    _ = try body.performLocal(generator.effect(), capability, value);
-    try c.define(body_fn, try body.ret(try body.constant(void, {})));
-    const cleanup_type = try c.callable(
-        .{ .exit = try c.cleanupInfo(unit) },
-        unit,
-        &.{release},
-        .{ .use = .reusable, .captures = &.{integer} },
-    );
-    const cleanup_fn = try c.functionFor("component release", cleanup_type);
-    const cleanup = try start.closureBody(cleanup_fn);
-    try c.define(cleanup_fn, try cleanup.ret(try cleanup.perform(release, value)));
-    try c.define(
-        start_fn,
-        try start.ret(try start.protect(
-            try start.lambda(body_fn, body_type),
-            try start.lambda(cleanup_fn, cleanup_type),
-            .{},
-        )),
-    );
+    try defineSuspensionProducer(c, generator, unit, integer, release, start, start_fn, value);
     const answer = try main_body.handleWith(
         generator.handler(),
         try main_body.lambda(start_fn, start_type),
@@ -397,3 +338,83 @@ pub const double_bindings = bindings ++ [_]data.linker.Binding{
         .supplied = .{ .instance = "suspend", .symbol = "release" },
     },
 };
+
+fn defineStateHandler(
+    b: *source.Builder,
+    c: Common,
+) source.Error!p.Id {
+    const token = try b.schema(.{ .internal = .{ .resumption = .{
+        .effect = c.read,
+        .input = c.integer,
+        .answer = c.pair,
+        .effects = &.{c.read},
+        .capture_bound = &.{ c.unit, c.integer, c.cap, c.callback, c.pair },
+        .handled = &.{c.read},
+        .escaping = &.{c.read},
+        .mode = .shallow,
+        .use = .linear,
+    } } });
+    const returns = try b.declare(&.{ c.integer, c.pair }, c.pair, &.{}, &.{});
+    try b.define(returns, try b.pure(try b.reference(b.parameter(returns, 1))));
+    const clause = try b.declare(&.{ c.integer, c.unit, token }, c.pair, &.{c.read}, &.{});
+    const handler = try b.handler(.{
+        .mode = .shallow,
+        .input = c.pair,
+        .answer = c.pair,
+        .return_function = returns,
+        .state = &.{c.integer},
+        .effects = &.{c.read},
+        .clauses = &.{.{ .effect = c.read, .function = clause, .resumption = token }},
+    });
+    const current = try b.reference(b.parameter(clause, 0));
+    try b.define(
+        clause,
+        try b.term(.{ .resume_with = .{
+            .resumption = try b.reference(b.parameter(clause, 2)),
+            .argument = current,
+            .handler = handler,
+            .state = &.{try add(b, c.integer, current, try b.constant(u64, 1))},
+        } }),
+    );
+    return handler;
+}
+
+fn defineSuspensionProducer(
+    c: *authoring.Context,
+    generator: anytype,
+    unit: anytype,
+    integer: anytype,
+    release: anytype,
+    start: anytype,
+    start_fn: anytype,
+    value: anytype,
+) authoring.Error!void {
+    const capability = try start.parameter("capability");
+    const body_type = try c.callable(
+        .{},
+        unit,
+        &.{generator.effect()},
+        .{ .use = .reusable, .captures = &.{ generator.capability(), integer } },
+    );
+    const body_fn = try c.functionFor("component suspension", body_type);
+    const body = try start.closureBody(body_fn);
+    _ = try body.performLocal(generator.effect(), capability, value);
+    try c.define(body_fn, try body.ret(try body.constant(void, {})));
+    const cleanup_type = try c.callable(
+        .{ .exit = try c.cleanupInfo(unit) },
+        unit,
+        &.{release},
+        .{ .use = .reusable, .captures = &.{integer} },
+    );
+    const cleanup_fn = try c.functionFor("component release", cleanup_type);
+    const cleanup = try start.closureBody(cleanup_fn);
+    try c.define(cleanup_fn, try cleanup.ret(try cleanup.perform(release, value)));
+    try c.define(
+        start_fn,
+        try start.ret(try start.protect(
+            try start.lambda(body_fn, body_type),
+            try start.lambda(cleanup_fn, cleanup_type),
+            .{},
+        )),
+    );
+}

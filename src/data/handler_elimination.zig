@@ -102,6 +102,103 @@ pub fn possible(program: ir.Program) bool {
     };
     return false;
 }
+fn returnBridge(
+    a: std.mem.Allocator,
+    old: ir.Block,
+    caller: *ir.Function,
+    blocks: *std.ArrayList(ir.Block),
+    handle: anytype,
+    handler: anytype,
+) Error!ir.Edge {
+    const slot = caller.layout.slots.len;
+    const slots = try a.alloc(
+        p.Id,
+        std.math.add(usize, slot, 1) catch return error.Capacity,
+    );
+    @memcpy(slots[0..slot], caller.layout.slots);
+    slots[slot] = handler.input;
+    caller.layout.slots = slots;
+    const arguments = try a.alloc(p.Id, handle.state.len + 1);
+    @memcpy(arguments[0..handle.state.len], handle.state);
+    arguments[handle.state.len] = slot;
+    const assignments = try a.alloc(ir.Assignment, 1);
+    assignments[0] = .{ .destination = slot, .source = .returned };
+    const next: ir.Edge = .{ .block = blocks.items.len, .assignments = assignments };
+    try blocks.append(
+        a,
+        .{
+            .function = old.function,
+            .custody = old.custody,
+            .instructions = &.{},
+            .terminator = .{ .call = .{
+                .function = handler.return_function,
+                .arguments = arguments,
+                .next = handle.next,
+            } },
+        },
+    );
+    return next;
+}
+fn validateBridge(
+    original: ir.Block,
+    candidate: ir.Program,
+    lengths: []usize,
+    bridge: *usize,
+    handle: anytype,
+    apply: anytype,
+    handler: anytype,
+) Error!void {
+    const old = original;
+    if (bridge.* >= candidate.blocks.len or
+        apply.next.block != bridge.* or
+        apply.next.assignments.len != 1)
+        return error.InvalidHandlerElimination;
+    const slot = lengths[@intCast(old.function)];
+    const assignment = apply.next.assignments[0];
+    if (assignment.destination != slot or
+        assignment.source != .returned or
+        slot >= candidate.functions[
+            @intCast(old.function)
+        ].layout.slots.len or
+        candidate.functions[
+            @intCast(old.function)
+        ].layout.slots[slot] != handler.input)
+        return error.InvalidHandlerElimination;
+    lengths[@intCast(old.function)] += 1;
+    const call = candidate.blocks[bridge.*];
+    bridge.* += 1;
+    if (call.function != old.function or
+        call.custody != old.custody or
+        call.instructions.len != 0 or
+        call.terminator != .call or
+        call.terminator.call.function != handler.return_function or
+        !equal(ir.Edge, call.terminator.call.next, handle.next))
+        return error.InvalidHandlerElimination;
+    const actual = call.terminator.call.arguments;
+    if (actual.len != handle.state.len + 1 or !equal(
+        []const p.Id,
+        actual[0..handle.state.len],
+        handle.state,
+    ) or actual[handle.state.len] != slot) return error.InvalidHandlerElimination;
+}
+fn validateLayouts(
+    a: std.mem.Allocator,
+    original: ir.Program,
+    candidate: ir.Program,
+) Error![]usize {
+    const lengths = try a.alloc(usize, original.functions.len);
+    for (original.functions, candidate.functions, lengths) |old, new, *length| {
+        length.* = old.layout.slots.len;
+        var metadata = new;
+        metadata.layout = old.layout;
+        if (!equal(ir.Function, old, metadata) or new.layout.slots.len < length.* or !equal(
+            []const p.Id,
+            old.layout.slots,
+            new.layout.slots[0..length.*],
+        )) return error.InvalidHandlerElimination;
+    }
+    return lengths;
+}
 pub fn construct(
     allocator: std.mem.Allocator,
     original: ir.Program,
@@ -129,33 +226,13 @@ pub fn construct(
         if (!try eligible(a, original, handler, permissions, schemas.exportable, &budget)) continue;
         var next = handle.next;
         if (!identityReturn(original, handler)) {
-            const caller = &functions[@intCast(old.function)];
-            const slot = caller.layout.slots.len;
-            const slots = try a.alloc(
-                p.Id,
-                std.math.add(usize, slot, 1) catch return error.Capacity,
-            );
-            @memcpy(slots[0..slot], caller.layout.slots);
-            slots[slot] = handler.input;
-            caller.layout.slots = slots;
-            const arguments = try a.alloc(p.Id, handle.state.len + 1);
-            @memcpy(arguments[0..handle.state.len], handle.state);
-            arguments[handle.state.len] = slot;
-            const assignments = try a.alloc(ir.Assignment, 1);
-            assignments[0] = .{ .destination = slot, .source = .returned };
-            next = .{ .block = blocks.items.len, .assignments = assignments };
-            try blocks.append(
+            next = try returnBridge(
                 a,
-                .{
-                    .function = old.function,
-                    .custody = old.custody,
-                    .instructions = &.{},
-                    .terminator = .{ .call = .{
-                        .function = handler.return_function,
-                        .arguments = arguments,
-                        .next = handle.next,
-                    } },
-                },
+                old,
+                &functions[@intCast(old.function)],
+                &blocks,
+                handle,
+                handler,
             );
             calls += 1;
         }
@@ -199,17 +276,7 @@ pub fn validate(
         original.functions.len != candidate.functions.len or
         original.blocks.len > candidate.blocks.len)
         return error.InvalidHandlerElimination;
-    const lengths = try a.alloc(usize, original.functions.len);
-    for (original.functions, candidate.functions, lengths) |old, new, *length| {
-        length.* = old.layout.slots.len;
-        var metadata = new;
-        metadata.layout = old.layout;
-        if (!equal(ir.Function, old, metadata) or new.layout.slots.len < length.* or !equal(
-            []const p.Id,
-            old.layout.slots,
-            new.layout.slots[0..length.*],
-        )) return error.InvalidHandlerElimination;
-    }
+    const lengths = try validateLayouts(a, original, candidate);
     var budget: Budget = .{ .left = limit };
     var bridge = original.blocks.len;
     for (original.blocks, candidate.blocks[0..original.blocks.len]) |old, new| {
@@ -236,37 +303,7 @@ pub fn validate(
             handle.arguments,
         )) return error.InvalidHandlerElimination;
         if (identityReturn(original, handler) and equal(ir.Edge, apply.next, handle.next)) continue;
-        if (bridge >= candidate.blocks.len or
-            apply.next.block != bridge or
-            apply.next.assignments.len != 1)
-            return error.InvalidHandlerElimination;
-        const slot = lengths[@intCast(old.function)];
-        const assignment = apply.next.assignments[0];
-        if (assignment.destination != slot or
-            assignment.source != .returned or
-            slot >= candidate.functions[
-                @intCast(old.function)
-            ].layout.slots.len or
-            candidate.functions[
-                @intCast(old.function)
-            ].layout.slots[slot] != handler.input)
-            return error.InvalidHandlerElimination;
-        lengths[@intCast(old.function)] += 1;
-        const call = candidate.blocks[bridge];
-        bridge += 1;
-        if (call.function != old.function or
-            call.custody != old.custody or
-            call.instructions.len != 0 or
-            call.terminator != .call or
-            call.terminator.call.function != handler.return_function or
-            !equal(ir.Edge, call.terminator.call.next, handle.next))
-            return error.InvalidHandlerElimination;
-        const actual = call.terminator.call.arguments;
-        if (actual.len != handle.state.len + 1 or !equal(
-            []const p.Id,
-            actual[0..handle.state.len],
-            handle.state,
-        ) or actual[handle.state.len] != slot) return error.InvalidHandlerElimination;
+        try validateBridge(old, candidate, lengths, &bridge, handle, apply, handler);
     }
     if (bridge != candidate.blocks.len) return error.InvalidHandlerElimination;
     for (

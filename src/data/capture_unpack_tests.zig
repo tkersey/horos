@@ -355,36 +355,7 @@ pub fn retentionFixture(allocator: std.mem.Allocator, case: RetentionCase) !ir.P
     switch (case) {
         .closure => {},
         .indirect_call => {
-            functions[5] = .{
-                .entry = 12,
-                .inputs = &.{ 0, 1 },
-                .layout = .{ .slots = &.{ 5, 1, 1 } },
-                .result = 1,
-                .effects = &.{0},
-            };
-            blocks[12] = .{
-                .function = 5,
-                .instructions = &.{},
-                .terminator = .{ .perform = .{
-                    .effect = 0,
-                    .capability = 0,
-                    .payload = 1,
-                    .next = .{
-                        .block = 13,
-                        .assignments = &.{.{ .destination = 2, .source = .returned }},
-                    },
-                } },
-            };
-            blocks[13] = .{
-                .function = 5,
-                .instructions = &.{},
-                .terminator = .{ .return_value = 2 },
-            };
-            blocks[0].terminator = .{ .call = .{
-                .function = 5,
-                .arguments = &.{ 5, 6 },
-                .next = .{ .block = 6 },
-            } };
+            retentionIndirectCall(functions, blocks);
         },
         .before_construction => {
             blocks[0].instructions = retained_cycle.blocks[0].instructions[1..];
@@ -478,4 +449,37 @@ test "capture unpack still rejects an invalid original continuation bound" {
     schemas[6].internal.resumption.capture_bound = &.{ 0, 2, 3, 5 };
     original.schemas = &schemas;
     try std.testing.expectError(error.InvalidOwnership, unpack.construct(a, original, 0));
+}
+
+fn retentionIndirectCall(functions: []ir.Function, blocks: []ir.Block) void {
+    functions[5] = .{
+        .entry = 12,
+        .inputs = &.{ 0, 1 },
+        .layout = .{ .slots = &.{ 5, 1, 1 } },
+        .result = 1,
+        .effects = &.{0},
+    };
+    blocks[12] = .{
+        .function = 5,
+        .instructions = &.{},
+        .terminator = .{ .perform = .{
+            .effect = 0,
+            .capability = 0,
+            .payload = 1,
+            .next = .{
+                .block = 13,
+                .assignments = &.{.{ .destination = 2, .source = .returned }},
+            },
+        } },
+    };
+    blocks[13] = .{
+        .function = 5,
+        .instructions = &.{},
+        .terminator = .{ .return_value = 2 },
+    };
+    blocks[0].terminator = .{ .call = .{
+        .function = 5,
+        .arguments = &.{ 5, 6 },
+        .next = .{ .block = 6 },
+    } };
 }

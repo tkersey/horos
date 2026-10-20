@@ -232,7 +232,7 @@ fn schemas(values: anytype) [
     return result;
 }
 
-fn listCount(comptime T: type) ?usize {
+inline fn listCount(comptime T: type) ?usize {
     return switch (@typeInfo(T)) {
         .@"struct" => |s| s.field_types.len,
         .array => |array| array.len,
@@ -257,7 +257,7 @@ fn HandleList(comptime family: Family, comptime T: type) type {
         }
     };
 }
-fn handles(comptime family: Family, values: anytype) HandleList(family, @TypeOf(values)) {
+inline fn handles(comptime family: Family, values: anytype) HandleList(family, @TypeOf(values)) {
     const T = @TypeOf(values);
     var list: HandleList(family, T) = .{};
     if (comptime @typeInfo(T) == .null) {
@@ -324,7 +324,7 @@ fn declarationCompatible(
     compareShapes(Expected, Actual, path, .declaration, &.{});
 }
 
-fn compareShapes(
+inline fn compareShapes(
     comptime Expected: type,
     comptime Actual: type,
     comptime path: []const u8,
@@ -347,88 +347,132 @@ fn compareShapes(
     const next = ancestors ++ [_]ShapePair{.{ .expected = Expected, .actual = Actual }};
     if (@hasDecl(Expected, "internal") or @hasDecl(Actual, "internal")) {
         if (!@hasDecl(Expected, "internal") or !@hasDecl(Actual, "internal")) mismatch(path);
-        const left = Expected.internal;
-        const right = Actual.internal;
-        if (std.meta.activeTag(left) != std.meta.activeTag(right)) mismatch(path);
-        switch (left) {
-            .region => {},
-            .callable => |signature| compareSignatures(
-                signature,
-                right.callable,
-                path,
-                relation,
-                next,
-            ),
-            .capability => |signature| {
-                if (signature == Dynamic) return;
-                if (right.capability == Dynamic) {
-                    if (relation == .declaration)
-                        @compileError(
-                            "Horos " ++
-                                path ++
-                                ": unknown capability cannot fulfill a known declaration shape",
-                        );
-                    return;
-                }
-                compareShapes(
-                    signature.payload,
-                    right.capability.payload,
-                    path ++ ".payload",
-                    relation,
-                    next,
-                );
-                compareShapes(
-                    signature.result,
-                    right.capability.result,
-                    path ++ ".reply",
-                    relation,
-                    next,
-                );
-                compareFields(
-                    signature.bodies,
-                    right.capability.bodies,
-                    path ++ ".bodies",
-                    relation,
-                    next,
-                );
-            },
-            .resumption => |signature| {
-                if (signature == Dynamic) return;
-                if (right.resumption == Dynamic) {
-                    if (relation == .declaration)
-                        @compileError(
-                            "Horos " ++
-                                path ++
-                                ": unknown resumption cannot fulfill a known declaration shape",
-                        );
-                    return;
-                }
-                if (signature.mode != right.resumption.mode) mismatch(path ++ ".mode");
-                compareShapes(
-                    signature.reply,
-                    right.resumption.reply,
-                    path ++ ".reply",
-                    relation,
-                    next,
-                );
-                compareShapes(
-                    signature.result,
-                    right.resumption.result,
-                    path ++ ".result",
-                    relation,
-                    next,
-                );
-            },
-            .cell, .resource, .borrowed, .package => |element, tag| compareShapes(
-                element,
-                @field(right, @tagName(tag)),
-                path ++ ".element",
-                relation,
-                next,
-            ),
-        }
+        compareInternal(Expected, Actual, path, relation, next);
         return;
     }
+    compareContract(Expected, Actual, path, relation, next);
+}
+fn compareInternal(
+    comptime Expected: type,
+    comptime Actual: type,
+    comptime path: []const u8,
+    comptime relation: ShapeRelation,
+    comptime next: []const ShapePair,
+) void {
+    const left = Expected.internal;
+    const right = Actual.internal;
+    if (std.meta.activeTag(left) != std.meta.activeTag(right)) mismatch(path);
+    switch (left) {
+        .region => {},
+        .callable => |signature| compareSignatures(
+            signature,
+            right.callable,
+            path,
+            relation,
+            next,
+        ),
+        .capability => |signature| compareCapability(
+            signature,
+            right.capability,
+            path,
+            relation,
+            next,
+        ),
+        .resumption => |signature| compareResumption(
+            signature,
+            right.resumption,
+            path,
+            relation,
+            next,
+        ),
+        .cell, .resource, .borrowed, .package => |element, tag| compareShapes(
+            element,
+            @field(right, @tagName(tag)),
+            path ++ ".element",
+            relation,
+            next,
+        ),
+    }
+}
+fn compareCapability(
+    comptime signature: type,
+    comptime actual: type,
+    comptime path: []const u8,
+    comptime relation: ShapeRelation,
+    comptime next: []const ShapePair,
+) void {
+    if (signature == Dynamic) return;
+    if (actual == Dynamic) {
+        if (relation == .declaration)
+            @compileError(
+                "Horos " ++
+                    path ++
+                    ": unknown capability cannot fulfill a known declaration shape",
+            );
+        return;
+    }
+    compareShapes(
+        signature.payload,
+        actual.payload,
+        path ++ ".payload",
+        relation,
+        next,
+    );
+    compareShapes(
+        signature.result,
+        actual.result,
+        path ++ ".reply",
+        relation,
+        next,
+    );
+    compareFields(
+        signature.bodies,
+        actual.bodies,
+        path ++ ".bodies",
+        relation,
+        next,
+    );
+}
+fn compareResumption(
+    comptime signature: type,
+    comptime actual: type,
+    comptime path: []const u8,
+    comptime relation: ShapeRelation,
+    comptime next: []const ShapePair,
+) void {
+    if (signature == Dynamic) return;
+    if (actual == Dynamic) {
+        if (relation == .declaration)
+            @compileError(
+                "Horos " ++
+                    path ++
+                    ": unknown resumption cannot fulfill a known declaration shape",
+            );
+        return;
+    }
+    if (signature.mode != actual.mode) mismatch(path ++ ".mode");
+    compareShapes(
+        signature.reply,
+        actual.reply,
+        path ++ ".reply",
+        relation,
+        next,
+    );
+    compareShapes(
+        signature.result,
+        actual.result,
+        path ++ ".result",
+        relation,
+        next,
+    );
+}
+fn compareContract(
+    comptime Expected: type,
+    comptime Actual: type,
+    comptime path: []const u8,
+    comptime relation: ShapeRelation,
+    comptime next: []const ShapePair,
+) void {
     const left = Expected.contract;
     const right = Actual.contract;
     if (std.meta.activeTag(left) != std.meta.activeTag(right)) mismatch(path);
@@ -464,6 +508,7 @@ fn compareShapes(
         else => mismatch(path),
     }
 }
+
 fn compareFields(
     comptime Expected: type,
     comptime Actual: type,
@@ -932,7 +977,7 @@ fn validateResumptionSlots(
     if (!@hasField(Options, "resumption_slots")) return;
     validateSlotCollection(@FieldType(Options, "resumption_slots"), Options, Ops, Input, Answer);
 }
-fn validateSlotCollection(
+inline fn validateSlotCollection(
     comptime Slots: type,
     comptime Options: type,
     comptime Ops: type,
@@ -3080,7 +3125,7 @@ fn capacityFailure(
         options.capacity,
     ) else null;
 }
-fn checkElements(comptime S: type, comptime T: type, comptime operation: []const u8) void {
+inline fn checkElements(comptime S: type, comptime T: type, comptime operation: []const u8) void {
     switch (@typeInfo(T)) {
         .@"struct" => |fields| for (fields.field_types) |Item| compatible(
             S,

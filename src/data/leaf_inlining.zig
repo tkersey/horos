@@ -245,64 +245,9 @@ pub fn validate(
             &budget,
         )) return error.InvalidLeafInlining;
         seen += 1;
+        try validateSite(original, candidate, old, new, lengths[@intCast(old.function)], &budget);
         const call = old.terminator.call;
-        const function = original.functions[@intCast(call.function)];
-        const body = original.blocks[@intCast(function.entry)];
-        const first = lengths[@intCast(old.function)];
-        const slots = candidate.functions[@intCast(old.function)].layout.slots;
-        if (slots.len < first + body.instructions.len or
-            new.function != old.function or
-            new.custody != old.custody or
-            new.instructions.len != old.instructions.len + body.instructions.len or
-            !equal(
-                []const ir.Instruction,
-                new.instructions[0..old.instructions.len],
-                old.instructions,
-            ))
-            return error.InvalidLeafInlining;
-        for (body.instructions, new.instructions[old.instructions.len..], 0..) |op, copied, index| {
-            try budget.tick();
-            if (copied.destination != first + index or
-                copied.operands.len != op.operands.len or
-                slots[first + index] != function.layout.slots[
-                    @intCast(op.destination)
-                ])
-                return error.InvalidLeafInlining;
-            for (
-                op.operands,
-                copied.operands,
-            ) |old_operand, new_operand| if (new_operand != sourceAt(
-                body,
-                function,
-                call.arguments,
-                old_operand,
-                index,
-                first,
-            )) return error.InvalidLeafInlining;
-            var metadata = copied;
-            metadata.operands = op.operands;
-            metadata.destination = op.destination;
-            if (!equal(ir.Instruction, op, metadata)) return error.InvalidLeafInlining;
-        }
-        if (new.terminator != .jump or
-            new.terminator.jump.block != call.next.block or
-            new.terminator.jump.assignments.len != call.next.assignments.len)
-            return error.InvalidLeafInlining;
-        for (
-            call.next.assignments,
-            new.terminator.jump.assignments,
-        ) |old_assignment, new_assignment| {
-            var expected = old_assignment;
-            if (expected.source == .returned) expected.source = .{ .slot = sourceAt(
-                body,
-                function,
-                call.arguments,
-                body.terminator.return_value,
-                body.instructions.len,
-                first,
-            ) };
-            if (!equal(ir.Assignment, expected, new_assignment)) return error.InvalidLeafInlining;
-        }
+        const body = original.blocks[@intCast(original.functions[@intCast(call.function)].entry)];
         lengths[@intCast(old.function)] += body.instructions.len;
     }
     if (seen != sites.len) return error.InvalidLeafInlining;
@@ -310,6 +255,91 @@ pub fn validate(
         lengths,
         candidate.functions,
     ) |length, function| if (length != function.layout.slots.len) return error.InvalidLeafInlining;
+}
+fn validateSite(
+    original: ir.Program,
+    candidate: ir.Program,
+    old: ir.Block,
+    new: ir.Block,
+    first: usize,
+    budget: *Budget,
+) Error!void {
+    const call = old.terminator.call;
+    const function = original.functions[@intCast(call.function)];
+    const body = original.blocks[@intCast(function.entry)];
+    const slots = candidate.functions[@intCast(old.function)].layout.slots;
+    if (slots.len < first + body.instructions.len or
+        new.function != old.function or
+        new.custody != old.custody or
+        new.instructions.len != old.instructions.len + body.instructions.len or
+        !equal(
+            []const ir.Instruction,
+            new.instructions[0..old.instructions.len],
+            old.instructions,
+        ))
+        return error.InvalidLeafInlining;
+    try validateInstructions(
+        body,
+        function,
+        call.arguments,
+        new.instructions[old.instructions.len..],
+        slots,
+        first,
+        budget,
+    );
+    if (new.terminator != .jump or
+        new.terminator.jump.block != call.next.block or
+        new.terminator.jump.assignments.len != call.next.assignments.len)
+        return error.InvalidLeafInlining;
+    for (
+        call.next.assignments,
+        new.terminator.jump.assignments,
+    ) |old_assignment, new_assignment| {
+        var expected = old_assignment;
+        if (expected.source == .returned) expected.source = .{ .slot = sourceAt(
+            body,
+            function,
+            call.arguments,
+            body.terminator.return_value,
+            body.instructions.len,
+            first,
+        ) };
+        if (!equal(ir.Assignment, expected, new_assignment)) return error.InvalidLeafInlining;
+    }
+}
+fn validateInstructions(
+    body: ir.Block,
+    function: ir.Function,
+    arguments: []const p.Id,
+    instructions: []const ir.Instruction,
+    slots: []const p.Id,
+    first: usize,
+    budget: *Budget,
+) Error!void {
+    for (body.instructions, instructions, 0..) |op, copied, index| {
+        try budget.tick();
+        if (copied.destination != first + index or
+            copied.operands.len != op.operands.len or
+            slots[first + index] != function.layout.slots[
+                @intCast(op.destination)
+            ])
+            return error.InvalidLeafInlining;
+        for (
+            op.operands,
+            copied.operands,
+        ) |old_operand, new_operand| if (new_operand != sourceAt(
+            body,
+            function,
+            arguments,
+            old_operand,
+            index,
+            first,
+        )) return error.InvalidLeafInlining;
+        var metadata = copied;
+        metadata.operands = op.operands;
+        metadata.destination = op.destination;
+        if (!equal(ir.Instruction, op, metadata)) return error.InvalidLeafInlining;
+    }
 }
 pub fn run(
     allocator: std.mem.Allocator,

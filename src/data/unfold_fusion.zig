@@ -20,20 +20,25 @@ pub const Statistics = struct {
 const Budget = struct {
     left: usize,
     fn record(self: *@This(), comptime T: type, value: T) Error!void {
+        @setEvalBranchQuota(10000);
+        return self.recordFields(T, value);
+    }
+
+    inline fn recordFields(self: *@This(), comptime T: type, value: T) Error!void {
         if (self.left == 0) return error.UnfoldFusionLimit;
         self.left -= 1;
         switch (@typeInfo(T)) {
             .@"struct" => |info| inline for (
                 info.field_names,
                 info.field_types,
-            ) |field_name, FieldType| try self.record(FieldType, @field(value, field_name)),
+            ) |field_name, FieldType| try self.recordFields(FieldType, @field(value, field_name)),
             .@"union" => switch (value) {
-                inline else => |v| try self.record(@TypeOf(v), v),
+                inline else => |v| try self.recordFields(@TypeOf(v), v),
             },
             .optional => |info| if (value) |v| {
-                try self.record(info.child, v);
+                try self.recordFields(info.child, v);
             },
-            .pointer => |info| for (value) |v| try self.record(info.child, v),
+            .pointer => |info| for (value) |v| try self.recordFields(info.child, v),
             else => {},
         }
     }
@@ -90,7 +95,7 @@ fn recognize(a: std.mem.Allocator, program: ir.Program, budget: *Budget) Error!?
     ] or !schemas.exportable[
         @intCast(product.product[0])
     ]) return null;
-    var shape: Shape = .{
+    const shape: Shape = .{
         .closure = constructor.schema,
         .step = signature.result,
         .state = state,
@@ -98,26 +103,34 @@ fn recognize(a: std.mem.Allocator, program: ir.Program, budget: *Budget) Error!?
         .constructions = 0,
         .applications = 0,
     };
+    if (!privateProtocol(program, shape, schemas.exportable)) return null;
+    return recognizeUses(program, shape, budget);
+}
+fn privateProtocol(program: ir.Program, shape: Shape, exportable: []const bool) bool {
     if (affected(shape, program.roots.result) or
         affected(shape, program.roots.failure))
-        return null;
+        return false;
     for (
         program.schemas,
         0..,
-    ) |_, id| if (!affected(shape, id) and !schemas.exportable[id]) return null;
-    for (program.constants) |literal| if (affected(shape, literal.schema)) return null;
+    ) |_, id| if (!affected(shape, id) and !exportable[id]) return false;
+    for (program.constants) |literal| if (affected(shape, literal.schema)) return false;
     const root = program.functions[@intCast(program.roots.entry)];
-    for (root.inputs) |slot| if (affected(shape, root.layout.slots[@intCast(slot)])) return null;
+    for (root.inputs) |slot| if (affected(shape, root.layout.slots[@intCast(slot)])) return false;
     for (program.functions) |function| {
         if (function.effects.len != 0 or
             function.regions.len != 0 or
             function.custody.len != 1 or
             function.result == shape.closure)
-            return null;
+            return false;
         for (function.inputs) |slot| if (function.layout.slots[
             @intCast(slot)
-        ] == shape.closure) return null;
+        ] == shape.closure) return false;
     }
+    return true;
+}
+fn recognizeUses(program: ir.Program, initial: Shape, budget: *Budget) Error!?Shape {
+    var shape = initial;
     var products: usize = 0;
     for (program.blocks) |block| {
         try budget.record(ir.Block, block);
@@ -268,6 +281,10 @@ pub fn validate(
             )) return error.InvalidUnfoldFusion;
         } else if (!equal(p.Schema, old, new)) return error.InvalidUnfoldFusion;
     }
+    try validateFunctions(original, candidate, shape);
+    try validateBlocks(original, candidate, shape);
+}
+fn validateFunctions(original: ir.Program, candidate: ir.Program, shape: Shape) Error!void {
     for (original.functions, candidate.functions) |old, new| {
         var metadata = new;
         metadata.layout = old.layout;
@@ -286,6 +303,8 @@ pub fn validate(
                 before_schema))
                 return error.InvalidUnfoldFusion;
     }
+}
+fn validateBlocks(original: ir.Program, candidate: ir.Program, shape: Shape) Error!void {
     for (original.blocks, candidate.blocks) |old, new| {
         if (old.function != new.function or
             old.custody != new.custody or

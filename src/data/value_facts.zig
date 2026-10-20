@@ -124,44 +124,36 @@ pub fn analyzeObservedWithLimit(
     const work = try a.alloc(Working, program.blocks.len);
     var max_slots: usize = 0;
     for (program.blocks, work) |block, *out| {
-        const layout = program.functions[@intCast(block.function)].layout.slots;
-        max_slots = @max(max_slots, layout.len);
-        try budget.take(layout.len + block.instructions.len);
-        const versions = try a.alloc(Version, layout.len);
-        const definitions = try a.alloc(Definition, layout.len + block.instructions.len);
-        for (layout, versions, 0..) |schema, *version, slot| {
-            version.* = slot;
-            definitions[slot] = .{
-                .slot = slot,
-                .instruction = null,
-                .operands = &.{},
-                .value = bounds(program.schemas[@intCast(schema)]),
-            };
-        }
-        const results = try a.alloc(Version, block.instructions.len);
-        for (block.instructions, results, 0..) |instruction, *result, index| {
-            try budget.take(instruction.operands.len);
-            const operands = try a.alloc(Version, instruction.operands.len);
-            for (
-                instruction.operands,
-                operands,
-            ) |slot, *version| version.* = versions[@intCast(slot)];
-            result.* = layout.len + index;
-            definitions[result.*] = .{
-                .slot = instruction.destination,
-                .instruction = index,
-                .operands = operands,
-                .value = .{},
-            };
-            versions[@intCast(instruction.destination)] = result.*;
-        }
-        out.* = .{
-            .definitions = definitions,
-            .results = results,
-            .exit = versions,
-            .outgoing = try a.alloc(Value, layout.len),
-        };
+        out.* = try initializeBlock(a, program, block, &budget);
+        max_slots = @max(max_slots, out.exit.len);
     }
+    const counts = try solve(a, program, work, max_slots, &budget);
+    const blocks = try a.alloc(Block, work.len);
+    for (
+        work,
+        blocks,
+    ) |state, *out| out.* = .{
+        .reachable = state.reachable,
+        .definitions = state.definitions,
+        .results = state.results,
+        .exit = state.exit,
+    };
+    return .{
+        .arena = arena,
+        .epoch = epoch,
+        .blocks = blocks,
+        .transfers = counts.transfers,
+        .block_visits = counts.visits,
+    };
+}
+const SolveCounts = struct { transfers: usize, visits: usize };
+fn solve(
+    a: std.mem.Allocator,
+    program: ir.Program,
+    work: []Working,
+    max_slots: usize,
+    budget: *Work,
+) Error!SolveCounts {
     const incoming = try a.alloc(Value, max_slots);
     const overwritten_slots = try a.alloc(bool, max_slots);
     // Unknown-entry workers are roots. Private direct-call workers are reached
@@ -215,30 +207,59 @@ pub fn analyzeObservedWithLimit(
             .allocator = a,
             .queue = &queue,
             .queued = queued,
-            .budget = &budget,
+            .budget = budget,
             .incoming = incoming,
             .overwritten_slots = overwritten_slots,
         };
         try propagation.terminator(block.terminator);
     }
-    const blocks = try a.alloc(Block, work.len);
-    for (
-        work,
-        blocks,
-    ) |state, *out| out.* = .{
-        .reachable = state.reachable,
-        .definitions = state.definitions,
-        .results = state.results,
-        .exit = state.exit,
-    };
+    return .{ .transfers = transfers, .visits = visits };
+}
+
+fn initializeBlock(
+    a: std.mem.Allocator,
+    program: ir.Program,
+    block: ir.Block,
+    budget: *Work,
+) Error!Working {
+    const layout = program.functions[@intCast(block.function)].layout.slots;
+    try budget.take(layout.len + block.instructions.len);
+    const versions = try a.alloc(Version, layout.len);
+    const definitions = try a.alloc(Definition, layout.len + block.instructions.len);
+    for (layout, versions, 0..) |schema, *version, slot| {
+        version.* = slot;
+        definitions[slot] = .{
+            .slot = slot,
+            .instruction = null,
+            .operands = &.{},
+            .value = bounds(program.schemas[@intCast(schema)]),
+        };
+    }
+    const results = try a.alloc(Version, block.instructions.len);
+    for (block.instructions, results, 0..) |instruction, *result, index| {
+        try budget.take(instruction.operands.len);
+        const operands = try a.alloc(Version, instruction.operands.len);
+        for (
+            instruction.operands,
+            operands,
+        ) |slot, *version| version.* = versions[@intCast(slot)];
+        result.* = layout.len + index;
+        definitions[result.*] = .{
+            .slot = instruction.destination,
+            .instruction = index,
+            .operands = operands,
+            .value = .{},
+        };
+        versions[@intCast(instruction.destination)] = result.*;
+    }
     return .{
-        .arena = arena,
-        .epoch = epoch,
-        .blocks = blocks,
-        .transfers = transfers,
-        .block_visits = visits,
+        .definitions = definitions,
+        .results = results,
+        .exit = versions,
+        .outgoing = try a.alloc(Value, layout.len),
     };
 }
+
 const Working = struct {
     reachable: bool = false,
     outgoing: []Value,
@@ -436,6 +457,18 @@ fn bounds(schema: p.Schema) Value {
 fn number(value: u64) Value {
     return .{ .unsigned = value, .maximum = value, .known_zero = ~value, .known_one = value };
 }
+fn constantValue(program: ir.Program, instruction: ir.Instruction, result: Value) Value {
+    const literal = program.constants[@intCast(instruction.immediate)];
+    return switch (program.schemas[@intCast(literal.schema)]) {
+        .boolean => .{ .boolean = literal.bytes[0] == 1 },
+        .u8 => number(literal.bytes[0]),
+        .u16 => number(std.mem.readInt(u16, literal.bytes[0..2], .little)),
+        .u32 => number(std.mem.readInt(u32, literal.bytes[0..4], .little)),
+        .u64 => number(std.mem.readInt(u64, literal.bytes[0..8], .little)),
+        else => result,
+    };
+}
+
 fn transfer(
     program: ir.Program,
     schema: p.Id,
@@ -448,17 +481,7 @@ fn transfer(
     const left: Value = if (operands.len > 0) definitions[operands[0]].value else .{};
     const right: Value = if (operands.len > 1) definitions[operands[1]].value else .{};
     return switch (instruction.opcode) {
-        .constant => blk: {
-            const literal = program.constants[@intCast(instruction.immediate)];
-            break :blk switch (program.schemas[@intCast(literal.schema)]) {
-                .boolean => .{ .boolean = literal.bytes[0] == 1 },
-                .u8 => number(literal.bytes[0]),
-                .u16 => number(std.mem.readInt(u16, literal.bytes[0..2], .little)),
-                .u32 => number(std.mem.readInt(u32, literal.bytes[0..4], .little)),
-                .u64 => number(std.mem.readInt(u64, literal.bytes[0..8], .little)),
-                else => result,
-            };
-        },
+        .constant => constantValue(program, instruction, result),
         .move => left,
         .computation => .{
             .constructor = instruction.immediate,
@@ -591,6 +614,16 @@ test "parallel fact transfer is linear and reads every source before writes" {
     }
     try std.testing.expectError(error.SemanticWorkLimit, analyzeWithLimit(a, program, 1));
 
+    try checkParallelCallTransfer(n, a, program, &instructions, &slots);
+}
+
+fn checkParallelCallTransfer(
+    comptime n: usize,
+    a: std.mem.Allocator,
+    program: ir.Program,
+    instructions: *const [n]ir.Instruction,
+    slots: *const [n]p.Id,
+) !void {
     var inputs: [n]p.Id = undefined;
     var arguments: [n]p.Id = undefined;
     for (&inputs, &arguments, 0..) |*input, *argument, index| {
@@ -600,12 +633,12 @@ test "parallel fact transfer is linear and reads every source before writes" {
     var called = program;
     called.functions = &.{
         program.functions[0],
-        .{ .entry = 2, .inputs = &inputs, .layout = .{ .slots = &slots }, .result = 0 },
+        .{ .entry = 2, .inputs = &inputs, .layout = .{ .slots = slots }, .result = 0 },
     };
     called.blocks = &.{
         .{
             .function = 0,
-            .instructions = &instructions,
+            .instructions = instructions,
             .terminator = .{ .call = .{
                 .function = 1,
                 .arguments = &arguments,

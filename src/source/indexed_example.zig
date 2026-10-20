@@ -33,6 +33,42 @@ fn buildTypedDeclarations(b: *source.Builder) a.Error!source.Module {
         .effect = try a.interop.operationId(c, choice_family.effect()),
         .capability = try a.interop.schemaId(c, choice_family.capability()),
     };
+    const built = try defineInterpretations(b, c, family, integer, boolean, choice_family, choose);
+    const terms = built.terms;
+    const answers = built.answers;
+    const result = try b.schema(.{ .product = &answers });
+    const main = try b.declare(&.{}, result, &family, &.{});
+    const first = try b.variable(answers[0]);
+    const second = try b.variable(answers[1]);
+    try b.define(
+        main,
+        try b.bind(
+            first,
+            terms[0],
+            try b.bind(
+                second,
+                terms[1],
+                try b.pure(try b.primitive(
+                    result,
+                    .product,
+                    &.{ try b.reference(first), try b.reference(second) },
+                    0,
+                )),
+            ),
+        ),
+    );
+    return b.module(main, unit);
+}
+
+fn defineInterpretations(
+    b: *source.Builder,
+    c: *a.Context,
+    family: [2]p.Id,
+    integer: p.Id,
+    boolean: p.Id,
+    choice_family: anytype,
+    choose: anytype,
+) a.Error!struct { terms: [2]p.Id, answers: [2]p.Id } {
     var terms: [2]p.Id = undefined;
     var answers: [2]p.Id = undefined;
     for (family, [_]p.Id{ integer, boolean }, 0..) |effect, result, index| {
@@ -76,26 +112,5 @@ fn buildTypedDeclarations(b: *source.Builder) a.Error!source.Module {
             .body = try b.lambda(body, body_type),
         } });
     }
-    const result = try b.schema(.{ .product = &answers });
-    const main = try b.declare(&.{}, result, &family, &.{});
-    const first = try b.variable(answers[0]);
-    const second = try b.variable(answers[1]);
-    try b.define(
-        main,
-        try b.bind(
-            first,
-            terms[0],
-            try b.bind(
-                second,
-                terms[1],
-                try b.pure(try b.primitive(
-                    result,
-                    .product,
-                    &.{ try b.reference(first), try b.reference(second) },
-                    0,
-                )),
-            ),
-        ),
-    );
-    return b.module(main, unit);
+    return .{ .terms = terms, .answers = answers };
 }

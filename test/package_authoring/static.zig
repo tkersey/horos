@@ -40,144 +40,56 @@ pub fn main(init: std.process.Init) !void {
             response,
             .{ .mode = .deep, .use = .linear, .return_effect = .{} },
         );
-    } else if (comptime selected("option_callable")) {
-        _ = try c.callable(.{}, integer, .{}, .{ .use = .reusable, .capture = .{} });
-    } else if (comptime selected("option_define_callable")) {
-        const schema = try c.callable(.{}, integer, .{}, .{ .use = .reusable });
-        const slot = try c.declareSchema(.callable, a.ShapeOf(@TypeOf(schema)));
-        try c.defineCallable(slot, .{}, integer, .{}, .{ .use = .reusable, .capture = .{} });
-    } else if (comptime selected("option_region_body")) {
-        _ = try c.regionBodySchema(
-            try c.region(),
-            .{},
-            integer,
-            .{},
-            .{ .use = .reusable, .capture = .{} },
-        );
-    } else if (comptime selected("option_append")) {
-        const sequence = try b.sequenceValue(try c.sequence(integer), .{});
-        _ = try b.append(sequence, value, .{ .capcity = null });
-    } else if (comptime selected("option_concat")) {
-        const sequence = try b.sequenceValue(try c.sequence(integer), .{});
-        _ = try b.concat(sequence, sequence, .{ .capcity = null });
-    } else if (comptime selected("option_convert")) {
-        _ = try b.convertInteger(integer, value, .{ .overflw = null });
-    } else if (comptime selected("option_blob")) {
-        const bytes = try c.schema(native.Bytes(null));
-        const blob = try a.interop.encodedLiteral(c, bytes, &.{0});
-        _ = try b.blobSlice(
-            bytes,
-            blob,
-            value,
-            value,
-            .{ .capacity = try c.literalFailure(void, {}), .capcity = null },
-        );
-    } else if (comptime selected("option_arithmetic")) {
-        _ = try b.checked(
-            .add,
-            value,
-            value,
-            .{ .overflow = try c.literalFailure(void, {}), .division_by_zerro = null },
-        );
-    } else if (comptime selected("option_choice_all")) {
-        const choice = try horos.library.choice.family(c, "options");
-        _ = try horos.library.choice.all(
-            c,
-            choice,
-            integer,
-            .{ .captures = .{ .continuation = .{} }, .capture = .{} },
-        );
-    } else if (comptime selected("option_choice_first")) {
-        const choice = try horos.library.choice.family(c, "options");
-        _ = try horos.library.choice.first(
-            c,
-            choice,
-            integer,
-            .{ .captures = .{ .continuation = .{} }, .capture = .{} },
-        );
-    } else if (comptime selected("option_search")) {
-        const search = try horos.library.search.family(c, "options");
-        _ = try horos.library.search.interpret(
-            c,
-            search,
-            integer,
-            .{ .captures = .{ .continuation = .{} }, .order = .depth_first, .capture = .{} },
-        );
-    } else if (comptime selected("option_generator")) {
-        _ = try horos.library.generator.create(
-            c,
-            "options",
-            integer,
-            integer,
-            integer,
-            .{ .captures = .{ .continuation = .{} }, .capture = .{} },
-        );
-    } else if (comptime selected("option_nested_capture")) {
-        const choice = try horos.library.choice.family(c, "options");
-        _ = try horos.library.choice.all(
-            c,
-            choice,
-            integer,
-            .{ .captures = .{ .continuation = .{}, .bodi = .{} } },
-        );
-    } else if (comptime selected("option_named_record")) {
-        const sequence = try b.sequenceValue(try c.sequence(integer), .{});
-        _ = try b.append(sequence, value, .{null});
-    } else if (comptime selected("nested")) {
-        const expected = try c.schema(struct { count: u64 });
-        const actual = try c.schema(struct { count: bool });
-        const target = try c.function("target", .{ .input = expected }, integer, .{});
-        _ = try b.call(
-            target,
-            .{ .input = try b.product(actual, .{ .count = try b.constant(bool, true) }) },
-        );
-    } else if (comptime selected("missing") or selected("extra")) {
-        const record = try c.record(.{ .count = integer });
-        if (comptime selected("missing"))
-            _ = try b.product(record, .{})
-        else
-            _ = try b.product(record, .{ .count = value, .extra = value });
-    } else if (comptime selected("name")) {
-        const record = try c.record(.{ .count = integer });
-        _ = try b.field(try b.product(record, .{ .count = value }), "absent");
-    } else if (comptime selected("category")) {
-        _ = try c.record(.{ .count = value });
-    } else if (comptime selected("fake_schema")) {
-        const Fake = opaque {
-            pub const horos_handle = a.Schema(a.Shape(u64)).horos_handle;
+    } else return rejectCallableOptions(c, integer, b, value);
+}
+
+fn rejectRecursiveShapes(
+    c: *a.Context,
+    integer: anytype,
+    b: anytype,
+    value: anytype,
+) !void {
+    if (comptime selected("recursive_mismatch")) {
+        const Left = struct {
+            pub const contract: native.Info = .{ .sum = native.Fields(
+                &.{ "next", "value" },
+                &.{ @This(), a.Shape(u64) },
+            ) };
         };
-        const fake: *const Fake = undefined;
-        _ = try c.record(.{ .count = fake });
-    } else if (comptime selected("fake_value")) {
-        const Fake = opaque {
-            pub const horos_handle = a.Value(a.Shape(u64)).horos_handle;
+        const Right = struct {
+            pub const contract: native.Info = .{ .sum = native.Fields(
+                &.{ "next", "value" },
+                &.{ @This(), a.Shape(bool) },
+            ) };
         };
-        const fake: *const Fake = undefined;
-        _ = try b.ret(fake);
-    } else if (comptime selected("branch")) {
-        const yes = try b.branch();
-        const no = try b.branch();
-        _ = try b.conditional(
-            try b.constant(bool, true),
-            try yes.ret(value),
-            try no.ret(try no.constant(bool, false)),
-        );
-    } else if (comptime selected("text_bound") or selected("text_bytes")) {
-        const text = try c.schema(native.Text(null));
-        const other = if (comptime selected("text_bound"))
-            try c.schema(native.Text(0))
-        else
-            try c.schema(native.Bytes(null));
-        const target = try c.function("target", .{ .input = text }, integer, .{});
-        _ = try b.call(target, .{ .input = try a.interop.encodedLiteral(c, other, &.{0}) });
-    } else if (comptime selected("enum_tags")) {
-        const left = try c.schema(enum(u32) { first = 2, last = 9 });
-        const right = try c.schema(enum(u32) { first = 2, last = 10 });
-        const target = try c.function("target", .{ .input = left }, integer, .{});
-        _ = try b.call(target, .{ .input = try a.interop.encodedLiteral(c, right, &.{2}) });
-    } else if (comptime selected("array_length")) {
-        _ = try b.sequenceValue(try c.schema([2]u64), .{value});
-    } else if (comptime selected("pending_unknown")) {
+        const left = try c.declareSchema(.alternatives, Left);
+        const right = try c.declareSchema(.alternatives, Right);
+        try c.defineAlternatives(left, .{ .next = left.schema(), .value = integer });
+        try c.defineAlternatives(right, .{ .next = right.schema(), .value = try c.schema(bool) });
+        _ = try a.interop.refineSchema(c, right.schema(), left.schema());
+    } else if (comptime selected("native_pointer")) {
+        _ = try c.schema(*u64);
+    } else if (comptime selected("native_recursive")) {
+        const Node = struct { children: []const @This() };
+        _ = try c.schema(Node);
+    } else if (comptime selected("match_arm")) {
+        const sum = try c.alternatives(.{ .no = integer, .yes = integer });
+        const input = try b.variant(sum, "no", value);
+        const no = try b.caseOf(input, "no");
+        const yes = try b.caseOf(input, "yes");
+        _ = try b.match(input, .{ .no = try yes.ret(value), .yes = try no.ret(value) });
+    } else if (comptime selected("failure_category")) {
+        _ = try b.checkedAdd(value, value, value);
+    } else @compileError("unknown static rejection mode");
+}
+
+fn rejectSchemaDeclarations(
+    c: *a.Context,
+    integer: anytype,
+    b: anytype,
+    value: anytype,
+) !void {
+    if (comptime selected("pending_unknown")) {
         const declaration = try c.declareSchema(.alternatives, a.Shape(?u64));
         try c.defineAlternatives(
             declaration,
@@ -221,36 +133,178 @@ pub fn main(init: std.process.Init) !void {
             unit,
             .{ .mode = .deep, .use = .linear, .resumption_slots = &.{slot} },
         );
-    } else if (comptime selected("recursive_mismatch")) {
-        const Left = struct {
-            pub const contract: native.Info = .{ .sum = native.Fields(
-                &.{ "next", "value" },
-                &.{ @This(), a.Shape(u64) },
-            ) };
+    } else return rejectRecursiveShapes(c, integer, b, value);
+}
+
+fn rejectScalarShapes(
+    c: *a.Context,
+    integer: anytype,
+    b: anytype,
+    value: anytype,
+) !void {
+    if (comptime selected("branch")) {
+        const yes = try b.branch();
+        const no = try b.branch();
+        _ = try b.conditional(
+            try b.constant(bool, true),
+            try yes.ret(value),
+            try no.ret(try no.constant(bool, false)),
+        );
+    } else if (comptime selected("text_bound") or selected("text_bytes")) {
+        const text = try c.schema(native.Text(null));
+        const other = if (comptime selected("text_bound"))
+            try c.schema(native.Text(0))
+        else
+            try c.schema(native.Bytes(null));
+        const target = try c.function("target", .{ .input = text }, integer, .{});
+        _ = try b.call(target, .{ .input = try a.interop.encodedLiteral(c, other, &.{0}) });
+    } else if (comptime selected("enum_tags")) {
+        const left = try c.schema(enum(u32) { first = 2, last = 9 });
+        const right = try c.schema(enum(u32) { first = 2, last = 10 });
+        const target = try c.function("target", .{ .input = left }, integer, .{});
+        _ = try b.call(target, .{ .input = try a.interop.encodedLiteral(c, right, &.{2}) });
+    } else if (comptime selected("array_length")) {
+        _ = try b.sequenceValue(try c.schema([2]u64), .{value});
+    } else return rejectSchemaDeclarations(c, integer, b, value);
+}
+
+fn rejectRecordShapes(
+    c: *a.Context,
+    integer: anytype,
+    b: anytype,
+    value: anytype,
+) !void {
+    if (comptime selected("nested")) {
+        const expected = try c.schema(struct { count: u64 });
+        const actual = try c.schema(struct { count: bool });
+        const target = try c.function("target", .{ .input = expected }, integer, .{});
+        _ = try b.call(
+            target,
+            .{ .input = try b.product(actual, .{ .count = try b.constant(bool, true) }) },
+        );
+    } else if (comptime selected("missing") or selected("extra")) {
+        const record = try c.record(.{ .count = integer });
+        if (comptime selected("missing"))
+            _ = try b.product(record, .{})
+        else
+            _ = try b.product(record, .{ .count = value, .extra = value });
+    } else if (comptime selected("name")) {
+        const record = try c.record(.{ .count = integer });
+        _ = try b.field(try b.product(record, .{ .count = value }), "absent");
+    } else if (comptime selected("category")) {
+        _ = try c.record(.{ .count = value });
+    } else if (comptime selected("fake_schema")) {
+        const Fake = opaque {
+            pub const horos_handle = a.Schema(a.Shape(u64)).horos_handle;
         };
-        const Right = struct {
-            pub const contract: native.Info = .{ .sum = native.Fields(
-                &.{ "next", "value" },
-                &.{ @This(), a.Shape(bool) },
-            ) };
+        const fake: *const Fake = undefined;
+        _ = try c.record(.{ .count = fake });
+    } else if (comptime selected("fake_value")) {
+        const Fake = opaque {
+            pub const horos_handle = a.Value(a.Shape(u64)).horos_handle;
         };
-        const left = try c.declareSchema(.alternatives, Left);
-        const right = try c.declareSchema(.alternatives, Right);
-        try c.defineAlternatives(left, .{ .next = left.schema(), .value = integer });
-        try c.defineAlternatives(right, .{ .next = right.schema(), .value = try c.schema(bool) });
-        _ = try a.interop.refineSchema(c, right.schema(), left.schema());
-    } else if (comptime selected("native_pointer")) {
-        _ = try c.schema(*u64);
-    } else if (comptime selected("native_recursive")) {
-        const Node = struct { children: []const @This() };
-        _ = try c.schema(Node);
-    } else if (comptime selected("match_arm")) {
-        const sum = try c.alternatives(.{ .no = integer, .yes = integer });
-        const input = try b.variant(sum, "no", value);
-        const no = try b.caseOf(input, "no");
-        const yes = try b.caseOf(input, "yes");
-        _ = try b.match(input, .{ .no = try yes.ret(value), .yes = try no.ret(value) });
-    } else if (comptime selected("failure_category")) {
-        _ = try b.checkedAdd(value, value, value);
-    } else @compileError("unknown static rejection mode");
+        const fake: *const Fake = undefined;
+        _ = try b.ret(fake);
+    } else return rejectScalarShapes(c, integer, b, value);
+}
+
+fn rejectLibraryOptions(
+    c: *a.Context,
+    integer: anytype,
+    b: anytype,
+    value: anytype,
+) !void {
+    if (comptime selected("option_choice_all")) {
+        const choice = try horos.library.choice.family(c, "options");
+        _ = try horos.library.choice.all(
+            c,
+            choice,
+            integer,
+            .{ .captures = .{ .continuation = .{} }, .capture = .{} },
+        );
+    } else if (comptime selected("option_choice_first")) {
+        const choice = try horos.library.choice.family(c, "options");
+        _ = try horos.library.choice.first(
+            c,
+            choice,
+            integer,
+            .{ .captures = .{ .continuation = .{} }, .capture = .{} },
+        );
+    } else if (comptime selected("option_search")) {
+        const search = try horos.library.search.family(c, "options");
+        _ = try horos.library.search.interpret(
+            c,
+            search,
+            integer,
+            .{ .captures = .{ .continuation = .{} }, .order = .depth_first, .capture = .{} },
+        );
+    } else if (comptime selected("option_generator")) {
+        _ = try horos.library.generator.create(
+            c,
+            "options",
+            integer,
+            integer,
+            integer,
+            .{ .captures = .{ .continuation = .{} }, .capture = .{} },
+        );
+    } else if (comptime selected("option_nested_capture")) {
+        const choice = try horos.library.choice.family(c, "options");
+        _ = try horos.library.choice.all(
+            c,
+            choice,
+            integer,
+            .{ .captures = .{ .continuation = .{}, .bodi = .{} } },
+        );
+    } else if (comptime selected("option_named_record")) {
+        const sequence = try b.sequenceValue(try c.sequence(integer), .{});
+        _ = try b.append(sequence, value, .{null});
+    } else return rejectRecordShapes(c, integer, b, value);
+}
+
+fn rejectCallableOptions(
+    c: *a.Context,
+    integer: anytype,
+    b: anytype,
+    value: anytype,
+) !void {
+    if (comptime selected("option_callable")) {
+        _ = try c.callable(.{}, integer, .{}, .{ .use = .reusable, .capture = .{} });
+    } else if (comptime selected("option_define_callable")) {
+        const schema = try c.callable(.{}, integer, .{}, .{ .use = .reusable });
+        const slot = try c.declareSchema(.callable, a.ShapeOf(@TypeOf(schema)));
+        try c.defineCallable(slot, .{}, integer, .{}, .{ .use = .reusable, .capture = .{} });
+    } else if (comptime selected("option_region_body")) {
+        _ = try c.regionBodySchema(
+            try c.region(),
+            .{},
+            integer,
+            .{},
+            .{ .use = .reusable, .capture = .{} },
+        );
+    } else if (comptime selected("option_append")) {
+        const sequence = try b.sequenceValue(try c.sequence(integer), .{});
+        _ = try b.append(sequence, value, .{ .capcity = null });
+    } else if (comptime selected("option_concat")) {
+        const sequence = try b.sequenceValue(try c.sequence(integer), .{});
+        _ = try b.concat(sequence, sequence, .{ .capcity = null });
+    } else if (comptime selected("option_convert")) {
+        _ = try b.convertInteger(integer, value, .{ .overflw = null });
+    } else if (comptime selected("option_blob")) {
+        const bytes = try c.schema(native.Bytes(null));
+        const blob = try a.interop.encodedLiteral(c, bytes, &.{0});
+        _ = try b.blobSlice(
+            bytes,
+            blob,
+            value,
+            value,
+            .{ .capacity = try c.literalFailure(void, {}), .capcity = null },
+        );
+    } else if (comptime selected("option_arithmetic")) {
+        _ = try b.checked(
+            .add,
+            value,
+            value,
+            .{ .overflow = try c.literalFailure(void, {}), .division_by_zerro = null },
+        );
+    } else return rejectLibraryOptions(c, integer, b, value);
 }

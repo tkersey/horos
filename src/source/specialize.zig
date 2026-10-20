@@ -87,14 +87,83 @@ fn extend(a: std.mem.Allocator, env: Env, item: Binding) !Env {
     result[env.len] = item;
     return result;
 }
-pub fn identity(m: ast.Module, request: Request) Error![32]u8 {
+pub fn identity(a: std.mem.Allocator, m: ast.Module, request: Request) Error![32]u8 {
     var digest = std.crypto.hash.sha2.Sha256.init(.{});
     var writer: data.wire.Writer = .{ .hasher = &digest };
     try writer.put("horos.source-specialization/1\x00");
     try data.record.write(ast.Module, m, &writer);
-    try data.record.write(Request, request, &writer);
+    try encodeRequest(a, request, &writer);
     return digest.finalResult();
 }
+fn encodeRequest(a: std.mem.Allocator, request: Request, writer: *data.wire.Writer) Error!void {
+    try data.record.write(Context, request.context, writer);
+    try writer.natural(request.function);
+    try encodeKnowledge(a, request.arguments, writer);
+    try data.record.write(Policy, request.policy, writer);
+}
+fn encodeKnowledge(
+    a: std.mem.Allocator,
+    arguments: []const Knowledge,
+    writer: *data.wire.Writer,
+) Error!void {
+    var pending: std.ArrayList([]const Knowledge) = .empty;
+    defer pending.deinit(a);
+    try writer.natural(arguments.len);
+    var current = arguments;
+    while (current.len != 0 or pending.items.len != 0) {
+        if (current.len == 0) current = pending.pop().?;
+        const value = current[0];
+        current = current[1..];
+        try writer.natural(@backingInt(std.meta.activeTag(value)));
+        switch (value) {
+            .dynamic => {},
+            .known => |literal| try data.record.write(p.Literal, literal, writer),
+            .product => |product| {
+                try writer.natural(product.schema);
+                try writer.natural(product.fields.len);
+                if (product.fields.len == 0) continue;
+                if (current.len != 0) try pending.append(a, current);
+                current = product.fields;
+            },
+        }
+    }
+}
+
+fn checkRequestEncoding(a: std.mem.Allocator) !void {
+    const request: Request = .{
+        .context = .{
+            .core = @splat(0),
+            .guest = @splat(0),
+            .observation = @splat(0),
+            .base_profile = @splat(0),
+            .admission_profile = @splat(0),
+            .compiler_policy = @splat(0),
+        },
+        .function = 7,
+        .arguments = &.{
+            .dynamic,
+            .{ .known = .{ .schema = 5, .bytes = &.{ 0xaa, 0xbb } } },
+            .{ .product = .{ .schema = 9, .fields = &.{
+                .dynamic,
+                .{ .known = .{ .schema = 3, .bytes = &.{} } },
+            } } },
+            .dynamic,
+        },
+        .policy = .{ .work = 128, .keys_per_function = 32, .depth = 512 },
+    };
+    var bytes: [256]u8 = undefined;
+    var writer: data.wire.Writer = .{ .output = &bytes };
+    try encodeRequest(a, request, &writer);
+    const expected = @as([192]u8, @splat(0)) ++ [_]u8{
+        7, 4, 0, 1, 5, 2, 0xaa, 0xbb, 2, 9, 2, 0, 1, 3, 0, 0, 128, 1, 32, 128, 4,
+    };
+    try std.testing.expectEqualSlices(u8, &expected, bytes[0..writer.position]);
+}
+
+test "specialization request encoding preserves field order and allocation failures" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, checkRequestEncoding, .{});
+}
+
 /// A policy limit rejects this candidate; the unchanged source remains usable.
 /// No effect is performed and no unchecked partial result is returned.
 pub fn specialize(a: std.mem.Allocator, original: ast.Module, requested: Request) Error!Output {
@@ -108,7 +177,8 @@ pub fn specialize(a: std.mem.Allocator, original: ast.Module, requested: Request
     errdefer out.deinit();
     const storage = out.builder.allocator();
     out.original = try source.own(ast.Module, storage, original);
-    out.request = try source.own(Request, storage, requested);
+    out.request = requested;
+    out.request.arguments = try values.ownMany(storage, requested.arguments);
     const m = out.original;
     inline for (.{
         "schemas",
@@ -150,7 +220,7 @@ pub fn specialize(a: std.mem.Allocator, original: ast.Module, requested: Request
     out.entry = out.functions.items[root].after;
     var cursor: usize = 0;
     while (cursor < out.functions.items.len) : (cursor += 1) try engine.function(cursor);
-    out.key = try identity(original, requested);
+    out.key = try identity(a, original, requested);
     try validate(a, original, requested, &out);
     return out;
 }
@@ -168,29 +238,41 @@ const Engine = struct {
             return error.SpecializationLimit;
         self.left -= 1;
     }
+    const SupportedTask = struct { id: p.Id, depth: usize };
     fn supported(self: *Engine, id: p.Id, depth: usize) Error!bool {
-        try self.spend(depth);
-        const t = self.out.original.terms[@intCast(id)];
-        return switch (t) {
-            .value, .perform, .fail => true,
-            // Generic callees keep their original lexical variable IDs.
-            // Preserve the complete closed caller when a call needs that
-            // environment, instead of renaming away its captured bindings.
-            .call => |v| self.captures[@intCast(v.function)].items.len == 0,
-            .bind => |v| try self.supported(v.value, depth + 1) and
-                try self.supported(v.next, depth + 1),
-            .conditional => |v| try self.supported(
-                v.when_true,
-                depth + 1,
-            ) and try self.supported(v.when_false, depth + 1),
-            .yield_then => |v| self.supported(v, depth + 1),
-            .unpack_product => |v| self.supported(v.body, depth + 1),
-            .match_sum => |v| blk: {
-                for (v.cases) |c| if (!try self.supported(c.body, depth + 1)) break :blk false;
-                break :blk true;
-            },
-            else => false,
-        };
+        var pending: std.ArrayList(SupportedTask) = .empty;
+        defer pending.deinit(self.a());
+        try pending.append(self.a(), .{ .id = id, .depth = depth });
+        while (pending.pop()) |task| {
+            try self.spend(task.depth);
+            const next = task.depth + 1;
+            switch (self.out.original.terms[@intCast(task.id)]) {
+                .value, .perform, .fail => {},
+                .call => |v| if (self.captures[@intCast(v.function)].items.len != 0) return false,
+                .bind => |v| {
+                    try pending.append(self.a(), .{ .id = v.next, .depth = next });
+                    try pending.append(self.a(), .{ .id = v.value, .depth = next });
+                },
+                .conditional => |v| {
+                    try pending.append(self.a(), .{ .id = v.when_false, .depth = next });
+                    try pending.append(self.a(), .{ .id = v.when_true, .depth = next });
+                },
+                .yield_then => |v| try pending.append(self.a(), .{ .id = v, .depth = next }),
+                .unpack_product => |v| try pending.append(
+                    self.a(),
+                    .{ .id = v.body, .depth = next },
+                ),
+                .match_sum => |v| {
+                    var i = v.cases.len;
+                    while (i > 0) {
+                        i -= 1;
+                        try pending.append(self.a(), .{ .id = v.cases[i].body, .depth = next });
+                    }
+                },
+                else => return false,
+            }
+        }
+        return true;
     }
     fn request(self: *Engine, id: p.Id, raw_arguments: []const Knowledge) Error!?usize {
         try self.spend(0);
@@ -204,7 +286,7 @@ const Engine = struct {
             count += 1;
             var same = f.arguments.len == arguments.len;
             if (same) for (f.arguments, arguments) |x, y| {
-                if (!values.equal(x, y)) {
+                if (!try values.equal(self.a(), x, y)) {
                     same = false;
                     break;
                 }
@@ -248,7 +330,7 @@ const Engine = struct {
             .{
                 .before = id,
                 .after = residual,
-                .arguments = try source.own([]const Knowledge, self.a(), arguments),
+                .arguments = try values.ownMany(self.a(), arguments),
             },
         );
         return index;
@@ -268,289 +350,405 @@ const Engine = struct {
         try self.out.builder.define(proof.after, body.id);
         self.out.functions.items[index].body = body.proof;
     }
-    fn value(self: *Engine, id: p.Id, env: Env, depth: usize) Error!Value {
+    const ValueFrame = struct {
+        before: p.Id,
+        expression: ast.Value,
+        knowledge: Knowledge = .dynamic,
+        total: bool = true,
+        children: std.ArrayList(usize) = .empty,
+        args: []p.Id = &.{},
+        known: []Knowledge = &.{},
+        cursor: usize = 0,
+    };
+    fn valueFrame(self: *Engine, id: p.Id, env: Env, depth: usize) Error!ValueFrame {
         try self.spend(depth);
         const before = self.out.original.values[@intCast(id)];
-        var expression = before;
-        var knowledge: Knowledge = .dynamic;
-        var total = true;
-        var children: std.ArrayList(usize) = .empty;
+        var frame: ValueFrame = .{ .before = id, .expression = before };
         switch (before.expression) {
             .variable => |v| {
-                const b = try binding(env, v);
-                expression.expression = .{ .variable = b.after };
-                knowledge = b.knowledge;
+                const bound = try binding(env, v);
+                frame.expression.expression = .{ .variable = bound.after };
+                frame.knowledge = bound.knowledge;
             },
-            .literal => |v| knowledge = .{ .known = self.out.original.constants[@intCast(v)] },
+            .literal => |v| {
+                frame.knowledge = .{ .known = self.out.original.constants[@intCast(v)] };
+            },
             .lambda => |v| {
-                if (self.captures[
-                    @intCast(v)
-                ].items.len != 0) return error.UnsupportedSpecialization;
-                total = false;
+                if (self.captures[@intCast(v)].items.len != 0) {
+                    return error.UnsupportedSpecialization;
+                }
+                frame.total = false;
             },
             .primitive => |op| {
-                const args = try self.a().alloc(p.Id, op.operands.len);
-                const known = try self.a().alloc(Knowledge, op.operands.len);
-                for (op.operands, args, known) |operand, *arg, *k| {
-                    const result = try self.value(operand, env, depth + 1);
-                    arg.* = result.id;
-                    k.* = result.knowledge;
-                    total = total and result.total;
-                    try children.append(self.a(), result.proof);
+                frame.args = try self.a().alloc(p.Id, op.operands.len);
+                frame.known = try self.a().alloc(Knowledge, op.operands.len);
+            },
+        }
+        return frame;
+    }
+    fn finishValue(self: *Engine, frame: *ValueFrame) Error!Value {
+        if (frame.expression.expression == .primitive) {
+            const before = frame.expression;
+            frame.expression.expression.primitive.operands = frame.args;
+            frame.knowledge = try values.normalize(self.a(), try values.primitive(
+                self.a(),
+                self.out.original,
+                self.facts,
+                before,
+                frame.known,
+                &self.left,
+            ), &self.left);
+            frame.total = frame.total and frame.knowledge == .known;
+        }
+        const folded = frame.total and frame.knowledge == .known;
+        const residual = if (folded) try self.out.builder.literal(
+            frame.knowledge.known,
+        ) else try self.out.builder.value(frame.expression);
+        const proof = self.out.value_proofs.items.len;
+        try self.out.value_proofs.append(self.a(), .{
+            .before = frame.before,
+            .after = residual,
+            .folded = folded,
+            .children = frame.children.items,
+        });
+        return .{
+            .id = residual,
+            .knowledge = frame.knowledge,
+            .total = frame.total,
+            .proof = proof,
+        };
+    }
+    fn value(self: *Engine, id: p.Id, env: Env, depth: usize) Error!Value {
+        var pending: std.ArrayList(ValueFrame) = .empty;
+        defer pending.deinit(self.a());
+        try pending.append(self.a(), try self.valueFrame(id, env, depth));
+        while (pending.items.len > 0) {
+            const frame = &pending.items[pending.items.len - 1];
+            if (frame.expression.expression == .primitive and frame.cursor < frame.args.len) {
+                const operand = frame.expression.expression.primitive.operands[frame.cursor];
+                const child = try self.valueFrame(operand, env, depth + pending.items.len);
+                try pending.append(self.a(), child);
+                continue;
+            }
+            const result = try self.finishValue(frame);
+            _ = pending.pop();
+            if (pending.items.len == 0) return result;
+            const parent = &pending.items[pending.items.len - 1];
+            parent.args[parent.cursor] = result.id;
+            parent.known[parent.cursor] = result.knowledge;
+            parent.total = parent.total and result.total;
+            parent.cursor += 1;
+            try parent.children.append(self.a(), result.proof);
+        }
+        unreachable;
+    }
+    const TermInput = struct { id: p.Id, env: Env, depth: usize };
+    const Case = std.meta.Elem(@FieldType(@FieldType(ast.Term, "match_sum"), "cases"));
+    const TermFrame = struct {
+        input: TermInput,
+        original: ast.Term,
+        residual: ast.Term,
+        phase: usize = 0,
+        vp: std.ArrayList(usize) = .empty,
+        tp: std.ArrayList(usize) = .empty,
+        knowledge: Knowledge = .dynamic,
+        selected: ?usize = null,
+        callee: ?usize = null,
+        alias: ?p.Id = null,
+        first: Term = undefined,
+        condition: Value = undefined,
+        variable: p.Id = undefined,
+        payload: Knowledge = undefined,
+        cases: []Case = &.{},
+    };
+    fn termFrame(self: *Engine, input: TermInput) Error!TermFrame {
+        try self.spend(input.depth);
+        const original = self.out.original.terms[@intCast(input.id)];
+        return .{ .input = input, .original = original, .residual = original };
+    }
+    fn childInput(frame: *const TermFrame, id: p.Id, env: Env) TermInput {
+        return .{ .id = id, .env = env, .depth = frame.input.depth + 1 };
+    }
+    fn term(self: *Engine, id: p.Id, env: Env, depth: usize) Error!Term {
+        var pending: std.ArrayList(TermFrame) = .empty;
+        defer pending.deinit(self.a());
+        try pending.append(self.a(), try self.termFrame(.{ .id = id, .env = env, .depth = depth }));
+        var result: Term = .{ .id = 0, .proof = 0 };
+        while (pending.items.len > 0) {
+            const frame = &pending.items[pending.items.len - 1];
+            if (try self.stepTerm(frame, result)) |child| {
+                try pending.append(self.a(), try self.termFrame(child));
+            } else {
+                result = try self.finishTerm(frame);
+                _ = pending.pop();
+            }
+        }
+        return result;
+    }
+    fn finishTerm(self: *Engine, frame: *TermFrame) Error!Term {
+        const after = frame.alias orelse try self.out.builder.term(frame.residual);
+        const proof = self.out.term_proofs.items.len;
+        try self.out.term_proofs.append(self.a(), .{
+            .before = frame.input.id,
+            .after = after,
+            .values = frame.vp.items,
+            .children = frame.tp.items,
+            .selected = frame.selected,
+            .callee = frame.callee,
+        });
+        return .{ .id = after, .knowledge = frame.knowledge, .proof = proof };
+    }
+    fn termValue(self: *Engine, frame: *TermFrame, id: p.Id) Error!Value {
+        const result = try self.value(id, frame.input.env, frame.input.depth + 1);
+        try frame.vp.append(self.a(), result.proof);
+        return result;
+    }
+    fn stepTerm(self: *Engine, frame: *TermFrame, result: Term) Error!?TermInput {
+        switch (frame.original) {
+            .value, .fail => |v| {
+                const x = try self.termValue(frame, v);
+                frame.residual = if (frame.original == .value)
+                    .{ .value = x.id }
+                else
+                    .{ .fail = x.id };
+                if (frame.original == .value) frame.knowledge = x.knowledge;
+            },
+            .bind => return self.stepBind(frame, result),
+            .conditional => return self.stepConditional(frame, result),
+            .call => try self.stepCall(frame),
+            .perform => try self.stepPerform(frame),
+            .yield_then => |v| {
+                if (frame.phase == 0) {
+                    frame.phase = 1;
+                    return childInput(frame, v, frame.input.env);
                 }
-                expression.expression.primitive.operands = args;
-                knowledge = try values.normalize(
-                    self.a(),
-                    try values.primitive(
+                try frame.tp.append(self.a(), result.proof);
+                frame.residual = .{ .yield_then = result.id };
+                frame.knowledge = result.knowledge;
+            },
+            .unpack_product => return self.stepUnpack(frame, result),
+            .match_sum => return self.stepMatch(frame, result),
+            else => return error.UnsupportedSpecialization,
+        }
+        return null;
+    }
+    fn stepBind(self: *Engine, frame: *TermFrame, result: Term) Error!?TermInput {
+        const v = frame.original.bind;
+        if (frame.phase == 0) {
+            frame.phase = 1;
+            return childInput(frame, v.value, frame.input.env);
+        }
+        try frame.tp.append(self.a(), result.proof);
+        if (frame.phase == 1) {
+            frame.first = result;
+            frame.variable = try self.out.builder.variable(
+                self.out.original.variables[@intCast(v.variable)],
+            );
+            const env = try extend(self.a(), frame.input.env, .{
+                .before = v.variable,
+                .after = frame.variable,
+                .knowledge = result.knowledge,
+            });
+            frame.phase = 2;
+            return childInput(frame, v.next, env);
+        }
+        frame.residual = .{ .bind = .{
+            .variable = frame.variable,
+            .value = frame.first.id,
+            .next = result.id,
+        } };
+        frame.knowledge = result.knowledge;
+        return null;
+    }
+    fn stepConditional(self: *Engine, frame: *TermFrame, result: Term) Error!?TermInput {
+        const v = frame.original.conditional;
+        if (frame.phase == 0) {
+            frame.condition = try self.termValue(frame, v.condition);
+            if (frame.condition.total and frame.condition.knowledge == .known) {
+                frame.selected = if (frame.condition.knowledge.known.bytes[0] == 1) 0 else 1;
+            }
+            frame.phase = 1;
+            return childInput(
+                frame,
+                if (frame.selected == 1) v.when_false else v.when_true,
+                frame.input.env,
+            );
+        }
+        try frame.tp.append(self.a(), result.proof);
+        if (frame.selected != null) {
+            frame.alias = result.id;
+            frame.knowledge = result.knowledge;
+            return null;
+        }
+        if (frame.phase == 1) {
+            frame.first = result;
+            frame.phase = 2;
+            return childInput(frame, v.when_false, frame.input.env);
+        }
+        frame.residual = .{ .conditional = .{
+            .condition = frame.condition.id,
+            .when_true = frame.first.id,
+            .when_false = result.id,
+        } };
+        if (try values.equal(self.a(), frame.first.knowledge, result.knowledge)) {
+            frame.knowledge = frame.first.knowledge;
+        }
+        return null;
+    }
+    fn stepCall(self: *Engine, frame: *TermFrame) Error!void {
+        const v = frame.original.call;
+        const args = try self.a().alloc(p.Id, v.arguments.len);
+        const ks = try self.a().alloc(Knowledge, v.arguments.len);
+        for (v.arguments, args, ks) |arg, *to, *known| {
+            const x = try self.termValue(frame, arg);
+            to.* = x.id;
+            known.* = if (x.knowledge == .known and !x.total) .dynamic else x.knowledge;
+        }
+        frame.callee = try self.request(v.function, ks);
+        if (frame.callee) |index| {
+            var dynamic: std.ArrayList(p.Id) = .empty;
+            for (args, self.out.functions.items[index].arguments) |arg, known| {
+                if (known != .known) try dynamic.append(self.a(), arg);
+            }
+            frame.residual = .{ .call = .{
+                .function = self.out.functions.items[index].after,
+                .arguments = dynamic.items,
+            } };
+        } else frame.residual = .{ .call = .{ .function = v.function, .arguments = args } };
+    }
+    fn stepPerform(self: *Engine, frame: *TermFrame) Error!void {
+        const v = frame.original.perform;
+        var operation = v;
+        operation.payload = (try self.termValue(frame, v.payload)).id;
+        if (v.capability) |cap| operation.capability = (try self.termValue(frame, cap)).id;
+        inline for (.{ "bodies", "use_site_capabilities" }) |name| {
+            const args = try self.a().alloc(p.Id, @field(v, name).len);
+            for (@field(v, name), args) |arg, *to| to.* = (try self.termValue(frame, arg)).id;
+            @field(operation, name) = args;
+        }
+        frame.residual = .{ .perform = operation };
+    }
+    fn stepUnpack(self: *Engine, frame: *TermFrame, result: Term) Error!?TermInput {
+        const v = frame.original.unpack_product;
+        if (frame.phase == 0) {
+            const x = try self.termValue(frame, v.value);
+            const vars = try self.a().alloc(p.Id, v.variables.len);
+            var env = frame.input.env;
+            for (v.variables, vars, 0..) |before, *after, i| {
+                after.* = try self.out.builder.variable(
+                    self.out.original.variables[@intCast(before)],
+                );
+                env = try extend(self.a(), env, .{
+                    .before = before,
+                    .after = after.*,
+                    .knowledge = try values.field(
                         self.a(),
                         self.out.original,
                         self.facts,
-                        before,
-                        known,
+                        x.knowledge,
+                        i,
                         &self.left,
                     ),
-                    &self.left,
-                );
-                // Only a fully evaluated ordinary result proves a primitive total.
-                // Partial record fields cannot erase a potentially failing sibling.
-                total = total and knowledge == .known;
-            },
+                });
+            }
+            frame.residual = .{ .unpack_product = .{
+                .value = x.id,
+                .variables = vars,
+                .body = undefined,
+            } };
+            frame.phase = 1;
+            return childInput(frame, v.body, env);
         }
-        const folded = total and knowledge == .known;
-        const residual = if (folded) try self.out.builder.literal(
-            knowledge.known,
-        ) else try self.out.builder.value(expression);
-        const proof = self.out.value_proofs.items.len;
-        try self.out.value_proofs.append(
-            self.a(),
-            .{ .before = id, .after = residual, .folded = folded, .children = children.items },
-        );
-        return .{ .id = residual, .knowledge = knowledge, .total = total, .proof = proof };
+        try frame.tp.append(self.a(), result.proof);
+        frame.residual.unpack_product.body = result.id;
+        frame.knowledge = result.knowledge;
+        return null;
     }
-    fn term(self: *Engine, id: p.Id, env: Env, depth: usize) Error!Term {
-        try self.spend(depth);
-        const original = self.out.original.terms[@intCast(id)];
-        var residual = original;
-        var vp: std.ArrayList(usize) = .empty;
-        var tp: std.ArrayList(usize) = .empty;
-        var knowledge: Knowledge = .dynamic;
-        var selected: ?usize = null;
-        var callee: ?usize = null;
-        var alias: ?p.Id = null;
-        switch (original) {
-            .value, .fail => |v| {
-                const x = try self.value(v, env, depth + 1);
-                try vp.append(self.a(), x.proof);
-                residual = if (original == .value) .{ .value = x.id } else .{ .fail = x.id };
-                if (original == .value) knowledge = x.knowledge;
-            },
-            .bind => |v| {
-                const first = try self.term(v.value, env, depth + 1);
-                const variable = try self.out.builder.variable(
-                    self.out.original.variables[
-                        @intCast(v.variable)
-                    ],
-                );
-                const next_env = try extend(
-                    self.a(),
-                    env,
-                    .{ .before = v.variable, .after = variable, .knowledge = first.knowledge },
-                );
-                const next = try self.term(v.next, next_env, depth + 1);
-                try tp.appendSlice(self.a(), &.{ first.proof, next.proof });
-                residual = .{ .bind = .{
-                    .variable = variable,
-                    .value = first.id,
-                    .next = next.id,
+    fn stepMatch(self: *Engine, frame: *TermFrame, result: Term) Error!?TermInput {
+        const v = frame.original.match_sum;
+        if (frame.phase == 0) {
+            frame.condition = try self.termValue(frame, v.value);
+            if (frame.condition.total and frame.condition.knowledge == .known) {
+                var reader: data.wire.Reader = .{ .input = frame.condition.knowledge.known.bytes };
+                frame.selected = try reader.count();
+            } else frame.cases = try self.a().alloc(Case, v.cases.len);
+        } else {
+            try frame.tp.append(self.a(), result.proof);
+            if (frame.selected != null) {
+                frame.knowledge = result.knowledge;
+                frame.residual = .{ .bind = .{
+                    .variable = frame.variable,
+                    .value = try self.out.builder.pure(
+                        try self.out.builder.literal(frame.payload.known),
+                    ),
+                    .next = result.id,
                 } };
-                knowledge = next.knowledge;
-            },
-            .conditional => |v| {
-                const condition = try self.value(v.condition, env, depth + 1);
-                try vp.append(self.a(), condition.proof);
-                if (condition.total and condition.knowledge == .known) {
-                    selected = if (condition.knowledge.known.bytes[0] == 1) 0 else 1;
-                    const child = try self.term(
-                        if (selected.? == 0) v.when_true else v.when_false,
-                        env,
-                        depth + 1,
-                    );
-                    alias = child.id;
-                    knowledge = child.knowledge;
-                    try tp.append(self.a(), child.proof);
-                } else {
-                    const yes = try self.term(v.when_true, env, depth + 1);
-                    const no = try self.term(v.when_false, env, depth + 1);
-                    try tp.appendSlice(self.a(), &.{ yes.proof, no.proof });
-                    residual = .{ .conditional = .{
-                        .condition = condition.id,
-                        .when_true = yes.id,
-                        .when_false = no.id,
-                    } };
-                    if (values.equal(yes.knowledge, no.knowledge)) knowledge = yes.knowledge;
-                }
-            },
-            .call => |v| {
-                const args = try self.a().alloc(p.Id, v.arguments.len);
-                const ks = try self.a().alloc(Knowledge, v.arguments.len);
-                for (v.arguments, args, ks) |arg, *to, *k| {
-                    const x = try self.value(arg, env, depth + 1);
-                    to.* = x.id;
-                    // Dropping a static argument must not erase its evaluation.
-                    k.* = if (x.knowledge == .known and !x.total) .dynamic else x.knowledge;
-                    try vp.append(self.a(), x.proof);
-                }
-                callee = try self.request(v.function, ks);
-                if (callee) |index| {
-                    var dynamic: std.ArrayList(p.Id) = .empty;
-                    for (
-                        args,
-                        self.out.functions.items[index].arguments,
-                    ) |arg, k| if (k != .known) try dynamic.append(self.a(), arg);
-                    residual = .{ .call = .{
-                        .function = self.out.functions.items[index].after,
-                        .arguments = dynamic.items,
-                    } };
-                } else residual = .{ .call = .{ .function = v.function, .arguments = args } };
-            },
-            .perform => |v| {
-                var operation = v;
-                const payload = try self.value(v.payload, env, depth + 1);
-                operation.payload = payload.id;
-                try vp.append(self.a(), payload.proof);
-                if (v.capability) |cap| {
-                    const x = try self.value(cap, env, depth + 1);
-                    operation.capability = x.id;
-                    try vp.append(self.a(), x.proof);
-                }
-                inline for (.{ "bodies", "use_site_capabilities" }) |name| {
-                    const args = try self.a().alloc(p.Id, @field(v, name).len);
-                    for (@field(v, name), args) |arg, *to| {
-                        const x = try self.value(arg, env, depth + 1);
-                        to.* = x.id;
-                        try vp.append(self.a(), x.proof);
-                    }
-                    @field(operation, name) = args;
-                }
-                residual = .{ .perform = operation };
-            },
-            .yield_then => |v| {
-                const x = try self.term(v, env, depth + 1);
-                try tp.append(self.a(), x.proof);
-                residual = .{ .yield_then = x.id };
-                knowledge = x.knowledge;
-            },
-            .unpack_product => |v| {
-                const x = try self.value(v.value, env, depth + 1);
-                try vp.append(self.a(), x.proof);
-                const vars = try self.a().alloc(p.Id, v.variables.len);
-                var next_env = env;
-                for (v.variables, vars, 0..) |before, *after, i| {
-                    after.* = try self.out.builder.variable(
-                        self.out.original.variables[
-                            @intCast(before)
-                        ],
-                    );
-                    next_env = try extend(
-                        self.a(),
-                        next_env,
-                        .{
-                            .before = before,
-                            .after = after.*,
-                            .knowledge = try values.field(
-                                self.a(),
-                                self.out.original,
-                                self.facts,
-                                x.knowledge,
-                                i,
-                                &self.left,
-                            ),
-                        },
-                    );
-                }
-                const body = try self.term(v.body, next_env, depth + 1);
-                try tp.append(self.a(), body.proof);
-                residual = .{ .unpack_product = .{
-                    .value = x.id,
-                    .variables = vars,
-                    .body = body.id,
-                } };
-                knowledge = body.knowledge;
-            },
-            .match_sum => |v| {
-                const x = try self.value(v.value, env, depth + 1);
-                try vp.append(self.a(), x.proof);
-                if (x.total and x.knowledge == .known) {
-                    var reader: data.wire.Reader = .{ .input = x.knowledge.known.bytes };
-                    const tag = try reader.count();
-                    const branch = v.cases[tag];
-                    const schema = self.out.original.variables[@intCast(branch.variable)];
-                    const payload_fact = (try values.payload(x.knowledge, schema)).value;
-                    const variable = try self.out.builder.variable(schema);
-                    const next_env = try extend(
-                        self.a(),
-                        env,
-                        .{
-                            .before = branch.variable,
-                            .after = variable,
-                            .knowledge = payload_fact,
-                        },
-                    );
-                    const body = try self.term(branch.body, next_env, depth + 1);
-                    try tp.append(self.a(), body.proof);
-                    selected = tag;
-                    knowledge = body.knowledge;
-                    residual = .{
-                        .bind = .{
-                            .variable = variable,
-                            .value = try self.out.builder.pure(
-                                try self.out.builder.literal(payload_fact.known),
-                            ),
-                            .next = body.id,
-                        },
-                    };
-                } else {
-                    const Case = @typeInfo(@TypeOf(v.cases)).pointer.child;
-                    const cases = try self.a().alloc(Case, v.cases.len);
-                    for (v.cases, cases) |before, *after| {
-                        const variable = try self.out.builder.variable(
-                            self.out.original.variables[
-                                @intCast(before.variable)
-                            ],
-                        );
-                        const next_env = try extend(
-                            self.a(),
-                            env,
-                            .{
-                                .before = before.variable,
-                                .after = variable,
-                                .knowledge = .dynamic,
-                            },
-                        );
-                        const body = try self.term(before.body, next_env, depth + 1);
-                        try tp.append(self.a(), body.proof);
-                        after.* = .{ .variable = variable, .body = body.id };
-                    }
-                    residual = .{ .match_sum = .{ .value = x.id, .cases = cases } };
-                }
-            },
-            else => return error.UnsupportedSpecialization,
+                return null;
+            }
+            frame.cases[frame.phase - 1] = .{ .variable = frame.variable, .body = result.id };
         }
-        const after = alias orelse try self.out.builder.term(residual);
-        const proof = self.out.term_proofs.items.len;
-        try self.out.term_proofs.append(
-            self.a(),
-            .{
-                .before = id,
-                .after = after,
-                .values = vp.items,
-                .children = tp.items,
-                .selected = selected,
-                .callee = callee,
-            },
-        );
-        return .{ .id = after, .knowledge = knowledge, .proof = proof };
+        if (frame.selected == null and frame.phase == v.cases.len) {
+            frame.residual = .{ .match_sum = .{
+                .value = frame.condition.id,
+                .cases = frame.cases,
+            } };
+            return null;
+        }
+        const branch = v.cases[frame.selected orelse frame.phase];
+        const schema = self.out.original.variables[@intCast(branch.variable)];
+        frame.payload = if (frame.selected != null)
+            (try values.payload(frame.condition.knowledge, schema)).value
+        else
+            .dynamic;
+        frame.variable = try self.out.builder.variable(schema);
+        const env = try extend(self.a(), frame.input.env, .{
+            .before = branch.variable,
+            .after = frame.variable,
+            .knowledge = frame.payload,
+        });
+        frame.phase += 1;
+        return childInput(frame, branch.body, env);
     }
 };
 
 pub const validate = @import("specialize_validate.zig").validate;
+
+pub fn requestEqual(a: std.mem.Allocator, lhs: Request, rhs: Request) Error!bool {
+    if (lhs.function != rhs.function or lhs.arguments.len != rhs.arguments.len) return false;
+    if (!data.record.equal(Context, lhs.context, rhs.context)) return false;
+    if (!data.record.equal(Policy, lhs.policy, rhs.policy)) return false;
+    for (lhs.arguments, rhs.arguments) |left, right| {
+        if (!try values.equal(a, left, right)) return false;
+    }
+    return true;
+}
+
+test "specialization traverses deep value and term derivations" {
+    const a = std.testing.allocator;
+    var builder = source.Builder.init(a);
+    defer builder.deinit();
+    const unit = try builder.scalar(void);
+    var value_id = try builder.constant(void, {});
+    for (0..1024) |_| value_id = try builder.primitive(unit, .move, &.{value_id}, 0);
+    var term_id = try builder.pure(value_id);
+    for (0..1024) |_| term_id = try builder.term(.{ .yield_then = term_id });
+    const function_id = try builder.declare(&.{}, unit, &.{}, &.{});
+    try builder.define(function_id, term_id);
+    const request: Request = .{
+        .context = std.mem.zeroes(Context),
+        .function = function_id,
+        .arguments = &.{},
+        .policy = .{ .depth = 4096 },
+    };
+    var result = try specialize(a, builder.module(function_id, unit), request);
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 1025), result.term_proofs.items.len);
+    try std.testing.expectEqual(@as(usize, 1025), result.value_proofs.items.len);
+    for (result.value_proofs.items) |proof| try std.testing.expect(proof.folded);
+    var limited = request;
+    limited.policy.depth = 1024;
+    try std.testing.expectError(
+        error.SpecializationLimit,
+        specialize(a, builder.module(function_id, unit), limited),
+    );
+}

@@ -170,8 +170,7 @@ pub fn readValue(
     if (!facts.exportable[@intCast(schema)]) return error.InvalidValue;
     if (reader.position > reader.input.len) return error.Truncated;
     const start = reader.position;
-    const Task = struct { schema: p.Id, count: u64 };
-    var pending: std.ArrayList(Task) = .empty;
+    var pending: std.ArrayList(ValueTask) = .empty;
     defer pending.deinit(allocator);
     try pending.append(allocator, .{ .schema = schema, .count = 1 });
     while (pending.pop()) |task| {
@@ -183,60 +182,83 @@ pub fn readValue(
             allocator,
             .{ .schema = task.schema, .count = task.count - 1 },
         );
-        switch (catalog[index]) {
-            .unit => {},
-            .boolean => {
-                if (try reader.byte() > 1) return error.InvalidValue;
-            },
-            .i8, .u8, .i16, .u16, .i32, .u32, .i64, .u64 => {
-                _ = try reader.take(@intCast(minimum));
-            },
-            .enumeration => |tags| {
-                const bytes = try reader.take(4);
-                const tag = std.mem.readInt(u32, bytes[0..4], .little);
-                if (std.mem.indexOfScalar(u32, tags, tag) == null) return error.InvalidValue;
-            },
-            .bytes => {
-                _ = try reader.bytes();
-            },
-            .text => {
-                _ = try reader.text();
-            },
-            .bounded_bytes => |maximum| {
-                if ((try reader.bytes()).len > maximum) return error.InvalidValue;
-            },
-            .bounded_text => |maximum| {
-                if ((try reader.text()).len > maximum) return error.InvalidValue;
-            },
-            .product => |fields| {
-                var i = fields.len;
-                while (i != 0) {
-                    i -= 1;
-                    try pending.append(allocator, .{ .schema = fields[i], .count = 1 });
-                }
-            },
-            .sum => |fields| {
-                const tag = try reader.count();
-                if (tag >= fields.len) return error.InvalidValue;
-                try pending.append(allocator, .{ .schema = fields[tag], .count = 1 });
-            },
-            .seq => |element| try pending.append(
-                allocator,
-                .{ .schema = element, .count = try reader.natural() },
-            ),
-            .vector => |vector| {
-                const count = try reader.natural();
-                if (count > vector.maximum) return error.InvalidValue;
-                try pending.append(allocator, .{ .schema = vector.element, .count = count });
-            },
-            .array => |array| try pending.append(
-                allocator,
-                .{ .schema = array.element, .count = array.length },
-            ),
-            .internal => return error.InvalidValue,
-        }
+        try readValueTask(allocator, catalog[index], minimum, reader, &pending);
     }
     return reader.input[start..reader.position];
+}
+
+const ValueTask = struct { schema: p.Id, count: u64 };
+
+fn readValueTask(
+    allocator: std.mem.Allocator,
+    shape: p.Schema,
+    minimum: u64,
+    reader: *wire.Reader,
+    pending: *std.ArrayList(ValueTask),
+) Error!void {
+    switch (shape) {
+        .unit => {},
+        .boolean => {
+            if (try reader.byte() > 1) return error.InvalidValue;
+        },
+        .i8, .u8, .i16, .u16, .i32, .u32, .i64, .u64 => {
+            _ = try reader.take(@intCast(minimum));
+        },
+        .enumeration => |tags| {
+            const bytes = try reader.take(4);
+            const tag = std.mem.readInt(u32, bytes[0..4], .little);
+            if (std.mem.indexOfScalar(u32, tags, tag) == null) return error.InvalidValue;
+        },
+        .bytes => {
+            _ = try reader.bytes();
+        },
+        .text => {
+            _ = try reader.text();
+        },
+        .bounded_bytes => |maximum| {
+            if ((try reader.bytes()).len > maximum) return error.InvalidValue;
+        },
+        .bounded_text => |maximum| {
+            if ((try reader.text()).len > maximum) return error.InvalidValue;
+        },
+        else => try queueValueChildren(allocator, shape, reader, pending),
+    }
+}
+
+fn queueValueChildren(
+    allocator: std.mem.Allocator,
+    shape: p.Schema,
+    reader: *wire.Reader,
+    pending: *std.ArrayList(ValueTask),
+) Error!void {
+    switch (shape) {
+        .product => |fields| {
+            var i = fields.len;
+            while (i != 0) {
+                i -= 1;
+                try pending.append(allocator, .{ .schema = fields[i], .count = 1 });
+            }
+        },
+        .sum => |fields| {
+            const tag = try reader.count();
+            if (tag >= fields.len) return error.InvalidValue;
+            try pending.append(allocator, .{ .schema = fields[tag], .count = 1 });
+        },
+        .seq => |element| try pending.append(
+            allocator,
+            .{ .schema = element, .count = try reader.natural() },
+        ),
+        .vector => |vector| {
+            const count = try reader.natural();
+            if (count > vector.maximum) return error.InvalidValue;
+            try pending.append(allocator, .{ .schema = vector.element, .count = count });
+        },
+        .array => |array| try pending.append(
+            allocator,
+            .{ .schema = array.element, .count = array.length },
+        ),
+        else => return error.InvalidValue,
+    }
 }
 
 pub fn slotType(slots: []const p.Id, id: p.Id) Error!p.Id {
@@ -279,21 +301,9 @@ pub fn validateInstruction(
     uses: @import("traits.zig").Facts,
 ) Error!void {
     try instructionFailures(image, instruction, slots);
-    const operands = instruction.operands;
-    const result = instruction.result_type;
     switch (instruction.opcode) {
-        .constant => {
-            if (operands.len != 0 or
-                instruction.immediate >= image.constants.len)
-                return error.InvalidReference;
-            if (image.constants[
-                @intCast(instruction.immediate)
-            ].schema != result) return error.TypeMismatch;
-        },
-        .move => {
-            if (operands.len != 1 or instruction.immediate != 0) return error.InvalidProgram;
-            if (slots[@intCast(operands[0])] != result) return error.TypeMismatch;
-        },
+        .constant,
+        .move,
         .integer_add,
         .integer_sub,
         .integer_mul,
@@ -304,54 +314,16 @@ pub fn validateInstruction(
         .integer_bit_xor,
         .equal,
         .less,
-        => {
-            if (operands.len != 2 or instruction.immediate != 0) return error.InvalidProgram;
-            const left = slots[@intCast(operands[0])];
-            if (left != slots[@intCast(operands[1])]) return error.TypeMismatch;
-            if (!integer(
-                image.schemas[
-                    @intCast(left)
-                ],
-            ) and !(instruction.opcode == .equal and image.schemas[
-                @intCast(left)
-            ] == .boolean)) return error.TypeMismatch;
-            const comparison = instruction.opcode == .equal or instruction.opcode == .less;
-            if (comparison) {
-                if (image.schemas[@intCast(result)] != .boolean) return error.TypeMismatch;
-            } else if (result != left) return error.TypeMismatch;
-        },
-        .integer_bit_not, .integer_convert, .enum_tag => {
-            if (operands.len != 1 or instruction.immediate != 0) return error.InvalidProgram;
-            const source_id = slots[@intCast(operands[0])];
-            const source = image.schemas[@intCast(source_id)];
-            const target = image.schemas[@intCast(result)];
-            if (instruction.opcode == .enum_tag) {
-                if (source != .enumeration or target != .u32) return error.TypeMismatch;
-            } else {
-                if (!integer(source) or !integer(target)) return error.TypeMismatch;
-                if (instruction.opcode == .integer_bit_not and
-                    source_id != result)
-                    return error.TypeMismatch;
-            }
-        },
-        .boolean_not => {
-            if (operands.len != 1 or instruction.immediate != 0) return error.InvalidProgram;
-            if (image.schemas[
-                @intCast(result)
-            ] != .boolean or slots[
-                @intCast(operands[0])
-            ] != result) return error.TypeMismatch;
-        },
-        .computation => {
-            if (instruction.immediate >= image.constructors.len) return error.InvalidReference;
-            const constructor = image.constructors[@intCast(instruction.immediate)];
-            if (constructor.schema != result) return error.TypeMismatch;
-            try arguments(
-                slots,
-                operands,
-                image.scopes.captures[@intCast(constructor.capture)].fields,
-            );
-        },
+        .integer_bit_not,
+        .integer_convert,
+        .enum_tag,
+        .boolean_not,
+        => try scalarInstruction(image, instruction, slots),
+        .computation, .package, .unpack, .clone_resumption => try internalInstruction(
+            image,
+            instruction,
+            slots,
+        ),
         .product,
         .field,
         .variant,
@@ -383,6 +355,29 @@ pub fn validateInstruction(
             slots,
             uses,
         ),
+        .resource_pack, .resource_unpack => try @import("resource_admission.zig").instruction(
+            image,
+            function,
+            instruction,
+            slots,
+        ),
+    }
+}
+
+fn internalInstruction(image: anytype, instruction: anytype, slots: []const p.Id) Error!void {
+    const operands = instruction.operands;
+    const result = instruction.result_type;
+    switch (instruction.opcode) {
+        .computation => {
+            if (instruction.immediate >= image.constructors.len) return error.InvalidReference;
+            const constructor = image.constructors[@intCast(instruction.immediate)];
+            if (constructor.schema != result) return error.TypeMismatch;
+            try arguments(
+                slots,
+                operands,
+                image.scopes.captures[@intCast(constructor.capture)].fields,
+            );
+        },
         .package, .unpack => {
             if (operands.len != 1 or instruction.immediate != 0) return error.InvalidProgram;
             const input = slots[@intCast(operands[0])];
@@ -405,13 +400,82 @@ pub fn validateInstruction(
                 result,
             )) return error.InvalidOwnership;
         },
-        .resource_pack, .resource_unpack => try @import("resource_admission.zig").instruction(
-            image,
-            function,
-            instruction,
-            slots,
-        ),
+        else => return error.UnsupportedInstruction,
     }
+}
+
+fn scalarInstruction(image: anytype, instruction: anytype, slots: []const p.Id) Error!void {
+    const operands = instruction.operands;
+    const result = instruction.result_type;
+    switch (instruction.opcode) {
+        .constant => {
+            if (operands.len != 0 or
+                instruction.immediate >= image.constants.len)
+                return error.InvalidReference;
+            if (image.constants[
+                @intCast(instruction.immediate)
+            ].schema != result) return error.TypeMismatch;
+        },
+        .move => {
+            if (operands.len != 1 or instruction.immediate != 0) return error.InvalidProgram;
+            if (slots[@intCast(operands[0])] != result) return error.TypeMismatch;
+        },
+        .integer_add,
+        .integer_sub,
+        .integer_mul,
+        .integer_div,
+        .integer_rem,
+        .integer_bit_and,
+        .integer_bit_or,
+        .integer_bit_xor,
+        .equal,
+        .less,
+        => {
+            try binaryInstruction(image, instruction, slots);
+        },
+        .integer_bit_not, .integer_convert, .enum_tag => {
+            if (operands.len != 1 or instruction.immediate != 0) return error.InvalidProgram;
+            const source_id = slots[@intCast(operands[0])];
+            const source = image.schemas[@intCast(source_id)];
+            const target = image.schemas[@intCast(result)];
+            if (instruction.opcode == .enum_tag) {
+                if (source != .enumeration or target != .u32) return error.TypeMismatch;
+            } else {
+                if (!integer(source) or !integer(target)) return error.TypeMismatch;
+                if (instruction.opcode == .integer_bit_not and
+                    source_id != result)
+                    return error.TypeMismatch;
+            }
+        },
+        .boolean_not => {
+            if (operands.len != 1 or instruction.immediate != 0) return error.InvalidProgram;
+            if (image.schemas[
+                @intCast(result)
+            ] != .boolean or slots[
+                @intCast(operands[0])
+            ] != result) return error.TypeMismatch;
+        },
+        else => return error.UnsupportedInstruction,
+    }
+}
+
+fn binaryInstruction(image: anytype, instruction: anytype, slots: []const p.Id) Error!void {
+    const operands = instruction.operands;
+    const result = instruction.result_type;
+    if (operands.len != 2 or instruction.immediate != 0) return error.InvalidProgram;
+    const left = slots[@intCast(operands[0])];
+    if (left != slots[@intCast(operands[1])]) return error.TypeMismatch;
+    if (!integer(
+        image.schemas[
+            @intCast(left)
+        ],
+    ) and !(instruction.opcode == .equal and image.schemas[
+        @intCast(left)
+    ] == .boolean)) return error.TypeMismatch;
+    const comparison = instruction.opcode == .equal or instruction.opcode == .less;
+    if (comparison) {
+        if (image.schemas[@intCast(result)] != .boolean) return error.TypeMismatch;
+    } else if (result != left) return error.TypeMismatch;
 }
 
 fn instructionFailures(image: anytype, instruction: anytype, slots: []const p.Id) Error!void {

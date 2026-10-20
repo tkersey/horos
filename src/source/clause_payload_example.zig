@@ -25,6 +25,49 @@ pub fn variant(
     std.debug.assert(effect == family);
     const returns = try b.declare(&.{unit}, unit, &.{}, &.{});
     try b.define(returns, try b.pure(try b.reference(b.parameter(returns, 0))));
+    const handlers = try defineHandlers(b, unit, cap, effect, returns);
+    const body = try b.declare(&.{ cap, cap }, unit, &.{effect}, &.{});
+    const selected = try b.reference(b.parameter(body, 0));
+    const payload = try b.reference(b.parameter(body, @intFromBool(older)));
+    const invoked = try invokePayload(b, helper, unit, cap, effect, selected, payload);
+    try b.define(body, invoked);
+    const body_type = try b.schema(.{ .internal = .{ .computation = .{
+        .parameters = &.{ cap, cap },
+        .result = unit,
+        .effects = &.{effect},
+    } } });
+    const outer = try b.declare(&.{cap}, unit, &.{effect}, &.{});
+    try b.define(
+        outer,
+        try b.term(.{ .handle = .{
+            .handler = handlers[1],
+            .body = try b.lambda(body, body_type),
+            .arguments = &.{try b.reference(b.parameter(outer, 0))},
+        } }),
+    );
+    const outer_type = try b.schema(.{ .internal = .{ .computation = .{
+        .parameters = &.{cap},
+        .result = unit,
+        .effects = &.{effect},
+    } } });
+    const entry = try b.declare(&.{}, unit, &.{}, &.{});
+    try b.define(
+        entry,
+        try b.term(.{ .handle = .{
+            .handler = handlers[0],
+            .body = try b.lambda(outer, outer_type),
+        } }),
+    );
+    return b.module(entry, unit);
+}
+
+fn defineHandlers(
+    b: *source.Builder,
+    unit: p.Id,
+    cap: p.Id,
+    effect: p.Id,
+    returns: p.Id,
+) source.Error![2]p.Id {
     var handlers: [2]p.Id = undefined;
     for (&handlers, 0..) |*handler, index| {
         const effects: []const p.Id = if (index == 0) &.{} else &.{effect};
@@ -58,9 +101,18 @@ pub fn variant(
             .clauses = &.{.{ .effect = effect, .function = clause, .resumption = token }},
         });
     }
-    const body = try b.declare(&.{ cap, cap }, unit, &.{effect}, &.{});
-    const selected = try b.reference(b.parameter(body, 0));
-    const payload = try b.reference(b.parameter(body, @intFromBool(older)));
+    return handlers;
+}
+
+fn invokePayload(
+    b: *source.Builder,
+    comptime helper: bool,
+    unit: p.Id,
+    cap: p.Id,
+    effect: p.Id,
+    selected: p.Id,
+    payload: p.Id,
+) source.Error!p.Id {
     const invoked = if (helper) blk: {
         const call = try b.declare(&.{ cap, cap }, unit, &.{effect}, &.{});
         try b.define(
@@ -80,33 +132,5 @@ pub fn variant(
         .capability = selected,
         .payload = payload,
     } });
-    try b.define(body, invoked);
-    const body_type = try b.schema(.{ .internal = .{ .computation = .{
-        .parameters = &.{ cap, cap },
-        .result = unit,
-        .effects = &.{effect},
-    } } });
-    const outer = try b.declare(&.{cap}, unit, &.{effect}, &.{});
-    try b.define(
-        outer,
-        try b.term(.{ .handle = .{
-            .handler = handlers[1],
-            .body = try b.lambda(body, body_type),
-            .arguments = &.{try b.reference(b.parameter(outer, 0))},
-        } }),
-    );
-    const outer_type = try b.schema(.{ .internal = .{ .computation = .{
-        .parameters = &.{cap},
-        .result = unit,
-        .effects = &.{effect},
-    } } });
-    const entry = try b.declare(&.{}, unit, &.{}, &.{});
-    try b.define(
-        entry,
-        try b.term(.{ .handle = .{
-            .handler = handlers[0],
-            .body = try b.lambda(outer, outer_type),
-        } }),
-    );
-    return b.module(entry, unit);
+    return invoked;
 }

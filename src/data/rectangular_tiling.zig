@@ -71,15 +71,6 @@ pub fn construct(
         s.m,
         s.one,
     }) |slot| if (old.layout.slots[@intCast(slot)] != schema) return null;
-    const start: p.Id = @intCast(old.layout.slots.len);
-    const ai = start;
-    const bj = start + 1;
-    const ei = start + 2;
-    const ej = start + 3;
-    const scratch = start + 4;
-    const width = start + 5;
-    const condition = original.blocks[s.outer].instructions[0].destination;
-    const failures = original.blocks[s.latch].instructions[0].failures;
     const functions = try a.dupe(ir.Function, original.functions);
     const slots = try a.alloc(p.Id, old.layout.slots.len + 6);
     @memcpy(slots[0..old.layout.slots.len], old.layout.slots);
@@ -91,6 +82,28 @@ pub fn construct(
     const encoded = try a.alloc(u8, 8);
     std.mem.writeInt(u64, encoded[0..8], tile_width, .little);
     constants[original.constants.len] = .{ .schema = schema, .bytes = encoded };
+    const blocks = try a.alloc(ir.Block, 13);
+    try emitInitial(a, original, s, blocks);
+    try emitRows(a, original, s, blocks);
+    try emitColumns(a, original, s, blocks);
+    try emitBody(a, original, s, blocks);
+    var program = original;
+    program.blocks = blocks;
+    program.functions = functions;
+    program.constants = constants;
+    keep = true;
+    return .{ .arena = arena, .program = program, .source = s };
+}
+fn emitInitial(
+    a: std.mem.Allocator,
+    original: ir.Program,
+    s: rectangle.Shape,
+    blocks: []ir.Block,
+) Error!void {
+    const old = original.functions[0];
+    const start: p.Id = @intCast(old.layout.slots.len);
+    const ai = start;
+    const width = start + 5;
     const init = try a.alloc(ir.Instruction, original.blocks[s.entry].instructions.len + 2);
     @memcpy(init[0 .. init.len - 2], original.blocks[s.entry].instructions);
     init[init.len - 2] = .{
@@ -99,10 +112,25 @@ pub fn construct(
         .immediate = original.constants.len,
     };
     init[init.len - 1] = move(ai, &.{s.i});
+    blocks[0] = try block(a, init, .{ .jump = .{ .block = 1 } });
+}
+fn emitRows(
+    a: std.mem.Allocator,
+    original: ir.Program,
+    s: rectangle.Shape,
+    blocks: []ir.Block,
+) Error!void {
+    const old = original.functions[0];
+    const start: p.Id = @intCast(old.layout.slots.len);
+    const ai = start;
+    const ei = start + 2;
+    const scratch = start + 4;
+    const width = start + 5;
+    const condition = original.blocks[s.outer].instructions[0].destination;
+    const failures = original.blocks[s.latch].instructions[0].failures;
+    const bj = start + 1;
     var reset = original.blocks[s.reset].instructions[0];
     reset.destination = bj;
-    const blocks = try a.alloc(ir.Block, 13);
-    blocks[0] = try block(a, init, .{ .jump = .{ .block = 1 } });
     blocks[1] = try block(
         a,
         &.{.{ .destination = condition, .opcode = .less, .operands = &.{ ai, s.n } }},
@@ -125,6 +153,22 @@ pub fn construct(
         },
         reset,
     }, .{ .jump = .{ .block = 3 } });
+}
+fn emitColumns(
+    a: std.mem.Allocator,
+    original: ir.Program,
+    s: rectangle.Shape,
+    blocks: []ir.Block,
+) Error!void {
+    const old = original.functions[0];
+    const start: p.Id = @intCast(old.layout.slots.len);
+    const ai = start;
+    const bj = start + 1;
+    const ej = start + 3;
+    const scratch = start + 4;
+    const width = start + 5;
+    const condition = original.blocks[s.outer].instructions[0].destination;
+    const failures = original.blocks[s.latch].instructions[0].failures;
     blocks[3] = try block(
         a,
         &.{.{ .destination = condition, .opcode = .less, .operands = &.{ bj, s.m } }},
@@ -147,6 +191,20 @@ pub fn construct(
         },
         move(s.i, &.{ai}),
     }, .{ .jump = .{ .block = 5 } });
+}
+fn emitBody(
+    a: std.mem.Allocator,
+    original: ir.Program,
+    s: rectangle.Shape,
+    blocks: []ir.Block,
+) Error!void {
+    const old = original.functions[0];
+    const start: p.Id = @intCast(old.layout.slots.len);
+    const ai = start;
+    const bj = start + 1;
+    const ei = start + 2;
+    const ej = start + 3;
+    const condition = original.blocks[s.outer].instructions[0].destination;
     blocks[5] = try block(
         a,
         &.{.{ .destination = condition, .opcode = .less, .operands = &.{ s.i, ei } }},
@@ -163,12 +221,6 @@ pub fn construct(
     blocks[10] = try block(a, &.{move(bj, &.{ej})}, .{ .jump = .{ .block = 3 } });
     blocks[11] = try block(a, &.{move(ai, &.{ei})}, .{ .jump = .{ .block = 1 } });
     blocks[12] = try block(a, &.{}, .{ .return_value = s.accumulator });
-    var program = original;
-    program.blocks = blocks;
-    program.functions = functions;
-    program.constants = constants;
-    keep = true;
-    return .{ .arena = arena, .program = program, .source = s };
 }
 fn check(actual: ir.Block, instructions: []const ir.Instruction, term: ir.Terminator) Error!void {
     if (actual.function != 0 or actual.custody != 0 or !equal(
@@ -207,6 +259,17 @@ pub fn validate(
     rest.functions = original.functions;
     rest.constants = original.constants;
     if (!equal(ir.Program, original, rest)) return error.InvalidRectangularTiling;
+    try validateMetadata(original, candidate, s);
+    try validateInitial(original, candidate, s);
+    try validateRows(original, candidate, s);
+    try validateColumns(original, candidate, s);
+    try validateBody(original, candidate, s);
+}
+fn validateMetadata(
+    original: ir.Program,
+    candidate: ir.Program,
+    s: rectangle.Shape,
+) Error!void {
     const old = original.functions[0];
     const changed = candidate.functions[0];
     const start = old.layout.slots.len;
@@ -239,14 +302,15 @@ pub fn validate(
         literal.bytes[0..8],
         .little,
     ) != tile_width) return error.InvalidRectangularTiling;
+}
+fn validateInitial(
+    original: ir.Program,
+    candidate: ir.Program,
+    s: rectangle.Shape,
+) Error!void {
+    const start = original.functions[0].layout.slots.len;
     const ai: p.Id = @intCast(start);
-    const bj = ai + 1;
-    const ei = ai + 2;
-    const ej = ai + 3;
-    const scratch = ai + 4;
     const width = ai + 5;
-    const condition = original.blocks[s.outer].instructions[0].destination;
-    const failures = original.blocks[s.latch].instructions[0].failures;
     const first = candidate.blocks[0];
     const initial = original.blocks[s.entry].instructions;
     if (first.function != 0 or
@@ -264,6 +328,20 @@ pub fn validate(
         first.instructions[initial.len + 1],
         .{ .destination = ai, .opcode = .move, .operands = &.{s.i} },
     )) return error.InvalidRectangularTiling;
+}
+fn validateRows(
+    original: ir.Program,
+    candidate: ir.Program,
+    s: rectangle.Shape,
+) Error!void {
+    const start = original.functions[0].layout.slots.len;
+    const ai: p.Id = @intCast(start);
+    const bj = ai + 1;
+    const ei = ai + 2;
+    const scratch = ai + 4;
+    const width = ai + 5;
+    const condition = original.blocks[s.outer].instructions[0].destination;
+    const failures = original.blocks[s.latch].instructions[0].failures;
     // Reconstruct the range and transfer equations, not an emitted candidate.
     try check(
         candidate.blocks[1],
@@ -293,6 +371,20 @@ pub fn validate(
         },
         reset,
     }, .{ .jump = .{ .block = 3 } });
+}
+fn validateColumns(
+    original: ir.Program,
+    candidate: ir.Program,
+    s: rectangle.Shape,
+) Error!void {
+    const start = original.functions[0].layout.slots.len;
+    const ai: p.Id = @intCast(start);
+    const bj = ai + 1;
+    const ej = ai + 3;
+    const scratch = ai + 4;
+    const width = ai + 5;
+    const condition = original.blocks[s.outer].instructions[0].destination;
+    const failures = original.blocks[s.latch].instructions[0].failures;
     try check(
         candidate.blocks[3],
         &.{.{ .destination = condition, .opcode = .less, .operands = &.{ bj, s.m } }},
@@ -319,6 +411,18 @@ pub fn validate(
         },
         .{ .destination = s.i, .opcode = .move, .operands = &.{ai} },
     }, .{ .jump = .{ .block = 5 } });
+}
+fn validateBody(
+    original: ir.Program,
+    candidate: ir.Program,
+    s: rectangle.Shape,
+) Error!void {
+    const start = original.functions[0].layout.slots.len;
+    const ai: p.Id = @intCast(start);
+    const bj = ai + 1;
+    const ei = ai + 2;
+    const ej = ai + 3;
+    const condition = original.blocks[s.outer].instructions[0].destination;
     try check(
         candidate.blocks[5],
         &.{.{ .destination = condition, .opcode = .less, .operands = &.{ s.i, ei } }},
@@ -364,6 +468,7 @@ pub fn validate(
     );
     try check(candidate.blocks[12], &.{}, .{ .return_value = s.accumulator });
 }
+
 pub fn executionWork(s: rectangle.Shape, body_instructions: usize) ?u64 {
     const tr = s.rows / tile_width + @intFromBool(s.rows % tile_width != 0);
     const tc = s.columns / tile_width + @intFromBool(s.columns % tile_width != 0);

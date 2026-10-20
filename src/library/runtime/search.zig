@@ -112,6 +112,20 @@ pub fn interpret(
             .{ .name = "rejected", .schema = unit },
         },
     );
+    try defineSearchHandler(c, f, handler, step);
+    const value = try makeSearch(c, element, options, boolean, step, token, handler);
+    try f.interpretations.append(
+        allocator,
+        .{ .key = try KeyOps.snapshot(allocator, key), .value = value },
+    );
+    return value;
+}
+fn defineSearchHandler(
+    c: *a.Context,
+    f: *const FamilyData,
+    handler: *const a.Handler,
+    step: *const a.Schema,
+) a.Error!void {
     const returns_fn = try c.returnFunction(handler);
     const returns = try c.body(returns_fn);
     try c.define(
@@ -134,6 +148,16 @@ pub fn interpret(
             try rejected.constant(void, {}),
         )),
     );
+}
+fn makeSearch(
+    c: *a.Context,
+    element: *const a.Schema,
+    options: Options,
+    boolean: *const a.Schema,
+    step: *const a.Schema,
+    token: *const a.Schema,
+    handler: *const a.Handler,
+) a.Error!Search {
     const solutions = try c.sequence(element);
     const task = try c.record(&.{
         .{ .name = "template", .schema = token },
@@ -158,6 +182,25 @@ pub fn interpret(
     );
     const explore = try c.functionFor("explore", explore_schema);
     const advance = try c.functionFor("next search task", next_schema);
+    try defineExplore(c, explore, advance, task, queue, options.order);
+    try defineAdvance(c, advance, explore);
+    return .{
+        .step = step,
+        .resumption = token,
+        .handler = handler,
+        .solutions = solutions,
+        .explore = explore,
+        .queue = queue,
+    };
+}
+fn defineExplore(
+    c: *a.Context,
+    explore: *const a.Function,
+    advance: *const a.Function,
+    task: *const a.Schema,
+    queue: *const a.Schema,
+    order: Order,
+) a.Error!void {
     const body = try c.body(explore);
     const current = try body.parameter("step");
     const prior = try body.parameter("queue");
@@ -185,7 +228,7 @@ pub fn interpret(
         },
     );
     const alternatives = try branch.body().sequenceValue(queue, &.{ left, right });
-    const queued = if (options.order == .depth_first) try branch.body().concat(
+    const queued = if (order == .depth_first) try branch.body().concat(
         alternatives,
         prior,
     ) else try branch.body().concat(prior, alternatives);
@@ -208,6 +251,12 @@ pub fn interpret(
             },
         )),
     );
+}
+fn defineAdvance(
+    c: *a.Context,
+    advance: *const a.Function,
+    explore: *const a.Function,
+) a.Error!void {
     const next_body = try c.body(advance);
     const done = try next_body.parameter("found");
     const popped = try next_body.pop(try next_body.parameter("queue"));
@@ -234,19 +283,6 @@ pub fn interpret(
             &.{ try empty.ret(done), try present.ret(continued) },
         )),
     );
-    const value: Search = .{
-        .step = step,
-        .resumption = token,
-        .handler = handler,
-        .solutions = solutions,
-        .explore = explore,
-        .queue = queue,
-    };
-    try f.interpretations.append(
-        allocator,
-        .{ .key = try KeyOps.snapshot(allocator, key), .value = value },
-    );
-    return value;
 }
 pub fn collect(body: *a.Body, search: Search, step: *const a.Value) a.Error!*const a.Value {
     return body.call(

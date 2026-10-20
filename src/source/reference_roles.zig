@@ -29,76 +29,81 @@ const case_fields = &[_]Field{
     field("variable", p.Id, .bound, .one),
     field("body", p.Id, .term, .one),
 };
+const reference_fields = std.EnumArray(Tag, []const Field).init(.{
+    .value = &.{},
+    .dispose = &.{},
+    .fail = &.{},
+    .yield_then = &.{},
+    .bind = &.{
+        field("variable", p.Id, .bound, .one),
+        field("value", p.Id, .term, .one),
+        field("next", p.Id, .term, .one),
+    },
+    .conditional = &.{
+        field("condition", p.Id, .value, .one),
+        field("when_true", p.Id, .term, .one),
+        field("when_false", p.Id, .term, .one),
+    },
+    .call = &.{
+        field("function", p.Id, .function, .one),
+        field("arguments", []const p.Id, .value, .list),
+    },
+    .apply = &.{
+        field("computation", p.Id, .value, .one),
+        field("arguments", []const p.Id, .value, .list),
+    },
+    .perform = &.{
+        field("effect", p.Id, .effect, .one),
+        field("capability", ?p.Id, .value, .optional),
+        field("payload", p.Id, .value, .one),
+        field("bodies", []const p.Id, .value, .list),
+        field("use_site_capabilities", []const p.Id, .value, .list),
+    },
+    .handle = &.{
+        field("handler", p.Id, .handler, .one),
+        field("body", p.Id, .value, .one),
+        field("arguments", []const p.Id, .value, .list),
+        field("state", []const p.Id, .value, .list),
+    },
+    .resume_value = &.{
+        field("resumption", p.Id, .value, .one),
+        field("argument", p.Id, .value, .one),
+    },
+    .resume_with = &.{
+        field("resumption", p.Id, .value, .one),
+        field("argument", p.Id, .value, .one),
+        field("handler", p.Id, .handler, .one),
+        field("state", []const p.Id, .value, .list),
+    },
+    .resume_computation = &.{
+        field("resumption", p.Id, .value, .one),
+        field("computation", p.Id, .value, .one),
+    },
+    .protect = &.{
+        field("body", p.Id, .value, .one),
+        field("cleanup", p.Id, .value, .one),
+        field("arguments", []const p.Id, .value, .list),
+        field("resource", ?p.Id, .value, .optional),
+        field("loan_region", ?p.Id, .region, .optional),
+    },
+    .with_region = &.{
+        field("region", p.Id, .region, .one),
+        field("body", p.Id, .value, .one),
+        field("arguments", []const p.Id, .value, .list),
+    },
+    .match_sum = &.{
+        field("value", p.Id, .value, .one),
+        field("cases", []const MatchCase, .match_case, .list),
+    },
+    .unpack_product = &.{
+        field("value", p.Id, .value, .one),
+        field("variables", []const p.Id, .bound, .list),
+        field("body", p.Id, .term, .one),
+    },
+});
+
 fn fields(comptime tag: Tag) []const Field {
-    return switch (tag) {
-        .value, .dispose, .fail, .yield_then => &.{},
-        .bind => &.{
-            field("variable", p.Id, .bound, .one),
-            field("value", p.Id, .term, .one),
-            field("next", p.Id, .term, .one),
-        },
-        .conditional => &.{
-            field("condition", p.Id, .value, .one),
-            field("when_true", p.Id, .term, .one),
-            field("when_false", p.Id, .term, .one),
-        },
-        .call => &.{
-            field("function", p.Id, .function, .one),
-            field("arguments", []const p.Id, .value, .list),
-        },
-        .apply => &.{
-            field("computation", p.Id, .value, .one),
-            field("arguments", []const p.Id, .value, .list),
-        },
-        .perform => &.{
-            field("effect", p.Id, .effect, .one),
-            field("capability", ?p.Id, .value, .optional),
-            field("payload", p.Id, .value, .one),
-            field("bodies", []const p.Id, .value, .list),
-            field("use_site_capabilities", []const p.Id, .value, .list),
-        },
-        .handle => &.{
-            field("handler", p.Id, .handler, .one),
-            field("body", p.Id, .value, .one),
-            field("arguments", []const p.Id, .value, .list),
-            field("state", []const p.Id, .value, .list),
-        },
-        .resume_value => &.{
-            field("resumption", p.Id, .value, .one),
-            field("argument", p.Id, .value, .one),
-        },
-        .resume_with => &.{
-            field("resumption", p.Id, .value, .one),
-            field("argument", p.Id, .value, .one),
-            field("handler", p.Id, .handler, .one),
-            field("state", []const p.Id, .value, .list),
-        },
-        .resume_computation => &.{
-            field("resumption", p.Id, .value, .one),
-            field("computation", p.Id, .value, .one),
-        },
-        .protect => &.{
-            field("body", p.Id, .value, .one),
-            field("cleanup", p.Id, .value, .one),
-            field("arguments", []const p.Id, .value, .list),
-            field("resource", ?p.Id, .value, .optional),
-            field("loan_region", ?p.Id, .region, .optional),
-        },
-        .with_region => &.{
-            field("region", p.Id, .region, .one),
-            field("body", p.Id, .value, .one),
-            field("arguments", []const p.Id, .value, .list),
-        },
-        .match_sum => &.{
-            field("value", p.Id, .value, .one),
-            field("cases", []const MatchCase, .match_case, .list),
-        },
-        .unpack_product => &.{
-            field("value", p.Id, .value, .one),
-            field("variables", []const p.Id, .bound, .list),
-            field("body", p.Id, .term, .one),
-        },
-    };
+    return reference_fields.get(tag);
 }
 fn validateFields(comptime T: type, comptime expected: []const Field) void {
     if (@typeInfo(T) != .@"struct") @compileError("source reference roles: expected a record");
