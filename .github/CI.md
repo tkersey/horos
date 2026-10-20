@@ -1,7 +1,11 @@
 # Qualification
 
-Source syntax/formatting and the tracked Zig source inventory are checked before
-compilation. The existing installation and contracts jobs remain independent:
+Source syntax/formatting, the tracked Zig source inventory and the
+[TigerStyle adoption gate](../docs/tiger-style.md) are checked before
+compilation. The source job checks out the actual proposed head with its history,
+tests the pinned native auditor and audits the selected committed difference.
+The source preflight retains its five-minute timeout. The existing installation
+and contracts jobs remain independent:
 
 ```sh
 zig build check-package -Doptimize=safe --summary all
