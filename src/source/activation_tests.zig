@@ -27,7 +27,12 @@ test "total branching tail clauses are distinct from general control" {
     }
     try testing.expectEqual(1, branches);
     try testing.expectEqual(2, returns);
-    inline for (.{ source.examples.deep, source.examples.shallow, source.examples.generator, source.examples.reentrant }) |example| {
+    inline for (.{
+        source.examples.deep,
+        source.examples.shallow,
+        source.examples.generator,
+        source.examples.reentrant,
+    }) |example| {
         var sibling = source.Builder.init(testing.allocator);
         defer sibling.deinit();
         var general = try lower(testing.allocator, try example(&sibling));
@@ -49,7 +54,9 @@ test "immediate lexical application uses direct calls without erasing callable c
     defer compiled.deinit();
     var calls: usize = 0;
     for (compiled.program.blocks) |block| {
-        for (block.instructions) |instruction| try testing.expect(instruction.opcode != .computation);
+        for (block.instructions) |instruction| try testing.expect(
+            instruction.opcode != .computation,
+        );
         try testing.expect(block.terminator != .apply);
         if (block.terminator == .call) {
             calls += 1;
@@ -60,7 +67,10 @@ test "immediate lexical application uses direct calls without erasing callable c
     // The original lambda's capture bound is still checked after specialization.
     const schema = builder.values.items[@intCast(application.computation)].schema;
     builder.schemas.items[@intCast(schema)].internal.computation.capture_bound = &.{};
-    try testing.expectError(error.InvalidOwnership, lower(testing.allocator, builder.module(original.entry, original.failure)));
+    try testing.expectError(
+        error.InvalidOwnership,
+        lower(testing.allocator, builder.module(original.entry, original.failure)),
+    );
 }
 
 test "immediate application retains the capture boundary for an owned resumption" {
@@ -100,7 +110,10 @@ test "module observes declarations made while evaluating its arguments" {
     const integer = try builder.scalar(u64);
     const main = try builder.declare(&.{}, integer, &.{}, &.{});
     try builder.define(main, try builder.pure(try builder.constant(u64, 42)));
-    var compiled = try source.lower(testing.allocator, builder.module(main, try builder.scalar(void)));
+    var compiled = try source.lower(
+        testing.allocator,
+        builder.module(main, try builder.scalar(void)),
+    );
     defer compiled.deinit();
     try testing.expect(compiled.program.schemas[@intCast(compiled.program.roots.failure)] == .unit);
 }
@@ -182,13 +195,21 @@ test "stable source analysis closes mutually recursive lexical captures" {
     const failure = try builder.failureLiteral(try builder.constant(void, {}));
     for ([_]p.Id{ left, right }, [_]p.Id{ right, left }) |function, other| {
         const n = try builder.reference(builder.parameter(function, 0));
-        const condition = try builder.primitive(boolean, .equal, &.{ n, try builder.constant(u64, 0) }, 0);
+        const condition = try builder.primitive(
+            boolean,
+            .equal,
+            &.{ n, try builder.constant(u64, 0) },
+            0,
+        );
         const decrement = try builder.value(.{ .schema = integer, .expression = .{ .primitive = .{
             .opcode = .integer_sub,
             .operands = &.{ n, try builder.constant(u64, 1) },
             .failures = &.{.{ .kind = .arithmetic_overflow, .value = failure }},
         } } });
-        const call = try builder.term(.{ .call = .{ .function = other, .arguments = &.{decrement} } });
+        const call = try builder.term(.{ .call = .{
+            .function = other,
+            .arguments = &.{decrement},
+        } });
         try builder.define(function, try builder.term(.{ .conditional = .{
             .condition = condition,
             .when_true = try builder.pure(try builder.reference(outer)),
@@ -222,7 +243,10 @@ test "both conditional arms write the same stable join slot" {
         .when_true = left,
         .when_false = right,
     } });
-    try builder.define(main, try builder.bind(binding, branch, try builder.pure(try builder.reference(binding))));
+    try builder.define(
+        main,
+        try builder.bind(binding, branch, try builder.pure(try builder.reference(binding))),
+    );
     var compiled = try lower(testing.allocator, builder.module(main, unit));
     defer compiled.deinit();
     const image = compiled.program;
@@ -233,9 +257,15 @@ test "both conditional arms write the same stable join slot" {
     const a = image.blocks[@intCast(conditional.when_true.block)];
     const b = image.blocks[@intCast(conditional.when_false.block)];
     try testing.expectEqual(a.terminator.jump.block, b.terminator.jump.block);
-    try testing.expectEqual(a.terminator.jump.assignments[0].destination, b.terminator.jump.assignments[0].destination);
+    try testing.expectEqual(
+        a.terminator.jump.assignments[0].destination,
+        b.terminator.jump.assignments[0].destination,
+    );
     const joined = image.blocks[@intCast(a.terminator.jump.block)];
-    try testing.expectEqual(joined.terminator.return_value, a.terminator.jump.assignments[0].destination);
+    try testing.expectEqual(
+        joined.terminator.return_value,
+        a.terminator.jump.assignments[0].destination,
+    );
     try testing.expect(a.terminator.jump.assignments[0].source.slot !=
         b.terminator.jump.assignments[0].source.slot);
 }
@@ -248,8 +278,15 @@ test "reused lexical name has distinct stable bindings" {
     const main = try builder.declare(&.{}, integer, &.{}, &.{});
     const name = try builder.variable(integer);
     const value = try builder.reference(name);
-    const inner = try builder.bind(name, try builder.pure(try builder.constant(u64, 2)), try builder.pure(value));
-    try builder.define(main, try builder.bind(name, try builder.pure(try builder.constant(u64, 1)), inner));
+    const inner = try builder.bind(
+        name,
+        try builder.pure(try builder.constant(u64, 2)),
+        try builder.pure(value),
+    );
+    try builder.define(
+        main,
+        try builder.bind(name, try builder.pure(try builder.constant(u64, 1)), inner),
+    );
     var compiled = try lower(testing.allocator, builder.module(main, unit));
     defer compiled.deinit();
     const image = compiled.program;
@@ -342,7 +379,10 @@ test "stable lowering distinguishes the successor handler answer from the resump
             .source = .returned,
         }};
         block.terminator.resume_with.next.assignments = &assignments;
-        try testing.expectError(error.TypeMismatch, data.activation_structure.validate(testing.allocator, image));
+        try testing.expectError(
+            error.TypeMismatch,
+            data.activation_structure.validate(testing.allocator, image),
+        );
         return;
     }
     return error.TestUnexpectedResult;
@@ -350,14 +390,44 @@ test "stable lowering distinguishes the successor handler answer from the resump
 
 test "generalized-effect staged examples round-trip directly through BPI3 admission" {
     inline for (.{
-        "lexical",          "deep",               "recursive",           "choicesAll",     "choicesFirst",
-        "generator",        "stateLocal",         "stateShared",         "ownership",      "answers",
-        "retainedScope",    "scopedReader",       "writerRaise",         "schedulerFifo",  "yieldingCleanup",
-        "borrowOperands",   "resourceScalar",     "resourcePair",        "boundedValues",  "queensDfs",
-        "queensBfs",        "nested",             "shallow",             "injection",      "indexed",
-        "abortCustody",     "unwind",             "reentrant",           "cloned",         "shallowResumptions",
-        "shallowInjection", "handleOperandOrder", "protectOperandOrder", "successorState", "clausePayload",
-        "clauseAbort",      "blobCapture",        "scalarContracts",
+        "lexical",
+        "deep",
+        "recursive",
+        "choicesAll",
+        "choicesFirst",
+        "generator",
+        "stateLocal",
+        "stateShared",
+        "ownership",
+        "answers",
+        "retainedScope",
+        "scopedReader",
+        "writerRaise",
+        "schedulerFifo",
+        "yieldingCleanup",
+        "borrowOperands",
+        "resourceScalar",
+        "resourcePair",
+        "boundedValues",
+        "queensDfs",
+        "queensBfs",
+        "nested",
+        "shallow",
+        "injection",
+        "indexed",
+        "abortCustody",
+        "unwind",
+        "reentrant",
+        "cloned",
+        "shallowResumptions",
+        "shallowInjection",
+        "handleOperandOrder",
+        "protectOperandOrder",
+        "successorState",
+        "clausePayload",
+        "clauseAbort",
+        "blobCapture",
+        "scalarContracts",
     }) |name| {
         var builder = source.Builder.init(testing.allocator);
         defer builder.deinit();
@@ -366,13 +436,19 @@ test "generalized-effect staged examples round-trip directly through BPI3 admiss
         try data.activation_structure.validate(testing.allocator, compiled.program);
 
         try testing.expect(compiled.program.blocks.len != 0);
-        const bytes = try testing.allocator.alloc(u8, try data.program_image.encodedLength(compiled.program));
+        const bytes = try testing.allocator.alloc(
+            u8,
+            try data.program_image.encodedLength(compiled.program),
+        );
         defer testing.allocator.free(bytes);
         _ = try compiled.encode(testing.allocator, bytes);
         var decoded = try data.program_image.decode(testing.allocator, bytes);
         defer decoded.deinit();
         try testing.expectEqualDeep(compiled.program, decoded.program);
-        try testing.expectEqual(try data.program_image.identity(testing.allocator, compiled.program), decoded.identity);
+        try testing.expectEqual(
+            try data.program_image.identity(testing.allocator, compiled.program),
+            decoded.identity,
+        );
     }
 }
 
@@ -380,10 +456,16 @@ test "complete BPI3 installation images stay within the fixed BPC1 anchors" {
     for ([_]usize{ 64, 128, 256 }, [_]usize{ 2805, 5574, 12102 }) |count, baseline| {
         var builder = source.Builder.init(testing.allocator);
         defer builder.deinit();
-        var compiled = try source.lower(testing.allocator, try source.examples.installations(&builder, count));
+        var compiled = try source.lower(
+            testing.allocator,
+            try source.examples.installations(&builder, count),
+        );
         defer compiled.deinit();
         const length = try data.program_image.encodedLength(compiled.program);
-        if (length > baseline) std.debug.print("BPI3 installations {d}: {d} > {d}\n", .{ count, length, baseline });
+        if (length > baseline) std.debug.print(
+            "BPI3 installations {d}: {d} > {d}\n",
+            .{ count, length, baseline },
+        );
         try testing.expect(length <= baseline);
         const bytes = try testing.allocator.alloc(u8, length);
         defer testing.allocator.free(bytes);
@@ -416,15 +498,36 @@ test "stable construction observations preserve bytes and report source failures
             .observer = .{ .context = &trace, .enter = Trace.enter },
         });
         defer observed.deinit();
-        try testing.expectEqualSlices(source.CompileStage, &.{ .source_check, .lowering, .target_check, .direct_optimization, .coalescing, .complete }, trace.stages[0..trace.count]);
+        try testing.expectEqualSlices(
+            source.CompileStage,
+            &.{
+                .source_check,
+                .lowering,
+                .target_check,
+                .direct_optimization,
+                .coalescing,
+                .complete,
+            },
+            trace.stages[0..trace.count],
+        );
         try testing.expectEqual(@as(?anyerror, null), diagnostic.code);
-        try testing.expectEqual(try data.program_image.identity(testing.allocator, plain.program), try data.program_image.identity(testing.allocator, observed.program));
+        try testing.expectEqual(
+            try data.program_image.identity(testing.allocator, plain.program),
+            try data.program_image.identity(testing.allocator, observed.program),
+        );
         builder.functions.items[@intCast(module.entry)].body = null;
         trace.count = 0;
-        try testing.expectError(error.UndefinedFunction, source.lowerObserved(testing.allocator, builder.module(module.entry, module.failure), .{
-            .diagnostic = &diagnostic,
-            .observer = .{ .context = &trace, .enter = Trace.enter },
-        }));
+        try testing.expectError(
+            error.UndefinedFunction,
+            source.lowerObserved(
+                testing.allocator,
+                builder.module(module.entry, module.failure),
+                .{
+                    .diagnostic = &diagnostic,
+                    .observer = .{ .context = &trace, .enter = Trace.enter },
+                },
+            ),
+        );
         try testing.expectEqual(error.UndefinedFunction, diagnostic.code.?);
         try testing.expectEqual(source.CompileStage.source_check, diagnostic.phase);
         try testing.expectEqual(@as(?data.program.Id, module.entry), diagnostic.function);
@@ -439,7 +542,10 @@ test "closed compiler rejects invalid unused source before catalogue pruning" {
     const unused = try builder.declare(&.{}, integer, &.{}, &.{});
     try builder.define(entry, try builder.pure(try builder.constant(u64, 42)));
     try builder.define(unused, try builder.pure(try builder.constant(bool, true)));
-    try testing.expectError(error.TypeMismatch, lower(testing.allocator, builder.module(entry, try builder.scalar(void))));
+    try testing.expectError(
+        error.TypeMismatch,
+        lower(testing.allocator, builder.module(entry, try builder.scalar(void))),
+    );
 }
 
 test "local product projection retains mutable reads and unselected faults" {
@@ -479,13 +585,28 @@ test "projection forwarding cannot erase malformed source operations" {
         const boolean = try b.scalar(bool);
         const unit = try b.scalar(void);
         const pair = try b.schema(.{ .product = &.{ integer, integer } });
-        const aggregate = try b.primitive(if (mode == 4) boolean else pair, .product, &.{ try b.constant(u64, 11), try b.constant(u64, 22) }, 0);
-        const selected = try b.value(.{ .schema = if (mode == 1) boolean else integer, .expression = .{ .primitive = .{
-            .opcode = .field,
-            .operands = if (mode == 2) &.{} else &.{aggregate},
-            .immediate = if (mode == 0) ~@as(p.Id, 0) else 0,
-            .failures = if (mode == 3) &.{.{ .kind = .arithmetic_overflow, .value = try b.failureLiteral(try b.constant(void, {})) }} else &.{},
-        } } });
+        const aggregate = try b.primitive(
+            if (mode == 4) boolean else pair,
+            .product,
+            &.{ try b.constant(u64, 11), try b.constant(u64, 22) },
+            0,
+        );
+        const selected = try b.value(
+            .{
+                .schema = if (mode == 1) boolean else integer,
+                .expression = .{
+                    .primitive = .{
+                        .opcode = .field,
+                        .operands = if (mode == 2) &.{} else &.{aggregate},
+                        .immediate = if (mode == 0) ~@as(p.Id, 0) else 0,
+                        .failures = if (mode == 3) &.{.{
+                            .kind = .arithmetic_overflow,
+                            .value = try b.failureLiteral(try b.constant(void, {})),
+                        }} else &.{},
+                    },
+                },
+            },
+        );
         const entry = try b.declare(&.{}, if (mode == 1) boolean else integer, &.{}, &.{});
         try b.define(entry, try b.pure(selected));
         if (lower(testing.allocator, b.module(entry, unit))) |result| {
@@ -496,29 +617,73 @@ test "projection forwarding cannot erase malformed source operations" {
     }
 }
 
-test "copy-binding fusion preserves repeated mutable reads across a write" {
-    var b = source.Builder.init(testing.allocator);
-    defer b.deinit();
+fn repeatedCellReadModule(b: *source.Builder) !source.Module {
     const unit = try b.scalar(void);
     const integer = try b.scalar(u64);
     const pair = try b.schema(.{ .product = &.{ integer, integer } });
     const region_id = b.region();
     const region = try b.schema(.{ .internal = .{ .region = region_id } });
-    const cell = try b.schema(.{ .internal = .{ .cell = .{ .element = integer, .region = region_id } } });
+    const cell = try b.schema(.{ .internal = .{ .cell = .{
+        .element = integer,
+        .region = region_id,
+    } } });
     const inside = try b.declare(&.{region}, pair, &.{}, &.{region_id});
     const target = try b.variable(cell);
     const first = try b.variable(integer);
     const ignored = try b.variable(unit);
     const second = try b.variable(integer);
     const read = try b.primitive(integer, .cell_get, &.{try b.reference(target)}, 0);
-    const write = try b.primitive(unit, .cell_set, &.{ try b.reference(target), try b.constant(u64, 7) }, 0);
-    const answer = try b.pure(try b.primitive(pair, .product, &.{ try b.reference(first), try b.reference(second) }, 0));
-    const body = try b.bind(first, try b.pure(read), try b.bind(ignored, try b.pure(write), try b.bind(second, try b.pure(read), answer)));
-    try b.define(inside, try b.bind(target, try b.pure(try b.primitive(cell, .cell_new, &.{ try b.reference(b.parameter(inside, 0)), try b.constant(u64, 1) }, 0)), body));
+    const write = try b.primitive(
+        unit,
+        .cell_set,
+        &.{ try b.reference(target), try b.constant(u64, 7) },
+        0,
+    );
+    const answer = try b.pure(try b.primitive(
+        pair,
+        .product,
+        &.{ try b.reference(first), try b.reference(second) },
+        0,
+    ));
+    const body = try b.bind(
+        first,
+        try b.pure(read),
+        try b.bind(ignored, try b.pure(write), try b.bind(second, try b.pure(read), answer)),
+    );
+    try b.define(
+        inside,
+        try b.bind(
+            target,
+            try b.pure(try b.primitive(
+                cell,
+                .cell_new,
+                &.{ try b.reference(b.parameter(inside, 0)), try b.constant(u64, 1) },
+                0,
+            )),
+            body,
+        ),
+    );
     const main = try b.declare(&.{}, pair, &.{}, &.{});
-    const signature = try b.schema(.{ .internal = .{ .computation = .{ .parameters = &.{region}, .result = pair, .regions = &.{region_id} } } });
-    try b.define(main, try b.term(.{ .with_region = .{ .region = region_id, .body = try b.lambda(inside, signature) } }));
-    var compiled = try lower(testing.allocator, b.module(main, unit));
+    const signature = try b.schema(.{ .internal = .{ .computation = .{
+        .parameters = &.{region},
+        .result = pair,
+        .regions = &.{region_id},
+    } } });
+    try b.define(
+        main,
+        try b.term(.{ .with_region = .{
+            .region = region_id,
+            .body = try b.lambda(inside, signature),
+        } }),
+    );
+    return b.module(main, unit);
+}
+
+test "copy-binding fusion preserves repeated mutable reads across a write" {
+    var b = source.Builder.init(testing.allocator);
+    defer b.deinit();
+    const module = try repeatedCellReadModule(&b);
+    var compiled = try lower(testing.allocator, module);
     defer compiled.deinit();
     var matched = false;
     for (compiled.program.blocks) |block| {
@@ -547,14 +712,21 @@ test "optional capture explanations preserve images and retain mapped presentati
         retained: ?Own.CaptureExplanation = null,
         fn capture(_: *anyopaque, _: *const Own.CaptureSite, _: p.Id) void {}
         fn closure(_: *anyopaque, _: p.Id, _: p.Id) void {}
-        fn explain(context: *anyopaque, _: *const Own.CaptureSite, _: p.Id, value: ?Own.CaptureExplanation) void {
+        fn explain(
+            context: *anyopaque,
+            _: *const Own.CaptureSite,
+            _: p.Id,
+            value: ?Own.CaptureExplanation,
+        ) void {
             const self: *@This() = @ptrCast(@alignCast(context));
             const present = value orelse {
                 self.unavailable = true;
                 return;
             };
             self.count += 1;
-            for (present.reasons) |reason| self.mapped = self.mapped or reason.location.source_variable != null;
+            for (present.reasons) |reason|
+                self.mapped = self.mapped or
+                    reason.location.source_variable != null;
             if (self.retained) |old| old.deinit(testing.allocator);
             self.retained = null;
             self.retained = present.copy(testing.allocator) catch {
@@ -563,7 +735,14 @@ test "optional capture explanations preserve images and retain mapped presentati
             };
         }
     };
-    inline for (.{ "deep", "generator", "recursive", "injection", "yieldingCleanup", "statefulService" }) |name| {
+    inline for (.{
+        "deep",
+        "generator",
+        "recursive",
+        "injection",
+        "yieldingCleanup",
+        "statefulService",
+    }) |name| {
         var observer: Observer = .{};
         defer if (observer.retained) |retained| retained.deinit(testing.allocator);
         {
@@ -572,18 +751,36 @@ test "optional capture explanations preserve images and retain mapped presentati
             const module = try @field(source.examples, name)(&builder);
             var plain = try source.lowerObserved(testing.allocator, module, .{});
             defer plain.deinit();
-            var observed = try source.lowerObserved(testing.allocator, module, .{ .captures = .{ .context = &observer, .capture = Observer.capture, .closure = Observer.closure, .explanation = Observer.explain } });
+            var observed = try source.lowerObserved(
+                testing.allocator,
+                module,
+                .{ .captures = .{
+                    .context = &observer,
+                    .capture = Observer.capture,
+                    .closure = Observer.closure,
+                    .explanation = Observer.explain,
+                } },
+            );
             defer observed.deinit();
-            try testing.expectEqual(try data.program_image.identity(testing.allocator, plain.program), try data.program_image.identity(testing.allocator, observed.program));
+            try testing.expectEqual(
+                try data.program_image.identity(testing.allocator, plain.program),
+                try data.program_image.identity(testing.allocator, observed.program),
+            );
             if (observer.unavailable) std.debug.print("explanation unavailable for {s}\n", .{name});
             try testing.expect(!observer.unavailable);
         }
         if (observer.retained) |retained| {
             try testing.expect(observer.count != 0);
-            for (retained.reasons) |reason| for (reason.inputs) |input| try testing.expect(input < retained.reasons.len);
+            for (retained.reasons) |reason| for (reason.inputs) |input| try testing.expect(
+                input < retained.reasons.len,
+            );
         }
         if (observer.count != 0) try testing.expect(observer.mapped);
-        if (comptime std.mem.eql(u8, name, "statefulService")) try testing.expect(observer.count != 0);
+        if (comptime std.mem.eql(
+            u8,
+            name,
+            "statefulService",
+        )) try testing.expect(observer.count != 0);
     }
 }
 
@@ -601,7 +798,10 @@ test "service interaction observation checks actual construction and labeled rep
                 self.failed = true;
                 return;
             };
-            if (report.ordered != self.expected or report.waits == null or report.waits.?.status != .scoped_acyclic) {
+            if (report.ordered != self.expected or
+                report.waits == null or
+                report.waits.?.status != .scoped_acyclic)
+            {
                 std.debug.print("service report: {any}\n", .{report.ordered});
                 self.failed = true;
                 return;
@@ -613,27 +813,74 @@ test "service interaction observation checks actual construction and labeled rep
             incomplete = report.waits.?;
             incomplete.ranks = &bad_ranks;
             self.failed = self.failed or report.ranksValid(incomplete);
-            self.failed = self.failed or !report.waitCoverage(report.waits.?) or !report.ranksValid(report.waits.?);
-            self.failed = self.failed or report.external_completion != .unresolved or report.scheduler_fairness != .explicit_runtime_premise or report.end_to_end != .conditional_on_finite_batch_fairness_external_completion_and_resources;
-            const event: Report.TraceEvent = if (self.expected == .established) .matching_reply else .mismatched_reply;
-            const trace = [_]Report.TraceEvent{ .command, .suspended, event, .command, .suspended, event, .command, .finalize };
+            self.failed = self.failed or !report.waitCoverage(
+                report.waits.?,
+            ) or !report.ranksValid(report.waits.?);
+            self.failed = self.failed or
+                report.external_completion != .unresolved or
+                report.scheduler_fairness != .explicit_runtime_premise or
+                report.end_to_end !=
+                    .conditional_on_finite_batch_fairness_external_completion_and_resources;
+            const event: Report.TraceEvent = if (self.expected == .established)
+                .matching_reply
+            else
+                .mismatched_reply;
+            const trace = [_]Report.TraceEvent{
+                .command,
+                .suspended,
+                event,
+                .command,
+                .suspended,
+                event,
+                .command,
+                .finalize,
+            };
             self.failed = self.failed or !(report.contains(testing.allocator, &trace) catch false);
-            self.failed = self.failed or (report.contains(testing.allocator, &.{ .command, event }) catch true);
-            self.failed = self.failed or !(report.contains(testing.allocator, &.{ .command, .suspended, .finalize }) catch false);
+            self.failed = self.failed or (report.contains(
+                testing.allocator,
+                &.{ .command, event },
+            ) catch true);
+            self.failed = self.failed or !(report.contains(
+                testing.allocator,
+                &.{ .command, .suspended, .finalize },
+            ) catch false);
         }
     };
     inline for (.{ false, true }) |swapped| {
         var builder = source.Builder.init(testing.allocator);
         defer builder.deinit();
-        const module = try (if (swapped) source.examples.swappedServiceReplies else source.examples.statefulService)(&builder);
+        const module = try (if (swapped)
+            source.examples.swappedServiceReplies
+        else
+            source.examples.statefulService)(
+            &builder,
+        );
         var observer: Observer = .{ .expected = if (swapped) .potential else .established };
         var plain = try source.lower(testing.allocator, module);
         defer plain.deinit();
-        var observed = try source.lowerObserved(testing.allocator, module, .{ .compilation_observer = .{ .context = &observer, .enter = Observer.enter, .service = .{ .contract = .{ .command = "example/service-command", .reply = "example/service-reply", .finalizer = "example/service-finalize" }, .receive = Observer.receive } } });
+        var observed = try source.lowerObserved(
+            testing.allocator,
+            module,
+            .{ .compilation_observer = .{
+                .context = &observer,
+                .enter = Observer.enter,
+                .service = .{
+                    .contract = .{
+                        .command = "example/service-command",
+                        .reply = "example/service-reply",
+                        .finalizer = "example/service-finalize",
+                    },
+                    .receive = Observer.receive,
+                },
+            } },
+        );
         defer observed.deinit();
         try testing.expectEqual(@as(usize, 1), observer.calls);
         try testing.expect(!observer.failed);
-        try testing.expectEqual(try data.program_image.identity(testing.allocator, plain.program), try data.program_image.identity(testing.allocator, observed.program));
+        try testing.expectEqual(
+            try data.program_image.identity(testing.allocator, plain.program),
+            try data.program_image.identity(testing.allocator, observed.program),
+        );
     }
 }
 
@@ -646,12 +893,18 @@ test "changed service code cannot retain prior interaction or wait conclusions" 
         fn receive(raw: *anyopaque, value: ?Report) void {
             const self: *@This() = @ptrCast(@alignCast(raw));
             self.received = true;
-            if (value) |report| self.unresolved = report.ordered == .unresolved and report.waits == null and report.end_to_end == .no_claim;
+            if (value) |report|
+                self.unresolved = report.ordered == .unresolved and
+                    report.waits == null and
+                    report.end_to_end == .no_claim;
         }
     };
     var builder = source.Builder.init(testing.allocator);
     defer builder.deinit();
-    var original = try source.lower(testing.allocator, try source.examples.statefulService(&builder));
+    var original = try source.lower(
+        testing.allocator,
+        try source.examples.statefulService(&builder),
+    );
     defer original.deinit();
     for ([_]bool{ false, true }) |overwrite| {
         const blocks = try testing.allocator.dupe(ir.Block, original.program.blocks);
@@ -659,14 +912,20 @@ test "changed service code cannot retain prior interaction or wait conclusions" 
         var arena = std.heap.ArenaAllocator.init(testing.allocator);
         defer arena.deinit();
         var changed = false;
-        for (blocks) |*block| for (block.instructions, 0..) |instruction, index| if (instruction.opcode == .integer_add) {
+        for (blocks) |*block| for (
+            block.instructions,
+            0..,
+        ) |instruction, index| if (instruction.opcode == .integer_add) {
             const operations = try arena.allocator().dupe(ir.Instruction, block.instructions);
             if (overwrite) {
                 // Keep the same checked operations and final state, but overwrite
                 // the request id with the sum before constructing its reply.
                 const request_id = operations[0].destination;
                 operations[index].destination = request_id;
-                operations[index + 1].operands = try arena.allocator().dupe(p.Id, &.{ operations[index + 1].operands[0], request_id });
+                operations[index + 1].operands = try arena.allocator().dupe(
+                    p.Id,
+                    &.{ operations[index + 1].operands[0], request_id },
+                );
             } else operations[index].opcode = .integer_sub;
             block.instructions = operations;
             changed = true;
@@ -677,7 +936,22 @@ test "changed service code cannot retain prior interaction or wait conclusions" 
         var admitted = try data.activation_ownership.analyze(testing.allocator, candidate);
         admitted.deinit();
         var observer: Observer = .{};
-        var compiled = try data.closed_compilation.run(testing.allocator, candidate, .{ .observer = .{ .context = &observer, .enter = Observer.enter, .service = .{ .contract = .{ .command = "example/service-command", .reply = "example/service-reply", .finalizer = "example/service-finalize" }, .receive = Observer.receive } } });
+        var compiled = try data.closed_compilation.run(
+            testing.allocator,
+            candidate,
+            .{ .observer = .{
+                .context = &observer,
+                .enter = Observer.enter,
+                .service = .{
+                    .contract = .{
+                        .command = "example/service-command",
+                        .reply = "example/service-reply",
+                        .finalizer = "example/service-finalize",
+                    },
+                    .receive = Observer.receive,
+                },
+            } },
+        );
         defer compiled.deinit();
         try testing.expect(observer.received and observer.unresolved);
     }

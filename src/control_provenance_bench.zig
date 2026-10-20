@@ -24,96 +24,271 @@ pub fn main(init: std.process.Init) !void {
         const candidate_mode = std.mem.startsWith(u8, operation, "candidate-");
         var decoded: ?image.Decoded = null;
         defer if (decoded) |*value| value.deinit();
-        const program = if (candidate_mode) try @import("data/evidence_forwarding_tests.zig").fixture(input) else load: {
+        const program = if (candidate_mode) try @import(
+            "data/evidence_forwarding_tests.zig",
+        ).fixture(
+            input,
+        ) else load: {
             const path = try std.fmt.allocPrint(input, "{s}/{s}.bpi3", .{ directory, name });
             const bytes = try std.Io.Dir.cwd().readFileAlloc(init.io, path, input, .unlimited);
             decoded = try image.decode(init.gpa, bytes);
             break :load decoded.?.program;
         };
-        var candidate = if (candidate_mode) try forwarding.construct(init.gpa, program, .{}) else null;
+        var candidate = if (candidate_mode) try forwarding.construct(
+            init.gpa,
+            program,
+            .{},
+        ) else null;
         defer if (candidate) |*value| value.deinit();
-        for (0..fixtures.samples) |sample| {
-            var meter: Meter = .{ .parent = init.gpa };
-            var arena = std.heap.ArenaAllocator.init(meter.allocator());
-            var reasons: usize = 0;
-            var states: usize = 0;
-            var edges: usize = 0;
-            var wait_edges: usize = 0;
-            var relations: usize = 0;
-            var widenings: usize = 0;
-            var iterations: usize = 0;
-            var recipients: usize = 0;
-            var queries: usize = 0;
-            var derivations: usize = 0;
-            var derivation_ns: ?i96 = null;
-            const start = std.Io.Clock.awake.now(init.io);
-            if (candidate_mode) {
-                const proposed = candidate orelse return error.MissingCandidate;
-                if (std.mem.eql(u8, operation, "candidate-validate")) {
-                    try forwarding.validate(meter.allocator(), program, proposed.program, proposed.pairs, 10_000_000);
-                    derivations = 2;
-                } else if (std.mem.eql(u8, operation, "candidate-observe")) {
-                    const observation = try forwarding.observeInteractions(meter.allocator(), program, proposed.program, proposed.pairs, 10_000_000);
-                    relations = observation.relations;
-                    widenings = observation.opaque_sites;
-                    queries = observation.monitors * 2;
-                    states = observation.finite_states;
-                    edges = observation.control_states;
-                    iterations = observation.iterations;
-                    derivations = 2; // borrow each intrinsic admission's owner
-                } else return error.InvalidArguments;
-            } else {
-                const explain = std.mem.eql(u8, operation, "explain");
-                const control = try provenance.deriveObserved(arena.allocator(), program, &.{}, false, explain);
-                if (std.mem.eql(u8, operation, "derive")) derivation_ns = start.durationTo(std.Io.Clock.awake.now(init.io)).nanoseconds;
-                derivations = 1;
-                for (program.blocks, 0..) |block, index| if (block.terminator == .perform) {
-                    recipients += control.targets(.{ .block = index, .role = .operation }, block.terminator.perform.effect).len;
-                    if (explain) {
-                        const selected = try control.select(.{ .block = index, .role = .operation }, block.terminator.perform.effect);
-                        const presentation = try control.explain(selected);
-                        reasons += presentation.reasons.len;
-                        queries += 1;
-                        const again = try control.explain(selected);
-                        if (presentation.reasons.ptr != again.reasons.ptr) return error.RepeatedDerivation;
-                    }
-                };
-                if (std.mem.eql(u8, operation, "interactions")) {
-                    const Probe = struct {
-                        fn project(_: *const anyopaque, subject: @import("data/activation.zig").Program, site: interactions.Site, _: usize) interactions.Mask {
-                            if (site.phase != .operation) return 0;
-                            return interactions.bit(@intCast(subject.blocks[@intCast(site.block)].terminator.perform.effect % 2));
-                        }
-                    };
-                    const binding: u8 = 0;
-                    const monitor: interactions.Monitor = .{ .binding = &binding, .states = 3, .alphabet = 2, .bad = 0, .transitions = &.{ 1, 2, 1, 2, 1, 2 }, .project = Probe.project };
-                    var session: interactions.Session = .{ .allocator = arena.allocator(), .owner = control };
-                    defer session.deinit();
-                    const result = try session.analyze(monitor);
-                    if (result.summaries.ptr != (try session.analyze(monitor)).summaries.ptr) return error.RepeatedDerivation;
-                    states = result.summaries.len;
-                    edges = result.statistics.control_states;
-                    relations = result.statistics.relations;
-                    widenings = result.statistics.opaque_sites;
-                    iterations = result.statistics.iterations;
-                    queries = 1;
-                } else if (std.mem.eql(u8, operation, "service")) {
-                    const report = try @import("data/service_interactions.zig").observe(arena.allocator(), control, .{ .command = "example/service-command", .reply = "example/service-reply", .finalizer = "example/service-finalize" });
-                    const phases = report.phases orelse return error.UnrecognizedService;
-                    states = phases.nodes * 10;
-                    edges = phases.edges.len;
-                    wait_edges = report.waits.?.edges.len;
-                    const summary = report.summary.?;
-                    relations = @popCount(summary.normal) + @popCount(summary.failure) + @popCount(summary.cancellation);
-                    queries = 2; // ordered lifecycle and waits, one target owner
-                } else if (!explain and !std.mem.eql(u8, operation, "derive")) return error.InvalidArguments;
-            }
-            const elapsed = derivation_ns orelse start.durationTo(std.Io.Clock.awake.now(init.io)).nanoseconds;
-            try std.json.Stringify.value(.{ .fixture = name, .operation = operation, .sample = sample, .ns = elapsed, .retained_bytes = meter.live, .peak_bytes = meter.peak, .allocation_calls = meter.calls, .arena_capacity = arena.queryCapacity(), .direct_recipients = recipients, .target_derivations = derivations, .queries = queries, .explanation_reasons = reasons, .finite_states = states, .phase_or_worklist_edges = edges, .wait_edges = wait_edges, .relations = relations, .widening_sites = widenings, .iterations = iterations }, .{}, &output.interface);
-            try output.interface.writeByte('\n');
-            arena.deinit();
-            if (meter.live != 0) return error.LeakedDerivation;
-        }
+        const measurement: Measurement = .{
+            .allocator = init.gpa,
+            .io = init.io,
+            .writer = &output.interface,
+            .name = name,
+            .operation = operation,
+            .program = program,
+            .candidate = candidate,
+        };
+        for (0..fixtures.samples) |sample| try measurement.run(sample);
         try output.interface.flush();
     }
 }
+
+const Program = @import("data/activation.zig").Program;
+const Measurement = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    writer: *std.Io.Writer,
+    name: []const u8,
+    operation: []const u8,
+    program: Program,
+    candidate: ?forwarding.Candidate,
+
+    fn run(self: Measurement, sample: usize) !void {
+        var meter: Meter = .{ .parent = self.allocator };
+        var arena = std.heap.ArenaAllocator.init(meter.allocator());
+        var result: Statistics = .{};
+        const start = std.Io.Clock.awake.now(self.io);
+        if (std.mem.startsWith(u8, self.operation, "candidate-")) {
+            try result.candidate(
+                meter.allocator(),
+                self.operation,
+                self.program,
+                self.candidate orelse return error.MissingCandidate,
+            );
+        } else {
+            try result.observed(arena.allocator(), self.io, self.operation, self.program, start);
+        }
+        const elapsed = result.derivation_ns orelse start.durationTo(
+            std.Io.Clock.awake.now(self.io),
+        ).nanoseconds;
+        try std.json.Stringify.value(
+            .{
+                .fixture = self.name,
+                .operation = self.operation,
+                .sample = sample,
+                .ns = elapsed,
+                .retained_bytes = meter.live,
+                .peak_bytes = meter.peak,
+                .allocation_calls = meter.calls,
+                .arena_capacity = arena.queryCapacity(),
+                .direct_recipients = result.recipients,
+                .target_derivations = result.derivations,
+                .queries = result.queries,
+                .explanation_reasons = result.reasons,
+                .finite_states = result.states,
+                .phase_or_worklist_edges = result.edges,
+                .wait_edges = result.wait_edges,
+                .relations = result.relations,
+                .widening_sites = result.widenings,
+                .iterations = result.iterations,
+            },
+            .{},
+            self.writer,
+        );
+        try self.writer.writeByte('\n');
+        arena.deinit();
+        if (meter.live != 0) return error.LeakedDerivation;
+    }
+};
+
+const Statistics = struct {
+    reasons: usize = 0,
+    states: usize = 0,
+    edges: usize = 0,
+    wait_edges: usize = 0,
+    relations: usize = 0,
+    widenings: usize = 0,
+    iterations: usize = 0,
+    recipients: usize = 0,
+    queries: usize = 0,
+    derivations: usize = 0,
+    derivation_ns: ?i96 = null,
+
+    fn candidate(
+        self: *Statistics,
+        allocator: std.mem.Allocator,
+        operation: []const u8,
+        program: Program,
+        proposed: forwarding.Candidate,
+    ) !void {
+        if (std.mem.eql(u8, operation, "candidate-validate")) {
+            try forwarding.validate(
+                allocator,
+                program,
+                proposed.program,
+                proposed.pairs,
+                10_000_000,
+            );
+            self.derivations = 2;
+        } else if (std.mem.eql(u8, operation, "candidate-observe")) {
+            const observation = try forwarding.observeInteractions(
+                allocator,
+                program,
+                proposed.program,
+                proposed.pairs,
+                10_000_000,
+            );
+            self.relations = observation.relations;
+            self.widenings = observation.opaque_sites;
+            self.queries = observation.monitors * 2;
+            self.states = observation.finite_states;
+            self.edges = observation.control_states;
+            self.iterations = observation.iterations;
+            self.derivations = 2; // borrow each intrinsic admission's owner
+        } else return error.InvalidArguments;
+    }
+
+    fn observed(
+        self: *Statistics,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        operation: []const u8,
+        program: Program,
+        start: std.Io.Timestamp,
+    ) !void {
+        const explain = std.mem.eql(u8, operation, "explain");
+        const control = try provenance.deriveObserved(
+            allocator,
+            program,
+            &.{},
+            false,
+            explain,
+        );
+        if (std.mem.eql(
+            u8,
+            operation,
+            "derive",
+        )) self.derivation_ns = start.durationTo(std.Io.Clock.awake.now(io)).nanoseconds;
+        self.derivations = 1;
+        try self.targets(program, control, explain);
+        if (std.mem.eql(u8, operation, "interactions")) {
+            try self.interaction(allocator, control);
+        } else if (std.mem.eql(u8, operation, "service")) {
+            try self.service(allocator, control);
+        } else if (!explain and !std.mem.eql(u8, operation, "derive")) {
+            return error.InvalidArguments;
+        }
+    }
+
+    fn targets(
+        self: *Statistics,
+        program: Program,
+        control: *const provenance.Analysis,
+        explain: bool,
+    ) !void {
+        for (program.blocks, 0..) |block, index|
+            if (block.terminator == .perform) {
+                self.recipients += control.targets(
+                    .{ .block = index, .role = .operation },
+                    block.terminator.perform.effect,
+                ).len;
+                if (explain) {
+                    const selected = try control.select(
+                        .{ .block = index, .role = .operation },
+                        block.terminator.perform.effect,
+                    );
+                    const presentation = try control.explain(selected);
+                    self.reasons += presentation.reasons.len;
+                    self.queries += 1;
+                    const again = try control.explain(selected);
+                    if (presentation.reasons.ptr != again.reasons.ptr)
+                        return error.RepeatedDerivation;
+                }
+            };
+    }
+
+    fn interaction(
+        self: *Statistics,
+        allocator: std.mem.Allocator,
+        control: *const provenance.Analysis,
+    ) !void {
+        const Probe = struct {
+            fn project(
+                _: *const anyopaque,
+                subject: @import("data/activation.zig").Program,
+                site: interactions.Site,
+                _: usize,
+            ) interactions.Mask {
+                if (site.phase != .operation) return 0;
+                return interactions.bit(
+                    @intCast(
+                        subject.blocks[
+                            @intCast(site.block)
+                        ].terminator.perform.effect % 2,
+                    ),
+                );
+            }
+        };
+        const binding: u8 = 0;
+        const monitor: interactions.Monitor = .{
+            .binding = &binding,
+            .states = 3,
+            .alphabet = 2,
+            .bad = 0,
+            .transitions = &.{ 1, 2, 1, 2, 1, 2 },
+            .project = Probe.project,
+        };
+        var session: interactions.Session = .{
+            .allocator = allocator,
+            .owner = control,
+        };
+        defer session.deinit();
+        const result = try session.analyze(monitor);
+        if (result.summaries.ptr != (try session.analyze(
+            monitor,
+        )).summaries.ptr) return error.RepeatedDerivation;
+        self.states = result.summaries.len;
+        self.edges = result.statistics.control_states;
+        self.relations = result.statistics.relations;
+        self.widenings = result.statistics.opaque_sites;
+        self.iterations = result.statistics.iterations;
+        self.queries = 1;
+    }
+
+    fn service(
+        self: *Statistics,
+        allocator: std.mem.Allocator,
+        control: *const provenance.Analysis,
+    ) !void {
+        const report = try @import("data/service_interactions.zig").observe(
+            allocator,
+            control,
+            .{
+                .command = "example/service-command",
+                .reply = "example/service-reply",
+                .finalizer = "example/service-finalize",
+            },
+        );
+        const phases = report.phases orelse return error.UnrecognizedService;
+        self.states = phases.nodes * 10;
+        self.edges = phases.edges.len;
+        self.wait_edges = report.waits.?.edges.len;
+        const summary = report.summary.?;
+        self.relations = @popCount(summary.normal) + @popCount(summary.failure) + @popCount(
+            summary.cancellation,
+        );
+        self.queries = 2; // ordered lifecycle and waits, one target owner
+
+    }
+};

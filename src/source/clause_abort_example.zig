@@ -41,10 +41,18 @@ fn authored(b: *source.Builder) a.Error!source.Module {
     const inside = try body.closureBody(inside_fn);
     _ = try inside.performLocal(operation, capability, try inside.constant(void, {}));
     try c.define(inside_fn, try inside.ret(try inside.constant(u64, 42)));
-    const cleanup_type = try c.callable(.{ .exit = info }, unit, &.{release}, .{ .use = .linear, .captures = &.{} });
+    const cleanup_type = try c.callable(
+        .{ .exit = info },
+        unit,
+        &.{release},
+        .{ .use = .linear, .captures = &.{} },
+    );
     const cleanup_fn = try c.functionFor("release", cleanup_type);
     const cleanup = try c.body(cleanup_fn);
-    try c.define(cleanup_fn, try cleanup.ret(try cleanup.perform(release, try cleanup.parameter("exit"))));
+    try c.define(
+        cleanup_fn,
+        try cleanup.ret(try cleanup.perform(release, try cleanup.parameter("exit"))),
+    );
     const protected = try body.protect(
         try body.lambda(inside_fn, inside_type),
         try body.lambda(cleanup_fn, cleanup_type),

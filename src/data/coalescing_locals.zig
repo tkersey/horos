@@ -195,7 +195,7 @@ pub const Blocks = struct {
         var cursor: usize = 0;
         while (cursor < self.order.items.len) : (cursor += 1) {
             const code = self.program.blocks[@intCast(self.order.items[cursor])];
-            try self.edges(code.terminator);
+            try self.edges(ir.Terminator, code.terminator);
         }
     }
     fn block(self: *Blocks, old: p.Id) Error!p.Id {
@@ -211,21 +211,19 @@ pub const Blocks = struct {
         return entry.value_ptr.*;
     }
     // Only bounded record nesting recurses, never the CFG or custody tree.
-    fn edges(self: *Blocks, value: anytype) Error!void {
-        const T = @TypeOf(value);
+    inline fn edges(self: *Blocks, comptime T: type, value: T) Error!void {
         if (T == ir.Edge) {
             _ = try self.block(value.block);
             return;
         }
         switch (@typeInfo(T)) {
-            .@"union" => inline for (@typeInfo(T).@"union".field_names) |field_name| {
-                if (std.mem.eql(u8, field_name, @tagName(value)))
-                    try self.edges(@field(value, field_name));
+            .@"union" => switch (value) {
+                inline else => |payload| try self.edges(@TypeOf(payload), payload),
             },
             .@"struct" => inline for (@typeInfo(T).@"struct".field_names) |field_name|
-                try self.edges(@field(value, field_name)),
+                try self.edges(@FieldType(T, field_name), @field(value, field_name)),
             .pointer => |info| if (info.child == ir.Edge) {
-                for (value) |edge| try self.edges(edge);
+                for (value) |edge| try self.edges(ir.Edge, edge);
             },
             else => {},
         }

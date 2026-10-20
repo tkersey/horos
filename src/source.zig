@@ -19,7 +19,9 @@ pub const lowerObserved = @import("source/activation_lower.zig").lowerObserved;
 pub const Diagnostic = @import("source/diagnostic.zig").Diagnostic;
 pub const CompileOptions = @import("source/diagnostic.zig").Options;
 pub const CompileStage = @import("source/diagnostic.zig").Stage;
-pub const Error = data.closed_compilation.Error || data.admission.Error || data.activation_flow.Error ||
+pub const Error = data.closed_compilation.Error ||
+    data.admission.Error ||
+    data.activation_flow.Error ||
     error{ UndefinedFunction, InvalidSource, UnboundVariable };
 
 /// Application.emit constructs a checked source Module. Its Zig body runs only
@@ -57,8 +59,22 @@ pub const Builder = struct {
     /// Staged type/effect evidence selects one shared declaration set. Runtime
     /// arguments and handler installation state are supplied to the emitted
     /// computations; they do not belong in specialization evidence.
-    pub fn specialization(self: *Builder, comptime Result: type, comptime template: []const u8, evidence: anytype) Error!Specialization(Result) {
-        const key = try std.json.Stringify.valueAlloc(self.allocator(), .{ .template = template, .result = @typeName(Result), .evidence_type = @typeName(@TypeOf(evidence)), .evidence = evidence }, .{});
+    pub fn specialization(
+        self: *Builder,
+        comptime Result: type,
+        comptime template: []const u8,
+        evidence: anytype,
+    ) Error!Specialization(Result) {
+        const key = try std.json.Stringify.valueAlloc(
+            self.allocator(),
+            .{
+                .template = template,
+                .result = @typeName(Result),
+                .evidence_type = @typeName(@TypeOf(evidence)),
+                .evidence = evidence,
+            },
+            .{},
+        );
         if (self.specializations.get(key)) |pointer| {
             self.allocator().free(key);
             const cached_result: *const Result = @ptrCast(@alignCast(pointer));
@@ -80,17 +96,36 @@ pub const Builder = struct {
         return id;
     }
     pub fn defineSchema(self: *Builder, id: p.Id, shape: p.Schema) Error!void {
-        if (id >= self.schemas.items.len or self.schemas.items[@intCast(id)] != .sum or self.schemas.items[@intCast(id)].sum.len != 0) return error.InvalidSource;
+        if (id >= self.schemas.items.len or self.schemas.items[
+            @intCast(id)
+        ] != .sum or self.schemas.items[
+            @intCast(id)
+        ].sum.len != 0) return error.InvalidSource;
         self.schemas.items[@intCast(id)] = try own(p.Schema, self.allocator(), shape);
     }
-    pub fn primitive(self: *Builder, schema_id: p.Id, opcode: p.Opcode, operands: []const p.Id, immediate: p.Id) Error!p.Id {
-        return self.value(.{ .schema = schema_id, .expression = .{ .primitive = .{ .opcode = opcode, .operands = operands, .immediate = immediate } } });
+    pub fn primitive(
+        self: *Builder,
+        schema_id: p.Id,
+        opcode: p.Opcode,
+        operands: []const p.Id,
+        immediate: p.Id,
+    ) Error!p.Id {
+        return self.value(.{
+            .schema = schema_id,
+            .expression = .{ .primitive = .{
+                .opcode = opcode,
+                .operands = operands,
+                .immediate = immediate,
+            } },
+        });
     }
     pub fn cloneResumption(self: *Builder, owned: p.Id, template_schema: p.Id) Error!p.Id {
         return self.primitive(template_schema, .clone_resumption, &.{owned}, 0);
     }
     pub fn failureLiteral(self: *const Builder, value_id: p.Id) Error!p.Id {
-        if (value_id >= self.values.items.len or self.values.items[@intCast(value_id)].expression != .literal) return error.InvalidSource;
+        if (value_id >= self.values.items.len or self.values.items[
+            @intCast(value_id)
+        ].expression != .literal) return error.InvalidSource;
         return self.values.items[@intCast(value_id)].expression.literal;
     }
     pub fn scalar(self: *Builder, comptime T: type) Error!p.Id {
@@ -114,14 +149,25 @@ pub const Builder = struct {
             id = index;
             break;
         };
-        if (id == self.constants.items.len) try self.constants.append(self.allocator(), try own(p.Literal, self.allocator(), wanted));
+        if (id == self.constants.items.len) try self.constants.append(
+            self.allocator(),
+            try own(p.Literal, self.allocator(), wanted),
+        );
         return self.value(.{ .schema = wanted.schema, .expression = .{ .literal = id } });
     }
     pub fn constant(self: *Builder, comptime T: type, value_item: T) Error!p.Id {
         const schema_id = try self.scalar(T);
         var bytes = @as([8]u8, @splat(0));
-        if (T == bool) bytes[0] = @intFromBool(value_item) else if (T != void) std.mem.writeInt(T, bytes[0..@sizeOf(T)], value_item, .little);
-        return self.literal(.{ .schema = schema_id, .bytes = bytes[0..data.scalar.width(self.schemas.items[@intCast(schema_id)]).?] });
+        if (T == bool) bytes[0] = @intFromBool(value_item) else if (T != void) std.mem.writeInt(
+            T,
+            bytes[0..@sizeOf(T)],
+            value_item,
+            .little,
+        );
+        return self.literal(.{
+            .schema = schema_id,
+            .bytes = bytes[0..data.scalar.width(self.schemas.items[@intCast(schema_id)]).?],
+        });
     }
     pub fn variable(self: *Builder, schema_id: p.Id) Error!p.Id {
         const id = self.variables.items.len;
@@ -130,7 +176,10 @@ pub const Builder = struct {
     }
     pub fn reference(self: *Builder, variable_id: p.Id) Error!p.Id {
         if (variable_id >= self.variables.items.len) return error.InvalidReference;
-        return self.value(.{ .schema = self.variables.items[@intCast(variable_id)], .expression = .{ .variable = variable_id } });
+        return self.value(.{
+            .schema = self.variables.items[@intCast(variable_id)],
+            .expression = .{ .variable = variable_id },
+        });
     }
     pub fn value(self: *Builder, expression: ast.Value) Error!p.Id {
         const id = self.values.items.len;
@@ -148,15 +197,37 @@ pub const Builder = struct {
     pub fn bind(self: *Builder, variable_id: p.Id, first: p.Id, next: p.Id) Error!p.Id {
         return self.term(.{ .bind = .{ .variable = variable_id, .value = first, .next = next } });
     }
-    pub fn declare(self: *Builder, parameters: []const p.Id, result: p.Id, effects: []const p.Id, regions: []const p.Id) Error!p.Id {
+    pub fn declare(
+        self: *Builder,
+        parameters: []const p.Id,
+        result: p.Id,
+        effects: []const p.Id,
+        regions: []const p.Id,
+    ) Error!p.Id {
         const variables = try self.allocator().alloc(p.Id, parameters.len);
-        for (variables, parameters) |*variable_id, schema_id| variable_id.* = try self.variable(schema_id);
+        for (
+            variables,
+            parameters,
+        ) |*variable_id, schema_id| variable_id.* = try self.variable(schema_id);
         const id = self.functions.items.len;
-        try self.functions.append(self.allocator(), .{ .parameters = variables, .result = result, .effects = try self.allocator().dupe(p.Id, effects), .regions = try self.allocator().dupe(p.Id, regions) });
+        try self.functions.append(
+            self.allocator(),
+            .{
+                .parameters = variables,
+                .result = result,
+                .effects = try self.allocator().dupe(p.Id, effects),
+                .regions = try self.allocator().dupe(p.Id, regions),
+            },
+        );
         return id;
     }
     pub fn define(self: *Builder, function: p.Id, body: p.Id) Error!void {
-        if (function >= self.functions.items.len or body >= self.terms.items.len or self.functions.items[@intCast(function)].body != null) return error.InvalidSource;
+        if (function >= self.functions.items.len or
+            body >= self.terms.items.len or
+            self.functions.items[
+                @intCast(function)
+            ].body != null)
+            return error.InvalidSource;
         self.functions.items[@intCast(function)].body = body;
     }
     pub fn parameter(self: *const Builder, function: p.Id, index: usize) p.Id {
@@ -172,7 +243,10 @@ pub const Builder = struct {
     }
     pub fn handler(self: *Builder, definition: p.Handler) Error!p.Id {
         const id = self.handlers.items.len;
-        try self.handlers.append(self.allocator(), try own(p.Handler, self.allocator(), definition));
+        try self.handlers.append(
+            self.allocator(),
+            try own(p.Handler, self.allocator(), definition),
+        );
         return id;
     }
     pub fn region(self: *Builder) p.Id {
@@ -181,22 +255,45 @@ pub const Builder = struct {
     }
     pub fn resource(self: *Builder, representation: p.Id) Error!p.Id {
         const id = self.resources.items.len;
-        try self.resources.append(self.allocator(), .{ .representation = representation, .introducers = &.{}, .eliminators = &.{} });
+        try self.resources.append(
+            self.allocator(),
+            .{ .representation = representation, .introducers = &.{}, .eliminators = &.{} },
+        );
         return self.schema(.{ .internal = .{ .abstract_resource = id } });
     }
-    pub fn resourceAuthority(self: *Builder, schema_id: p.Id, introducers: []const p.Id, eliminators: []const p.Id) Error!void {
+    pub fn resourceAuthority(
+        self: *Builder,
+        schema_id: p.Id,
+        introducers: []const p.Id,
+        eliminators: []const p.Id,
+    ) Error!void {
         if (schema_id >= self.schemas.items.len) return error.InvalidReference;
         const shape = self.schemas.items[@intCast(schema_id)];
         if (shape != .internal or shape.internal != .abstract_resource) return error.TypeMismatch;
         const resource_id = shape.internal.abstract_resource;
         if (resource_id >= self.resources.items.len) return error.InvalidReference;
         const descriptor = &self.resources.items[@intCast(resource_id)];
-        if (descriptor.introducers.len != 0 or descriptor.eliminators.len != 0) return error.InvalidOwnership;
+        if (descriptor.introducers.len != 0 or
+            descriptor.eliminators.len != 0)
+            return error.InvalidOwnership;
         descriptor.introducers = try self.allocator().dupe(p.Id, introducers);
         descriptor.eliminators = try self.allocator().dupe(p.Id, eliminators);
     }
     pub fn module(self: *const Builder, entry: p.Id, failure: p.Id) ast.Module {
-        return .{ .entry = entry, .failure = failure, .schemas = self.schemas.items, .constants = self.constants.items, .effects = self.effects.items, .handlers = self.handlers.items, .region_count = self.region_count, .resources = self.resources.items, .variables = self.variables.items, .values = self.values.items, .terms = self.terms.items, .functions = self.functions.items };
+        return .{
+            .entry = entry,
+            .failure = failure,
+            .schemas = self.schemas.items,
+            .constants = self.constants.items,
+            .effects = self.effects.items,
+            .handlers = self.handlers.items,
+            .region_count = self.region_count,
+            .resources = self.resources.items,
+            .variables = self.variables.items,
+            .values = self.values.items,
+            .terms = self.terms.items,
+            .functions = self.functions.items,
+        };
     }
 };
 
@@ -265,39 +362,115 @@ pub const Row = struct {
     pub fn subtract(self: Row, allocator: std.mem.Allocator, removed: Row) Error!Row {
         var values: std.ArrayList(p.Id) = .empty;
         errdefer values.deinit(allocator);
-        for (self.effects) |effect| if (std.mem.indexOfScalar(p.Id, removed.effects, effect) == null) try values.append(allocator, effect);
+        for (self.effects) |effect| if (std.mem.indexOfScalar(
+            p.Id,
+            removed.effects,
+            effect,
+        ) == null) try values.append(allocator, effect);
         return .{ .effects = try values.toOwnedSlice(allocator) };
     }
 };
 
-pub fn own(comptime T: type, allocator: std.mem.Allocator, value_item: T) std.mem.Allocator.Error!T {
+pub fn own(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    value_item: T,
+) std.mem.Allocator.Error!T {
+    @setEvalBranchQuota(10000);
+    var output = value_item;
+    var pending: std.ArrayList(OwnTask) = .empty;
+    defer pending.deinit(allocator);
+    try enqueueOwn(T, allocator, &pending, &output);
+    while (pending.pop()) |task| try task.apply(allocator, &pending, task.output);
+    return output;
+}
+
+const OwnTask = struct {
+    output: *anyopaque,
+    apply: *const fn (
+        std.mem.Allocator,
+        *std.ArrayList(OwnTask),
+        *anyopaque,
+    ) std.mem.Allocator.Error!void,
+};
+
+inline fn ownershipRequired(comptime T: type) bool {
     return switch (@typeInfo(T)) {
         .pointer => |pointer| blk: {
             if (pointer.size != .slice) @compileError("source records contain only owned slices");
-            const output = try allocator.alloc(pointer.child, value_item.len);
-            for (output, value_item) |*to, from| to.* = try own(pointer.child, allocator, from);
-            break :blk output;
+            break :blk true;
         },
-        .@"struct" => blk: {
-            var output: T = undefined;
-            inline for (@typeInfo(T).@"struct".field_names, @typeInfo(T).@"struct".field_types) |field_name, FieldType| @field(output, field_name) = try own(FieldType, allocator, @field(value_item, field_name));
-            break :blk output;
+        .@"struct" => |info| blk: {
+            inline for (info.field_types) |FieldType|
+                if (ownershipRequired(FieldType)) break :blk true;
+            break :blk false;
         },
-        .@"union" => blk: {
-            inline for (@typeInfo(T).@"union".field_names, @typeInfo(T).@"union".field_types) |field_name, FieldType| if (std.mem.eql(u8, @tagName(value_item), field_name)) break :blk @unionInit(T, field_name, try own(FieldType, allocator, @field(value_item, field_name)));
-            unreachable;
+        .@"union" => |info| blk: {
+            inline for (info.field_types) |FieldType|
+                if (ownershipRequired(FieldType)) break :blk true;
+            break :blk false;
         },
-        .optional => |optional| if (value_item) |present| try own(optional.child, allocator, present) else null,
-        .array => |array| blk: {
-            // Preserve the complete array, including any sentinel outside len.
-            var output = value_item;
-            for (&output, value_item) |*to, from| to.* = try own(array.child, allocator, from);
-            break :blk output;
-        },
-        else => value_item,
+        .optional => |optional| ownershipRequired(optional.child),
+        .array => |array| ownershipRequired(array.child),
+        else => false,
     };
 }
-fn equal(comptime T: type, left: T, right: T) bool {
+
+fn enqueueOwn(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    pending: *std.ArrayList(OwnTask),
+    output: *align(1) T,
+) std.mem.Allocator.Error!void {
+    if (comptime ownershipRequired(T)) try pending.append(allocator, .{
+        .output = @ptrCast(output),
+        .apply = OwnValue(T).apply,
+    });
+}
+
+fn OwnValue(comptime T: type) type {
+    return struct {
+        fn apply(
+            allocator: std.mem.Allocator,
+            pending: *std.ArrayList(OwnTask),
+            address: *anyopaque,
+        ) std.mem.Allocator.Error!void {
+            const output: *align(1) T = @ptrCast(address);
+            switch (@typeInfo(T)) {
+                .pointer => |pointer| {
+                    const elements = try allocator.alloc(pointer.child, output.len);
+                    for (elements, output.*) |*element, input| element.* = input;
+                    output.* = elements;
+                    for (elements) |*element|
+                        try enqueueOwn(pointer.child, allocator, pending, element);
+                },
+                .@"struct" => |info| inline for (
+                    info.field_names,
+                    info.field_types,
+                ) |name, FieldType| {
+                    if (comptime ownershipRequired(FieldType))
+                        try enqueueOwn(FieldType, allocator, pending, &@field(output, name));
+                },
+                .@"union" => switch (output.*) {
+                    inline else => |*payload| try enqueueOwn(
+                        @TypeOf(payload.*),
+                        allocator,
+                        pending,
+                        payload,
+                    ),
+                },
+                .optional => |optional| {
+                    if (output.*) |*present|
+                        try enqueueOwn(optional.child, allocator, pending, present);
+                },
+                .array => |array| for (output) |*element|
+                    try enqueueOwn(array.child, allocator, pending, element),
+                else => {},
+            }
+        }
+    };
+}
+inline fn equal(comptime T: type, left: T, right: T) bool {
     return switch (@typeInfo(T)) {
         .pointer => |pointer| blk: {
             if (left.len != right.len) break :blk false;
@@ -305,15 +478,33 @@ fn equal(comptime T: type, left: T, right: T) bool {
             break :blk true;
         },
         .@"struct" => blk: {
-            inline for (@typeInfo(T).@"struct".field_names, @typeInfo(T).@"struct".field_types) |field_name, FieldType| if (!equal(FieldType, @field(left, field_name), @field(right, field_name))) break :blk false;
+            inline for (
+                @typeInfo(T).@"struct".field_names,
+                @typeInfo(T).@"struct".field_types,
+            ) |field_name, FieldType| if (!equal(
+                FieldType,
+                @field(left, field_name),
+                @field(right, field_name),
+            )) break :blk false;
             break :blk true;
         },
         .@"union" => blk: {
             if (std.meta.activeTag(left) != std.meta.activeTag(right)) break :blk false;
-            inline for (@typeInfo(T).@"union".field_names, @typeInfo(T).@"union".field_types) |field_name, FieldType| if (std.mem.eql(u8, @tagName(left), field_name)) break :blk equal(FieldType, @field(left, field_name), @field(right, field_name));
+            inline for (
+                @typeInfo(T).@"union".field_names,
+                @typeInfo(T).@"union".field_types,
+            ) |field_name, FieldType| if (std.mem.eql(
+                u8,
+                @tagName(left),
+                field_name,
+            )) break :blk equal(FieldType, @field(left, field_name), @field(right, field_name));
             unreachable;
         },
-        .optional => if (left) |present| if (right) |other| equal(@typeInfo(T).optional.child, present, other) else false else right == null,
+        .optional => if (left) |present| if (right) |other| equal(
+            @typeInfo(T).optional.child,
+            present,
+            other,
+        ) else false else right == null,
         .void => true,
         else => left == right,
     };
@@ -321,12 +512,20 @@ fn equal(comptime T: type, left: T, right: T) bool {
 
 test "row merge preserves the original duplicate policy order and caller storage" {
     const a = std.testing.allocator;
-    const cases = [_]Row{ .{ .effects = &.{} }, .{ .effects = &.{0} }, .{ .effects = &.{ 3, 1, 1, 0 } }, .{ .effects = &.{ 2, 2, 4 } }, .{ .effects = &.{ std.math.maxInt(p.Id), 0 } } };
+    const cases = [_]Row{
+        .{ .effects = &.{} },                           .{ .effects = &.{0} },
+        .{ .effects = &.{ 3, 1, 1, 0 } },               .{ .effects = &.{ 2, 2, 4 } },
+        .{ .effects = &.{ std.math.maxInt(p.Id), 0 } },
+    };
     for (cases) |left| for (cases) |right| {
         var expected: std.ArrayList(p.Id) = .empty;
         defer expected.deinit(a);
         try expected.appendSlice(a, left.effects);
-        for (right.effects) |id| if (std.mem.indexOfScalar(p.Id, expected.items, id) == null) try expected.append(a, id);
+        for (right.effects) |id| if (std.mem.indexOfScalar(
+            p.Id,
+            expected.items,
+            id,
+        ) == null) try expected.append(a, id);
         std.mem.sort(p.Id, expected.items, {}, std.sort.asc(p.Id));
         const left_before = try a.dupe(p.Id, left.effects);
         defer a.free(left_before);
@@ -340,7 +539,10 @@ test "row merge preserves the original duplicate policy order and caller storage
     };
 }
 fn rowAllocationAttempt(a: std.mem.Allocator) !void {
-    const result = try (Row{ .effects = &.{ 4, 1, 1, 0 } }).unionWith(a, .{ .effects = &.{ 8, 2, 2, 0 } });
+    const result = try (Row{ .effects = &.{ 4, 1, 1, 0 } }).unionWith(
+        a,
+        .{ .effects = &.{ 8, 2, 2, 0 } },
+    );
     defer a.free(result.effects);
 }
 test "row merge frees every failed allocation without mutating evidence" {

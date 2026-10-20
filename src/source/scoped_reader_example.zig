@@ -19,71 +19,248 @@ fn authored(b: *source.Builder) a.Error!source.Module {
         slot.* = try c.declareSchema(.resumption, a.Dynamic);
         schema.* = slot.*.schema();
     }
-    const captures: []const *const a.Schema(a.Dynamic) = &.{ a.interop.erase(unit), a.interop.erase(integer), a.interop.erase(pair), tokens[0], tokens[1], tokens[2], tokens[3] };
-    const family = try reader_library.family(c, "example/scoped-reader", integer, integer, &.{}, &.{log}, &.{});
+    const captures: []const *const a.Schema(a.Dynamic) = &.{
+        a.interop.erase(unit),
+        a.interop.erase(integer),
+        a.interop.erase(pair),
+        tokens[0],
+        tokens[1],
+        tokens[2],
+        tokens[3],
+    };
+    const family = try reader_library.family(
+        c,
+        "example/scoped-reader",
+        integer,
+        integer,
+        &.{},
+        &.{log},
+        &.{},
+    );
     const reader = try reader_library.interpret(c, family, pair, .{ .continuation = captures });
-    const effects = &.{ log, family.ask(), family.local() };
-    const bound = try b.allocator().alloc(*const a.Schema(a.Dynamic), captures.len + reader.resumptions.len + 3);
-    @memcpy(bound[0..captures.len], captures);
-    @memcpy(bound[captures.len..][0..reader.resumptions.len], reader.resumptions);
-    @memcpy(bound[bound.len - 3 ..], &[_]*const a.Schema(a.Dynamic){ a.interop.erase(family.askCapability()), a.interop.erase(family.localCapability()), a.interop.erase(family.inside()) });
-    const Ops = native.Fields(&.{ "ask", "local" }, &.{ a.ShapeOf(@TypeOf(family.ask())), a.ShapeOf(@TypeOf(family.local())) });
-    const State = native.Fields(&.{ "outer_ask", "outer_local" }, &.{ a.ShapeOf(@TypeOf(family.askCapability())), a.ShapeOf(@TypeOf(family.localCapability())) });
+    return declareForwarders(b, .{
+        .c = c,
+        .unit = unit,
+        .integer = integer,
+        .pair = pair,
+        .log = log,
+        .declarations = declarations,
+        .captures = captures,
+        .family = family,
+        .reader = reader,
+    });
+}
+
+fn declareForwarders(
+    b: *source.Builder,
+    ctx: anytype,
+) a.Error!source.Module {
+    const effects = &.{ ctx.log, ctx.family.ask(), ctx.family.local() };
+    const bound = try b.allocator().alloc(
+        *const a.Schema(a.Dynamic),
+        ctx.captures.len + ctx.reader.resumptions.len + 3,
+    );
+    @memcpy(bound[0..ctx.captures.len], ctx.captures);
+    @memcpy(bound[ctx.captures.len..][0..ctx.reader.resumptions.len], ctx.reader.resumptions);
+    @memcpy(
+        bound[bound.len - 3 ..],
+        &[_]*const a.Schema(a.Dynamic){
+            a.interop.erase(ctx.family.askCapability()),
+            a.interop.erase(ctx.family.localCapability()),
+            a.interop.erase(ctx.family.inside()),
+        },
+    );
+    const Ops = native.Fields(
+        &.{ "ask", "local" },
+        &.{ a.ShapeOf(@TypeOf(ctx.family.ask())), a.ShapeOf(@TypeOf(ctx.family.local())) },
+    );
+    const State = native.Fields(
+        &.{ "outer_ask", "outer_local" },
+        &.{
+            a.ShapeOf(@TypeOf(ctx.family.askCapability())),
+            a.ShapeOf(@TypeOf(ctx.family.localCapability())),
+        },
+    );
     const Empty = native.Fields(&.{}, &.{});
-    const Pair = a.ShapeOf(@TypeOf(pair));
+    const Pair = a.ShapeOf(@TypeOf(ctx.pair));
     const Integer = a.Shape(u64);
     var forwarding: struct {
         *const a.Handler(a.HandlerShape(Ops, Pair, Pair, State, Empty, .deep)),
         *const a.Handler(a.HandlerShape(Ops, Integer, Integer, State, Empty, .deep)),
     } = undefined;
-    inline for (.{ pair, integer }, 0..) |answer, index| {
-        const handler = try c.handlerSet(.{ .ask = family.ask(), .local = family.local() }, answer, answer, .{
+    return defineAskForwarders(.{
+        .c = ctx.c,
+        .unit = ctx.unit,
+        .integer = ctx.integer,
+        .pair = ctx.pair,
+        .log = ctx.log,
+        .declarations = ctx.declarations,
+        .family = ctx.family,
+        .reader = ctx.reader,
+        .effects = effects,
+        .bound = bound,
+        .forwarding = &forwarding,
+    });
+}
+
+fn defineAskForwarders(
+    ctx: anytype,
+) a.Error!source.Module {
+    inline for (.{ ctx.pair, ctx.integer }, 0..) |answer, index| {
+        const handler = try ctx.c.handlerSet(.{
+            .ask = ctx.family.ask(),
+            .local = ctx.family.local(),
+        }, answer, answer, .{
             .mode = .deep,
             .use = .linear,
-            .residual = effects,
+            .residual = ctx.effects,
             .return_effects = &.{},
-            .captures = bound,
-            .body_captures = if (index == 0) &.{} else &.{family.inside()},
-            .state = .{ .outer_ask = family.askCapability(), .outer_local = family.localCapability() },
-            .resumption_slots = declarations[index * 2 ..][0..2],
+            .captures = ctx.bound,
+            .body_captures = if (index == 0) &.{} else &.{ctx.family.inside()},
+            .state = .{
+                .outer_ask = ctx.family.askCapability(),
+                .outer_local = ctx.family.localCapability(),
+            },
+            .resumption_slots = ctx.declarations[index * 2 ..][0..2],
         });
-        forwarding[index] = handler;
-        const returns_fn = try c.returnFunction(handler);
-        const returns = try c.body(returns_fn);
-        try c.define(returns_fn, try returns.ret(try returns.parameter("result")));
-        const asks_fn = try c.clauseFunctionFor(handler, family.ask());
-        const asks = try c.body(asks_fn);
-        _ = try asks.perform(log, try asks.constant(u64, 1));
-        const answer_value = try asks.performLocal(family.ask(), try asks.parameter("outer_ask"), try asks.constant(void, {}));
-        try c.define(asks_fn, try asks.ret(try asks.resumeValue(try asks.parameter("resumption"), answer_value)));
+        ctx.forwarding[index] = handler;
+        const returns_fn = try ctx.c.returnFunction(handler);
+        const returns = try ctx.c.body(returns_fn);
+        try ctx.c.define(returns_fn, try returns.ret(try returns.parameter("result")));
+        const asks_fn = try ctx.c.clauseFunctionFor(handler, ctx.family.ask());
+        const asks = try ctx.c.body(asks_fn);
+        _ = try asks.perform(ctx.log, try asks.constant(u64, 1));
+        const answer_value = try asks.performLocal(
+            ctx.family.ask(),
+            try asks.parameter("outer_ask"),
+            try asks.constant(void, {}),
+        );
+        try ctx.c.define(
+            asks_fn,
+            try asks.ret(try asks.resumeValue(try asks.parameter("resumption"), answer_value)),
+        );
     }
-    inline for (forwarding) |handler| {
-        const clause_fn = try c.clauseFunctionFor(handler, family.local());
-        const clause = try c.body(clause_fn);
-        const wrapper_fn = try c.functionFor("forward scoped body", family.inside());
+    return defineScopedForwarders(.{
+        .c = ctx.c,
+        .unit = ctx.unit,
+        .pair = ctx.pair,
+        .log = ctx.log,
+        .family = ctx.family,
+        .reader = ctx.reader,
+        .forwarding = ctx.forwarding,
+    });
+}
+
+fn defineScopedForwarders(
+    ctx: anytype,
+) a.Error!source.Module {
+    inline for (ctx.forwarding.*) |handler| {
+        const clause_fn = try ctx.c.clauseFunctionFor(handler, ctx.family.local());
+        const clause = try ctx.c.body(clause_fn);
+        const wrapper_fn = try ctx.c.functionFor("forward scoped body", ctx.family.inside());
         const wrapper = try clause.closureBody(wrapper_fn);
-        const wrapped = try wrapper.handleWith(forwarding[1], try clause.parameter("inside"), .{ .outer_ask = try wrapper.parameter("ask"), .outer_local = try wrapper.parameter("local") });
-        try c.define(wrapper_fn, try wrapper.ret(wrapped));
-        _ = try clause.perform(log, try clause.constant(u64, 2));
-        const forwarded = try clause.performScoped(family.local(), try clause.parameter("outer_local"), try clause.parameter("payload"), .{ .inside = try clause.lambda(wrapper_fn, family.inside()) });
-        try c.define(clause_fn, try clause.ret(try clause.resumeValue(try clause.parameter("resumption"), forwarded)));
+        const wrapped = try wrapper.handleWith(
+            ctx.forwarding[1],
+            try clause.parameter("inside"),
+            .{
+                .outer_ask = try wrapper.parameter("ask"),
+                .outer_local = try wrapper.parameter("local"),
+            },
+        );
+        try ctx.c.define(wrapper_fn, try wrapper.ret(wrapped));
+        _ = try clause.perform(ctx.log, try clause.constant(u64, 2));
+        const forwarded = try clause.performScoped(
+            ctx.family.local(),
+            try clause.parameter("outer_local"),
+            try clause.parameter("payload"),
+            .{ .inside = try clause.lambda(wrapper_fn, ctx.family.inside()) },
+        );
+        try ctx.c.define(
+            clause_fn,
+            try clause.ret(try clause.resumeValue(
+                try clause.parameter("resumption"),
+                forwarded,
+            )),
+        );
     }
-    const inside_fn = try c.functionFor("local read", family.inside());
-    const inside = try c.body(inside_fn);
-    try c.define(inside_fn, try inside.ret(try inside.performLocal(family.ask(), try inside.parameter("ask"), try inside.constant(void, {}))));
-    const client_schema = try c.handledSchema(forwarding[0]);
-    const client_fn = try c.functionFor("client", client_schema);
-    const client = try c.body(client_fn);
-    const local = try client.performScoped(family.local(), try client.parameter("local"), try client.constant(u64, 20), .{ .inside = try client.lambda(inside_fn, family.inside()) });
-    const outer = try client.performLocal(family.ask(), try client.parameter("ask"), try client.constant(void, {}));
-    try c.define(client_fn, try client.ret(try client.product(pair, .{ .local = local, .outer = outer })));
-    const reader_schema = try c.handledSchema(reader.handler);
-    const reader_fn = try c.functionFor("reader body", reader_schema);
-    const reader_body = try c.body(reader_fn);
-    const interpreted = try reader_body.handleWith(forwarding[0], try reader_body.lambda(client_fn, client_schema), .{ .outer_ask = try reader_body.parameter("ask"), .outer_local = try reader_body.parameter("local") });
-    try c.define(reader_fn, try reader_body.ret(interpreted));
-    const main = try c.function("entry", .{}, pair, &.{log});
-    const entry = try c.body(main);
-    try c.define(main, try entry.ret(try entry.handleWith(reader.handler, try entry.lambda(reader_fn, reader_schema), .{ .environment = try entry.constant(u64, 10) })));
-    return c.module(main, unit);
+    return defineClient(.{
+        .c = ctx.c,
+        .unit = ctx.unit,
+        .pair = ctx.pair,
+        .log = ctx.log,
+        .family = ctx.family,
+        .reader = ctx.reader,
+        .forwarding = ctx.forwarding,
+    });
+}
+
+fn defineClient(
+    ctx: anytype,
+) a.Error!source.Module {
+    const inside_fn = try ctx.c.functionFor("local read", ctx.family.inside());
+    const inside = try ctx.c.body(inside_fn);
+    try ctx.c.define(
+        inside_fn,
+        try inside.ret(try inside.performLocal(
+            ctx.family.ask(),
+            try inside.parameter("ask"),
+            try inside.constant(void, {}),
+        )),
+    );
+    const client_schema = try ctx.c.handledSchema(ctx.forwarding[0]);
+    const client_fn = try ctx.c.functionFor("client", client_schema);
+    const client = try ctx.c.body(client_fn);
+    const local = try client.performScoped(
+        ctx.family.local(),
+        try client.parameter("local"),
+        try client.constant(u64, 20),
+        .{ .inside = try client.lambda(inside_fn, ctx.family.inside()) },
+    );
+    const outer = try client.performLocal(
+        ctx.family.ask(),
+        try client.parameter("ask"),
+        try client.constant(void, {}),
+    );
+    try ctx.c.define(
+        client_fn,
+        try client.ret(try client.product(ctx.pair, .{ .local = local, .outer = outer })),
+    );
+    return interpretClient(.{
+        .c = ctx.c,
+        .unit = ctx.unit,
+        .pair = ctx.pair,
+        .log = ctx.log,
+        .reader = ctx.reader,
+        .forwarding = ctx.forwarding,
+        .client_schema = client_schema,
+        .client_fn = client_fn,
+    });
+}
+
+fn interpretClient(
+    ctx: anytype,
+) a.Error!source.Module {
+    const reader_schema = try ctx.c.handledSchema(ctx.reader.handler);
+    const reader_fn = try ctx.c.functionFor("reader body", reader_schema);
+    const reader_body = try ctx.c.body(reader_fn);
+    const interpreted = try reader_body.handleWith(
+        ctx.forwarding[0],
+        try reader_body.lambda(ctx.client_fn, ctx.client_schema),
+        .{
+            .outer_ask = try reader_body.parameter("ask"),
+            .outer_local = try reader_body.parameter("local"),
+        },
+    );
+    try ctx.c.define(reader_fn, try reader_body.ret(interpreted));
+    const main = try ctx.c.function("entry", .{}, ctx.pair, &.{ctx.log});
+    const entry = try ctx.c.body(main);
+    try ctx.c.define(
+        main,
+        try entry.ret(try entry.handleWith(
+            ctx.reader.handler,
+            try entry.lambda(reader_fn, reader_schema),
+            .{ .environment = try entry.constant(u64, 10) },
+        )),
+    );
+    return ctx.c.module(main, ctx.unit);
 }

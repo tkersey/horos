@@ -8,7 +8,10 @@ pub fn build(b: *std.Build) void {
         .target = b.graph.host,
         .imports = &.{.{ .name = "horos_data", .module = pure.module("horos_data") }},
     }) });
-    b.step("data", "Check isolated data-only dependency").dependOn(&b.addRunArtifact(pure_test).step);
+    b.step(
+        "data",
+        "Check isolated data-only dependency",
+    ).dependOn(&b.addRunArtifact(pure_test).step);
     const client = b.addExecutable(.{ .name = "client", .root_module = b.createModule(.{
         .root_source_file = b.path("client.zig"),
         .target = b.graph.host,
@@ -21,8 +24,14 @@ pub fn build(b: *std.Build) void {
         .target = b.graph.host,
         .imports = &.{.{ .name = "horos", .module = horos }},
     }) });
-    b.step("reject", "Check rejected public-package neighbor").dependOn(&b.addRunArtifact(rejection).step);
-    const static = b.step("comptime-reject", "Reject incompatible shapes through the public package");
+    b.step(
+        "reject",
+        "Check rejected public-package neighbor",
+    ).dependOn(&b.addRunArtifact(rejection).step);
+    const static = b.step(
+        "comptime-reject",
+        "Reject incompatible shapes through the public package",
+    );
     inline for (@import("static_cases.zig").cases) |case| {
         const options = b.addOptions();
         options.addOption([]const u8, "value", case[0]);

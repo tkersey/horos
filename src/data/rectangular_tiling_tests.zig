@@ -14,7 +14,11 @@ test "four by four tiles admit partial final tiles and retain the exact body" {
     try tiling.validate(a, original, candidate.program, candidate.source, .{});
     try std.testing.expectEqual(@as(usize, 13), candidate.program.blocks.len);
     try std.testing.expectEqual(@as(?u64, 373), tiling.executionWork(candidate.source, 3));
-    try std.testing.expect(@import("record_equal.zig").equal([]const ir.Instruction, original.blocks[4].instructions, candidate.program.blocks[8].instructions));
+    try std.testing.expect(@import("record_equal.zig").equal(
+        []const ir.Instruction,
+        original.blocks[4].instructions,
+        candidate.program.blocks[8].instructions,
+    ));
 }
 test "admitted wrong final endpoint and wrong tile advance fail independent validation" {
     var candidate = (try tiling.construct(a, fixture.base, .{})).?;
@@ -30,7 +34,10 @@ test "admitted wrong final endpoint and wrong tile advance fail independent vali
     forged.blocks = blocks;
     var admitted = try own.analyze(a, forged);
     admitted.deinit();
-    try std.testing.expectError(error.InvalidRectangularTiling, tiling.validate(a, fixture.base, forged, candidate.source, .{}));
+    try std.testing.expectError(
+        error.InvalidRectangularTiling,
+        tiling.validate(a, fixture.base, forged, candidate.source, .{}),
+    );
     @memcpy(blocks, candidate.program.blocks);
     const advance = try a.dupe(ir.Instruction, blocks[10].instructions);
     defer a.free(advance);
@@ -38,12 +45,19 @@ test "admitted wrong final endpoint and wrong tile advance fail independent vali
     blocks[10].instructions = advance;
     admitted = try own.analyze(a, forged);
     admitted.deinit();
-    try std.testing.expectError(error.InvalidRectangularTiling, tiling.validate(a, fixture.base, forged, candidate.source, .{}));
+    try std.testing.expectError(
+        error.InvalidRectangularTiling,
+        tiling.validate(a, fixture.base, forged, candidate.source, .{}),
+    );
 }
 test "tiling proof includes maximum unsigned dimensions without endpoint overflow" {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
-    const original = try fixture.rectangle(arena.allocator(), std.math.maxInt(u64), std.math.maxInt(u64));
+    const original = try fixture.rectangle(
+        arena.allocator(),
+        std.math.maxInt(u64),
+        std.math.maxInt(u64),
+    );
     var candidate = (try tiling.construct(a, original, .{})).?;
     defer candidate.deinit();
     try tiling.validate(a, original, candidate.program, candidate.source, .{});

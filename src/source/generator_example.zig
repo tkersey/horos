@@ -26,27 +26,118 @@ fn authored(b: *source.Builder) a.Error!source.Module {
     const start_fn = try c.functionFor("generator producer", start_type);
     const start = try c.body(start_fn);
     const capability = try start.parameter("capability");
-    const private_type = try c.regionBodySchema(scope, .{}, unit, effects, .{ .use = .reusable, .captures = &.{generator.capability()} });
+    const private_type = try c.regionBodySchema(
+        scope,
+        .{},
+        unit,
+        effects,
+        .{ .use = .reusable, .captures = &.{generator.capability()} },
+    );
     const private_fn = try c.functionFor("private generator state", private_type);
     const private = try start.closureBody(private_fn);
-    const cell = try private.newCell(cell_type, try private.parameter("region"), try private.constant(u64, 42));
-    const body_type = try c.callable(.{}, unit, &.{generator.effect()}, .{ .use = .reusable, .captures = &.{ generator.capability(), cell_type }, .regions = &.{scope} });
+    const cell = try private.newCell(
+        cell_type,
+        try private.parameter("region"),
+        try private.constant(u64, 42),
+    );
+    try definePrivateProducer(
+        c,
+        unit,
+        generator,
+        cell_type,
+        scope,
+        private,
+        capability,
+        cell,
+        release,
+        private_fn,
+    );
+    try c.define(
+        start_fn,
+        try start.ret(try start.withRegion(
+            scope,
+            try start.lambda(private_fn, private_type),
+            .{},
+        )),
+    );
+
+    return defineEntry(
+        c,
+        pair,
+        release,
+        generator,
+        start_fn,
+        start_type,
+        unit,
+    );
+}
+
+fn definePrivateProducer(
+    c: *a.Context,
+    unit: anytype,
+    generator: anytype,
+    cell_type: anytype,
+    scope: anytype,
+    private: anytype,
+    capability: anytype,
+    cell: anytype,
+    release: anytype,
+    private_fn: anytype,
+) a.Error!void {
+    const body_type = try c.callable(
+        .{},
+        unit,
+        &.{generator.effect()},
+        .{
+            .use = .reusable,
+            .captures = &.{ generator.capability(), cell_type },
+            .regions = &.{scope},
+        },
+    );
     const body_fn = try c.functionFor("generator yields", body_type);
     const body = try private.closureBody(body_fn);
     _ = try body.performLocal(generator.effect(), capability, try body.readCell(cell));
     _ = try body.writeCell(cell, try body.constant(u64, 43));
     _ = try body.performLocal(generator.effect(), capability, try body.readCell(cell));
     try c.define(body_fn, try body.ret(try body.constant(void, {})));
-    const cleanup_type = try c.callable(.{ .exit = try c.cleanupInfo(unit) }, unit, &.{release}, .{ .use = .reusable, .captures = &.{cell_type}, .regions = &.{scope} });
+    const cleanup_type = try c.callable(
+        .{ .exit = try c.cleanupInfo(unit) },
+        unit,
+        &.{release},
+        .{ .use = .reusable, .captures = &.{cell_type}, .regions = &.{scope} },
+    );
     const cleanup_fn = try c.functionFor("generator release", cleanup_type);
     const cleanup = try private.closureBody(cleanup_fn);
-    try c.define(cleanup_fn, try cleanup.ret(try cleanup.perform(release, try cleanup.readCell(cell))));
-    try c.define(private_fn, try private.ret(try private.protect(try private.lambda(body_fn, body_type), try private.lambda(cleanup_fn, cleanup_type), .{})));
-    try c.define(start_fn, try start.ret(try start.withRegion(scope, try start.lambda(private_fn, private_type), .{})));
+    try c.define(
+        cleanup_fn,
+        try cleanup.ret(try cleanup.perform(release, try cleanup.readCell(cell))),
+    );
+    try c.define(
+        private_fn,
+        try private.ret(try private.protect(
+            try private.lambda(body_fn, body_type),
+            try private.lambda(cleanup_fn, cleanup_type),
+            .{},
+        )),
+    );
+}
 
+fn defineEntry(
+    c: *a.Context,
+    pair: anytype,
+    release: anytype,
+    generator: anytype,
+    start_fn: anytype,
+    start_type: anytype,
+    unit: anytype,
+) a.Error!source.Module {
     const main = try c.function("entry", .{}, pair, &.{release});
     const entry = try c.body(main);
-    const answer = try entry.handleWith(generator.handler(), try entry.lambda(start_fn, start_type), .{});
+    const answer = try entry.handleWith(
+        generator.handler(),
+        try entry.lambda(start_fn, start_type),
+        .{},
+    );
     const done = try entry.caseOf(answer, "done");
     const yielded = try entry.caseOf(answer, "yielded");
     const first = yielded.body();
@@ -62,7 +153,22 @@ fn authored(b: *source.Builder) a.Error!source.Module {
     const second_value = try parts2.get("value");
     _ = try second.disposePackage(try parts2.get("future"));
     const result = try second.product(pair, .{ .first = first_value, .second = second_value });
-    const next = try first.match(answer2, .{ .done = try done2.fail(pair, try done2.body().constant(void, {})), .yielded = try yielded2.ret(result) });
-    try c.define(main, try entry.ret(try entry.match(answer, .{ .done = try done.fail(pair, try done.body().constant(void, {})), .yielded = try yielded.ret(next) })));
+    const next = try first.match(
+        answer2,
+        .{
+            .done = try done2.fail(pair, try done2.body().constant(void, {})),
+            .yielded = try yielded2.ret(result),
+        },
+    );
+    try c.define(
+        main,
+        try entry.ret(try entry.match(
+            answer,
+            .{
+                .done = try done.fail(pair, try done.body().constant(void, {})),
+                .yielded = try yielded.ret(next),
+            },
+        )),
+    );
     return c.module(main, unit);
 }

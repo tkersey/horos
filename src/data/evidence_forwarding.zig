@@ -15,7 +15,11 @@ const p01 = @import("coalescing.zig");
 pub const Error = arguments.Error || error{ InvalidEvidenceForwarding, EvidenceWorkLimit };
 pub const Options = struct { work_limit: usize = 10_000_000, coalescing: p01.Options = .{} };
 pub const Pair = struct { function: p.Id, keep: usize, remove: usize };
-pub const Statistics = struct { parameters_coalesced: usize = 0, call_arguments_removed: usize = 0, work_limit: bool = false };
+pub const Statistics = struct {
+    parameters_coalesced: usize = 0,
+    call_arguments_removed: usize = 0,
+    work_limit: bool = false,
+};
 pub const Candidate = struct {
     arena: std.heap.ArenaAllocator,
     program: ir.Program,
@@ -32,30 +36,56 @@ const Budget = struct {
         self.left -= amount;
     }
     fn record(self: *Budget, comptime T: type, value: T) Error!void {
+        @setEvalBranchQuota(10000);
+        return self.recordFields(T, value);
+    }
+
+    inline fn recordFields(self: *Budget, comptime T: type, value: T) Error!void {
         try self.take(1);
         switch (@typeInfo(T)) {
-            .@"struct" => |info| inline for (info.field_names, info.field_types) |field_name, FieldType| try self.record(FieldType, @field(value, field_name)),
+            .@"struct" => |info| inline for (
+                info.field_names,
+                info.field_types,
+            ) |field_name, FieldType| try self.recordFields(FieldType, @field(value, field_name)),
             .@"union" => switch (value) {
-                inline else => |payload| try self.record(@TypeOf(payload), payload),
+                inline else => |payload| try self.recordFields(@TypeOf(payload), payload),
             },
             .optional => |info| if (value) |payload| {
-                try self.record(info.child, payload);
+                try self.recordFields(info.child, payload);
             },
-            .pointer => |info| for (value) |item| try self.record(info.child, item),
+            .pointer => |info| for (value) |item| try self.recordFields(info.child, item),
             else => {},
         }
     }
 };
-fn admissiblePair(program: ir.Program, pair: Pair, permissions: traits.Facts, budget: *Budget) Error!bool {
+fn admissiblePair(
+    program: ir.Program,
+    pair: Pair,
+    permissions: traits.Facts,
+    budget: *Budget,
+) Error!bool {
     try budget.take(1);
-    if (pair.function >= program.functions.len or contexts.unknownEntry(program, pair.function)) return false;
+    if (pair.function >= program.functions.len or contexts.unknownEntry(
+        program,
+        pair.function,
+    )) return false;
     const function = program.functions[@intCast(pair.function)];
     if (pair.keep >= pair.remove or pair.remove >= function.inputs.len) return false;
     const keep = function.inputs[pair.keep];
     const remove = function.inputs[pair.remove];
     const schema = function.layout.slots[@intCast(keep)];
-    if (schema != function.layout.slots[@intCast(remove)] or program.schemas[@intCast(schema)] != .internal or
-        program.schemas[@intCast(schema)].internal != .capability or !permissions.copy[@intCast(schema)] or !permissions.drop[@intCast(schema)]) return false;
+    if (schema != function.layout.slots[
+        @intCast(remove)
+    ] or program.schemas[
+        @intCast(schema)
+    ] != .internal or
+        program.schemas[
+            @intCast(schema)
+        ].internal != .capability or !permissions.copy[
+        @intCast(schema)
+    ] or !permissions.drop[
+        @intCast(schema)
+    ]) return false;
     var callers: usize = 0;
     var kept_reads: usize = 0;
     var removed_reads: usize = 0;
@@ -83,7 +113,11 @@ fn admissiblePair(program: ir.Program, pair: Pair, permissions: traits.Facts, bu
         if (block.terminator == .perform) {
             const op = block.terminator.perform;
             try budget.take(op.use_site_capabilities.len);
-            allowed = @as(usize, @intFromBool(op.capability == remove)) + std.mem.count(p.Id, op.use_site_capabilities, &.{remove});
+            allowed = @as(usize, @intFromBool(op.capability == remove)) + std.mem.count(
+                p.Id,
+                op.use_site_capabilities,
+                &.{remove},
+            );
         }
         if (removed.reads != allowed) return false;
         removed_reads += allowed;
@@ -102,7 +136,11 @@ pub fn possible(program: ir.Program) bool {
     }
     return false;
 }
-pub fn construct(allocator: std.mem.Allocator, original: ir.Program, options: Options) Error!?Candidate {
+pub fn construct(
+    allocator: std.mem.Allocator,
+    original: ir.Program,
+    options: Options,
+) Error!?Candidate {
     var admitted = try own.analyze(allocator, original);
     defer admitted.deinit();
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -160,10 +198,23 @@ pub fn construct(allocator: std.mem.Allocator, original: ir.Program, options: Op
     keep_arena = true;
     return .{ .arena = arena, .program = program, .pairs = selected };
 }
-pub fn validate(allocator: std.mem.Allocator, original: ir.Program, candidate: ir.Program, pairs: []const Pair, limit: usize) Error!void {
+pub fn validate(
+    allocator: std.mem.Allocator,
+    original: ir.Program,
+    candidate: ir.Program,
+    pairs: []const Pair,
+    limit: usize,
+) Error!void {
     return validateObserved(allocator, original, candidate, pairs, limit, null);
 }
-fn validateObserved(allocator: std.mem.Allocator, original: ir.Program, candidate: ir.Program, pairs: []const Pair, limit: usize, observer: ?own.CaptureObserver) Error!void {
+fn validateObserved(
+    allocator: std.mem.Allocator,
+    original: ir.Program,
+    candidate: ir.Program,
+    pairs: []const Pair,
+    limit: usize,
+    observer: ?own.CaptureObserver,
+) Error!void {
     var before = try own.analyzeObserved(allocator, original, null, observer);
     defer before.deinit();
     var after = try own.analyzeObserved(allocator, candidate, null, observer);
@@ -173,50 +224,82 @@ fn validateObserved(allocator: std.mem.Allocator, original: ir.Program, candidat
     const permissions = try traits.derive(arena.allocator(), original.schemas);
     var rest = candidate;
     rest.blocks = original.blocks;
-    if (pairs.len == 0 or !equal(ir.Program, original, rest) or original.blocks.len != candidate.blocks.len) return error.InvalidEvidenceForwarding;
+    if (pairs.len == 0 or !equal(
+        ir.Program,
+        original,
+        rest,
+    ) or original.blocks.len != candidate.blocks.len) return error.InvalidEvidenceForwarding;
     var budget: Budget = .{ .left = limit };
     for (pairs, 0..) |pair, index| {
         // Reconstruct all callers and immutable uses from original records.
-        if (!try admissiblePair(original, pair, permissions, &budget)) return error.InvalidEvidenceForwarding;
-        for (pairs[0..index]) |prior| if (prior.function == pair.function and
-            (prior.remove == pair.remove or prior.keep == pair.remove or prior.remove == pair.keep)) return error.InvalidEvidenceForwarding;
+        if (!try admissiblePair(
+            original,
+            pair,
+            permissions,
+            &budget,
+        )) return error.InvalidEvidenceForwarding;
+        for (pairs[0..index]) |prior|
+            if (prior.function == pair.function and
+                (prior.remove == pair.remove or
+                    prior.keep == pair.remove or
+                    prior.remove == pair.keep))
+                return error.InvalidEvidenceForwarding;
     }
-    for (original.blocks, candidate.blocks) |old, new| {
-        try budget.record(ir.Block, old);
-        try budget.record(ir.Block, new);
-        if (old.terminator != .perform) {
-            if (!equal(ir.Block, old, new)) return error.InvalidEvidenceForwarding;
-            continue;
-        }
-        if (new.terminator != .perform) return error.InvalidEvidenceForwarding;
-        var metadata = new;
-        metadata.terminator = old.terminator;
-        if (!equal(ir.Block, old, metadata)) return error.InvalidEvidenceForwarding;
-        const old_op = old.terminator.perform;
-        const new_op = new.terminator.perform;
-        var op_metadata = new_op;
-        op_metadata.capability = old_op.capability;
-        op_metadata.use_site_capabilities = old_op.use_site_capabilities;
-        if (!equal(ir.Perform, old_op, op_metadata) or old_op.use_site_capabilities.len != new_op.use_site_capabilities.len) return error.InvalidEvidenceForwarding;
-        var expected = old_op.capability;
-        for (pairs) |pair| if (pair.function == old.function) {
+    for (original.blocks, candidate.blocks) |old, new|
+        try validateBlock(original, old, new, pairs, &budget);
+}
+fn validateBlock(
+    original: ir.Program,
+    old: ir.Block,
+    new: ir.Block,
+    pairs: []const Pair,
+    budget: *Budget,
+) Error!void {
+    try budget.record(ir.Block, old);
+    try budget.record(ir.Block, new);
+    if (old.terminator != .perform) {
+        if (!equal(ir.Block, old, new)) return error.InvalidEvidenceForwarding;
+        return;
+    }
+    if (new.terminator != .perform) return error.InvalidEvidenceForwarding;
+    var metadata = new;
+    metadata.terminator = old.terminator;
+    if (!equal(ir.Block, old, metadata)) return error.InvalidEvidenceForwarding;
+    const old_op = old.terminator.perform;
+    const new_op = new.terminator.perform;
+    var op_metadata = new_op;
+    op_metadata.capability = old_op.capability;
+    op_metadata.use_site_capabilities = old_op.use_site_capabilities;
+    if (!equal(ir.Perform, old_op, op_metadata) or
+        old_op.use_site_capabilities.len != new_op.use_site_capabilities.len)
+        return error.InvalidEvidenceForwarding;
+    var expected = old_op.capability;
+    for (pairs) |pair|
+        if (pair.function == old.function) {
             try budget.take(1);
             const function = original.functions[@intCast(pair.function)];
-            if (old_op.capability == function.inputs[pair.remove]) expected = function.inputs[pair.keep];
+            if (old_op.capability == function.inputs[pair.remove])
+                expected = function.inputs[pair.keep];
         };
-        if (new_op.capability != expected) return error.InvalidEvidenceForwarding;
-        for (old_op.use_site_capabilities, new_op.use_site_capabilities) |old_slot, new_slot| {
-            var expected_slot = old_slot;
-            for (pairs) |pair| if (pair.function == old.function) {
+    if (new_op.capability != expected) return error.InvalidEvidenceForwarding;
+    for (old_op.use_site_capabilities, new_op.use_site_capabilities) |old_slot, new_slot| {
+        var expected_slot = old_slot;
+        for (pairs) |pair|
+            if (pair.function == old.function) {
                 try budget.take(1);
                 const function = original.functions[@intCast(pair.function)];
-                if (old_slot == function.inputs[pair.remove]) expected_slot = function.inputs[pair.keep];
+                if (old_slot == function.inputs[pair.remove])
+                    expected_slot = function.inputs[pair.keep];
             };
-            if (new_slot != expected_slot) return error.InvalidEvidenceForwarding;
-        }
+        if (new_slot != expected_slot) return error.InvalidEvidenceForwarding;
     }
 }
-pub fn run(allocator: std.mem.Allocator, original: ir.Program, statistics: ?*Statistics, options: Options) Error!p01.Owned {
+pub fn run(
+    allocator: std.mem.Allocator,
+    original: ir.Program,
+    statistics: ?*Statistics,
+    options: Options,
+) Error!p01.Owned {
     var stats: Statistics = .{};
     defer if (statistics) |out| {
         out.* = stats;
@@ -229,7 +312,13 @@ pub fn run(allocator: std.mem.Allocator, original: ir.Program, statistics: ?*Sta
         else => return err,
     }) orelse return p01.run(allocator, original, options.coalescing);
     defer candidate.deinit();
-    validate(allocator, original, candidate.program, candidate.pairs, options.work_limit) catch |err| switch (err) {
+    validate(
+        allocator,
+        original,
+        candidate.program,
+        candidate.pairs,
+        options.work_limit,
+    ) catch |err| switch (err) {
         error.EvidenceWorkLimit => {
             stats.work_limit = true;
             return p01.run(allocator, original, options.coalescing);
@@ -256,7 +345,13 @@ pub const InteractionObservation = struct {
     control_states: usize = 0,
     iterations: usize = 0,
 };
-pub fn observeInteractions(allocator: std.mem.Allocator, original: ir.Program, candidate: ir.Program, pairs: []const Pair, limit: usize) (Error || @import("interactions.zig").Error)!InteractionObservation {
+pub fn observeInteractions(
+    allocator: std.mem.Allocator,
+    original: ir.Program,
+    candidate: ir.Program,
+    pairs: []const Pair,
+    limit: usize,
+) (Error || @import("interactions.zig").Error)!InteractionObservation {
     const interactions = @import("interactions.zig");
     const provenance = @import("control_provenance.zig");
     const ObserveError = Error || interactions.Error;
@@ -283,31 +378,60 @@ pub fn observeInteractions(allocator: std.mem.Allocator, original: ir.Program, c
             defer session.deinit();
             var sites: std.ArrayList(p.Id) = .empty;
             for (program.blocks, 0..) |block, id| if (block.terminator == .perform) {
-                const selected = try owner.select(.{ .block = id, .role = .operation }, block.terminator.perform.effect);
+                const selected = try owner.select(
+                    .{ .block = id, .role = .operation },
+                    block.terminator.perform.effect,
+                );
                 const index = sites.items.len;
                 try sites.append(self.allocator, id);
                 if (self.pass == 0) {
-                    try self.targets.append(self.allocator, try self.allocator.dupe(provenance.Target, selected.targets()));
+                    try self.targets.append(
+                        self.allocator,
+                        try self.allocator.dupe(provenance.Target, selected.targets()),
+                    );
                     try self.knowledge.append(self.allocator, selected.knowledge());
-                } else if (index >= self.targets.items.len or !equal([]const provenance.Target, self.targets.items[index], selected.targets()) or !std.meta.eql(self.knowledge.items[index], selected.knowledge())) {
+                } else if (index >= self.targets.items.len or !equal(
+                    []const provenance.Target,
+                    self.targets.items[index],
+                    selected.targets(),
+                ) or !std.meta.eql(self.knowledge.items[index], selected.knowledge())) {
                     self.observation.status = .inconclusive;
                 }
             };
-            if (self.pass != 0 and sites.items.len != self.targets.items.len) self.observation.status = .inconclusive;
+            if (self.pass != 0 and
+                sites.items.len != self.targets.items.len)
+                self.observation.status = .inconclusive;
             const Binding = struct {
                 first: p.Id,
                 second: p.Id,
-                fn project(raw: *const anyopaque, _: ir.Program, site: interactions.Site, _: usize) interactions.Mask {
+                fn project(
+                    raw: *const anyopaque,
+                    _: ir.Program,
+                    site: interactions.Site,
+                    _: usize,
+                ) interactions.Mask {
                     const self_: *const @This() = @ptrCast(@alignCast(raw));
                     if (site.phase != .operation) return 0;
-                    return if (site.block == self_.first) 1 else if (site.block == self_.second) 2 else 0;
+                    return if (site.block == self_.first)
+                        1
+                    else if (site.block == self_.second)
+                        2
+                    else
+                        0;
                 }
             };
             var root_index: usize = 0;
             for (sites.items, 0..) |first, index| for (sites.items[index + 1 ..]) |second| {
                 const binding = try self.allocator.create(Binding);
                 binding.* = .{ .first = first, .second = second };
-                const monitor: interactions.Monitor = .{ .binding = binding, .states = 5, .alphabet = 2, .bad = interactions.bit(4), .transitions = &.{ 1, 2, 1, 3, 4, 2, 4, 3, 4, 4 }, .project = Binding.project };
+                const monitor: interactions.Monitor = .{
+                    .binding = binding,
+                    .states = 5,
+                    .alphabet = 2,
+                    .bad = interactions.bit(4),
+                    .transitions = &.{ 1, 2, 1, 3, 4, 2, 4, 3, 4, 4 },
+                    .project = Binding.project,
+                };
                 const result = try session.analyze(monitor);
                 if (self.pass == 0) self.observation.monitors += 1;
                 self.observation.relations += result.statistics.relations;
@@ -320,13 +444,18 @@ pub fn observeInteractions(allocator: std.mem.Allocator, original: ir.Program, c
                     if (root.widened) self.observation.status = .inconclusive;
                     if (self.pass == 0) {
                         try self.roots.append(self.allocator, root);
-                    } else if (root_index >= self.roots.items.len or !std.meta.eql(root, self.roots.items[root_index])) {
+                    } else if (root_index >= self.roots.items.len or !std.meta.eql(
+                        root,
+                        self.roots.items[root_index],
+                    )) {
                         self.observation.status = .inconclusive;
                     }
                     root_index += 1;
                 }
             };
-            if (self.pass != 0 and root_index != self.roots.items.len) self.observation.status = .inconclusive;
+            if (self.pass != 0 and
+                root_index != self.roots.items.len)
+                self.observation.status = .inconclusive;
         }
     };
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -334,7 +463,14 @@ pub fn observeInteractions(allocator: std.mem.Allocator, original: ir.Program, c
     var collector: Collector = .{ .allocator = arena.allocator() };
     // Admission owns each analysis. Copy only observations needed after its
     // callback; never retain an owner or rederive targets for the property.
-    try validateObserved(allocator, original, candidate, pairs, limit, .{ .context = &collector, .capture = Collector.capture, .analyzed = Collector.analyzed });
+    try validateObserved(
+        allocator,
+        original,
+        candidate,
+        pairs,
+        limit,
+        .{ .context = &collector, .capture = Collector.capture, .analyzed = Collector.analyzed },
+    );
     if (collector.failure) |err| return err;
     return collector.observation;
 }

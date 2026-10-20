@@ -10,7 +10,9 @@ pub const Facts = struct {
     dependencies: []const bool,
     width: usize,
     pub fn contains(self: Facts, schema: p.Id, effect: p.Id) bool {
-        return self.dependencies[@as(usize, @intCast(schema)) * self.width + @as(usize, @intCast(effect))];
+        return self.dependencies[
+            @as(usize, @intCast(schema)) * self.width + @as(usize, @intCast(effect))
+        ];
     }
 };
 
@@ -18,7 +20,11 @@ pub fn derive(allocator: std.mem.Allocator, image: anytype) Error!Facts {
     return deriveComponent(allocator, image, &.{});
 }
 
-pub fn deriveComponent(allocator: std.mem.Allocator, image: anytype, imports: []const p.Id) Error!Facts {
+pub fn deriveComponent(
+    allocator: std.mem.Allocator,
+    image: anytype,
+    imports: []const p.Id,
+) Error!Facts {
     const ambient = try allocator.alloc(bool, image.effects.len);
     @memset(ambient, false);
     // An unknown implementation is not evidence of local-only interpretation.
@@ -31,10 +37,18 @@ pub fn deriveComponent(allocator: std.mem.Allocator, image: anytype, imports: []
         if (operation.effect >= image.effects.len) return error.InvalidEffect;
         if (operation.capability == null) ambient[@intCast(operation.effect)] = true;
     };
-    const length = std.math.mul(usize, image.schemas.len, image.effects.len) catch return error.InvalidLength;
+    const length = std.math.mul(
+        usize,
+        image.schemas.len,
+        image.effects.len,
+    ) catch return error.InvalidLength;
     const dependencies = try allocator.alloc(bool, length);
     @memset(dependencies, false);
-    const facts: Facts = .{ .ambient = ambient, .dependencies = dependencies, .width = image.effects.len };
+    const facts: Facts = .{
+        .ambient = ambient,
+        .dependencies = dependencies,
+        .width = image.effects.len,
+    };
     var changed = true;
     while (changed) {
         changed = false;
@@ -64,27 +78,46 @@ fn dependency(image: anytype, facts: Facts, schema: p.Schema, effect: p.Id) bool
             .cell => |cell| facts.contains(cell.element, effect),
             .suspension_package => |token| facts.contains(token, effect),
             .computation => |signature| blk: {
-                if (any(facts, signature.capture_bound, effect) or facts.contains(signature.result, effect)) break :blk true;
-                if (std.mem.indexOfScalar(p.Id, signature.effects, effect) == null) break :blk false;
+                if (any(facts, signature.capture_bound, effect) or
+                    facts.contains(signature.result, effect))
+                    break :blk true;
+                if (std.mem.indexOfScalar(
+                    p.Id,
+                    signature.effects,
+                    effect,
+                ) == null) break :blk false;
                 if (facts.ambient[@intCast(effect)]) break :blk true;
                 // An explicit capability parameter is supplied by the caller;
                 // it is not an attachment hidden inside this computation value.
                 for (signature.parameters) |parameter| {
                     const shape = image.schemas[@intCast(parameter)];
-                    if (shape == .internal and shape.internal == .capability and shape.internal.capability == effect) break :blk false;
+                    if (shape == .internal and
+                        shape.internal == .capability and
+                        shape.internal.capability == effect)
+                        break :blk false;
                 }
                 break :blk true;
             },
             // Tokens expose only their declared execution and answer. Captured
             // capabilities beneath a deep delimiter cannot be projected out.
-            .resumption => |signature| std.mem.indexOfScalar(p.Id, signature.effects, effect) != null or facts.contains(signature.answer, effect),
+            .resumption => |signature| std.mem.indexOfScalar(
+                p.Id,
+                signature.effects,
+                effect,
+            ) != null or facts.contains(signature.answer, effect),
             .region, .abstract_resource, .borrowed => false,
         },
         else => false,
     };
 }
 
-pub fn discharged(image: anytype, facts: Facts, handler: anytype, body: p.ComputationType, effect: p.Id) bool {
+pub fn discharged(
+    image: anytype,
+    facts: Facts,
+    handler: anytype,
+    body: p.ComputationType,
+    effect: p.Id,
+) bool {
     if (facts.ambient[@intCast(effect)] or any(facts, body.capture_bound, effect)) return false;
     if (any(facts, body.parameters[handler.clauses.len..], effect)) return false;
     for (handler.clauses) |clause| if (clause.effect == effect) return true;

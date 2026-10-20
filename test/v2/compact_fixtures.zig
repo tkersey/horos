@@ -28,7 +28,11 @@ pub fn variedMixed(
     const unit = try b.scalar(void);
     const kinds = [_]p.Id{ try b.scalar(bool), try b.scalar(u64), try b.scalar(u32) };
     var effects: [3]p.Id = undefined;
-    for (&effects, kinds, [_][]const u8{ "compact/bool", "compact/u64", "compact/u32" }) |*effect, kind, name| {
+    for (
+        &effects,
+        kinds,
+        [_][]const u8{ "compact/bool", "compact/u64", "compact/u32" },
+    ) |*effect, kind, name| {
         effect.* = try b.effect(.{ .identity = name, .payload = unit, .result = kind });
     }
     const variables = try b.allocator().alloc(p.Id, count);

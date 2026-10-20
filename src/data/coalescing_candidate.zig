@@ -89,7 +89,10 @@ pub fn materialize(
     var composed: r.Maps = undefined;
     for (correspondence.final, &composed, 0..) |map, *result, kind| {
         const values = try scratch.alloc(p.Id, map.len);
-        for (map, values) |old, *target| target.* = try projected.mapped(@fromBackingInt(@intCast(kind)), old);
+        for (
+            map,
+            values,
+        ) |old, *target| target.* = try projected.mapped(@fromBackingInt(@intCast(kind)), old);
         result.* = values;
     }
     correspondence.final = composed;
@@ -102,7 +105,11 @@ pub fn materialize(
         diagnostic,
     );
     if (diagnostic) |d| d.* = .{ .stage = .candidate };
-    var flow = admission.analyzeDiagnosed(allocator, projected.program, if (diagnostic) |d| &d.target else null) catch |err| {
+    var flow = admission.analyzeDiagnosed(
+        allocator,
+        projected.program,
+        if (diagnostic) |d| &d.target else null,
+    ) catch |err| {
         if (diagnostic) |d| if (trace) |t| t.explain(correspondence, d);
         return err;
     };
@@ -127,7 +134,13 @@ fn checkTransformation(
     diagnostic: ?*origins.Diagnostic,
 ) Error!void {
     if (diagnostic) |d| d.* = .{ .stage = .transformation };
-    validation.validateDiagnosed(allocator, original, result, map, if (diagnostic) |d| &d.target else null) catch |err| {
+    validation.validateDiagnosed(
+        allocator,
+        original,
+        result,
+        map,
+        if (diagnostic) |d| &d.target else null,
+    ) catch |err| {
         if (diagnostic) |d| if (trace) |t| t.explain(null, d);
         return err;
     };

@@ -117,11 +117,7 @@ pub fn run(allocator: std.mem.Allocator, original: ir.Program, options: Options)
 
 fn runInternal(allocator: std.mem.Allocator, original: ir.Program, options: Options) Error!Owned {
     const round_storage: []Round = if (options.statistics) |stats| stats.rounds else &.{};
-    var checked = admission.analyzeDiagnosed(allocator, original, if (options.diagnostic) |d| &d.target else null) catch |err| {
-        if (options.diagnostic) |d| origins.explainOriginal(original, d);
-        return err;
-    };
-    checked.deinit();
+    try admitOriginal(allocator, original, options);
     if (options.diagnostic) |d| d.* = .{ .stage = .baseline };
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
@@ -134,10 +130,7 @@ fn runInternal(allocator: std.mem.Allocator, original: ir.Program, options: Opti
         null;
     defer if (trace) |*value| value.deinit();
     if (options.diagnostic) |d| d.* = .{ .stage = .baseline };
-    var flow = admission.analyzeDiagnosed(allocator, baseline.program, if (options.diagnostic) |d| &d.target else null) catch |err| {
-        if (options.diagnostic) |d| if (trace) |*t| t.explain(null, d);
-        return err;
-    };
+    var flow = try baselineFlow(allocator, baseline.program, options, &trace);
     errdefer flow.deinit();
     if (options.diagnostic) |d| d.* = .{ .stage = .cost };
     const counts = try Counts.of(baseline.program);
@@ -150,7 +143,13 @@ fn runInternal(allocator: std.mem.Allocator, original: ir.Program, options: Opti
     defer {
         if (options.statistics) |output| output.* = stats;
     }
-    const selected = attempt(allocator, baseline.program, &stats, if (trace) |*t| t else null, options.diagnostic) catch |err| switch (err) {
+    const selected = attempt(
+        allocator,
+        baseline.program,
+        &stats,
+        if (trace) |*t| t else null,
+        options.diagnostic,
+    ) catch |err| switch (err) {
         error.WorkLimit => blk: {
             // The attempt may have selected earlier rounds before exhausting
             // its allowance. Returning the baseline also restores its mapping.
@@ -217,94 +216,23 @@ fn recordRound(stats: *Statistics, selected: ?discovery.Profile, materialized: b
     stats.round_count += 1;
 }
 
-fn attempt(allocator: std.mem.Allocator, baseline: ir.Program, stats: *Statistics, trace: ?*origins.Trace, diagnostic: ?*Diagnostic) Error!?Owned {
+fn attempt(
+    allocator: std.mem.Allocator,
+    baseline: ir.Program,
+    stats: *Statistics,
+    trace: ?*origins.Trace,
+    diagnostic: ?*Diagnostic,
+) Error!?Owned {
     var selected: ?Owned = null;
     errdefer if (selected) |*value| value.deinit();
     stats.outcome = .no_change;
     var remaining = stats.baseline.entries;
-    while (true) {
-        if (diagnostic) |d| d.* = .{ .stage = .mapping };
-        var scratch = std.heap.ArenaAllocator.init(allocator);
-        defer scratch.deinit();
-        const a = scratch.allocator();
-        const program = if (selected) |value| value.program else baseline;
-        const analysis = try discovery.analyze(a, program, &stats.work);
-        if (stats.round_count == 0) for (analysis.nodes[0..program.functions.len]) |node| {
-            stats.pinned_functions += @intFromBool(node.pinned);
-        };
-        const full_map = try discovery.correspondence(a, program, analysis, .full, &stats.work);
-        // A restricted profile can only split the complete full relation. If
-        // that relation has no merge, neither profile can reduce live records.
-        if (!hasMerge(full_map.representatives)) {
-            stats.full = stats.selected;
-            stats.descriptions = stats.selected;
-            recordRound(stats, null, false);
+    while (remaining != 0) {
+        if (!try attemptRound(allocator, baseline, stats, trace, diagnostic, &selected))
             return selected;
-        }
-        var full = try candidate.materialize(allocator, a, program, full_map, trace, diagnostic);
-        var keep_full = false;
-        defer if (!keep_full) full.deinit();
-        // The description profile adds only singleton function restrictions.
-        // When full discovery already has those singletons, both fixed points
-        // and materializations are identical. Reuse the independently checked
-        // full candidate; the existing tie-break selects it in either case.
-        const same_profiles = !mapHasMerge(full_map.representatives[@backingInt(r.Kind.function)]);
-        var separate_descriptions: ?candidate.Candidate = if (same_profiles) null else try candidate.buildObserved(
-            allocator,
-            a,
-            program,
-            analysis,
-            .descriptions,
-            &stats.work,
-            trace,
-            diagnostic,
-        );
-        const descriptions = if (separate_descriptions) |*value| value else &full;
-        var keep_descriptions = false;
-        defer if (!keep_descriptions) if (separate_descriptions) |*value| value.deinit();
-        stats.validator_calls += if (same_profiles) @as(usize, 2) else 4;
-        stats.candidate_admissions += if (same_profiles) @as(usize, 1) else 2;
-        stats.full = try Counts.of(full.program);
-        stats.descriptions = try Counts.of(descriptions.program);
-        const full_eligible = eligible(full, stats.selected);
-        const description_eligible = eligible(descriptions.*, stats.selected);
-        const selected_profile = choose(
-            if (full_eligible) .{ .bytes = full.bytes, .entries = full.entries } else null,
-            if (description_eligible)
-                .{ .bytes = descriptions.bytes, .entries = descriptions.entries }
-            else
-                null,
-        );
-        recordRound(stats, selected_profile, true);
-        if (!full_eligible and !description_eligible) {
-            if (selected == null and (full.entries < stats.selected.entries or
-                descriptions.entries < stats.selected.entries)) stats.outcome = .size_guard;
-            return selected;
-        }
-        if (remaining == 0) return error.InvalidCorrespondence;
         remaining -= 1;
-        if (diagnostic) |d| d.* = .{ .stage = .mapping };
-        if (trace) |t| try t.advance(if (selected_profile.? == .full)
-            full.correspondence
-        else
-            descriptions.correspondence);
-        if (selected) |*old| old.deinit();
-        if (selected_profile.? == .full) {
-            keep_full = true;
-            selected = owned(full);
-            stats.selected = stats.full;
-            stats.selected_profile = .full;
-        } else {
-            keep_descriptions = true;
-            selected = owned(descriptions.*);
-            stats.selected = stats.descriptions;
-            stats.selected_profile = .descriptions;
-        }
-        stats.outcome = .applied;
-        stats.extraction_rounds += 1;
-        stats.attempted_extraction_rounds += 1;
-        if (stats.first_selected_work == 0) stats.first_selected_work = stats.work.units;
     }
+    return error.InvalidCorrespondence;
 }
 
 fn hasMerge(maps: r.Maps) bool {
@@ -345,7 +273,14 @@ test "coalescing size guard independently rejects growth and nonreducing extract
     defer scratch.deinit();
     var work: graph.Work = .{};
     const analysis = try discovery.analyze(scratch.allocator(), original, &work);
-    var proposed = try candidate.build(testing.allocator, scratch.allocator(), original, analysis, .full, &work);
+    var proposed = try candidate.build(
+        testing.allocator,
+        scratch.allocator(),
+        original,
+        analysis,
+        .full,
+        &work,
+    );
     defer proposed.deinit();
     const baseline = try Counts.of(original);
     try testing.expect(eligible(proposed, baseline));
@@ -360,4 +295,166 @@ test "coalescing size guard independently rejects growth and nonreducing extract
     try testing.expect(!eligible(cost, baseline));
     cost.bytes = 0;
     try testing.expect(!eligible(cost, baseline));
+}
+
+fn admitOriginal(allocator: std.mem.Allocator, original: ir.Program, options: Options) Error!void {
+    var checked = admission.analyzeDiagnosed(
+        allocator,
+        original,
+        if (options.diagnostic) |d| &d.target else null,
+    ) catch |err| {
+        if (options.diagnostic) |d| origins.explainOriginal(original, d);
+        return err;
+    };
+    checked.deinit();
+}
+
+fn baselineFlow(
+    allocator: std.mem.Allocator,
+    program: ir.Program,
+    options: Options,
+    trace: *?origins.Trace,
+) Error!@import("activation_flow.zig").Facts {
+    return admission.analyzeDiagnosed(
+        allocator,
+        program,
+        if (options.diagnostic) |d| &d.target else null,
+    ) catch |err| {
+        if (options.diagnostic) |d| if (trace.*) |*t| t.explain(null, d);
+        return err;
+    };
+}
+
+fn attemptRound(
+    allocator: std.mem.Allocator,
+    baseline: ir.Program,
+    stats: *Statistics,
+    trace: ?*origins.Trace,
+    diagnostic: ?*Diagnostic,
+    selected: *?Owned,
+) Error!bool {
+    if (diagnostic) |d| d.* = .{ .stage = .mapping };
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    const a = scratch.allocator();
+    const program = if (selected.*) |value| value.program else baseline;
+    const analysis = try discovery.analyze(a, program, &stats.work);
+    if (stats.round_count == 0) for (analysis.nodes[0..program.functions.len]) |node| {
+        stats.pinned_functions += @intFromBool(node.pinned);
+    };
+    const full_map = try discovery.correspondence(a, program, analysis, .full, &stats.work);
+    // A restricted profile can only split the complete full relation. If
+    // that relation has no merge, neither profile can reduce live records.
+    if (!hasMerge(full_map.representatives)) {
+        stats.full = stats.selected;
+        stats.descriptions = stats.selected;
+        recordRound(stats, null, false);
+        return false;
+    }
+    return materializeRound(
+        allocator,
+        a,
+        program,
+        analysis,
+        full_map,
+        stats,
+        trace,
+        diagnostic,
+        selected,
+    );
+}
+
+fn materializeRound(
+    allocator: std.mem.Allocator,
+    a: std.mem.Allocator,
+    program: ir.Program,
+    analysis: discovery.Analysis,
+    full_map: @import("coalescing_witness.zig").Witness,
+    stats: *Statistics,
+    trace: ?*origins.Trace,
+    diagnostic: ?*Diagnostic,
+    selected: *?Owned,
+) Error!bool {
+    var full = try candidate.materialize(allocator, a, program, full_map, trace, diagnostic);
+    var keep_full = false;
+    defer if (!keep_full) full.deinit();
+    // The description profile adds only singleton function restrictions.
+    // When full discovery already has those singletons, both fixed points
+    // and materializations are identical. Reuse the independently checked
+    // full candidate; the existing tie-break selects it in either case.
+    const same_profiles = !mapHasMerge(full_map.representatives[@backingInt(r.Kind.function)]);
+    var separate_descriptions: ?candidate.Candidate = if (same_profiles)
+        null
+    else
+        try candidate.buildObserved(
+            allocator,
+            a,
+            program,
+            analysis,
+            .descriptions,
+            &stats.work,
+            trace,
+            diagnostic,
+        );
+    const descriptions = if (separate_descriptions) |*value| value else &full;
+    var keep_descriptions = false;
+    defer if (!keep_descriptions) if (separate_descriptions) |*value| value.deinit();
+    const selected_profile = try selectProfile(
+        stats,
+        full,
+        descriptions.*,
+        same_profiles,
+        selected.* == null,
+    ) orelse return false;
+    if (diagnostic) |d| d.* = .{ .stage = .mapping };
+    if (trace) |t| try t.advance(if (selected_profile == .full)
+        full.correspondence
+    else
+        descriptions.correspondence);
+    if (selected.*) |*old| old.deinit();
+    if (selected_profile == .full) {
+        keep_full = true;
+        selected.* = owned(full);
+        stats.selected = stats.full;
+        stats.selected_profile = .full;
+    } else {
+        keep_descriptions = true;
+        selected.* = owned(descriptions.*);
+        stats.selected = stats.descriptions;
+        stats.selected_profile = .descriptions;
+    }
+    stats.outcome = .applied;
+    stats.extraction_rounds += 1;
+    stats.attempted_extraction_rounds += 1;
+    if (stats.first_selected_work == 0) stats.first_selected_work = stats.work.units;
+    return true;
+}
+
+fn selectProfile(
+    stats: *Statistics,
+    full: candidate.Candidate,
+    descriptions: candidate.Candidate,
+    same_profiles: bool,
+    initial: bool,
+) Error!?discovery.Profile {
+    stats.validator_calls += if (same_profiles) @as(usize, 2) else 4;
+    stats.candidate_admissions += if (same_profiles) @as(usize, 1) else 2;
+    stats.full = try Counts.of(full.program);
+    stats.descriptions = try Counts.of(descriptions.program);
+    const full_eligible = eligible(full, stats.selected);
+    const description_eligible = eligible(descriptions, stats.selected);
+    const selected_profile = choose(
+        if (full_eligible) .{ .bytes = full.bytes, .entries = full.entries } else null,
+        if (description_eligible)
+            .{ .bytes = descriptions.bytes, .entries = descriptions.entries }
+        else
+            null,
+    );
+    recordRound(stats, selected_profile, true);
+    if (!full_eligible and !description_eligible) {
+        if (initial and (full.entries < stats.selected.entries or
+            descriptions.entries < stats.selected.entries)) stats.outcome = .size_guard;
+        return null;
+    }
+    return selected_profile;
 }

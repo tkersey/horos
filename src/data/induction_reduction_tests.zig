@@ -11,14 +11,39 @@ pub const guarded: ir.Program = .{
     .schemas = base.schemas,
     .constants = base.constants,
     .effects = &.{},
-    .functions = &.{.{ .entry = 0, .inputs = &.{ 0, 1, 2 }, .layout = .{ .slots = &.{ 0, 0, 0, 0, 0, 2, 0, 0, 2, 1 } }, .result = 0 }},
+    .functions = &.{.{
+        .entry = 0,
+        .inputs = &.{ 0, 1, 2 },
+        .layout = .{ .slots = &.{ 0, 0, 0, 0, 0, 2, 0, 0, 2, 1 } },
+        .result = 0,
+    }},
     .blocks = &.{
         base.blocks[0],
-        .{ .function = 0, .instructions = base.blocks[1].instructions, .terminator = .{ .branch = .{ .condition = 5, .when_true = .{ .block = 2 }, .when_false = .{ .block = 4 } } } },
-        .{ .function = 0, .instructions = &.{.{ .destination = 8, .opcode = .less, .operands = &.{ 3, 0 } }}, .terminator = .{ .branch = .{ .condition = 8, .when_true = .{ .block = 3 }, .when_false = .{ .block = 5 } } } },
+        .{
+            .function = 0,
+            .instructions = base.blocks[1].instructions,
+            .terminator = .{ .branch = .{
+                .condition = 5,
+                .when_true = .{ .block = 2 },
+                .when_false = .{ .block = 4 },
+            } },
+        },
+        .{
+            .function = 0,
+            .instructions = &.{.{ .destination = 8, .opcode = .less, .operands = &.{ 3, 0 } }},
+            .terminator = .{ .branch = .{
+                .condition = 8,
+                .when_true = .{ .block = 3 },
+                .when_false = .{ .block = 5 },
+            } },
+        },
         base.blocks[2],
         base.blocks[3],
-        .{ .function = 0, .instructions = &.{.{ .destination = 9, .opcode = .constant, .immediate = 2 }}, .terminator = .{ .fail = 9 } },
+        .{
+            .function = 0,
+            .instructions = &.{.{ .destination = 9, .opcode = .constant, .immediate = 2 }},
+            .terminator = .{ .fail = 9 },
+        },
     },
 };
 test "finite unit induction removes an exact repeated bounds relation" {
@@ -41,7 +66,10 @@ test "admitted wrong success edge is not an induction rewrite" {
     forged.blocks = blocks;
     var admitted = try own.analyze(a, forged);
     admitted.deinit();
-    try std.testing.expectError(error.InvalidInductionReduction, reduce.validate(a, guarded, forged, candidate.witness, .{}));
+    try std.testing.expectError(
+        error.InvalidInductionReduction,
+        reduce.validate(a, guarded, forged, candidate.witness, .{}),
+    );
 }
 test "a distinct bound and a counter update before the check remain observable" {
     var program = guarded;
@@ -51,7 +79,10 @@ test "a distinct bound and a counter update before the check remain observable" 
     var admitted = try own.analyze(a, program);
     admitted.deinit();
     try std.testing.expect(try reduce.construct(a, program, .{}) == null);
-    blocks[2].instructions = &.{ guarded.blocks[3].instructions[2], guarded.blocks[2].instructions[0] };
+    blocks[2].instructions = &.{
+        guarded.blocks[3].instructions[2],
+        guarded.blocks[2].instructions[0],
+    };
     admitted = try own.analyze(a, program);
     admitted.deinit();
     try std.testing.expect(try reduce.construct(a, program, .{}) == null);
@@ -69,17 +100,34 @@ test "induction reduction cleans allocation failures and preserves zero-work adm
     defer baseline.deinit();
     try std.testing.expect(stats.work_limit);
     const identity = @import("program_image.zig").identity;
-    try std.testing.expectEqual(try identity(a, baseline.program), try identity(a, limited.program));
+    try std.testing.expectEqual(
+        try identity(a, baseline.program),
+        try identity(a, limited.program),
+    );
     var invalid = guarded;
     invalid.roots.entry = 99;
-    try std.testing.expectError(error.InvalidReference, reduce.run(a, invalid, null, .{ .work_limit = 0 }));
+    try std.testing.expectError(
+        error.InvalidReference,
+        reduce.run(a, invalid, null, .{ .work_limit = 0 }),
+    );
 }
 
 pub fn sequenceGuard(allocator: std.mem.Allocator, use_capacity: bool) !ir.Program {
     var program = guarded;
     program.roots.failure = 0;
-    program.schemas = &.{ .u64, .unit, .boolean, .{ .vector = .{ .element = 1, .maximum = 50 } }, .{ .sum = &.{ 1, 1 } } };
-    program.constants = &.{ guarded.constants[0], guarded.constants[1], .{ .schema = 0, .bytes = &.{ 99, 0, 0, 0, 0, 0, 0, 0 } }, .{ .schema = 0, .bytes = &.{ 73, 0, 0, 0, 0, 0, 0, 0 } }, .{ .schema = 0, .bytes = &.{ 50, 0, 0, 0, 0, 0, 0, 0 } } };
+    program.schemas = &.{
+        .u64,                                            .unit,                  .boolean,
+        .{ .vector = .{ .element = 1, .maximum = 50 } }, .{ .sum = &.{ 1, 1 } },
+    };
+    program.constants = &.{
+        guarded.constants[0],                                     guarded.constants[1],
+        .{ .schema = 0, .bytes = &.{ 99, 0, 0, 0, 0, 0, 0, 0 } },
+        .{
+            .schema = 0,
+            .bytes = &.{ 73, 0, 0, 0, 0, 0, 0, 0 },
+        },
+        .{ .schema = 0, .bytes = &.{ 50, 0, 0, 0, 0, 0, 0, 0 } },
+    };
     const functions = try allocator.dupe(ir.Function, program.functions);
     functions[0].layout.slots = &.{ 3, 0, 0, 0, 0, 2, 0, 0, 2, 0, 0, 4, 0, 1 };
     program.functions = functions;
@@ -89,11 +137,27 @@ pub fn sequenceGuard(allocator: std.mem.Allocator, use_capacity: bool) !ir.Progr
     init[init.len - 2] = .{ .destination = 10, .opcode = .sequence_length, .operands = &.{0} };
     init[init.len - 1] = .{ .destination = 12, .opcode = .constant, .immediate = 4 };
     blocks[0].instructions = init;
-    blocks[1].instructions = try allocator.dupe(ir.Instruction, &.{.{ .destination = 5, .opcode = .less, .operands = try allocator.dupe(p.Id, &.{ 3, if (use_capacity) @as(p.Id, 12) else 10 }) }});
+    blocks[1].instructions = try allocator.dupe(
+        ir.Instruction,
+        &.{.{
+            .destination = 5,
+            .opcode = .less,
+            .operands = try allocator.dupe(
+                p.Id,
+                &.{ 3, if (use_capacity) @as(p.Id, 12) else 10 },
+            ),
+        }},
+    );
     blocks[2].instructions = &.{.{ .destination = 8, .opcode = .less, .operands = &.{ 3, 10 } }};
     const work = try allocator.alloc(ir.Instruction, blocks[3].instructions.len + 2);
     work[0] = .{ .destination = 11, .opcode = .sequence_get, .operands = &.{ 0, 3 } };
-    work[1] = .{ .destination = 13, .opcode = .variant_payload, .operands = &.{11}, .immediate = 1, .failures = &.{.{ .kind = .invalid_variant, .value = 3 }} };
+    work[1] = .{
+        .destination = 13,
+        .opcode = .variant_payload,
+        .operands = &.{11},
+        .immediate = 1,
+        .failures = &.{.{ .kind = .invalid_variant, .value = 3 }},
+    };
     @memcpy(work[2..], blocks[3].instructions);
     blocks[3].instructions = work;
     program.blocks = blocks;

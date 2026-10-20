@@ -9,16 +9,62 @@ pub const bounded: ir.Program = .{
     .roots = .{ .entry = 0, .result = 0, .failure = 1 },
     .schemas = &.{ .u8, .unit, .boolean },
     .effects = &.{},
-    .constants = &.{ .{ .schema = 0, .bytes = &.{50} }, .{ .schema = 0, .bytes = &.{0} }, .{ .schema = 0, .bytes = &.{5} }, .{ .schema = 0, .bytes = &.{3} }, .{ .schema = 0, .bytes = &.{1} }, .{ .schema = 1, .bytes = &.{} } },
-    .functions = &.{.{ .entry = 0, .inputs = &.{0}, .layout = .{ .slots = &.{ 0, 0, 0, 0, 2, 0, 0, 0, 0, 0 } }, .result = 0 }},
+    .constants = &.{
+        .{ .schema = 0, .bytes = &.{50} },
+        .{ .schema = 0, .bytes = &.{0} },
+        .{ .schema = 0, .bytes = &.{5} },
+        .{ .schema = 0, .bytes = &.{3} },
+        .{ .schema = 0, .bytes = &.{1} },
+        .{ .schema = 1, .bytes = &.{} },
+    },
+    .functions = &.{.{
+        .entry = 0,
+        .inputs = &.{0},
+        .layout = .{ .slots = &.{ 0, 0, 0, 0, 2, 0, 0, 0, 0, 0 } },
+        .result = 0,
+    }},
     .blocks = &.{
-        .{ .function = 0, .instructions = &.{ .{ .destination = 1, .opcode = .constant, .immediate = 0 }, .{ .destination = 2, .opcode = .constant, .immediate = 1 }, .{ .destination = 3, .opcode = .constant, .immediate = 1 }, .{ .destination = 5, .opcode = .constant, .immediate = 2 }, .{ .destination = 6, .opcode = .constant, .immediate = 3 }, .{ .destination = 9, .opcode = .constant, .immediate = 4 } }, .terminator = .{ .jump = .{ .block = 1 } } },
-        .{ .function = 0, .instructions = &.{.{ .destination = 4, .opcode = .less, .operands = &.{ 2, 1 } }}, .terminator = .{ .branch = .{ .condition = 4, .when_true = .{ .block = 2 }, .when_false = .{ .block = 3 } } } },
+        .{
+            .function = 0,
+            .instructions = &.{
+                .{ .destination = 1, .opcode = .constant, .immediate = 0 },
+                .{ .destination = 2, .opcode = .constant, .immediate = 1 },
+                .{ .destination = 3, .opcode = .constant, .immediate = 1 },
+                .{ .destination = 5, .opcode = .constant, .immediate = 2 },
+                .{ .destination = 6, .opcode = .constant, .immediate = 3 },
+                .{ .destination = 9, .opcode = .constant, .immediate = 4 },
+            },
+            .terminator = .{ .jump = .{ .block = 1 } },
+        },
+        .{
+            .function = 0,
+            .instructions = &.{.{ .destination = 4, .opcode = .less, .operands = &.{ 2, 1 } }},
+            .terminator = .{ .branch = .{
+                .condition = 4,
+                .when_true = .{ .block = 2 },
+                .when_false = .{ .block = 3 },
+            } },
+        },
         .{ .function = 0, .instructions = &.{
-            .{ .destination = 7, .opcode = .integer_mul, .operands = &.{ 2, 5 }, .failures = &.{.{ .kind = .arithmetic_overflow, .value = 5 }} },
-            .{ .destination = 8, .opcode = .integer_add, .operands = &.{ 7, 6 }, .failures = &.{.{ .kind = .arithmetic_overflow, .value = 5 }} },
+            .{
+                .destination = 7,
+                .opcode = .integer_mul,
+                .operands = &.{ 2, 5 },
+                .failures = &.{.{ .kind = .arithmetic_overflow, .value = 5 }},
+            },
+            .{
+                .destination = 8,
+                .opcode = .integer_add,
+                .operands = &.{ 7, 6 },
+                .failures = &.{.{ .kind = .arithmetic_overflow, .value = 5 }},
+            },
             .{ .destination = 3, .opcode = .integer_bit_xor, .operands = &.{ 3, 8 } },
-            .{ .destination = 2, .opcode = .integer_add, .operands = &.{ 2, 9 }, .failures = &.{.{ .kind = .arithmetic_overflow, .value = 5 }} },
+            .{
+                .destination = 2,
+                .opcode = .integer_add,
+                .operands = &.{ 2, 9 },
+                .failures = &.{.{ .kind = .arithmetic_overflow, .value = 5 }},
+            },
         }, .terminator = .{ .jump = .{ .block = 1 } } },
         .{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 3 } },
     },
@@ -26,7 +72,14 @@ pub const bounded: ir.Program = .{
 pub fn lengthBound(allocator: std.mem.Allocator) !ir.Program {
     var result = bounded;
     result.schemas = &.{ .u64, .unit, .boolean, .{ .vector = .{ .element = 1, .maximum = 50 } } };
-    result.constants = &.{ .{ .schema = 0, .bytes = &.{ 50, 0, 0, 0, 0, 0, 0, 0 } }, .{ .schema = 0, .bytes = &.{ 0, 0, 0, 0, 0, 0, 0, 0 } }, .{ .schema = 0, .bytes = &.{ 5, 0, 0, 0, 0, 0, 0, 0 } }, .{ .schema = 0, .bytes = &.{ 3, 0, 0, 0, 0, 0, 0, 0 } }, .{ .schema = 0, .bytes = &.{ 1, 0, 0, 0, 0, 0, 0, 0 } }, .{ .schema = 1, .bytes = &.{} } };
+    result.constants = &.{
+        .{ .schema = 0, .bytes = &.{ 50, 0, 0, 0, 0, 0, 0, 0 } },
+        .{ .schema = 0, .bytes = &.{ 0, 0, 0, 0, 0, 0, 0, 0 } },
+        .{ .schema = 0, .bytes = &.{ 5, 0, 0, 0, 0, 0, 0, 0 } },
+        .{ .schema = 0, .bytes = &.{ 3, 0, 0, 0, 0, 0, 0, 0 } },
+        .{ .schema = 0, .bytes = &.{ 1, 0, 0, 0, 0, 0, 0, 0 } },
+        .{ .schema = 1, .bytes = &.{} },
+    };
     const functions = try allocator.dupe(ir.Function, result.functions);
     functions[0].layout.slots = &.{ 3, 0, 0, 0, 2, 0, 0, 0, 0, 0 };
     result.functions = functions;
@@ -41,12 +94,18 @@ test "checked affine recurrence bounds every intermediate including the last upd
     var candidate = (try affine.construct(a, bounded, .{})).?;
     defer candidate.deinit();
     try affine.validate(a, bounded, candidate.program, candidate.witness, .{});
-    try std.testing.expectEqualSlices(p.Id, bounded.functions[0].layout.slots, candidate.program.functions[0].layout.slots);
+    try std.testing.expectEqualSlices(
+        p.Id,
+        bounded.functions[0].layout.slots,
+        candidate.program.functions[0].layout.slots,
+    );
     var stats: affine.Statistics = .{};
     var result = try affine.run(a, bounded, &stats, .{});
     defer result.deinit();
     try std.testing.expectEqual(@as(usize, 1), stats.recurrences);
-    for (result.program.blocks) |block| for (block.instructions) |op| try std.testing.expect(op.opcode != .integer_mul);
+    for (result.program.blocks) |block| for (block.instructions) |op| try std.testing.expect(
+        op.opcode != .integer_mul,
+    );
 }
 test "actual sequence length bounds arithmetic without becoming its capacity" {
     var arena = std.heap.ArenaAllocator.init(a);
@@ -68,7 +127,10 @@ test "recurrence storage cannot reuse an observed or edge-transferred product" {
     admitted.deinit();
     try std.testing.expect(try affine.construct(a, observed, .{}) == null);
     blocks[3] = bounded.blocks[3];
-    blocks[2].terminator = .{ .jump = .{ .block = 1, .assignments = &.{.{ .destination = 0, .source = .{ .slot = 7 } }} } };
+    blocks[2].terminator = .{ .jump = .{
+        .block = 1,
+        .assignments = &.{.{ .destination = 0, .source = .{ .slot = 7 } }},
+    } };
     admitted = try own.analyze(a, observed);
     admitted.deinit();
     try std.testing.expect(try affine.construct(a, observed, .{}) == null);
@@ -95,7 +157,10 @@ test "admitted wrong recurrence seed and increment fail correspondence validatio
     forged.blocks = blocks;
     var admitted = try own.analyze(a, forged);
     admitted.deinit();
-    try std.testing.expectError(error.InvalidAffineInduction, affine.validate(a, bounded, forged, candidate.witness, .{}));
+    try std.testing.expectError(
+        error.InvalidAffineInduction,
+        affine.validate(a, bounded, forged, candidate.witness, .{}),
+    );
     @memcpy(blocks, candidate.program.blocks);
     const tail = try a.dupe(ir.Instruction, blocks[2].instructions);
     defer a.free(tail);
@@ -103,7 +168,10 @@ test "admitted wrong recurrence seed and increment fail correspondence validatio
     blocks[2].instructions = tail;
     admitted = try own.analyze(a, forged);
     admitted.deinit();
-    try std.testing.expectError(error.InvalidAffineInduction, affine.validate(a, bounded, forged, candidate.witness, .{}));
+    try std.testing.expectError(
+        error.InvalidAffineInduction,
+        affine.validate(a, bounded, forged, candidate.witness, .{}),
+    );
 }
 fn allocationAttempt(allocator: std.mem.Allocator) !void {
     var result = try affine.run(allocator, bounded, null, .{});

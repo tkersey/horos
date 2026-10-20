@@ -40,17 +40,17 @@ fn scratchLifetimeCase(allocator: std.mem.Allocator) !void {
         .status = .active,
         .roots = .{ .current = .{ .id = 0 } },
         .nodes = &nodes,
-        .blobs = &.{
-            .{ .schema = 0, .bytes = &payload },
-            .{ .schema = 0, .bytes = &payload },
-        },
+        .blobs = &.{ .{ .schema = 0, .bytes = &payload }, .{ .schema = 0, .bytes = &payload } },
     }, null);
     defer normalized.deinit();
     @memset(&payload, 0xa5);
     try std.testing.expectEqual(@as(usize, 2), normalized.state.nodes.len);
     try std.testing.expectEqual(@as(usize, 1), normalized.state.blobs.len);
     try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3, 4 }, normalized.state.blobs[0].bytes);
-    try std.testing.expectEqual(@as(u64, 0), normalized.state.nodes[1].record.environment.tail.?.id);
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        normalized.state.nodes[1].record.environment.tail.?.id,
+    );
 }
 
 test "snapshot scratch release preserves owned payloads, cycles and distinct nodes" {

@@ -23,7 +23,9 @@ pub const Reader = struct {
     position: usize = 0,
 
     pub fn take(self: *Reader, length: usize) Error![]const u8 {
-        if (self.position > self.input.len or length > self.input.len - self.position) return error.Truncated;
+        if (self.position > self.input.len or
+            length > self.input.len - self.position)
+            return error.Truncated;
         const result = self.input[self.position..][0..length];
         self.position += length;
         return result;
@@ -102,13 +104,8 @@ pub const Writer = struct {
     }
 
     pub fn natural(self: *Writer, value: u64) Error!void {
-        var remaining = value;
-        while (true) {
-            const next: u8 = @intCast(remaining & 0x7f);
-            remaining >>= 7;
-            try self.byte(next | @as(u8, if (remaining == 0) 0 else 0x80));
-            if (remaining == 0) return;
-        }
+        var buffer: [10]u8 = undefined;
+        for (naturalBytes(value, &buffer)) |next| try self.byte(next);
     }
 
     pub fn bytes(self: *Writer, value: []const u8) Error!void {
@@ -138,10 +135,24 @@ pub fn digest(bytes: []const u8) [32]u8 {
 
 pub fn hashField(hash: *std.crypto.hash.sha2.Sha256, bytes: []const u8) void {
     var length: [10]u8 = undefined;
-    var writer: Writer = .{ .output = &length };
-    writer.natural(bytes.len) catch unreachable; // Ten bytes encode every u64.
-    hash.update(length[0..writer.position]);
+    hash.update(naturalBytes(bytes.len, &length));
     hash.update(bytes);
+}
+
+pub fn naturalLength(value: u64) usize {
+    return (@as(usize, 64 - @clz(value | 1)) + 6) / 7;
+}
+
+fn naturalBytes(value: u64, buffer: *[10]u8) []const u8 {
+    const length = naturalLength(value);
+    var remaining = value;
+    for (buffer[0..length], 0..) |*next, index| {
+        next.* = @intCast(remaining & 0x7f);
+        remaining >>= 7;
+        if (index + 1 < length) next.* |= 0x80;
+    }
+    std.debug.assert(remaining == 0);
+    return buffer[0..length];
 }
 
 test "minimal naturals include u64 max and reject overflow without trapping" {
@@ -157,4 +168,18 @@ test "minimal naturals include u64 max and reject overflow without trapping" {
     try std.testing.expectError(error.NonCanonical, overlong.natural());
     var overflow: Reader = .{ .input = &.{ 255, 255, 255, 255, 255, 255, 255, 255, 255, 2 } };
     try std.testing.expectError(error.InvalidLength, overflow.natural());
+}
+
+test "natural writer preserves the emitted prefix when capacity is exhausted" {
+    const expected = [_]u8{ 255, 255, 255, 255, 255, 255, 255, 255, 255, 1 };
+    var output: [expected.len]u8 = undefined;
+    for (0..expected.len) |capacity| {
+        @memset(&output, 0);
+        var writer: Writer = .{ .output = output[0..capacity] };
+        try std.testing.expectError(error.Capacity, writer.natural(std.math.maxInt(u64)));
+        try std.testing.expectEqual(capacity, writer.position);
+        try std.testing.expectEqualSlices(u8, expected[0..capacity], output[0..capacity]);
+    }
+    try std.testing.expectEqual(expected.len, naturalLength(std.math.maxInt(u64)));
+    try std.testing.expectEqual(1, naturalLength(0));
 }

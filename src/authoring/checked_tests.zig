@@ -9,11 +9,26 @@ test "checked environmental operation imports and sites retain validated contrac
     const number = try c.schema(u64);
     const unit = try c.schema(void);
     const number_id = try a.interop.schemaId(c, number);
-    const effect = try raw.effect(.{ .identity = "checked external", .payload = number_id, .result = number_id });
+    const effect = try raw.effect(.{
+        .identity = "checked external",
+        .payload = number_id,
+        .result = number_id,
+    });
     const operation = try a.interop.externalOperation(c, effect, number, number);
-    try std.testing.expectError(error.SchemaMismatch, a.interop.externalOperation(c, effect, unit, number));
-    const local = try raw.effect(.{ .identity = "local", .payload = number_id, .result = number_id, .external = false });
-    try std.testing.expectError(error.InvalidCategory, a.interop.externalOperation(c, local, number, number));
+    try std.testing.expectError(
+        error.SchemaMismatch,
+        a.interop.externalOperation(c, effect, unit, number),
+    );
+    const local = try raw.effect(.{
+        .identity = "local",
+        .payload = number_id,
+        .result = number_id,
+        .external = false,
+    });
+    try std.testing.expectError(
+        error.InvalidCategory,
+        a.interop.externalOperation(c, local, number, number),
+    );
     const owner = try c.function("environment owner", .{}, number, .{operation});
     const owner_body = try c.body(owner);
     const site = try a.interop.performSite(owner_body, operation, try owner_body.constant(u64, 7));
@@ -29,22 +44,36 @@ test "replacement retains schema through parameter nested field call ret and def
     const Request = struct { input: u64, offset: u64 };
     const integer = try c.schema(u64);
     const request = try c.schema(Request);
-    const run = try c.function("run", .{ .request = request, .enabled = try c.schema(bool) }, integer, .{});
+    const run = try c.function(
+        "run",
+        .{ .request = request, .enabled = try c.schema(bool) },
+        integer,
+        .{},
+    );
     const body = try c.body(run);
     const input = try body.field(try body.parameter("request"), "input");
     try std.testing.expect(@TypeOf(input) == *const a.Value(a.Shape(u64)));
     try c.define(run, try body.ret(input));
     const entry = try c.function("entry", .{}, integer, .{});
     const caller = try c.body(entry);
-    const value = try caller.product(request, .{ .offset = try caller.constant(u64, 2), .input = try caller.constant(u64, 19) });
-    const answer = try caller.call(run, .{ .enabled = try caller.constant(bool, true), .request = value });
+    const value = try caller.product(
+        request,
+        .{ .offset = try caller.constant(u64, 2), .input = try caller.constant(u64, 19) },
+    );
+    const answer = try caller.call(
+        run,
+        .{ .enabled = try caller.constant(bool, true), .request = value },
+    );
     try std.testing.expect(@TypeOf(answer) == @TypeOf(input));
     try c.define(entry, try caller.ret(answer));
     var compiled = try source.lower(std.testing.allocator, try c.module(entry, try c.schema(void)));
     defer compiled.deinit();
     const composed = try c.record(.{ .input = integer, .offset = integer });
     try std.testing.expect(@TypeOf(composed) == @TypeOf(request));
-    try std.testing.expectEqual(try a.interop.schemaId(c, request), try a.interop.schemaId(c, composed));
+    try std.testing.expectEqual(
+        try a.interop.schemaId(c, request),
+        try a.interop.schemaId(c, composed),
+    );
     try std.testing.expect(@TypeOf((try request.fields()).input) == @TypeOf(integer));
 }
 
@@ -73,7 +102,11 @@ test "replacement body parameters are independent from intermediate branch resul
     const body = try c.body(entry);
     const yes = try body.branch();
     const no = try body.branch();
-    const flag = try body.conditional(try body.constant(bool, true), try yes.ret(try yes.constant(bool, false)), try no.ret(try no.constant(bool, true)));
+    const flag = try body.conditional(
+        try body.constant(bool, true),
+        try yes.ret(try yes.constant(bool, false)),
+        try no.ret(try no.constant(bool, true)),
+    );
     try c.define(entry, try body.ret(try body.product(record, .{ .flag = flag })));
     var compiled = try source.lower(std.testing.allocator, try c.module(entry, try c.schema(void)));
     defer compiled.deinit();
@@ -85,14 +118,20 @@ test "replacement runtime collections snapshot names and retain known function r
     const c = try a.Context.init(&raw);
     const integer = try c.schema(u64);
     var name = [_]u8{ 'k', 'e', 'y' };
-    const parameters = try a.interop.RuntimeNamed(.schema).init(c, &.{.{ .name = &name, .handle = a.interop.erase(integer) }});
+    const parameters = try a.interop.RuntimeNamed(.schema).init(
+        c,
+        &.{.{ .name = &name, .handle = a.interop.erase(integer) }},
+    );
     name[0] = 'x';
     const run = try c.function("runtime names", parameters, integer, .{});
     const body = try c.body(run);
     try c.define(run, try body.ret(try a.interop.parameter(body, "key")));
     const entry = try c.function("entry", .{}, integer, .{});
     const caller = try c.body(entry);
-    const args = try a.interop.RuntimeNamed(.value).init(c, &.{.{ .name = "key", .handle = a.interop.erase(try caller.constant(u64, 42)) }});
+    const args = try a.interop.RuntimeNamed(.value).init(
+        c,
+        &.{.{ .name = "key", .handle = a.interop.erase(try caller.constant(u64, 42)) }},
+    );
     const answer = try caller.call(run, args);
     try std.testing.expect(@TypeOf(answer) == *const a.Value(a.Shape(u64)));
     try c.define(entry, try caller.ret(answer));
@@ -104,7 +143,10 @@ test "replacement explicit unknown child preserves known surrounding names and s
     var raw = source.Builder.init(std.testing.allocator);
     defer raw.deinit();
     const c = try a.Context.init(&raw);
-    const mixed = try c.record(.{ .count = try c.schema(u64), .other = a.interop.erase(try c.schema(bool)) });
+    const mixed = try c.record(.{
+        .count = try c.schema(u64),
+        .other = a.interop.erase(try c.schema(bool)),
+    });
     const entry = try c.function("entry", .{ .input = mixed }, try c.schema(u64), .{});
     const body = try c.body(entry);
     const input = try body.parameter("input");
@@ -166,7 +208,10 @@ test "replacement rejects erased completed cases swapped under the wrong names" 
     const none = try a.interop.caseOf(body, value, "none");
     const finished_some = a.interop.erase(try some.ret(some.payload()));
     const finished_none = a.interop.erase(try none.ret(try none.body().constant(u64, 0)));
-    try std.testing.expectError(error.InvalidBranch, body.match(value, .{ .some = finished_none, .none = finished_some }));
+    try std.testing.expectError(
+        error.InvalidBranch,
+        body.match(value, .{ .some = finished_none, .none = finished_some }),
+    );
 }
 
 test "replacement callable composition retains captured and returned shape" {
@@ -177,7 +222,12 @@ test "replacement callable composition retains captured and returned shape" {
     const entry = try c.function("entry", .{ .input = integer }, integer, .{});
     const body = try c.body(entry);
     const value = try body.parameter("input");
-    const callable = try c.callable(.{}, integer, .{}, .{ .use = .reusable, .captures = .{integer} });
+    const callable = try c.callable(
+        .{},
+        integer,
+        .{},
+        .{ .use = .reusable, .captures = .{integer} },
+    );
     const nested = try c.functionFor("nested", callable);
     const inner = try body.closureBody(nested);
     try c.define(nested, try inner.ret(value));
@@ -199,9 +249,17 @@ test "replacement same-shaped capability does not authorize another nominal effe
     const first_cap = try c.capability(first);
     const second_cap = try c.capability(second);
     try std.testing.expect(@TypeOf(first_cap) == @TypeOf(second_cap));
-    const entry = try c.function("entry", .{ .capability = second_cap }, integer, .{ first, second });
+    const entry = try c.function(
+        "entry",
+        .{ .capability = second_cap },
+        integer,
+        .{ first, second },
+    );
     const body = try c.body(entry);
-    try std.testing.expectError(error.SchemaMismatch, body.performLocal(first, try body.parameter("capability"), try body.constant(void, {})));
+    try std.testing.expectError(
+        error.SchemaMismatch,
+        body.performLocal(first, try body.parameter("capability"), try body.constant(void, {})),
+    );
 }
 
 fn finishHandler(c: *a.Context, op: anytype, h: anytype) !void {
@@ -228,7 +286,11 @@ fn finishHandler(c: *a.Context, op: anytype, h: anytype) !void {
     const work_schema = try c.handledSchema(h);
     const work = try c.functionFor("work", work_schema);
     const wb = try c.body(work);
-    const answer = try wb.performLocal(op, try wb.parameter("capability"), try wb.constant(void, {}));
+    const answer = try wb.performLocal(
+        op,
+        try wb.parameter("capability"),
+        try wb.constant(void, {}),
+    );
     try c.define(work, try wb.ret(answer));
     const entry = try c.function("entry", .{}, try c.schema(bool), .{op});
     const eb = try c.body(entry);
@@ -256,7 +318,18 @@ fn runtimeHandlerMode(mode: @import("horos_data").program.Mode) !void {
     const integer = try c.schema(u64);
     const op = try c.local("choose", try c.schema(void), integer, .multi);
     const slot = try c.declareSchema(.resumption, a.Dynamic);
-    const selected = try c.handler(op, integer, try c.schema(bool), .{ .mode = mode, .use = .multi, .residual = .{op}, .captures = .{ integer, try c.schema(bool), slot.schema() }, .resumption_slots = .{slot} });
+    const selected = try c.handler(
+        op,
+        integer,
+        try c.schema(bool),
+        .{
+            .mode = mode,
+            .use = .multi,
+            .residual = .{op},
+            .captures = .{ integer, try c.schema(bool), slot.schema() },
+            .resumption_slots = .{slot},
+        },
+    );
     try std.testing.expect(@typeInfo(@TypeOf(selected)) == .@"union");
     switch (selected) {
         .deep => |h| {
@@ -320,7 +393,14 @@ test "replacement explicit clone retains reply and answer and rejects multi sour
     const schema = try c.handledSchema(h);
     const work = try c.functionFor("work", schema);
     const wb = try c.body(work);
-    try c.define(work, try wb.ret(try wb.performLocal(op, try wb.parameter("capability"), try wb.constant(void, {}))));
+    try c.define(
+        work,
+        try wb.ret(try wb.performLocal(
+            op,
+            try wb.parameter("capability"),
+            try wb.constant(void, {}),
+        )),
+    );
     const entry = try c.function("entry", .{}, integer, .{});
     const eb = try c.body(entry);
     try c.define(entry, try eb.ret(try eb.handleWith(h, try eb.lambda(work, schema), .{})));
@@ -336,8 +416,13 @@ test "replacement recursive typed declarations retain pending lifecycle" {
     const slot = try c.declareSchema(.alternatives, S);
     try std.testing.expectError(error.UndefinedSchema, slot.schema().fields());
     try c.defineAlternatives(slot, .{ .empty = try c.schema(void), .value = try c.schema(u64) });
-    try std.testing.expect(@TypeOf((try slot.schema().fields()).value) == *const a.Schema(a.Shape(u64)));
-    try std.testing.expectError(error.SchemaAlreadyDefined, c.defineAlternatives(slot, .{ .empty = try c.schema(void), .value = try c.schema(u64) }));
+    try std.testing.expect(
+        @TypeOf((try slot.schema().fields()).value) == *const a.Schema(a.Shape(u64)),
+    );
+    try std.testing.expectError(
+        error.SchemaAlreadyDefined,
+        c.defineAlternatives(slot, .{ .empty = try c.schema(void), .value = try c.schema(u64) }),
+    );
     const entry = try c.function("entry", .{}, slot.schema(), .{});
     const b = try c.body(entry);
     try c.define(entry, try b.ret(try b.variant(slot.schema(), "value", try b.constant(u64, 7))));
@@ -356,12 +441,18 @@ test "replacement encoded literals are global checked values with reachable vali
     try std.testing.expectError(error.InvalidValue, a.interop.encodedLiteral(c, schema, &.{9}));
     const f = try c.function("one", .{}, schema, .{});
     const b = try c.body(f);
-    try std.testing.expectEqual(try a.interop.valueId(c, literal), try a.interop.valueId(b, literal));
+    try std.testing.expectEqual(
+        try a.interop.valueId(c, literal),
+        try a.interop.valueId(b, literal),
+    );
     try std.testing.expectError(error.OutOfScope, a.interop.valueId(c, try b.constant(u64, 3)));
     try c.define(f, try b.ret(literal));
     const g = try c.function("two", .{}, schema, .{});
     const gb = try c.body(g);
-    try std.testing.expectError(error.OutOfScope, a.interop.literalFailure(c, try gb.constant(u64, 3)));
+    try std.testing.expectError(
+        error.OutOfScope,
+        a.interop.literalFailure(c, try gb.constant(u64, 3)),
+    );
     try c.define(g, try gb.ret(literal));
     _ = try a.interop.literalFailure(c, literal);
     var other_raw = source.Builder.init(std.testing.allocator);
@@ -413,15 +504,33 @@ test "replacement explicit positional mapping validates schema without relabelin
     const expected = try c.schema(struct { count: u64 });
     const other = try c.schema(struct { total: u64 });
     const imported = try a.interop.schema(c, try a.interop.schemaId(c, expected));
-    try std.testing.expectError(error.SchemaMismatch, a.interop.refineSchema(c, imported, expected));
+    try std.testing.expectError(
+        error.SchemaMismatch,
+        a.interop.refineSchema(c, imported, expected),
+    );
     const incompatible = try c.schema(struct { count: bool });
-    try std.testing.expectError(error.SchemaMismatch, a.interop.mapSchema(c, imported, incompatible));
+    try std.testing.expectError(
+        error.SchemaMismatch,
+        a.interop.mapSchema(c, imported, incompatible),
+    );
     const mapped = try a.interop.mapSchema(c, imported, expected);
     try std.testing.expect(@TypeOf(mapped) == @TypeOf(expected));
-    try std.testing.expectError(error.SchemaMismatch, a.interop.mapSchema(c, a.interop.erase(other), expected));
-    const vector = try c.schema(@import("horos_data").schema.native.Vector(struct { count: u64 }, 2));
-    const renamed = try c.schema(@import("horos_data").schema.native.Vector(struct { total: u64 }, 2));
-    try std.testing.expectError(error.SchemaMismatch, a.interop.refineSchema(c, a.interop.erase(renamed), vector));
+    try std.testing.expectError(
+        error.SchemaMismatch,
+        a.interop.mapSchema(c, a.interop.erase(other), expected),
+    );
+    const vector = try c.schema(@import("horos_data").schema.native.Vector(
+        struct { count: u64 },
+        2,
+    ));
+    const renamed = try c.schema(@import("horos_data").schema.native.Vector(
+        struct { total: u64 },
+        2,
+    ));
+    try std.testing.expectError(
+        error.SchemaMismatch,
+        a.interop.refineSchema(c, a.interop.erase(renamed), vector),
+    );
     const fields = try a.interop.fields(c, expected);
     try std.testing.expectEqual(@as(usize, 1), fields.len());
     try std.testing.expectEqualStrings("count", fields.at(0).?.name);
@@ -431,7 +540,10 @@ test "replacement explicit positional mapping validates schema without relabelin
     const value = try b.product(expected, .{ .count = try b.constant(u64, 8) });
     const refined = try a.interop.refineValue(b, a.interop.erase(value), expected);
     try std.testing.expect(@TypeOf(refined) == @TypeOf(value));
-    try std.testing.expectError(error.SchemaMismatch, a.interop.mapValue(b, a.interop.erase(value), other));
+    try std.testing.expectError(
+        error.SchemaMismatch,
+        a.interop.mapValue(b, a.interop.erase(value), other),
+    );
     try c.define(entry, try b.ret(refined));
     var compiled = try c.compile(std.testing.allocator, entry, try c.schema(void));
     defer compiled.deinit();
@@ -444,7 +556,10 @@ test "schema refinement allocation failure poisons the context" {
     const c = try a.Context.init(&raw);
     const expected = try c.schema(u64);
     failing.fail_index = failing.alloc_index;
-    try std.testing.expectError(error.OutOfMemory, a.interop.refineSchema(c, a.interop.erase(expected), expected));
+    try std.testing.expectError(
+        error.OutOfMemory,
+        a.interop.refineSchema(c, a.interop.erase(expected), expected),
+    );
     try std.testing.expectEqual(error.OutOfMemory, c.lastDiagnostic().code.?);
     try std.testing.expectError(error.PoisonedAuthoring, a.interop.schemaId(c, expected));
 }
@@ -458,7 +573,11 @@ test "replacement checked scalar blob and record operations retain their result 
     const entry = try c.function("entry", .{}, integer, .{});
     const b = try c.body(entry);
     const fault = try c.literalFailure(u8, 1);
-    const narrow = try b.convertInteger(try c.schema(u8), try b.constant(u64, 7), .{ .overflow = fault });
+    const narrow = try b.convertInteger(
+        try c.schema(u8),
+        try b.constant(u64, 7),
+        .{ .overflow = fault },
+    );
     const wide = try b.convertInteger(integer, narrow, .{});
     const bits = try b.bitwise(.xor, wide, try b.bitNot(wide));
     const negative = try b.booleanNot(try b.constant(bool, false));
@@ -466,7 +585,13 @@ test "replacement checked scalar blob and record operations retain their result 
     const text = try b.textInteger(wide);
     const scalar = try b.textScalar(try b.constant(u32, 65), fault);
     const combined = try b.blobConcat(try c.schema(native.Text(64)), text, scalar, fault);
-    const sliced = try b.blobSlice(try c.schema(native.Text(null)), combined, try b.constant(u64, 0), try b.constant(u64, 1), .{ .capacity = fault, .invalid_utf8 = fault });
+    const sliced = try b.blobSlice(
+        try c.schema(native.Text(null)),
+        combined,
+        try b.constant(u64, 0),
+        try b.constant(u64, 1),
+        .{ .capacity = fault, .invalid_utf8 = fault },
+    );
     try std.testing.expect(@TypeOf(sliced) == *const a.Value(a.Shape(native.Text(null))));
     const bytes = try b.blobFromByte(narrow);
     _ = try b.blobByte(bytes, try b.constant(u64, 0));
@@ -488,15 +613,27 @@ test "replacement region callable and reusable result reflection keep nested sha
     const sig = try c.regionBodySchema(r, .{ .seed = integer }, integer, .{}, .{ .use = .linear });
     const f = try c.functionFor("region work", sig);
     const b = try c.body(f);
-    const cell = try b.newCell(try c.cell(r, integer), try b.parameter("region"), try b.parameter("seed"));
+    const cell = try b.newCell(
+        try c.cell(r, integer),
+        try b.parameter("region"),
+        try b.parameter("seed"),
+    );
     try c.define(f, try b.ret(try b.readCell(cell)));
     const entry = try c.function("entry", .{}, integer, .{});
     const eb = try c.body(entry);
-    const result = try eb.withRegion(r, try eb.lambda(f, sig), .{ .seed = try eb.constant(u64, 7) });
+    const result = try eb.withRegion(
+        r,
+        try eb.lambda(f, sig),
+        .{ .seed = try eb.constant(u64, 7) },
+    );
     try std.testing.expect(@TypeOf(result) == *const a.Value(a.Shape(u64)));
     try c.define(entry, try eb.ret(result));
     const cleanup = try c.cleanupInfo(try c.schema(u8));
-    try std.testing.expect(@TypeOf((try cleanup.fields()).@"2") == *const a.Schema(a.Shape(@import("horos_data").schema.native.Vector(u8, null))));
+    try std.testing.expect(
+        @TypeOf((try cleanup.fields()).@"2") == *const a.Schema(
+            a.Shape(@import("horos_data").schema.native.Vector(u8, null)),
+        ),
+    );
     var compiled = try c.compile(std.testing.allocator, entry, try c.schema(void));
     defer compiled.deinit();
 }
@@ -509,14 +646,30 @@ test "replacement State runtime policies expose distinct typed answers" {
     const state = try State.family(c, "state", try c.schema(u64));
     const region = try c.region();
     for ([_]State.Answer{ .value, .with_state, .optional }) |policy| {
-        const selected = try State.interpret(c, state, try c.schema(bool), region, .{ .continuation = .{} }, .{}, policy);
+        const selected = try State.interpret(
+            c,
+            state,
+            try c.schema(bool),
+            region,
+            .{ .continuation = .{} },
+            .{},
+            policy,
+        );
         switch (selected) {
-            .value => |v| try std.testing.expect(@TypeOf(v.answer) == *const a.Schema(a.Shape(bool))),
+            .value => |v| try std.testing.expect(
+                @TypeOf(v.answer) == *const a.Schema(a.Shape(bool)),
+            ),
             .with_state => |v| {
-                try std.testing.expect(@TypeOf((try v.answer.fields()).value) == *const a.Schema(a.Shape(bool)));
-                try std.testing.expect(@TypeOf((try v.answer.fields()).state) == *const a.Schema(a.Shape(u64)));
+                try std.testing.expect(
+                    @TypeOf((try v.answer.fields()).value) == *const a.Schema(a.Shape(bool)),
+                );
+                try std.testing.expect(
+                    @TypeOf((try v.answer.fields()).state) == *const a.Schema(a.Shape(u64)),
+                );
             },
-            .optional => |v| try std.testing.expect(@TypeOf((try v.answer.fields()).some) == *const a.Schema(a.Shape(bool))),
+            .optional => |v| try std.testing.expect(
+                @TypeOf((try v.answer.fields()).some) == *const a.Schema(a.Shape(bool)),
+            ),
         }
     }
 }
@@ -528,17 +681,31 @@ test "replacement Choice library retains its answer and resumption through compo
     const c = try a.Context.init(&raw);
     const choice = try Choice.family(c, "choose");
     const integer = try c.schema(u64);
-    const interpreted = try Choice.all(c, choice, integer, .{ .captures = .{ .continuation = .{} } });
-    try std.testing.expect(@TypeOf(try interpreted.answer.resultSchema()) == *const a.Schema(a.Shape(u64)));
+    const interpreted = try Choice.all(
+        c,
+        choice,
+        integer,
+        .{ .captures = .{ .continuation = .{} } },
+    );
+    try std.testing.expect(
+        @TypeOf(try interpreted.answer.resultSchema()) == *const a.Schema(a.Shape(u64)),
+    );
     const sig = try c.handledSchema(interpreted.handler);
     const work = try c.functionFor("work", sig);
     const wb = try c.body(work);
-    const selected = try wb.performLocal(choice.effect(), try wb.parameter("capability"), try wb.constant(void, {}));
+    const selected = try wb.performLocal(
+        choice.effect(),
+        try wb.parameter("capability"),
+        try wb.constant(void, {}),
+    );
     const result = try wb.select(selected, try wb.constant(u64, 1), try wb.constant(u64, 2));
     try c.define(work, try wb.ret(result));
     const entry = try c.function("entry", .{}, interpreted.answer, .{});
     const eb = try c.body(entry);
-    try c.define(entry, try eb.ret(try eb.handleWith(interpreted.handler, try eb.lambda(work, sig), .{})));
+    try c.define(
+        entry,
+        try eb.ret(try eb.handleWith(interpreted.handler, try eb.lambda(work, sig), .{})),
+    );
     var compiled = try c.compile(std.testing.allocator, entry, try c.schema(void));
     defer compiled.deinit();
 }
@@ -562,29 +729,46 @@ test "replacement recursive library results preserve known schemas" {
     const inside = try c.functionFor("inside type", reader.inside());
     const inside_body = try c.body(inside);
     const cap = try inside_body.parameter("local");
-    try std.testing.expect(@TypeOf(cap) == *const a.Value(a.ShapeOf(@TypeOf(reader.localCapability()))));
+    try std.testing.expect(
+        @TypeOf(cap) == *const a.Value(a.ShapeOf(@TypeOf(reader.localCapability()))),
+    );
     inside_body.abandon();
     const read_return = try c.returnFunction(reading.handler);
     try std.testing.expect(a.ShapeOf(@TypeOf(read_return)).result == a.Shape(u64));
     const writer = try Writer.family(c, "writer", boolean);
     const writing = try Writer.interpret(c, writer, integer, region, .{ .continuation = .{} }, .{});
     try std.testing.expect(@TypeOf((try writing.answer.fields()).value) == @TypeOf(integer));
-    try std.testing.expect(@TypeOf(try (try writing.answer.fields()).log.resultSchema()) == @TypeOf(boolean));
+    try std.testing.expect(
+        @TypeOf(try (try writing.answer.fields()).log.resultSchema()) == @TypeOf(boolean),
+    );
     const raised = try Raise.family(c, "raise", boolean);
     const catching = try Raise.catching(c, raised, integer, .{ .continuation = .{} }, .{}, .{});
     try std.testing.expect(@TypeOf((try catching.answer.fields()).failure) == @TypeOf(boolean));
     const search = try Search.family(c, "search");
-    const searching = try Search.interpret(c, search, integer, .{ .captures = .{ .continuation = .{} }, .order = .breadth_first });
+    const searching = try Search.interpret(
+        c,
+        search,
+        integer,
+        .{ .captures = .{ .continuation = .{} }, .order = .breadth_first },
+    );
     try std.testing.expect(@TypeOf((try searching.step.fields()).solution) == @TypeOf(integer));
-    try std.testing.expect(@TypeOf(try searching.resumption.resultSchema()) == @TypeOf(searching.step));
+    try std.testing.expect(
+        @TypeOf(try searching.resumption.resultSchema()) == @TypeOf(searching.step),
+    );
     const options = .{ .captures = .{ .continuation = .{integer} } };
     const left = try Generator.create(c, "left", integer, boolean, unit, options);
     const right = try Generator.create(c, "right", boolean, integer, unit, options);
     const pipeline = try Generator.pipeline(c, "pipeline", left, right);
     try std.testing.expect(@TypeOf(pipeline.generator.input()) == @TypeOf(integer));
     try std.testing.expect(@TypeOf(pipeline.generator.element()) == @TypeOf(integer));
-    try std.testing.expect(@TypeOf((try pipeline.generator.answer().fields()).done) == @TypeOf(unit));
-    try std.testing.expect(@TypeOf(try pipeline.generator.resumption().resultSchema()) == @TypeOf(pipeline.generator.answer()));
+    try std.testing.expect(
+        @TypeOf((try pipeline.generator.answer().fields()).done) == @TypeOf(unit),
+    );
+    try std.testing.expect(
+        @TypeOf(try pipeline.generator.resumption().resultSchema()) == @TypeOf(
+            pipeline.generator.answer(),
+        ),
+    );
     const tasks = try Generator.create(c, "tasks", unit, unit, unit, options);
     const fifo = try Scheduler.fifo(c, tasks, .{}, .{region});
     try std.testing.expect(@TypeOf(try fifo.queue.resultSchema()) == @TypeOf(tasks.package()));
@@ -605,10 +789,16 @@ test "recursive partial shapes refine through the same Search interpretation" {
     const partial = try Search.interpret(c, family, a.interop.erase(integer), options);
     const refined = try a.interop.refineSchema(c, partial.step, known.step);
     try std.testing.expect(@TypeOf(refined) == @TypeOf(known.step));
-    try std.testing.expectEqual(try a.interop.schemaId(c, known.step), try a.interop.schemaId(c, refined));
+    try std.testing.expectEqual(
+        try a.interop.schemaId(c, known.step),
+        try a.interop.schemaId(c, refined),
+    );
     const refined_token = try a.interop.refineSchema(c, partial.resumption, known.resumption);
     try std.testing.expect(@TypeOf(refined_token) == @TypeOf(known.resumption));
-    try std.testing.expectEqual(try a.interop.schemaId(c, known.resumption), try a.interop.schemaId(c, refined_token));
+    try std.testing.expectEqual(
+        try a.interop.schemaId(c, known.resumption),
+        try a.interop.schemaId(c, refined_token),
+    );
 }
 
 test "declaration completion retains promises while Dynamic authority remains usable" {
@@ -620,15 +810,24 @@ test "declaration completion retains promises while Dynamic authority remains us
     const known = try c.declareSchema(.alternatives, a.Shape(?u64));
     try c.defineAlternatives(known, .{ .none = unit, .some = integer });
     const erased_schema = a.interop.erase(known.schema());
-    try std.testing.expectEqual(try a.interop.schemaId(c, known.schema()), try a.interop.schemaId(c, erased_schema));
+    try std.testing.expectEqual(
+        try a.interop.schemaId(c, known.schema()),
+        try a.interop.schemaId(c, erased_schema),
+    );
     const fields = try known.schema().fields();
     try std.testing.expect(@TypeOf(fields.some) == @TypeOf(integer));
-    try std.testing.expectEqual(try a.interop.schemaId(c, integer), try a.interop.schemaId(c, fields.some));
+    try std.testing.expectEqual(
+        try a.interop.schemaId(c, integer),
+        try a.interop.schemaId(c, fields.some),
+    );
     const dynamic = try c.declareSchema(.alternatives, a.Dynamic);
     try c.defineAlternatives(a.interop.erase(dynamic), .{ .none = unit, .some = integer });
     const dynamic_fields = try a.interop.fields(c, dynamic.schema());
     try std.testing.expectEqual(@as(usize, 2), dynamic_fields.len());
-    try std.testing.expectEqual(try a.interop.schemaId(c, integer), try a.interop.schemaId(c, dynamic_fields.at(1).?.handle));
+    try std.testing.expectEqual(
+        try a.interop.schemaId(c, integer),
+        try a.interop.schemaId(c, dynamic_fields.at(1).?.handle),
+    );
     const recovered = try a.interop.refineSchema(c, erased_schema, known.schema());
     try std.testing.expect(@TypeOf(recovered) == @TypeOf(known.schema()));
 }
@@ -636,10 +835,16 @@ test "declaration completion retains promises while Dynamic authority remains us
 test "compatible recursive descriptions retain actual schema identity checks" {
     const native = @import("horos_data").schema.native;
     const Left = struct {
-        pub const contract: native.Info = .{ .sum = native.Fields(&.{ "next", "value" }, &.{ @This(), a.Shape(u64) }) };
+        pub const contract: native.Info = .{ .sum = native.Fields(
+            &.{ "next", "value" },
+            &.{ @This(), a.Shape(u64) },
+        ) };
     };
     const Right = struct {
-        pub const contract: native.Info = .{ .sum = native.Fields(&.{ "next", "value" }, &.{ @This(), a.Shape(u64) }) };
+        pub const contract: native.Info = .{ .sum = native.Fields(
+            &.{ "next", "value" },
+            &.{ @This(), a.Shape(u64) },
+        ) };
     };
     var raw = source.Builder.init(std.testing.allocator);
     defer raw.deinit();
@@ -651,5 +856,8 @@ test "compatible recursive descriptions retain actual schema identity checks" {
     try c.defineAlternatives(right, .{ .next = right.schema(), .value = integer });
     // The structural comparison must terminate, but distinct reserved runtime
     // schema identities remain incompatible under the existing owner.
-    try std.testing.expectError(error.SchemaMismatch, a.interop.refineSchema(c, right.schema(), left.schema()));
+    try std.testing.expectError(
+        error.SchemaMismatch,
+        a.interop.refineSchema(c, right.schema(), left.schema()),
+    );
 }

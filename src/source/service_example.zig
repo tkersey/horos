@@ -19,7 +19,11 @@ pub fn twoInstances(b: *source.Builder) source.Error!source.Module {
     return authored(b, false, true) catch |err| return a.sourceError(err);
 }
 
-fn authored(b: *source.Builder, comptime swap_replies: bool, comptime paired: bool) a.Error!source.Module {
+fn authored(
+    b: *source.Builder,
+    comptime swap_replies: bool,
+    comptime paired: bool,
+) a.Error!source.Module {
     const c = try a.Context.init(b);
     const unit = try c.schema(void);
     const integer = try c.schema(u64);
@@ -33,21 +37,54 @@ fn authored(b: *source.Builder, comptime swap_replies: bool, comptime paired: bo
     const send = try c.external("example/service-reply", reply, unit);
     const release = try c.external("example/service-finalize", integer, unit);
     const service = try gen.create(c, "example/service-turn", command, output, integer, .{
-        .captures = .{ .continuation = &.{ unit, integer, request, command, reply, output, cell_type } },
+        .captures = .{ .continuation = &.{
+            unit,
+            integer,
+            request,
+            command,
+            reply,
+            output,
+            cell_type,
+        } },
         .owned_regions = &.{region},
         .residual = &.{release},
         .body_use = .reusable,
     });
 
+    return defineRequestWorker(swap_replies, paired, .{
+        .c = c,
+        .unit = unit,
+        .integer = integer,
+        .command = command,
+        .reply = reply,
+        .output = output,
+        .region = region,
+        .cell_type = cell_type,
+        .receive = receive,
+        .send = send,
+        .release = release,
+        .service = service,
+    });
+}
+
+fn defineRequestWorker(
+    comptime swap_replies: bool,
+    comptime paired: bool,
+    ctx: anytype,
+) a.Error!source.Module {
     // A direct recursive worker owns no independent state authority. Its cell
     // and explicit capability exist only inside the generator's owned region.
-    const work_type = try c.callable(.{ .command = command, .state = cell_type, .capability = service.capability() }, integer, &.{service.effect()}, .{
+    const work_type = try ctx.c.callable(.{
+        .command = ctx.command,
+        .state = ctx.cell_type,
+        .capability = ctx.service.capability(),
+    }, ctx.integer, &.{ctx.service.effect()}, .{
         .use = .reusable,
         .captures = &.{},
-        .regions = &.{region},
+        .regions = &.{ctx.region},
     });
-    const work_fn = try c.functionFor("service request", work_type);
-    const work = try c.body(work_fn);
+    const work_fn = try ctx.c.functionFor("service request", work_type);
+    const work = try ctx.c.body(work_fn);
     const input = try work.parameter("command");
     const state = try work.parameter("state");
     const capability = try work.parameter("capability");
@@ -57,53 +94,167 @@ fn authored(b: *source.Builder, comptime swap_replies: bool, comptime paired: bo
     const id = try turn.field(serving.payload(), "id");
     const delta = try turn.field(serving.payload(), "delta");
     const before = try turn.readCell(state);
-    const after = try turn.checkedAdd(before, delta, try c.literalFailure(void, {}));
+    const after = try turn.checkedAdd(before, delta, try ctx.c.literalFailure(void, {}));
     _ = try turn.writeCell(state, after);
     // The driver has no package while this suffix is running or suspended.
     // A second command cannot enter until the reply returns its successor.
     _ = try turn.yieldNow();
-    const reply_id = if (swap_replies) try turn.bitwise(.xor, id, try turn.constant(u64, 3)) else id;
-    const response = try turn.product(reply, .{ .id = reply_id, .previous = before });
-    const next = try turn.performLocal(service.effect(), capability, try turn.variant(output, "reply", response));
-    const continued = try turn.call(work_fn, .{ .command = next, .state = state, .capability = capability });
-    try c.define(work_fn, try work.ret(try work.match(input, .{
+    const reply_id = if (swap_replies) try turn.bitwise(
+        .xor,
+        id,
+        try turn.constant(u64, 3),
+    ) else id;
+    const response = try turn.product(ctx.reply, .{ .id = reply_id, .previous = before });
+    const next = try turn.performLocal(
+        ctx.service.effect(),
+        capability,
+        try turn.variant(ctx.output, "reply", response),
+    );
+    const continued = try turn.call(
+        work_fn,
+        .{ .command = next, .state = state, .capability = capability },
+    );
+    try ctx.c.define(work_fn, try work.ret(try work.match(input, .{
         .serve = try serving.ret(continued),
         .close = try closing.ret(try closing.body().readCell(state)),
     })));
 
-    const producer_type = try c.handledSchema(service.handler());
-    const producer_fn = try c.functionFor("service producer", producer_type);
-    const producer = try c.body(producer_fn);
-    const producer_cap = try producer.parameter("capability");
-    const private_type = try c.regionBodySchema(region, .{}, integer, &.{ service.effect(), release }, .{
-        .use = .reusable,
-        .captures = &.{service.capability()},
+    return defineProducer(paired, .{
+        .c = ctx.c,
+        .unit = ctx.unit,
+        .integer = ctx.integer,
+        .output = ctx.output,
+        .region = ctx.region,
+        .cell_type = ctx.cell_type,
+        .receive = ctx.receive,
+        .send = ctx.send,
+        .release = ctx.release,
+        .service = ctx.service,
+        .work_fn = work_fn,
     });
-    const private_fn = try c.functionFor("service state", private_type);
-    const private = try producer.closureBody(private_fn);
-    const cell = try private.newCell(cell_type, try private.parameter("region"), try private.constant(u64, 0));
-    const body_type = try c.callable(.{}, integer, &.{service.effect()}, .{
-        .use = .reusable,
-        .captures = &.{ service.capability(), cell_type },
-        .regions = &.{region},
-    });
-    const body_fn = try c.functionFor("service exchange", body_type);
-    const body = try private.closureBody(body_fn);
-    const first = try body.performLocal(service.effect(), producer_cap, try body.variant(output, "ready", try body.constant(void, {})));
-    try c.define(body_fn, try body.ret(try body.call(work_fn, .{ .command = first, .state = cell, .capability = producer_cap })));
-    const cleanup_type = try c.callable(.{ .exit = try c.cleanupInfo(unit) }, unit, &.{release}, .{
-        .use = .reusable,
-        .captures = &.{cell_type},
-        .regions = &.{region},
-    });
-    const cleanup_fn = try c.functionFor("service finalizer", cleanup_type);
-    const cleanup = try private.closureBody(cleanup_fn);
-    try c.define(cleanup_fn, try cleanup.ret(try cleanup.perform(release, try cleanup.readCell(cell))));
-    try c.define(private_fn, try private.ret(try private.protect(try private.lambda(body_fn, body_type), try private.lambda(cleanup_fn, cleanup_type), .{})));
-    try c.define(producer_fn, try producer.ret(try producer.withRegion(region, try producer.lambda(private_fn, private_type), .{})));
+}
 
-    const drive_fn = try c.function("service driver", .{ .answer = service.answer() }, integer, &.{ receive, send, release });
-    const driver = try c.body(drive_fn);
+fn defineProducer(
+    comptime paired: bool,
+    ctx: anytype,
+) a.Error!source.Module {
+    const producer_type = try ctx.c.handledSchema(ctx.service.handler());
+    const producer_fn = try ctx.c.functionFor("service producer", producer_type);
+    const producer = try ctx.c.body(producer_fn);
+    const producer_cap = try producer.parameter("capability");
+    const private_type = try ctx.c.regionBodySchema(ctx.region, .{}, ctx.integer, &.{
+        ctx.service.effect(),
+        ctx.release,
+    }, .{ .use = .reusable, .captures = &.{ctx.service.capability()} });
+    const private_fn = try ctx.c.functionFor("service state", private_type);
+    const private = try producer.closureBody(private_fn);
+    const cell = try private.newCell(
+        ctx.cell_type,
+        try private.parameter("region"),
+        try private.constant(u64, 0),
+    );
+    const body_type = try ctx.c.callable(.{}, ctx.integer, &.{ctx.service.effect()}, .{
+        .use = .reusable,
+        .captures = &.{ ctx.service.capability(), ctx.cell_type },
+        .regions = &.{ctx.region},
+    });
+    const body_fn = try ctx.c.functionFor("service exchange", body_type);
+    const body = try private.closureBody(body_fn);
+    const first = try body.performLocal(
+        ctx.service.effect(),
+        producer_cap,
+        try body.variant(ctx.output, "ready", try body.constant(void, {})),
+    );
+    try ctx.c.define(
+        body_fn,
+        try body.ret(try body.call(
+            ctx.work_fn,
+            .{ .command = first, .state = cell, .capability = producer_cap },
+        )),
+    );
+    return protectProducer(paired, .{
+        .c = ctx.c,
+        .unit = ctx.unit,
+        .integer = ctx.integer,
+        .region = ctx.region,
+        .cell_type = ctx.cell_type,
+        .receive = ctx.receive,
+        .send = ctx.send,
+        .release = ctx.release,
+        .service = ctx.service,
+        .producer_type = producer_type,
+        .producer_fn = producer_fn,
+        .producer = producer,
+        .private_type = private_type,
+        .private_fn = private_fn,
+        .private = private,
+        .cell = cell,
+        .body_type = body_type,
+        .body_fn = body_fn,
+    });
+}
+
+fn protectProducer(
+    comptime paired: bool,
+    ctx: anytype,
+) a.Error!source.Module {
+    const cleanup_type = try ctx.c.callable(
+        .{ .exit = try ctx.c.cleanupInfo(ctx.unit) },
+        ctx.unit,
+        &.{ctx.release},
+        .{
+            .use = .reusable,
+            .captures = &.{ctx.cell_type},
+            .regions = &.{ctx.region},
+        },
+    );
+    const cleanup_fn = try ctx.c.functionFor("service finalizer", cleanup_type);
+    const cleanup = try ctx.private.closureBody(cleanup_fn);
+    try ctx.c.define(
+        cleanup_fn,
+        try cleanup.ret(try cleanup.perform(ctx.release, try cleanup.readCell(ctx.cell))),
+    );
+    try ctx.c.define(
+        ctx.private_fn,
+        try ctx.private.ret(try ctx.private.protect(
+            try ctx.private.lambda(ctx.body_fn, ctx.body_type),
+            try ctx.private.lambda(cleanup_fn, cleanup_type),
+            .{},
+        )),
+    );
+    try ctx.c.define(
+        ctx.producer_fn,
+        try ctx.producer.ret(try ctx.producer.withRegion(
+            ctx.region,
+            try ctx.producer.lambda(ctx.private_fn, ctx.private_type),
+            .{},
+        )),
+    );
+
+    return defineDriver(paired, .{
+        .c = ctx.c,
+        .unit = ctx.unit,
+        .integer = ctx.integer,
+        .receive = ctx.receive,
+        .send = ctx.send,
+        .release = ctx.release,
+        .service = ctx.service,
+        .producer_type = ctx.producer_type,
+        .producer_fn = ctx.producer_fn,
+    });
+}
+
+fn defineDriver(
+    comptime paired: bool,
+    ctx: anytype,
+) a.Error!source.Module {
+    const drive_fn = try ctx.c.function(
+        "service driver",
+        .{ .answer = ctx.service.answer() },
+        ctx.integer,
+        &.{ ctx.receive, ctx.send, ctx.release },
+    );
+    const driver = try ctx.c.body(drive_fn);
     const answer = try driver.parameter("answer");
     const done = try driver.caseOf(answer, "done");
     const yielded = try driver.caseOf(answer, "yielded");
@@ -115,19 +266,60 @@ fn authored(b: *source.Builder, comptime swap_replies: bool, comptime paired: bo
     const replied = try step.caseOf(message, "reply");
     _ = try step.match(message, .{
         .ready = try ready.ret(try ready.body().constant(void, {})),
-        .reply = try replied.ret(try replied.body().perform(send, replied.payload())),
+        .reply = try replied.ret(try replied.body().perform(ctx.send, replied.payload())),
     });
-    const incoming = try step.perform(receive, try step.constant(void, {}));
+    const incoming = try step.perform(ctx.receive, try step.constant(void, {}));
     const successor = try step.resumePackage(future, incoming);
     const result = try step.call(drive_fn, .{ .answer = successor });
-    try c.define(drive_fn, try driver.ret(try driver.match(answer, .{ .done = try done.ret(done.payload()), .yielded = try yielded.ret(result) })));
+    try ctx.c.define(
+        drive_fn,
+        try driver.ret(try driver.match(
+            answer,
+            .{ .done = try done.ret(done.payload()), .yielded = try yielded.ret(result) },
+        )),
+    );
 
-    const main = try c.function("entry", .{}, integer, &.{ receive, send, release });
-    const entry = try c.body(main);
-    const initial = try entry.handleWith(service.handler(), try entry.lambda(producer_fn, producer_type), .{});
-    const second = if (paired) try entry.handleWith(service.handler(), try entry.lambda(producer_fn, producer_type), .{}) else null;
-    const first_result = try entry.call(drive_fn, .{ .answer = initial });
-    const combined = if (paired) try entry.checkedAdd(first_result, try entry.call(drive_fn, .{ .answer = second }), try c.literalFailure(void, {})) else first_result;
-    try c.define(main, try entry.ret(combined));
-    return c.module(main, unit);
+    return startService(paired, .{
+        .c = ctx.c,
+        .unit = ctx.unit,
+        .integer = ctx.integer,
+        .receive = ctx.receive,
+        .send = ctx.send,
+        .release = ctx.release,
+        .service = ctx.service,
+        .producer_type = ctx.producer_type,
+        .producer_fn = ctx.producer_fn,
+        .drive_fn = drive_fn,
+    });
+}
+
+fn startService(
+    comptime paired: bool,
+    ctx: anytype,
+) a.Error!source.Module {
+    const main = try ctx.c.function(
+        "entry",
+        .{},
+        ctx.integer,
+        &.{ ctx.receive, ctx.send, ctx.release },
+    );
+    const entry = try ctx.c.body(main);
+    const initial = try entry.handleWith(
+        ctx.service.handler(),
+        try entry.lambda(ctx.producer_fn, ctx.producer_type),
+        .{},
+    );
+    const second = if (paired) try entry.handleWith(
+        ctx.service.handler(),
+        try entry.lambda(ctx.producer_fn, ctx.producer_type),
+        .{},
+    ) else null;
+    const first_result = try entry.call(ctx.drive_fn, .{ .answer = initial });
+    const combined = if (paired) try entry.checkedAdd(
+        first_result,
+        try entry.call(ctx.drive_fn, .{ .answer = second }),
+        try ctx.c.literalFailure(void, {}),
+    ) else first_result;
+    try ctx.c.define(main, try entry.ret(combined));
+    return ctx.c.module(main, ctx.unit);
 }

@@ -1,7 +1,10 @@
 //! Separate staged-authoring test entry point.
 test {
+    _ = @import("source/static_value.zig");
+    _ = @import("source/specialize.zig");
     _ = @import("source/specialize_tests.zig");
     _ = @import("source/recovery_tests.zig");
+    _ = @import("source/record_tests.zig");
     _ = @import("source/reference_roles_tests.zig");
     _ = @import("source/reference_roles.zig");
     _ = @import("authoring/cache_key.zig");

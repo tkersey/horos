@@ -7,13 +7,56 @@ const base: ir.Program = .{
     .roots = .{ .entry = 0, .result = 1, .failure = 1 },
     .schemas = &.{ .u64, .unit, .boolean },
     .constants = &.{.{ .schema = 1, .bytes = &.{} }},
-    .effects = &.{ .{ .identity = "controlled-validation", .payload = 0, .result = 2 }, .{ .identity = "protected-write", .payload = 0, .result = 1 } },
-    .functions = &.{.{ .entry = 0, .inputs = &.{ 0, 1 }, .layout = .{ .slots = &.{ 0, 0, 2, 1 } }, .result = 1, .effects = &.{ 0, 1 } }},
+    .effects = &.{
+        .{ .identity = "controlled-validation", .payload = 0, .result = 2 },
+        .{ .identity = "protected-write", .payload = 0, .result = 1 },
+    },
+    .functions = &.{.{
+        .entry = 0,
+        .inputs = &.{ 0, 1 },
+        .layout = .{ .slots = &.{ 0, 0, 2, 1 } },
+        .result = 1,
+        .effects = &.{ 0, 1 },
+    }},
     .blocks = &.{
-        .{ .function = 0, .instructions = &.{}, .terminator = .{ .perform = .{ .effect = 0, .payload = 0, .next = .{ .block = 1, .assignments = &.{.{ .destination = 2, .source = .returned }} } } } },
-        .{ .function = 0, .instructions = &.{}, .terminator = .{ .branch = .{ .condition = 2, .when_true = .{ .block = 2 }, .when_false = .{ .block = 3 } } } },
-        .{ .function = 0, .instructions = &.{}, .terminator = .{ .perform = .{ .effect = 1, .payload = 0, .next = .{ .block = 3, .assignments = &.{.{ .destination = 3, .source = .returned }} } } } },
-        .{ .function = 0, .instructions = &.{.{ .destination = 3, .opcode = .constant, .immediate = 0 }}, .terminator = .{ .return_value = 3 } },
+        .{
+            .function = 0,
+            .instructions = &.{},
+            .terminator = .{ .perform = .{
+                .effect = 0,
+                .payload = 0,
+                .next = .{
+                    .block = 1,
+                    .assignments = &.{.{ .destination = 2, .source = .returned }},
+                },
+            } },
+        },
+        .{
+            .function = 0,
+            .instructions = &.{},
+            .terminator = .{ .branch = .{
+                .condition = 2,
+                .when_true = .{ .block = 2 },
+                .when_false = .{ .block = 3 },
+            } },
+        },
+        .{
+            .function = 0,
+            .instructions = &.{},
+            .terminator = .{ .perform = .{
+                .effect = 1,
+                .payload = 0,
+                .next = .{
+                    .block = 3,
+                    .assignments = &.{.{ .destination = 3, .source = .returned }},
+                },
+            } },
+        },
+        .{
+            .function = 0,
+            .instructions = &.{.{ .destination = 3, .opcode = .constant, .immediate = 0 }},
+            .terminator = .{ .return_value = 3 },
+        },
     },
 };
 const Binding = struct {
@@ -23,17 +66,41 @@ const Binding = struct {
     // branch. Contexts describe formal input order (A/B, B/A, unknown); monitor
     // states retain a must-valid subset of the two symbolic object versions.
     // Equal schemas/bytes never manufacture an A=B identity relationship.
-    fn project(raw: *const anyopaque, image: ir.Program, site: interaction.Site, context: usize) interaction.Mask {
+    fn project(
+        raw: *const anyopaque,
+        image: ir.Program,
+        site: interaction.Site,
+        context: usize,
+    ) interaction.Mask {
         const self: *const Binding = @ptrCast(@alignCast(raw));
-        if (site.phase == .branch and site.block == self.success_block and site.alternative == 0) return if (context < 2) interaction.bit(context) else interaction.bit(4);
-        if (site.phase == .instruction and self.mutation_block == site.block) return interaction.bit(4);
-        if (site.phase == .operation and image.blocks[@intCast(site.block)].terminator.perform.effect == 1) {
+        if (site.phase == .branch and
+            site.block == self.success_block and
+            site.alternative == 0)
+            return if (context < 2)
+                interaction.bit(context)
+            else
+                interaction.bit(4);
+        if (site.phase == .instruction and
+            self.mutation_block == site.block)
+            return interaction.bit(4);
+        if (site.phase == .operation and image.blocks[
+            @intCast(site.block)
+        ].terminator.perform.effect == 1) {
             const slot = image.blocks[@intCast(site.block)].terminator.perform.payload;
-            return interaction.bit(if (context < 2 and slot < 2) 2 + (context ^ @as(usize, @intCast(slot))) else 5);
+            return interaction.bit(if (context < 2 and slot < 2) 2 + (context ^ @as(
+                usize,
+                @intCast(slot),
+            )) else 5);
         }
         return 0;
     }
-    fn parameters(_: *const anyopaque, image: ir.Program, block: p.Id, _: p.Id, context: usize) interaction.Mask {
+    fn parameters(
+        _: *const anyopaque,
+        image: ir.Program,
+        block: p.Id,
+        _: p.Id,
+        context: usize,
+    ) interaction.Mask {
         const term = image.blocks[@intCast(block)].terminator;
         if (term != .call or context == 2) return interaction.bit(2);
         if (std.mem.eql(p.Id, term.call.arguments, &.{ 0, 1 })) return interaction.bit(context);
@@ -52,7 +119,16 @@ const Binding = struct {
         break :table result;
     };
     fn monitor(self: *const Binding) interaction.Monitor {
-        return .{ .binding = self, .states = 5, .alphabet = 6, .contexts = 3, .bad = interaction.bit(4), .transitions = &transitions, .project = project, .parameters = parameters };
+        return .{
+            .binding = self,
+            .states = 5,
+            .alphabet = 6,
+            .contexts = 3,
+            .bad = interaction.bit(4),
+            .transitions = &transitions,
+            .project = project,
+            .parameters = parameters,
+        };
     }
 };
 fn analyze(image: ir.Program, binding: *const Binding, expected: interaction.Status) !void {
@@ -60,7 +136,12 @@ fn analyze(image: ir.Program, binding: *const Binding, expected: interaction.Sta
     admitted.deinit();
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
-    const owner = try @import("control_provenance.zig").derive(arena.allocator(), image, &.{}, false);
+    const owner = try @import("control_provenance.zig").derive(
+        arena.allocator(),
+        image,
+        &.{},
+        false,
+    );
     var session: interaction.Session = .{ .allocator = a, .owner = owner };
     defer session.deinit();
     const result = try session.analyze(binding.monitor());
@@ -74,12 +155,21 @@ fn analyze(image: ir.Program, binding: *const Binding, expected: interaction.Sta
 fn observedSummary(image: ir.Program, monitor: interaction.Monitor) !interaction.Summary {
     return functionSummary(image, monitor, image.roots.entry);
 }
-fn functionSummary(image: ir.Program, monitor: interaction.Monitor, function: p.Id) !interaction.Summary {
+fn functionSummary(
+    image: ir.Program,
+    monitor: interaction.Monitor,
+    function: p.Id,
+) !interaction.Summary {
     var admitted = try @import("activation_ownership.zig").analyze(a, image);
     defer admitted.deinit();
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
-    const owner = try @import("control_provenance.zig").derive(arena.allocator(), image, &.{}, false);
+    const owner = try @import("control_provenance.zig").derive(
+        arena.allocator(),
+        image,
+        &.{},
+        false,
+    );
     var session: interaction.Session = .{ .allocator = a, .owner = owner };
     defer session.deinit();
     return (try session.analyze(monitor)).get(function, 0, monitor.entry);
@@ -87,7 +177,12 @@ fn functionSummary(image: ir.Program, monitor: interaction.Monitor, function: p.
 
 test "branch and switch retain transient bad prefixes" {
     const Projection = struct {
-        fn project(_: *const anyopaque, _: ir.Program, site: interaction.Site, _: usize) interaction.Mask {
+        fn project(
+            _: *const anyopaque,
+            _: ir.Program,
+            site: interaction.Site,
+            _: usize,
+        ) interaction.Mask {
             return switch (site.phase) {
                 .branch => 1,
                 .returned, .cancellation => 2,
@@ -96,16 +191,39 @@ test "branch and switch retain transient bad prefixes" {
         }
     };
     const binding: u8 = 0;
-    const monitor: interaction.Monitor = .{ .binding = &binding, .states = 2, .alphabet = 2, .bad = 2, .transitions = &.{ 1, 0, 1, 0 }, .project = Projection.project };
+    const monitor: interaction.Monitor = .{
+        .binding = &binding,
+        .states = 2,
+        .alphabet = 2,
+        .bad = 2,
+        .transitions = &.{ 1, 0, 1, 0 },
+        .project = Projection.project,
+    };
     inline for (.{ false, true }) |variant| {
         const image: ir.Program = .{
             .roots = .{ .entry = 0, .result = 0, .failure = 0 },
             .schemas = &.{ .unit, .boolean, .{ .sum = &.{ 0, 0 } } },
             .constants = &.{.{ .schema = 0, .bytes = &.{} }},
             .effects = &.{},
-            .functions = &.{.{ .entry = 0, .inputs = &.{ 0, 1 }, .layout = .{ .slots = &.{ if (variant) 2 else 1, 0 } }, .result = 0 }},
+            .functions = &.{.{
+                .entry = 0,
+                .inputs = &.{ 0, 1 },
+                .layout = .{ .slots = &.{ if (variant) 2 else 1, 0 } },
+                .result = 0,
+            }},
             .blocks = &.{
-                .{ .function = 0, .instructions = &.{}, .terminator = if (variant) .{ .switch_variant = .{ .value = 0, .cases = &.{ .{ .block = 1 }, .{ .block = 1 } } } } else .{ .branch = .{ .condition = 0, .when_true = .{ .block = 1 }, .when_false = .{ .block = 1 } } } },
+                .{
+                    .function = 0,
+                    .instructions = &.{},
+                    .terminator = if (variant) .{ .switch_variant = .{
+                        .value = 0,
+                        .cases = &.{ .{ .block = 1 }, .{ .block = 1 } },
+                    } } else .{ .branch = .{
+                        .condition = 0,
+                        .when_true = .{ .block = 1 },
+                        .when_false = .{ .block = 1 },
+                    } },
+                },
                 .{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 1 } },
             },
         };
@@ -118,7 +236,12 @@ test "branch and switch retain transient bad prefixes" {
 
 test "pending external operation includes cancellation before reply" {
     const Projection = struct {
-        fn project(_: *const anyopaque, _: ir.Program, site: interaction.Site, _: usize) interaction.Mask {
+        fn project(
+            _: *const anyopaque,
+            _: ir.Program,
+            site: interaction.Site,
+            _: usize,
+        ) interaction.Mask {
             return switch (site.phase) {
                 .operation => if (site.block == 0) 1 else 0,
                 .reply => if (site.block == 0) 2 else 0,
@@ -128,7 +251,14 @@ test "pending external operation includes cancellation before reply" {
         }
     };
     const binding: u8 = 0;
-    const monitor: interaction.Monitor = .{ .binding = &binding, .states = 3, .alphabet = 3, .bad = 4, .transitions = &.{ 1, 0, 0, 1, 0, 2, 2, 2, 2 }, .project = Projection.project };
+    const monitor: interaction.Monitor = .{
+        .binding = &binding,
+        .states = 3,
+        .alphabet = 3,
+        .bad = 4,
+        .transitions = &.{ 1, 0, 0, 1, 0, 2, 2, 2, 2 },
+        .project = Projection.project,
+    };
     const result = try observedSummary(base, monitor);
     try std.testing.expectEqual(.potential, result.status(monitor));
     try std.testing.expect(result.cancellation & 4 != 0);
@@ -138,7 +268,12 @@ test "pending external operation includes cancellation before reply" {
 test "administrative clauses and returns preserve cancellation observations" {
     const Projection = struct {
         block: p.Id,
-        fn project(raw: *const anyopaque, _: ir.Program, site: interaction.Site, _: usize) interaction.Mask {
+        fn project(
+            raw: *const anyopaque,
+            _: ir.Program,
+            site: interaction.Site,
+            _: usize,
+        ) interaction.Mask {
             const self: *const @This() = @ptrCast(@alignCast(raw));
             return if (site.phase == .cancellation and site.block == self.block) 1 else 0;
         }
@@ -149,17 +284,38 @@ test "administrative clauses and returns preserve cancellation observations" {
     // Both erased owners are independently interruptible at a numeric quantum.
     for ([_]p.Id{ 4, 5 }) |block| {
         const binding: Projection = .{ .block = block };
-        const monitor: interaction.Monitor = .{ .binding = &binding, .states = 2, .alphabet = 1, .bad = 2, .transitions = &.{ 1, 1 }, .project = Projection.project };
-        try std.testing.expectEqual(.potential, (try observedSummary(image, monitor)).status(monitor));
+        const monitor: interaction.Monitor = .{
+            .binding = &binding,
+            .states = 2,
+            .alphabet = 1,
+            .bad = 2,
+            .transitions = &.{ 1, 1 },
+            .project = Projection.project,
+        };
+        try std.testing.expectEqual(
+            .potential,
+            (try observedSummary(image, monitor)).status(monitor),
+        );
     }
 }
 
 test "administrative resume uses the clause parameter interpretation" {
     const Projection = struct {
-        fn project(_: *const anyopaque, _: ir.Program, site: interaction.Site, context: usize) interaction.Mask {
+        fn project(
+            _: *const anyopaque,
+            _: ir.Program,
+            site: interaction.Site,
+            context: usize,
+        ) interaction.Mask {
             return if (site.phase == .resumed and context == 1) 1 else 0;
         }
-        fn parameters(_: *const anyopaque, _: ir.Program, _: p.Id, callee: p.Id, context: usize) interaction.Mask {
+        fn parameters(
+            _: *const anyopaque,
+            _: ir.Program,
+            _: p.Id,
+            callee: p.Id,
+            context: usize,
+        ) interaction.Mask {
             return interaction.bit(if (callee == 3) 1 else context);
         }
     };
@@ -167,46 +323,97 @@ test "administrative resume uses the clause parameter interpretation" {
     defer arena.deinit();
     const image = try @import("evidence_forwarding_tests.zig").fixture(arena.allocator());
     const binding: u8 = 0;
-    const monitor: interaction.Monitor = .{ .binding = &binding, .states = 2, .alphabet = 1, .contexts = 2, .bad = 2, .transitions = &.{ 1, 1 }, .project = Projection.project, .parameters = Projection.parameters };
+    const monitor: interaction.Monitor = .{
+        .binding = &binding,
+        .states = 2,
+        .alphabet = 1,
+        .contexts = 2,
+        .bad = 2,
+        .transitions = &.{ 1, 1 },
+        .project = Projection.project,
+        .parameters = Projection.parameters,
+    };
     try std.testing.expectEqual(.potential, (try observedSummary(image, monitor)).status(monitor));
 }
 
+const YieldingDisposalFixture = struct {
+    const image: ir.Program = .{
+        .roots = .{ .entry = 0, .result = 0, .failure = 0 },
+        .schemas = &.{
+            .unit,
+            .{ .internal = .{ .resumption = .{
+                .effect = 0,
+                .input = 0,
+                .answer = 4,
+                .handled = &.{0},
+                .mode = .deep,
+                .use = .linear,
+                .obligations = true,
+            } } },
+            .{ .internal = .{ .suspension_package = 1 } },
+            .{ .product = &.{ 0, 2 } },
+            .{ .sum = &.{ 0, 3 } },
+        },
+        .constants = &.{.{ .schema = 0, .bytes = &.{} }},
+        .effects = &.{.{
+            .identity = "pure-cleanup-exchange",
+            .payload = 0,
+            .result = 0,
+            .external = false,
+        }},
+        .functions = &.{
+            .{ .entry = 0, .inputs = &.{}, .layout = .{ .slots = &.{0} }, .result = 0 },
+            .{ .entry = 1, .inputs = &.{0}, .layout = .{ .slots = &.{ 4, 0 } }, .result = 0 },
+        },
+        .blocks = &.{
+            .{
+                .function = 0,
+                .instructions = &.{.{ .destination = 0, .opcode = .constant }},
+                .terminator = .{ .return_value = 0 },
+            },
+            .{
+                .function = 1,
+                .instructions = &.{.{ .destination = 1, .opcode = .constant }},
+                .terminator = .{ .fail = 1 },
+            },
+        },
+    };
+};
+
 test "implicit disposal may yield without an escaping effect" {
     const Projection = struct {
-        fn project(_: *const anyopaque, _: ir.Program, site: interaction.Site, _: usize) interaction.Mask {
+        fn project(
+            _: *const anyopaque,
+            _: ir.Program,
+            site: interaction.Site,
+            _: usize,
+        ) interaction.Mask {
             return if (site.phase == .yield) 1 else 0;
         }
     };
     // An admitted helper receives a generator answer retaining a protected
     // continuation. Its failure discards that answer; a pure yielding cleanup
     // is permitted even though neither the helper nor token has an effect row.
-    const image: ir.Program = .{
-        .roots = .{ .entry = 0, .result = 0, .failure = 0 },
-        .schemas = &.{
-            .unit,
-            .{ .internal = .{ .resumption = .{ .effect = 0, .input = 0, .answer = 4, .handled = &.{0}, .mode = .deep, .use = .linear, .obligations = true } } },
-            .{ .internal = .{ .suspension_package = 1 } },
-            .{ .product = &.{ 0, 2 } },
-            .{ .sum = &.{ 0, 3 } },
-        },
-        .constants = &.{.{ .schema = 0, .bytes = &.{} }},
-        .effects = &.{.{ .identity = "pure-cleanup-exchange", .payload = 0, .result = 0, .external = false }},
-        .functions = &.{
-            .{ .entry = 0, .inputs = &.{}, .layout = .{ .slots = &.{0} }, .result = 0 },
-            .{ .entry = 1, .inputs = &.{0}, .layout = .{ .slots = &.{ 4, 0 } }, .result = 0 },
-        },
-        .blocks = &.{
-            .{ .function = 0, .instructions = &.{.{ .destination = 0, .opcode = .constant }}, .terminator = .{ .return_value = 0 } },
-            .{ .function = 1, .instructions = &.{.{ .destination = 1, .opcode = .constant }}, .terminator = .{ .fail = 1 } },
-        },
-    };
+    const image = YieldingDisposalFixture.image;
     const binding: u8 = 0;
-    const monitor: interaction.Monitor = .{ .binding = &binding, .states = 2, .alphabet = 1, .bad = 2, .transitions = &.{ 1, 1 }, .project = Projection.project };
+    const monitor: interaction.Monitor = .{
+        .binding = &binding,
+        .states = 2,
+        .alphabet = 1,
+        .bad = 2,
+        .transitions = &.{ 1, 1 },
+        .project = Projection.project,
+    };
     const result = try functionSummary(image, monitor, 1);
     try std.testing.expectEqual(.potential, result.status(monitor));
     try std.testing.expect(result.widened and result.failure & 2 != 0);
     const Resetting = struct {
-        fn project(_: *const anyopaque, _: ir.Program, site: interaction.Site, _: usize) interaction.Mask {
+        fn project(
+            _: *const anyopaque,
+            _: ir.Program,
+            site: interaction.Site,
+            _: usize,
+        ) interaction.Mask {
             return switch (site.phase) {
                 .yield => 1,
                 .instruction, .returned, .failure, .cancellation => 2,
@@ -215,7 +422,14 @@ test "implicit disposal may yield without an escaping effect" {
         }
     };
     // An exit may reset the monitor without erasing the cleanup's bad prefix.
-    const resetting: interaction.Monitor = .{ .binding = &binding, .states = 2, .alphabet = 2, .bad = 2, .transitions = &.{ 1, 0, 1, 0 }, .project = Resetting.project };
+    const resetting: interaction.Monitor = .{
+        .binding = &binding,
+        .states = 2,
+        .alphabet = 2,
+        .bad = 2,
+        .transitions = &.{ 1, 0, 1, 0 },
+        .project = Resetting.project,
+    };
     const transient = try functionSummary(image, resetting, 1);
     try std.testing.expectEqual(.potential, transient.status(resetting));
     try std.testing.expect(transient.prefixes & 2 != 0);
@@ -227,8 +441,16 @@ test "interaction validation success precedes same object version write" {
     var blocks = base.blocks[0..4].*;
     var image = base;
     image.blocks = &blocks;
-    blocks[0].terminator = .{ .perform = .{ .effect = 1, .payload = 0, .next = .{ .block = 2, .assignments = &.{.{ .destination = 3, .source = .returned }} } } };
-    blocks[2].terminator = .{ .perform = .{ .effect = 0, .payload = 0, .next = .{ .block = 3, .assignments = &.{.{ .destination = 2, .source = .returned }} } } };
+    blocks[0].terminator = .{ .perform = .{
+        .effect = 1,
+        .payload = 0,
+        .next = .{ .block = 2, .assignments = &.{.{ .destination = 3, .source = .returned }} },
+    } };
+    blocks[2].terminator = .{ .perform = .{
+        .effect = 0,
+        .payload = 0,
+        .next = .{ .block = 3, .assignments = &.{.{ .destination = 2, .source = .returned }} },
+    } };
     try analyze(image, &.{}, .potential);
     blocks = base.blocks[0..4].*;
     blocks[2].terminator.perform.payload = 1;
@@ -241,15 +463,7 @@ test "interaction validation success precedes same object version write" {
     try analyze(image, &.{ .mutation_block = 2 }, .potential);
 }
 test "interaction mutually recursive helpers use matched least fixed point summaries" {
-    var blocks: [9]ir.Block = undefined;
-    @memcpy(blocks[0..4], base.blocks);
-    blocks[4] = .{ .function = 1, .instructions = &.{}, .terminator = .{ .perform = .{ .effect = 0, .payload = 0, .next = .{ .block = 5, .assignments = &.{.{ .destination = 2, .source = .returned }} } } } };
-    blocks[5] = .{ .function = 1, .instructions = &.{}, .terminator = .{ .branch = .{ .condition = 2, .when_true = .{ .block = 6 }, .when_false = .{ .block = 7 } } } };
-    blocks[6] = .{ .function = 1, .instructions = &.{.{ .destination = 3, .opcode = .constant }}, .terminator = .{ .return_value = 3 } };
-    blocks[7] = .{ .function = 1, .instructions = &.{}, .terminator = .{ .call = .{ .function = 2, .arguments = &.{ 0, 1 }, .next = .{ .block = 6, .assignments = &.{.{ .destination = 3, .source = .returned }} } } } };
-    blocks[8] = .{ .function = 2, .instructions = &.{}, .terminator = .{ .call = .{ .function = 1, .arguments = &.{ 0, 1 }, .next = .{ .block = 1, .assignments = &.{.{ .destination = 3, .source = .returned }} } } } };
-    blocks[1] = .{ .function = 2, .instructions = &.{}, .terminator = .{ .return_value = 3 } };
-    blocks[0].terminator = .{ .call = .{ .function = 1, .arguments = &.{ 0, 1 }, .next = .{ .block = 2, .assignments = &.{.{ .destination = 3, .source = .returned }} } } };
+    var blocks = mutuallyRecursiveBlocks();
     var functions = [_]ir.Function{ base.functions[0], base.functions[0], base.functions[0] };
     functions[1].entry = 4;
     functions[2].entry = 8;
@@ -262,15 +476,77 @@ test "interaction mutually recursive helpers use matched least fixed point summa
     blocks[0].terminator.call.arguments = &.{ 0, 1 };
     // No base return: root cannot return, but the bad prefix in the helper is
     // still observable. A depth bound or optimistic return seed is unnecessary.
-    blocks[6].terminator = .{ .call = .{ .function = 2, .arguments = &.{ 0, 1 }, .next = .{ .block = 7, .assignments = &.{.{ .destination = 3, .source = .returned }} } } };
+    blocks[6].terminator = .{ .call = .{
+        .function = 2,
+        .arguments = &.{ 0, 1 },
+        .next = .{ .block = 7, .assignments = &.{.{ .destination = 3, .source = .returned }} },
+    } };
     blocks[4].terminator.perform.effect = 1;
     blocks[4].terminator.perform.next.assignments = &.{.{ .destination = 3, .source = .returned }};
     blocks[5].terminator = .{ .jump = .{ .block = 6 } };
     try analyze(image, &.{ .success_block = 5 }, .potential);
 }
 
+fn mutuallyRecursiveBlocks() [9]ir.Block {
+    var blocks: [9]ir.Block = undefined;
+    @memcpy(blocks[0..4], base.blocks);
+    blocks[4] = .{
+        .function = 1,
+        .instructions = &.{},
+        .terminator = .{ .perform = .{
+            .effect = 0,
+            .payload = 0,
+            .next = .{ .block = 5, .assignments = &.{.{ .destination = 2, .source = .returned }} },
+        } },
+    };
+    blocks[5] = .{
+        .function = 1,
+        .instructions = &.{},
+        .terminator = .{ .branch = .{
+            .condition = 2,
+            .when_true = .{ .block = 6 },
+            .when_false = .{ .block = 7 },
+        } },
+    };
+    blocks[6] = .{
+        .function = 1,
+        .instructions = &.{.{ .destination = 3, .opcode = .constant }},
+        .terminator = .{ .return_value = 3 },
+    };
+    blocks[7] = .{
+        .function = 1,
+        .instructions = &.{},
+        .terminator = .{ .call = .{
+            .function = 2,
+            .arguments = &.{ 0, 1 },
+            .next = .{ .block = 6, .assignments = &.{.{ .destination = 3, .source = .returned }} },
+        } },
+    };
+    blocks[8] = .{
+        .function = 2,
+        .instructions = &.{},
+        .terminator = .{ .call = .{
+            .function = 1,
+            .arguments = &.{ 0, 1 },
+            .next = .{ .block = 1, .assignments = &.{.{ .destination = 3, .source = .returned }} },
+        } },
+    };
+    blocks[1] = .{ .function = 2, .instructions = &.{}, .terminator = .{ .return_value = 3 } };
+    blocks[0].terminator = .{ .call = .{
+        .function = 1,
+        .arguments = &.{ 0, 1 },
+        .next = .{ .block = 2, .assignments = &.{.{ .destination = 3, .source = .returned }} },
+    } };
+    return blocks;
+}
+
 test "existing cloned source fixture retains multi shot suffix and one initialization" {
-    const bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "test/authoring-baseline/source-cloned.bpi3", a, .limited(1000000));
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(
+        std.testing.io,
+        "test/authoring-baseline/source-cloned.bpi3",
+        a,
+        .limited(1000000),
+    );
     defer a.free(bytes);
     var decoded = try @import("program_image.zig").decode(a, bytes);
     defer decoded.deinit();
@@ -279,23 +555,46 @@ test "existing cloned source fixture retains multi shot suffix and one initializ
     admitted.deinit();
     var producer: ?struct { block: p.Id, position: usize } = null;
     for (image.blocks, 0..) |block, id| for (block.instructions, 0..) |instruction, position| {
-        if (instruction.opcode == .cell_new and producer == null) producer = .{ .block = id, .position = position };
+        if (instruction.opcode == .cell_new and producer == null) producer = .{
+            .block = id,
+            .position = position,
+        };
     };
     const Bound = struct {
         block: p.Id,
         position: usize,
-        fn project(raw: *const anyopaque, _: ir.Program, site: interaction.Site, _: usize) interaction.Mask {
+        fn project(
+            raw: *const anyopaque,
+            _: ir.Program,
+            site: interaction.Site,
+            _: usize,
+        ) interaction.Mask {
             const self: *const @This() = @ptrCast(@alignCast(raw));
-            if (site.phase == .instruction and site.block == self.block and site.position == self.position) return 1;
+            if (site.phase == .instruction and
+                site.block == self.block and
+                site.position == self.position)
+                return 1;
             if (site.phase == .yield) return 2;
             return 0;
         }
     };
     const bound: Bound = .{ .block = producer.?.block, .position = producer.?.position };
-    const monitor: interaction.Monitor = .{ .binding = &bound, .states = 3, .alphabet = 2, .bad = interaction.bit(2), .transitions = &.{ 1, 0, 2, 1, 2, 2 }, .project = Bound.project };
+    const monitor: interaction.Monitor = .{
+        .binding = &bound,
+        .states = 3,
+        .alphabet = 2,
+        .bad = interaction.bit(2),
+        .transitions = &.{ 1, 0, 2, 1, 2, 2 },
+        .project = Bound.project,
+    };
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
-    const owner = try @import("control_provenance.zig").derive(arena.allocator(), image, &.{}, false);
+    const owner = try @import("control_provenance.zig").derive(
+        arena.allocator(),
+        image,
+        &.{},
+        false,
+    );
     var session: interaction.Session = .{ .allocator = a, .owner = owner };
     defer session.deinit();
     const result = try session.analyze(monitor);
@@ -306,46 +605,95 @@ test "existing cloned source fixture retains multi shot suffix and one initializ
 
 test "opaque imports include multiple events and relinking or property change derives fresh facts" {
     var blocks = base.blocks[0..4].*;
-    blocks[0].terminator = .{ .call = .{ .function = 1, .arguments = &.{ 0, 1 }, .next = .{ .block = 3, .assignments = &.{.{ .destination = 3, .source = .returned }} } } };
+    blocks[0].terminator = .{ .call = .{
+        .function = 1,
+        .arguments = &.{ 0, 1 },
+        .next = .{ .block = 3, .assignments = &.{.{ .destination = 3, .source = .returned }} },
+    } };
     var functions = [_]ir.Function{ base.functions[0], base.functions[0] };
     functions[1].entry = @import("relocation.zig").missing;
     functions[1].layout.slots = &.{ 0, 0 };
     var image = base;
     image.blocks = &blocks;
     image.functions = &functions;
-    var admitted = try @import("activation_ownership.zig").analyzeComponent(a, image, &.{1}, &.{.{ .function = 1 }});
+    var admitted = try @import("activation_ownership.zig").analyzeComponent(
+        a,
+        image,
+        &.{1},
+        &.{.{ .function = 1 }},
+    );
     admitted.deinit();
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
-    const owner = try @import("control_provenance.zig").derive(arena.allocator(), image, &.{1}, true);
+    const owner = try @import("control_provenance.zig").derive(
+        arena.allocator(),
+        image,
+        &.{1},
+        true,
+    );
     var session: interaction.Session = .{ .allocator = a, .owner = owner, .imports = &.{1} };
     defer session.deinit();
     const Projection = struct {
-        fn project(_: *const anyopaque, _: ir.Program, _: interaction.Site, _: usize) interaction.Mask {
+        fn project(
+            _: *const anyopaque,
+            _: ir.Program,
+            _: interaction.Site,
+            _: usize,
+        ) interaction.Mask {
             return 0;
         }
     };
     const binding: u8 = 0;
     // Neither event alone is bad. Only A then B reaches state 3: one wildcard
     // step would miss the violation, whereas alphabet closure retains it.
-    const monitor: interaction.Monitor = .{ .binding = &binding, .states = 4, .alphabet = 2, .bad = interaction.bit(3), .transitions = &.{ 1, 2, 1, 3, 2, 2, 3, 3 }, .project = Projection.project };
+    const monitor: interaction.Monitor = .{
+        .binding = &binding,
+        .states = 4,
+        .alphabet = 2,
+        .bad = interaction.bit(3),
+        .transitions = &.{ 1, 2, 1, 3, 2, 2, 3, 3 },
+        .project = Projection.project,
+    };
     const opaque_result = (try session.analyze(monitor)).get(0, 0, 0);
     try std.testing.expectEqual(.potential, opaque_result.status(monitor));
     try std.testing.expect(opaque_result.widened and opaque_result.may_nonreturn);
     var independent = monitor;
     independent.bad = 0;
-    try std.testing.expectEqual(.established, (try session.analyze(independent)).get(0, 0, 0).status(independent));
+    try std.testing.expectEqual(
+        .established,
+        (try session.analyze(independent)).get(0, 0, 0).status(independent),
+    );
     try std.testing.expectEqual(@as(usize, 2), session.cached.items.len);
+    try checkRelinkedImport(arena.allocator(), image, blocks, functions, monitor);
+}
+
+fn checkRelinkedImport(
+    allocator: std.mem.Allocator,
+    original: ir.Program,
+    blocks: [4]ir.Block,
+    functions: [2]ir.Function,
+    monitor: interaction.Monitor,
+) !void {
+    var image = original;
     // Resolve the previously opaque implementation to an actual silent return.
     var linked_blocks: [5]ir.Block = undefined;
     @memcpy(linked_blocks[0..4], &blocks);
-    linked_blocks[4] = .{ .function = 1, .instructions = &.{.{ .destination = 3, .opcode = .constant }}, .terminator = .{ .return_value = 3 } };
+    linked_blocks[4] = .{
+        .function = 1,
+        .instructions = &.{.{ .destination = 3, .opcode = .constant }},
+        .terminator = .{ .return_value = 3 },
+    };
     var linked_functions = functions;
     linked_functions[1].entry = 4;
     linked_functions[1].layout = base.functions[0].layout;
     image.functions = &linked_functions;
     image.blocks = &linked_blocks;
-    const linked_owner = try @import("control_provenance.zig").derive(arena.allocator(), image, &.{}, false);
+    const linked_owner = try @import("control_provenance.zig").derive(
+        allocator,
+        image,
+        &.{},
+        false,
+    );
     var linked: interaction.Session = .{ .allocator = a, .owner = linked_owner };
     defer linked.deinit();
     const linked_result = (try linked.analyze(monitor)).get(0, 0, 0);
@@ -356,13 +704,27 @@ test "opaque imports include multiple events and relinking or property change de
 test "effect free divergence has no invented successful return" {
     var image = base;
     image.effects = &.{};
-    image.functions = &.{.{ .entry = 0, .inputs = &.{}, .layout = .{ .slots = &.{} }, .result = 1 }};
-    image.blocks = &.{.{ .function = 0, .instructions = &.{}, .terminator = .{ .jump = .{ .block = 0 } } }};
+    image.functions = &.{.{
+        .entry = 0,
+        .inputs = &.{},
+        .layout = .{ .slots = &.{} },
+        .result = 1,
+    }};
+    image.blocks = &.{.{
+        .function = 0,
+        .instructions = &.{},
+        .terminator = .{ .jump = .{ .block = 0 } },
+    }};
     var admitted = try @import("activation_ownership.zig").analyze(a, image);
     admitted.deinit();
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
-    const owner = try @import("control_provenance.zig").derive(arena.allocator(), image, &.{}, false);
+    const owner = try @import("control_provenance.zig").derive(
+        arena.allocator(),
+        image,
+        &.{},
+        false,
+    );
     var session: interaction.Session = .{ .allocator = a, .owner = owner };
     defer session.deinit();
     const binding: Binding = .{};
@@ -372,47 +734,115 @@ test "effect free divergence has no invented successful return" {
     try std.testing.expectEqual(.established, result.status(binding.monitor()));
 }
 
+const ControlledWaitsFixture = struct {
+    const image: ir.Program = .{
+        .roots = .{ .entry = 0, .result = 0, .failure = 0 },
+        .schemas = &.{ .unit, .boolean },
+        .constants = &.{.{ .schema = 0, .bytes = &.{} }},
+        .effects = &.{
+            .{ .identity = "controlled-wait-0", .payload = 0, .result = 0 },
+            .{ .identity = "controlled-wait-1", .payload = 0, .result = 0 },
+        },
+        .functions = &.{.{
+            .entry = 0,
+            .inputs = &.{0},
+            .layout = .{ .slots = &.{ 1, 0 } },
+            .result = 0,
+            .effects = &.{ 0, 1 },
+        }},
+        .blocks = &.{
+            .{
+                .function = 0,
+                .instructions = &.{.{ .destination = 1, .opcode = .constant }},
+                .terminator = .{ .branch = .{
+                    .condition = 0,
+                    .when_true = .{ .block = 1 },
+                    .when_false = .{ .block = 2 },
+                } },
+            },
+            .{
+                .function = 0,
+                .instructions = &.{},
+                .terminator = .{ .perform = .{
+                    .effect = 0,
+                    .payload = 1,
+                    .next = .{ .block = 3 },
+                } },
+            },
+            .{
+                .function = 0,
+                .instructions = &.{},
+                .terminator = .{ .perform = .{
+                    .effect = 1,
+                    .payload = 1,
+                    .next = .{ .block = 3 },
+                } },
+            },
+            .{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 1 } },
+        },
+    };
+};
+
 test "exclusive controlled waits derive a cycle candidate from both actual branch operations" {
     // Test-local environment contract for these exact declarations: operation
     // zero waits for completion while the driver holds its turn; operation one
     // waits for that turn while completion is held. The input selects one host
     // scenario. No claim is made about arbitrary external operations.
-    const image: ir.Program = .{
-        .roots = .{ .entry = 0, .result = 0, .failure = 0 },
-        .schemas = &.{ .unit, .boolean },
-        .constants = &.{.{ .schema = 0, .bytes = &.{} }},
-        .effects = &.{ .{ .identity = "controlled-wait-0", .payload = 0, .result = 0 }, .{ .identity = "controlled-wait-1", .payload = 0, .result = 0 } },
-        .functions = &.{.{ .entry = 0, .inputs = &.{0}, .layout = .{ .slots = &.{ 1, 0 } }, .result = 0, .effects = &.{ 0, 1 } }},
-        .blocks = &.{
-            .{ .function = 0, .instructions = &.{.{ .destination = 1, .opcode = .constant }}, .terminator = .{ .branch = .{ .condition = 0, .when_true = .{ .block = 1 }, .when_false = .{ .block = 2 } } } },
-            .{ .function = 0, .instructions = &.{}, .terminator = .{ .perform = .{ .effect = 0, .payload = 1, .next = .{ .block = 3 } } } },
-            .{ .function = 0, .instructions = &.{}, .terminator = .{ .perform = .{ .effect = 1, .payload = 1, .next = .{ .block = 3 } } } },
-            .{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 1 } },
-        },
-    };
+    const image = ControlledWaitsFixture.image;
     var admitted = try @import("activation_ownership.zig").analyze(a, image);
     admitted.deinit();
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
-    const owner = try @import("control_provenance.zig").derive(arena.allocator(), image, &.{}, false);
+    const owner = try @import("control_provenance.zig").derive(
+        arena.allocator(),
+        image,
+        &.{},
+        false,
+    );
     var session: interaction.Session = .{ .allocator = a, .owner = owner };
     defer session.deinit();
     const Projection = struct {
-        fn project(_: *const anyopaque, subject: ir.Program, site: interaction.Site, _: usize) interaction.Mask {
-            return if (site.phase == .operation) interaction.bit(@intCast(subject.blocks[@intCast(site.block)].terminator.perform.effect)) else 0;
+        fn project(
+            _: *const anyopaque,
+            subject: ir.Program,
+            site: interaction.Site,
+            _: usize,
+        ) interaction.Mask {
+            return if (site.phase == .operation) interaction.bit(
+                @intCast(subject.blocks[
+                    @intCast(site.block)
+                ].terminator.perform.effect),
+            ) else 0;
         }
     };
     const binding: u8 = 0;
-    const monitor: interaction.Monitor = .{ .binding = &binding, .states = 4, .alphabet = 2, .bad = interaction.bit(3), .transitions = &.{ 1, 2, 1, 3, 3, 2, 3, 3 }, .project = Projection.project };
+    const monitor: interaction.Monitor = .{
+        .binding = &binding,
+        .states = 4,
+        .alphabet = 2,
+        .bad = interaction.bit(3),
+        .transitions = &.{ 1, 2, 1, 3, 3, 2, 3, 3 },
+        .project = Projection.project,
+    };
     const summary = (try session.analyze(monitor)).get(0, 0, 0);
-    try std.testing.expectEqual(.established, summary.status(monitor)); // no concrete path has both waits
+    try std.testing.expectEqual(
+        .established,
+        summary.status(monitor),
+    ); // no concrete path has both waits
     const service = @import("service_interactions.zig");
     var edges: std.ArrayList(service.WaitEdge) = .empty;
     defer edges.deinit(a);
     for (image.blocks, 0..) |block, id| if (block.terminator == .perform) {
         const operation = block.terminator.perform.effect;
         if (summary.prefixes & interaction.bit(@as(usize, @intCast(operation)) + 1) == 0) continue;
-        try edges.append(a, .{ .dependent = if (operation == 0) .driver else .completion, .required = if (operation == 0) .completion else .driver, .site = id });
+        try edges.append(
+            a,
+            .{
+                .dependent = if (operation == 0) .driver else .completion,
+                .required = if (operation == 0) .completion else .driver,
+                .site = id,
+            },
+        );
     };
     const ranked = try service.rank(a, edges.items);
     defer a.free(ranked.ranks);
@@ -422,10 +852,22 @@ test "exclusive controlled waits derive a cycle candidate from both actual branc
 
 test "existing cleanup and injection programs retain exceptional and latent observations" {
     const provenance = @import("control_provenance.zig");
-    for ([_][]const u8{ "cleanup-disposal", "cleanup-disposal-owned", "cleanup-disposal-running", "cleanup-disposal-failure", "injection", "shallow-injection" }) |name| {
+    for ([_][]const u8{
+        "cleanup-disposal",
+        "cleanup-disposal-owned",
+        "cleanup-disposal-running",
+        "cleanup-disposal-failure",
+        "injection",
+        "shallow-injection",
+    }) |name| {
         const path = try std.fmt.allocPrint(a, "test/authoring-baseline/source-{s}.bpi3", .{name});
         defer a.free(path);
-        const bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, a, .limited(1000000));
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(
+            std.testing.io,
+            path,
+            a,
+            .limited(1000000),
+        );
         defer a.free(bytes);
         var decoded = try @import("program_image.zig").decode(a, bytes);
         defer decoded.deinit();
@@ -436,7 +878,12 @@ test "existing cleanup and injection programs retain exceptional and latent obse
         defer arena.deinit();
         const owner = try provenance.deriveObserved(arena.allocator(), image, &.{}, false, true);
         const Projection = struct {
-            fn project(_: *const anyopaque, _: ir.Program, site: interaction.Site, _: usize) interaction.Mask {
+            fn project(
+                _: *const anyopaque,
+                _: ir.Program,
+                site: interaction.Site,
+                _: usize,
+            ) interaction.Mask {
                 return switch (site.phase) {
                     .operation => 1,
                     .failure => 2,
@@ -446,7 +893,14 @@ test "existing cleanup and injection programs retain exceptional and latent obse
             }
         };
         const binding: u8 = 0;
-        const monitor: interaction.Monitor = .{ .binding = &binding, .states = 4, .alphabet = 3, .bad = interaction.bit(3), .transitions = &.{ 1, 2, 3, 1, 2, 3, 2, 2, 3, 3, 3, 3 }, .project = Projection.project };
+        const monitor: interaction.Monitor = .{
+            .binding = &binding,
+            .states = 4,
+            .alphabet = 3,
+            .bad = interaction.bit(3),
+            .transitions = &.{ 1, 2, 3, 1, 2, 3, 2, 2, 3, 3, 3, 3 },
+            .project = Projection.project,
+        };
         var session: interaction.Session = .{ .allocator = a, .owner = owner };
         defer session.deinit();
         const result = try session.analyze(monitor);
@@ -461,15 +915,65 @@ test "captured suffix includes nested handler return before clause suffix" {
     defer arena.deinit();
     const allocator = arena.allocator();
     var image = try @import("evidence_forwarding_tests.zig").fixture(allocator);
+    const schemas = try nestedSuffixSchemas(allocator, image);
+    image.schemas = schemas;
+    image.effects = &.{
+        image.effects[0],
+        .{ .identity = "inner", .payload = 0, .result = 0, .external = false },
+        .{ .identity = "X", .payload = 0, .result = 0 },
+        .{ .identity = "Y", .payload = 0, .result = 0 },
+    };
+    const functions = try nestedSuffixFunctions(allocator, image);
+    image.functions = functions;
+    const blocks = try nestedSuffixBlocks(allocator, image);
+    image.blocks = blocks;
+    var outer = image.handlers[0];
+    outer.effects = &.{ 2, 3 };
+    image.handlers = &.{
+        outer,
+        .{
+            .mode = .deep,
+            .input = 0,
+            .answer = 0,
+            .effects = &.{ 0, 2, 3 },
+            .return_function = 6,
+            .clauses = &.{.{ .effect = 1, .function = 7, .resumption = 8 }},
+        },
+    };
+    image.constructors = &.{ image.constructors[0], .{ .function = 5, .capture = 1, .schema = 7 } };
+    image.scopes.captures = &.{
+        image.scopes.captures[0],
+        .{ .fields = &.{ 0, 5 }, .use = .reusable },
+    };
+    try checkNestedSuffix(allocator, image);
+}
+
+fn nestedSuffixSchemas(allocator: std.mem.Allocator, image: ir.Program) ![]p.Schema {
     const schemas = try allocator.alloc(p.Schema, 9);
     @memcpy(schemas[0..6], image.schemas);
     schemas[3].internal.computation.effects = &.{ 0, 2, 3 };
     schemas[4].internal.resumption.effects = &.{ 2, 3 };
     schemas[6] = .{ .internal = .{ .capability = 1 } };
-    schemas[7] = .{ .internal = .{ .computation = .{ .parameters = &.{6}, .result = 0, .effects = &.{ 0, 2, 3 }, .capture_bound = &.{ 0, 5 } } } };
-    schemas[8] = .{ .internal = .{ .resumption = .{ .effect = 1, .input = 0, .answer = 0, .effects = &.{ 0, 2, 3 }, .handled = &.{1}, .capture_bound = &.{ 0, 5, 6 }, .mode = .deep, .use = .linear } } };
-    image.schemas = schemas;
-    image.effects = &.{ image.effects[0], .{ .identity = "inner", .payload = 0, .result = 0, .external = false }, .{ .identity = "X", .payload = 0, .result = 0 }, .{ .identity = "Y", .payload = 0, .result = 0 } };
+    schemas[7] = .{ .internal = .{ .computation = .{
+        .parameters = &.{6},
+        .result = 0,
+        .effects = &.{ 0, 2, 3 },
+        .capture_bound = &.{ 0, 5 },
+    } } };
+    schemas[8] = .{ .internal = .{ .resumption = .{
+        .effect = 1,
+        .input = 0,
+        .answer = 0,
+        .effects = &.{ 0, 2, 3 },
+        .handled = &.{1},
+        .capture_bound = &.{ 0, 5, 6 },
+        .mode = .deep,
+        .use = .linear,
+    } } };
+    return schemas;
+}
+
+fn nestedSuffixFunctions(allocator: std.mem.Allocator, image: ir.Program) ![]ir.Function {
     const functions = try allocator.alloc(ir.Function, 8);
     @memcpy(functions[0..5], image.functions);
     functions[0].effects = &.{ 2, 3 };
@@ -477,30 +981,102 @@ test "captured suffix includes nested handler return before clause suffix" {
     functions[1].layout.slots = &.{ 0, 5, 0, 0, 7 };
     functions[3].effects = &.{ 2, 3 };
     functions[4].effects = &.{ 0, 2, 3 };
-    functions[5] = .{ .entry = 11, .inputs = &.{ 0, 1, 2 }, .layout = .{ .slots = &.{ 0, 5, 6, 0 } }, .result = 0, .effects = &.{ 0, 2, 3 } };
-    functions[6] = .{ .entry = 13, .inputs = &.{0}, .layout = .{ .slots = &.{ 0, 0 } }, .result = 0, .effects = &.{2} };
-    functions[7] = .{ .entry = 15, .inputs = &.{ 0, 1 }, .layout = .{ .slots = &.{ 0, 8, 0 } }, .result = 0, .effects = &.{ 0, 2, 3 } };
-    image.functions = functions;
+    functions[5] = .{
+        .entry = 11,
+        .inputs = &.{ 0, 1, 2 },
+        .layout = .{ .slots = &.{ 0, 5, 6, 0 } },
+        .result = 0,
+        .effects = &.{ 0, 2, 3 },
+    };
+    functions[6] = .{
+        .entry = 13,
+        .inputs = &.{0},
+        .layout = .{ .slots = &.{ 0, 0 } },
+        .result = 0,
+        .effects = &.{2},
+    };
+    functions[7] = .{
+        .entry = 15,
+        .inputs = &.{ 0, 1 },
+        .layout = .{ .slots = &.{ 0, 8, 0 } },
+        .result = 0,
+        .effects = &.{ 0, 2, 3 },
+    };
+    return functions;
+}
+
+fn nestedSuffixBlocks(allocator: std.mem.Allocator, image: ir.Program) ![]ir.Block {
     const blocks = try allocator.alloc(ir.Block, 17);
     @memcpy(blocks[0..11], image.blocks);
-    blocks[2].instructions = &.{.{ .destination = 4, .opcode = .computation, .operands = &.{ 0, 1 }, .immediate = 1 }};
-    blocks[2].terminator = .{ .handle = .{ .handler = 1, .body = 4, .arguments = &.{}, .state = &.{}, .next = image.blocks[2].terminator.call.next } };
+    blocks[2].instructions = &.{.{
+        .destination = 4,
+        .opcode = .computation,
+        .operands = &.{ 0, 1 },
+        .immediate = 1,
+    }};
+    blocks[2].terminator = .{ .handle = .{
+        .handler = 1,
+        .body = 4,
+        .arguments = &.{},
+        .state = &.{},
+        .next = image.blocks[2].terminator.call.next,
+    } };
     blocks[6].instructions = &.{};
-    blocks[6].terminator = .{ .perform = .{ .effect = 3, .payload = 2, .next = .{ .block = 7, .assignments = &.{.{ .destination = 2, .source = .returned }} } } };
-    blocks[11] = .{ .function = 5, .instructions = &.{}, .terminator = .{ .call = .{ .function = 4, .arguments = &.{ 1, 1, 0 }, .next = .{ .block = 12, .assignments = &.{.{ .destination = 3, .source = .returned }} } } } };
+    blocks[6].terminator = .{ .perform = .{
+        .effect = 3,
+        .payload = 2,
+        .next = .{ .block = 7, .assignments = &.{.{ .destination = 2, .source = .returned }} },
+    } };
+    blocks[11] = .{
+        .function = 5,
+        .instructions = &.{},
+        .terminator = .{ .call = .{
+            .function = 4,
+            .arguments = &.{ 1, 1, 0 },
+            .next = .{
+                .block = 12,
+                .assignments = &.{.{ .destination = 3, .source = .returned }},
+            },
+        } },
+    };
     blocks[12] = .{ .function = 5, .instructions = &.{}, .terminator = .{ .return_value = 3 } };
-    blocks[13] = .{ .function = 6, .instructions = &.{}, .terminator = .{ .perform = .{ .effect = 2, .payload = 0, .next = .{ .block = 14, .assignments = &.{.{ .destination = 1, .source = .returned }} } } } };
+    blocks[13] = .{
+        .function = 6,
+        .instructions = &.{},
+        .terminator = .{ .perform = .{
+            .effect = 2,
+            .payload = 0,
+            .next = .{
+                .block = 14,
+                .assignments = &.{.{ .destination = 1, .source = .returned }},
+            },
+        } },
+    };
     blocks[14] = .{ .function = 6, .instructions = &.{}, .terminator = .{ .return_value = 1 } };
-    blocks[15] = .{ .function = 7, .instructions = &.{}, .terminator = .{ .resume_value = .{ .resumption = 1, .argument = 0, .next = .{ .block = 16, .assignments = &.{.{ .destination = 2, .source = .returned }} } } } };
+    blocks[15] = .{
+        .function = 7,
+        .instructions = &.{},
+        .terminator = .{ .resume_value = .{
+            .resumption = 1,
+            .argument = 0,
+            .next = .{
+                .block = 16,
+                .assignments = &.{.{ .destination = 2, .source = .returned }},
+            },
+        } },
+    };
     blocks[16] = .{ .function = 7, .instructions = &.{}, .terminator = .{ .return_value = 2 } };
-    image.blocks = blocks;
-    var outer = image.handlers[0];
-    outer.effects = &.{ 2, 3 };
-    image.handlers = &.{ outer, .{ .mode = .deep, .input = 0, .answer = 0, .effects = &.{ 0, 2, 3 }, .return_function = 6, .clauses = &.{.{ .effect = 1, .function = 7, .resumption = 8 }} } };
-    image.constructors = &.{ image.constructors[0], .{ .function = 5, .capture = 1, .schema = 7 } };
-    image.scopes.captures = &.{ image.scopes.captures[0], .{ .fields = &.{ 0, 5 }, .use = .reusable } };
+    return blocks;
+}
+
+fn checkNestedSuffix(allocator: std.mem.Allocator, image: ir.Program) !void {
     var diagnostic: @import("admission.zig").Diagnostic = .{};
-    var admitted = @import("activation_ownership.zig").analyzeObserved(allocator, image, &diagnostic, null) catch |err| {
+    var admitted = @import("activation_ownership.zig").analyzeObserved(
+        allocator,
+        image,
+        &diagnostic,
+        null,
+    ) catch |err| {
         std.debug.print("admission: {any}, diagnostic {any}\n", .{ err, diagnostic });
         return err;
     };
@@ -509,7 +1085,12 @@ test "captured suffix includes nested handler return before clause suffix" {
     var session: interaction.Session = .{ .allocator = allocator, .owner = owner };
     defer session.deinit();
     const Projection = struct {
-        fn project(_: *const anyopaque, subject: ir.Program, site: interaction.Site, _: usize) interaction.Mask {
+        fn project(
+            _: *const anyopaque,
+            subject: ir.Program,
+            site: interaction.Site,
+            _: usize,
+        ) interaction.Mask {
             if (site.phase != .operation) return 0;
             return switch (subject.blocks[@intCast(site.block)].terminator.perform.effect) {
                 2 => 1,
@@ -519,34 +1100,107 @@ test "captured suffix includes nested handler return before clause suffix" {
         }
     };
     const binding: u8 = 0;
-    const monitor: interaction.Monitor = .{ .binding = &binding, .states = 3, .alphabet = 2, .bad = 4, .transitions = &.{ 1, 0, 1, 2, 2, 2 }, .project = Projection.project };
+    const monitor: interaction.Monitor = .{
+        .binding = &binding,
+        .states = 3,
+        .alphabet = 2,
+        .bad = 4,
+        .transitions = &.{ 1, 0, 1, 2, 2, 2 },
+        .project = Projection.project,
+    };
     const root = (try session.analyze(monitor)).get(0, 0, 0);
     try std.testing.expectEqual(.potential, root.status(monitor));
 }
 
-test "cancellation during cleanup retains pending reply and primary failure" {
-    var image: ir.Program = .{
+const CleanupCancellationFixture = struct {
+    const image: ir.Program = .{
         .roots = .{ .entry = 0, .result = 0, .failure = 0 },
-        .schemas = &.{ .unit, .text, .bytes, .{ .sum = &.{ 1, 2 } }, .{ .sum = &.{ 0, 0, 3, 0 } }, .{ .sum = &.{ 0, 3 } }, .{ .seq = 0 }, .{ .product = &.{ 4, 5, 6 } }, .{ .internal = .{ .computation = .{ .parameters = &.{}, .result = 0 } } }, .{ .internal = .{ .computation = .{ .parameters = &.{7}, .result = 0, .effects = &.{0} } } } },
+        .schemas = &.{
+            .unit,                  .text,                         .bytes,
+            .{ .sum = &.{ 1, 2 } }, .{ .sum = &.{ 0, 0, 3, 0 } },  .{ .sum = &.{ 0, 3 } },
+            .{ .seq = 0 },          .{ .product = &.{ 4, 5, 6 } },
+            .{
+                .internal = .{ .computation = .{ .parameters = &.{}, .result = 0 } },
+            },
+            .{ .internal = .{ .computation = .{
+                .parameters = &.{7},
+                .result = 0,
+                .effects = &.{0},
+            } } },
+        },
         .constants = &.{.{ .schema = 0, .bytes = &.{} }},
         .effects = &.{.{ .identity = "cleanup-request", .payload = 0, .result = 0 }},
         .functions = &.{
-            .{ .entry = 0, .inputs = &.{}, .layout = .{ .slots = &.{ 8, 9, 0 } }, .result = 0, .effects = &.{0} },
+            .{
+                .entry = 0,
+                .inputs = &.{},
+                .layout = .{ .slots = &.{ 8, 9, 0 } },
+                .result = 0,
+                .effects = &.{0},
+            },
             .{ .entry = 2, .inputs = &.{}, .layout = .{ .slots = &.{0} }, .result = 0 },
-            .{ .entry = 3, .inputs = &.{0}, .layout = .{ .slots = &.{ 7, 0, 0 } }, .result = 0, .effects = &.{0} },
+            .{
+                .entry = 3,
+                .inputs = &.{0},
+                .layout = .{ .slots = &.{ 7, 0, 0 } },
+                .result = 0,
+                .effects = &.{0},
+            },
         },
         .blocks = &.{
-            .{ .function = 0, .instructions = &.{ .{ .destination = 0, .opcode = .computation, .immediate = 0 }, .{ .destination = 1, .opcode = .computation, .immediate = 1 } }, .terminator = .{ .protect = .{ .body = 0, .cleanup = 1, .arguments = &.{}, .next = .{ .block = 1, .assignments = &.{.{ .destination = 2, .source = .returned }} } } } },
+            .{
+                .function = 0,
+                .instructions = &.{
+                    .{ .destination = 0, .opcode = .computation, .immediate = 0 },
+                    .{ .destination = 1, .opcode = .computation, .immediate = 1 },
+                },
+                .terminator = .{ .protect = .{
+                    .body = 0,
+                    .cleanup = 1,
+                    .arguments = &.{},
+                    .next = .{
+                        .block = 1,
+                        .assignments = &.{.{ .destination = 2, .source = .returned }},
+                    },
+                } },
+            },
             .{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 2 } },
-            .{ .function = 1, .instructions = &.{.{ .destination = 0, .opcode = .constant }}, .terminator = .{ .return_value = 0 } },
-            .{ .function = 2, .instructions = &.{.{ .destination = 1, .opcode = .constant }}, .terminator = .{ .perform = .{ .effect = 0, .payload = 1, .next = .{ .block = 4, .assignments = &.{.{ .destination = 2, .source = .returned }} } } } },
+            .{
+                .function = 1,
+                .instructions = &.{.{ .destination = 0, .opcode = .constant }},
+                .terminator = .{ .return_value = 0 },
+            },
+            .{
+                .function = 2,
+                .instructions = &.{.{ .destination = 1, .opcode = .constant }},
+                .terminator = .{ .perform = .{
+                    .effect = 0,
+                    .payload = 1,
+                    .next = .{
+                        .block = 4,
+                        .assignments = &.{.{ .destination = 2, .source = .returned }},
+                    },
+                } },
+            },
             .{ .function = 2, .instructions = &.{}, .terminator = .{ .return_value = 2 } },
         },
-        .constructors = &.{ .{ .function = 1, .capture = 0, .schema = 8 }, .{ .function = 2, .capture = 0, .schema = 9 } },
+        .constructors = &.{
+            .{ .function = 1, .capture = 0, .schema = 8 },
+            .{ .function = 2, .capture = 0, .schema = 9 },
+        },
         .scopes = .{ .captures = &.{.{ .fields = &.{}, .use = .reusable }} },
     };
+};
+
+test "cancellation during cleanup retains pending reply and primary failure" {
+    var image = CleanupCancellationFixture.image;
     const Projection = struct {
-        fn project(_: *const anyopaque, _: ir.Program, site: interaction.Site, _: usize) interaction.Mask {
+        fn project(
+            _: *const anyopaque,
+            _: ir.Program,
+            site: interaction.Site,
+            _: usize,
+        ) interaction.Mask {
             if (site.block != 3) return 0;
             return switch (site.phase) {
                 .cancellation => 1,
@@ -556,26 +1210,45 @@ test "cancellation during cleanup retains pending reply and primary failure" {
         }
     };
     const binding: u8 = 0;
-    const monitor: interaction.Monitor = .{ .binding = &binding, .states = 3, .alphabet = 2, .bad = 4, .transitions = &.{ 1, 0, 1, 2, 2, 2 }, .project = Projection.project };
+    const monitor: interaction.Monitor = .{
+        .binding = &binding,
+        .states = 3,
+        .alphabet = 2,
+        .bad = 4,
+        .transitions = &.{ 1, 0, 1, 2, 2, 2 },
+        .project = Projection.project,
+    };
     var blocks = image.blocks[0..5].*;
     image.blocks = &blocks;
     inline for (.{ false, true }) |failed_body| {
         blocks[2].terminator = if (failed_body) .{ .fail = 0 } else .{ .return_value = 0 };
         const root = try observedSummary(image, monitor);
         try std.testing.expectEqual(.potential, root.status(monitor));
-        try std.testing.expect((if (failed_body) root.failure else root.cancellation) & monitor.bad != 0);
+        try std.testing.expect(
+            (if (failed_body) root.failure else root.cancellation) & monitor.bad != 0,
+        );
     }
 }
 
 test "silent administrative transfers preserve cancellation exit states" {
     const Projection = struct {
         before_resume: bool,
-        fn project(raw: *const anyopaque, _: ir.Program, site: interaction.Site, _: usize) interaction.Mask {
+        fn project(
+            raw: *const anyopaque,
+            _: ir.Program,
+            site: interaction.Site,
+            _: usize,
+        ) interaction.Mask {
             const self: *const @This() = @ptrCast(@alignCast(raw));
             if (self.before_resume) {
                 if (site.block == 8 and site.phase == .operation) return 1;
                 if (site.phase == .resumed) return 2;
-                if (site.phase == .cancellation and site.block != 5 and site.block != 6 and site.block != 7 and site.block != 4) return 2;
+                if (site.phase == .cancellation and
+                    site.block != 5 and
+                    site.block != 6 and
+                    site.block != 7 and
+                    site.block != 4)
+                    return 2;
             } else {
                 if (site.block == 3 and site.phase == .returned) return 1;
                 if (site.phase == .cancellation and site.block == 1) return 2;
@@ -588,7 +1261,14 @@ test "silent administrative transfers preserve cancellation exit states" {
     const image = try @import("evidence_forwarding_tests.zig").fixture(arena.allocator());
     inline for (.{ false, true }) |before_resume| {
         const binding: Projection = .{ .before_resume = before_resume };
-        const monitor: interaction.Monitor = .{ .binding = &binding, .states = 2, .alphabet = 2, .bad = 0, .transitions = &.{ 1, 0, 1, 0 }, .project = Projection.project };
+        const monitor: interaction.Monitor = .{
+            .binding = &binding,
+            .states = 2,
+            .alphabet = 2,
+            .bad = 0,
+            .transitions = &.{ 1, 0, 1, 0 },
+            .project = Projection.project,
+        };
         // A numeric quantum can stop inside the silent clause or return. The
         // cancellation event at the caller successor has a different projection.
         try std.testing.expect((try observedSummary(image, monitor)).cancellation & 2 != 0);
@@ -596,18 +1276,32 @@ test "silent administrative transfers preserve cancellation exit states" {
 }
 
 test "yielding cleanup keeps cancellation context through direct helpers" {
-    const bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "test/authoring-baseline/source-yielding-cleanup.bpi3", a, .limited(1000000));
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(
+        std.testing.io,
+        "test/authoring-baseline/source-yielding-cleanup.bpi3",
+        a,
+        .limited(1000000),
+    );
     defer a.free(bytes);
     var decoded = try @import("program_image.zig").decode(a, bytes);
     defer decoded.deinit();
     const image = decoded.program;
     const Projection = struct {
         cleanup: p.Id,
-        fn project(raw: *const anyopaque, subject: ir.Program, site: interaction.Site, _: usize) interaction.Mask {
+        fn project(
+            raw: *const anyopaque,
+            subject: ir.Program,
+            site: interaction.Site,
+            _: usize,
+        ) interaction.Mask {
             const self: *const @This() = @ptrCast(@alignCast(raw));
             const block = subject.blocks[@intCast(site.block)];
             if (site.phase == .cancellation and block.function == self.cleanup) return 1;
-            if (site.phase == .operation and std.mem.eql(u8, subject.effects[@intCast(block.terminator.perform.effect)].identity, "example/middle-cleanup")) return 2;
+            if (site.phase == .operation and std.mem.eql(
+                u8,
+                subject.effects[@intCast(block.terminator.perform.effect)].identity,
+                "example/middle-cleanup",
+            )) return 2;
             return 0;
         }
     };
@@ -617,7 +1311,14 @@ test "yielding cleanup keeps cancellation context through direct helpers" {
         break;
     };
     const binding: Projection = .{ .cleanup = cleanup orelse return error.MissingCleanupYield };
-    const monitor: interaction.Monitor = .{ .binding = &binding, .states = 3, .alphabet = 2, .bad = 4, .transitions = &.{ 1, 0, 1, 2, 2, 2 }, .project = Projection.project };
+    const monitor: interaction.Monitor = .{
+        .binding = &binding,
+        .states = 3,
+        .alphabet = 2,
+        .bad = 4,
+        .transitions = &.{ 1, 0, 1, 2, 2, 2 },
+        .project = Projection.project,
+    };
     const result = try observedSummary(image, monitor);
     try std.testing.expectEqual(.potential, result.status(monitor));
     try std.testing.expect(result.failure & monitor.bad != 0);

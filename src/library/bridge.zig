@@ -18,10 +18,17 @@ pub fn schema(value: anytype) *const raw.Schema {
     _ = comptime schemaShape(@TypeOf(value));
     return @ptrCast(value);
 }
-pub inline fn option(options: anytype, comptime name: []const u8, default: anytype) (if (@hasField(@TypeOf(options), name)) @FieldType(@TypeOf(options), name) else @TypeOf(default)) {
+pub inline fn option(
+    options: anytype,
+    comptime name: []const u8,
+    default: anytype,
+) (if (@hasField(@TypeOf(options), name))
+    @FieldType(@TypeOf(options), name)
+else
+    @TypeOf(default)) {
     return if (@hasField(@TypeOf(options), name)) @field(options, name) else default;
 }
-fn count(comptime T: type) ?usize {
+inline fn count(comptime T: type) ?usize {
     return switch (@typeInfo(T)) {
         .@"struct" => |s| s.field_types.len,
         .array => |ar| ar.len,
@@ -43,7 +50,8 @@ fn checked(comptime family: Family, value: anytype) *const Handle(family) {
         .operation => a.Operation(S),
         .region => a.Region,
     };
-    if (@TypeOf(value) != *const Canonical) @compileError("Horos library: wrong canonical handle family");
+    if (@TypeOf(value) != *const Canonical)
+        @compileError("Horos library: wrong canonical handle family");
     return @ptrCast(value);
 }
 pub fn List(comptime family: Family, comptime T: type) type {
@@ -66,17 +74,26 @@ pub fn list(comptime family: Family, items: anytype) List(family, @TypeOf(items)
             .operation => a.Operation(S),
             .region => a.Region,
         };
-        if (@typeInfo(T).pointer.child != *const Canonical) @compileError("Horos library: wrong canonical handle family");
+        if (@typeInfo(T).pointer.child != *const Canonical) @compileError(
+            "Horos library: wrong canonical handle family",
+        );
         out.borrowed = @as([*]const *const Handle(family), @ptrCast(items.ptr))[0..items.len];
     } else if (comptime @typeInfo(T) == .@"struct") {
-        inline for (@typeInfo(T).@"struct".field_names, 0..) |name, i| out.owned[i] = checked(family, @field(items, name));
+        inline for (
+            @typeInfo(T).@"struct".field_names,
+            0..,
+        ) |name, i| out.owned[i] = checked(family, @field(items, name));
     } else {
         inline for (items, 0..) |value, i| out.owned[i] = checked(family, value);
     }
     return out;
 }
 pub fn CaptureLists(comptime T: type) type {
-    comptime @import("../authoring/option_contract.zig").check("capture bounds", T, &.{ "continuation", "body" });
+    comptime @import("../authoring/option_contract.zig").check(
+        "capture bounds",
+        T,
+        &.{ "continuation", "body" },
+    );
     return struct {
         continuation: List(.schema, @FieldType(T, "continuation")),
         body: List(.schema, if (@hasField(T, "body")) @FieldType(T, "body") else @TypeOf(.{})),
@@ -86,7 +103,10 @@ pub fn CaptureLists(comptime T: type) type {
     };
 }
 pub fn captures(items: anytype) CaptureLists(@TypeOf(items)) {
-    return .{ .continuation = list(.schema, items.continuation), .body = list(.schema, option(items, "body", .{})) };
+    return .{
+        .continuation = list(.schema, items.continuation),
+        .body = list(.schema, option(items, "body", .{})),
+    };
 }
 pub fn sequence(comptime S: type) type {
     return native.Contract(.{ .sequence = .{ .element = S, .maximum = null } });
@@ -102,7 +122,9 @@ pub fn namedShape(comptime T: type) type {
     if (T == *const a.interop.RuntimeNamed(.schema)) return a.Dynamic;
     if (@typeInfo(T) != .@"struct") @compileError("Horos library: expected named schema handles");
     const fields = @typeInfo(T).@"struct";
-    if (fields.is_tuple and fields.field_types.len != 0) @compileError("Horos library: expected named schema handles");
+    if (fields.is_tuple and fields.field_types.len != 0) @compileError(
+        "Horos library: expected named schema handles",
+    );
     var children: [fields.field_types.len]type = undefined;
     for (fields.field_types, 0..) |Child, i| children[i] = schemaShape(Child);
     return native.Fields(fields.field_names, &children);
@@ -127,7 +149,10 @@ pub fn named(c: *a.Context, fields: anytype) a.Error!NamedSchemas(@TypeOf(fields
         }
         result.borrowed = entries;
     } else {
-        inline for (@typeInfo(@TypeOf(fields)).@"struct".field_names, 0..) |name, i| result.owned[i] = .{ .name = name, .schema = schema(@field(fields, name)) };
+        inline for (
+            @typeInfo(@TypeOf(fields)).@"struct".field_names,
+            0..,
+        ) |name, i| result.owned[i] = .{ .name = name, .schema = schema(@field(fields, name)) };
     }
     return result;
 }

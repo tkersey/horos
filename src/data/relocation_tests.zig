@@ -16,12 +16,28 @@ const fixture: d.activation.Program = .{
         .{ .entry = 2, .inputs = &.{}, .layout = .{ .slots = &.{ 0, 2 } }, .result = 0 },
     },
     .blocks = &.{
-        .{ .function = 0, .instructions = &.{.{ .destination = 0, .opcode = .constant }}, .terminator = .{ .return_value = 0 } },
-        .{ .function = 1, .instructions = &.{.{ .destination = 0, .opcode = .constant, .immediate = 1 }}, .terminator = .{ .return_value = 0 } },
-        .{ .function = 2, .instructions = &.{.{ .destination = 0, .opcode = .constant, .immediate = 2 }}, .terminator = .{ .return_value = 0 } },
+        .{
+            .function = 0,
+            .instructions = &.{.{ .destination = 0, .opcode = .constant }},
+            .terminator = .{ .return_value = 0 },
+        },
+        .{
+            .function = 1,
+            .instructions = &.{.{ .destination = 0, .opcode = .constant, .immediate = 1 }},
+            .terminator = .{ .return_value = 0 },
+        },
+        .{
+            .function = 2,
+            .instructions = &.{.{ .destination = 0, .opcode = .constant, .immediate = 2 }},
+            .terminator = .{ .return_value = 0 },
+        },
     },
     // Authority keeps function1, even though no call edge reaches it.
-    .scopes = .{ .resources = &.{.{ .representation = 0, .introducers = &.{1}, .eliminators = &.{1} }} },
+    .scopes = .{ .resources = &.{.{
+        .representation = 0,
+        .introducers = &.{1},
+        .eliminators = &.{1},
+    }} },
 };
 
 fn projectionCase(allocator: std.mem.Allocator) !void {
@@ -37,7 +53,11 @@ fn projectionCase(allocator: std.mem.Allocator) !void {
     const program = blk: {
         var scratch = std.heap.ArenaAllocator.init(allocator);
         defer scratch.deinit();
-        const result = try d.relocation.ownReachable(output.allocator(), scratch.allocator(), input);
+        const result = try d.relocation.ownReachable(
+            output.allocator(),
+            scratch.allocator(),
+            input,
+        );
         try testing.expectEqualSlices(u64, &.{ 1, 2 }, result.function_origins);
         break :blk result.program;
     };

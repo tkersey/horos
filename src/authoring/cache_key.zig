@@ -5,7 +5,10 @@ const a = @import("../authoring.zig");
 const raw = @import("runtime.zig");
 pub const DefaultPolicy = struct {
     pub fn leaf(comptime T: type) bool {
-        if (T == *const raw.Schema or T == *const raw.Operation or T == *const raw.Region) return true;
+        if (T == *const raw.Schema or
+            T == *const raw.Operation or
+            T == *const raw.Region)
+            return true;
         if (@typeInfo(T) != .pointer or @typeInfo(T).pointer.size != .one) return false;
         const Child = @typeInfo(T).pointer.child;
         if (@typeInfo(Child) != .@"opaque" or !@hasDecl(Child, "horos_handle")) return false;
@@ -36,30 +39,47 @@ pub fn KeyOps(comptime Key: type, comptime Policy: type) type {
         }
     };
 }
-fn validate(comptime T: type, comptime Policy: type) void {
+inline fn validate(comptime T: type, comptime Policy: type) void {
     if (Policy.leaf(T)) return;
     switch (@typeInfo(T)) {
         .int, .bool, .@"enum" => {},
         .optional => |o| validate(o.child, Policy),
         .array => |ar| validate(ar.child, Policy),
         .@"struct" => |s| for (s.field_types, s.field_attrs) |Field, attr| {
-            if (attr.@"comptime") @compileError("Horos cache key: comptime fields are not runtime key inputs");
+            if (attr.@"comptime") @compileError(
+                "Horos cache key: comptime fields are not runtime key inputs",
+            );
             validate(Field, Policy);
         },
         .pointer => |ptr| {
-            if (ptr.size != .slice or ptr.sentinel_ptr != null) @compileError("Horos cache key: pointer needs an explicit identity or ownership policy");
+            if (ptr.size != .slice or ptr.sentinel_ptr != null) @compileError(
+                "Horos cache key: pointer needs an explicit identity or ownership policy",
+            );
             validate(ptr.child, Policy);
         },
         else => @compileError("Horos cache key: unsupported field type " ++ @typeName(T)),
     }
 }
-fn equal(comptime T: type, comptime Policy: type, left: T, right: T) bool {
+inline fn equal(comptime T: type, comptime Policy: type, left: T, right: T) bool {
     if (comptime Policy.leaf(T)) return Policy.eql(T, left, right);
     return switch (@typeInfo(T)) {
         .int, .bool, .@"enum" => left == right,
-        .optional => |o| if (left) |value| if (right) |other| equal(o.child, Policy, value, other) else false else right == null,
+        .optional => |o| if (left) |value| if (right) |other| equal(
+            o.child,
+            Policy,
+            value,
+            other,
+        ) else false else right == null,
         .@"struct" => |s| blk: {
-            inline for (s.field_names, s.field_types) |name, Field| if (!equal(Field, Policy, @field(left, name), @field(right, name))) break :blk false;
+            inline for (
+                s.field_names,
+                s.field_types,
+            ) |name, Field| if (!equal(
+                Field,
+                Policy,
+                @field(left, name),
+                @field(right, name),
+            )) break :blk false;
             break :blk true;
         },
         .array => |ar| blk: {
@@ -74,11 +94,21 @@ fn equal(comptime T: type, comptime Policy: type, left: T, right: T) bool {
         else => unreachable,
     };
 }
-fn copy(comptime T: type, comptime Policy: type, allocator: std.mem.Allocator, value: T) std.mem.Allocator.Error!T {
+inline fn copy(
+    comptime T: type,
+    comptime Policy: type,
+    allocator: std.mem.Allocator,
+    value: T,
+) std.mem.Allocator.Error!T {
     if (comptime Policy.leaf(T)) return Policy.snapshot(T, allocator, value);
     return switch (@typeInfo(T)) {
         .int, .bool, .@"enum" => value,
-        .optional => |o| if (value) |present| try copy(o.child, Policy, allocator, present) else null,
+        .optional => |o| if (value) |present| try copy(
+            o.child,
+            Policy,
+            allocator,
+            present,
+        ) else null,
         .@"struct" => |s| blk: {
             var output: T = undefined;
             var initialized: usize = 0;
@@ -117,12 +147,20 @@ fn copy(comptime T: type, comptime Policy: type, allocator: std.mem.Allocator, v
         else => unreachable,
     };
 }
-fn release(comptime T: type, comptime Policy: type, allocator: std.mem.Allocator, value: T) void {
+inline fn release(
+    comptime T: type,
+    comptime Policy: type,
+    allocator: std.mem.Allocator,
+    value: T,
+) void {
     if (comptime Policy.leaf(T)) return Policy.release(T, allocator, value);
     switch (@typeInfo(T)) {
         .int, .bool, .@"enum" => {},
         .optional => |o| if (value) |present| release(o.child, Policy, allocator, present),
-        .@"struct" => |s| inline for (s.field_names, s.field_types) |name, Field| release(Field, Policy, allocator, @field(value, name)),
+        .@"struct" => |s| inline for (
+            s.field_names,
+            s.field_types,
+        ) |name, Field| release(Field, Policy, allocator, @field(value, name)),
         .array => |ar| for (value) |item| release(ar.child, Policy, allocator, item),
         .pointer => |ptr| {
             for (value) |item| release(ptr.child, Policy, allocator, item);
@@ -132,9 +170,25 @@ fn release(comptime T: type, comptime Policy: type, allocator: std.mem.Allocator
     }
 }
 
-const TestKey = struct { enabled: bool, order: enum { first, last }, count: u64, nested: struct { names: []const []const u8, optional: ?[2]u32 } };
+const TestKey = struct {
+    enabled: bool,
+    order: enum {
+        first,
+        last,
+    },
+    count: u64,
+    nested: struct {
+        names: []const []const u8,
+        optional: ?[2]u32,
+    },
+};
 fn snapshotAttempt(allocator: std.mem.Allocator) !void {
-    const key: TestKey = .{ .enabled = true, .order = .first, .count = 7, .nested = .{ .names = &.{ "alpha", "beta" }, .optional = .{ 1, 2 } } };
+    const key: TestKey = .{
+        .enabled = true,
+        .order = .first,
+        .count = 7,
+        .nested = .{ .names = &.{ "alpha", "beta" }, .optional = .{ 1, 2 } },
+    };
     const saved = try KeyOps(TestKey, DefaultPolicy).snapshot(allocator, key);
     defer release(TestKey, DefaultPolicy, allocator, saved);
     try std.testing.expect(KeyOps(TestKey, DefaultPolicy).eql(key, saved));
@@ -146,7 +200,12 @@ test "cache key snapshot owns nested slices and compares every record field" {
     const Ops = KeyOps(TestKey, DefaultPolicy);
     var text = [_]u8{ 'a', 'b' };
     var names = [_][]const u8{&text};
-    var key: TestKey = .{ .enabled = true, .order = .first, .count = 7, .nested = .{ .names = &names, .optional = .{ 1, 2 } } };
+    var key: TestKey = .{
+        .enabled = true,
+        .order = .first,
+        .count = 7,
+        .nested = .{ .names = &names, .optional = .{ 1, 2 } },
+    };
     const saved = try Ops.snapshot(std.testing.allocator, key);
     defer release(TestKey, DefaultPolicy, std.testing.allocator, saved);
     inline for (.{ "enabled", "order", "count", "nested" }) |name| {

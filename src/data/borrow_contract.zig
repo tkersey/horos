@@ -51,7 +51,10 @@ fn describe(solver: anytype, source: flow.Source) a.Error!Projection {
         cursor = item.tail;
     }
     return .{
-        .source = if (source.ambient) |ambient| .{ .ambient = ambient } else .{ .input = source.parameter },
+        .source = if (source.ambient) |ambient|
+            .{ .ambient = ambient }
+        else
+            .{ .input = source.parameter },
         .path = try path.toOwnedSlice(solver.allocator),
     };
 }
@@ -79,9 +82,17 @@ pub fn infer(solver: anytype, function: p.Id) a.Error!Summary {
         if (schema != .internal or schema.internal != .cell) continue;
         const values = try solver.written(start, id);
         if (values.len == 0) continue;
-        try writes.append(solver.allocator, .{ .schema = id, .sources = try sources(solver, values) });
+        try writes.append(
+            solver.allocator,
+            .{ .schema = id, .sources = try sources(solver, values) },
+        );
     }
-    return .{ .function = function, .returned = returned, .requirements = requirements, .writes = try writes.toOwnedSlice(solver.allocator) };
+    return .{
+        .function = function,
+        .returned = returned,
+        .requirements = requirements,
+        .writes = try writes.toOwnedSlice(solver.allocator),
+    };
 }
 
 fn contains(bound: []const Projection, actual: Projection) bool {
@@ -153,7 +164,10 @@ pub fn relocated(mapper: relocate.Mapper, value: Summary) a.Error!Summary {
     for (writes) |write| {
         if (count != 0 and writes[count - 1].schema == write.schema) {
             const prior = &writes[count - 1];
-            const joined = try mapper.allocator.alloc(Projection, prior.sources.len + write.sources.len);
+            const joined = try mapper.allocator.alloc(
+                Projection,
+                prior.sources.len + write.sources.len,
+            );
             @memcpy(joined[0..prior.sources.len], prior.sources);
             @memcpy(joined[prior.sources.len..], write.sources);
             prior.sources = joined;
@@ -162,5 +176,10 @@ pub fn relocated(mapper: relocate.Mapper, value: Summary) a.Error!Summary {
             count += 1;
         }
     }
-    return .{ .function = try mapper.id(.function, value.function), .returned = try projections(mapper, value.returned), .requirements = requirements, .writes = writes[0..count] };
+    return .{
+        .function = try mapper.id(.function, value.function),
+        .returned = try projections(mapper, value.returned),
+        .requirements = requirements,
+        .writes = writes[0..count],
+    };
 }

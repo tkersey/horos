@@ -7,7 +7,11 @@ const Id = data.program.Id;
 pub const Kind = enum { tree, tree_near };
 const depth = 8;
 
-pub fn compile(a: std.mem.Allocator, kind: Kind, options: data.coalescing.Options) !source.Compiled {
+pub fn compile(
+    a: std.mem.Allocator,
+    kind: Kind,
+    options: data.coalescing.Options,
+) !source.Compiled {
     var b = source.Builder.init(a);
     defer b.deinit();
     const integer = try b.scalar(u64);
@@ -44,7 +48,12 @@ pub fn compile(a: std.mem.Allocator, kind: Kind, options: data.coalescing.Option
         .function = groups[1][depth],
         .arguments = &.{argument},
     } });
-    const result = try b.primitive(pair, .product, &.{ try b.reference(left), try b.reference(right) }, 0);
+    const result = try b.primitive(
+        pair,
+        .product,
+        &.{ try b.reference(left), try b.reference(right) },
+        0,
+    );
     try b.define(main, try b.bind(left, first, try b.bind(right, second, try b.pure(result))));
     return source.lowerObserved(a, b.module(main, unit), .{ .coalescing = options });
 }
@@ -53,11 +62,21 @@ fn addOne(b: *source.Builder, integer: Id, value: Id) !Id {
     return b.value(.{ .schema = integer, .expression = .{ .primitive = .{
         .opcode = .integer_add,
         .operands = &.{ value, try b.constant(u64, 1) },
-        .failures = &.{.{ .kind = .arithmetic_overflow, .value = try b.failureLiteral(try b.constant(void, {})) }},
+        .failures = &.{.{
+            .kind = .arithmetic_overflow,
+            .value = try b.failureLiteral(try b.constant(void, {})),
+        }},
     } } });
 }
 
-fn parent(b: *source.Builder, integer: Id, callable: Id, function: Id, child: Id, indirect: bool) !void {
+fn parent(
+    b: *source.Builder,
+    integer: Id,
+    callable: Id,
+    function: Id,
+    child: Id,
+    indirect: bool,
+) !void {
     const argument = try b.reference(b.parameter(function, 0));
     const result = try b.variable(integer);
     const next = try b.pure(try addOne(b, integer, try b.reference(result)));
@@ -67,7 +86,14 @@ fn parent(b: *source.Builder, integer: Id, callable: Id, function: Id, child: Id
             .computation = try b.reference(closure),
             .arguments = &.{argument},
         } });
-        try b.define(function, try b.bind(closure, try b.pure(try b.lambda(child, callable)), try b.bind(result, apply, next)));
+        try b.define(
+            function,
+            try b.bind(
+                closure,
+                try b.pure(try b.lambda(child, callable)),
+                try b.bind(result, apply, next),
+            ),
+        );
     } else {
         const call = try b.term(.{ .call = .{ .function = child, .arguments = &.{argument} } });
         try b.define(function, try b.bind(result, call, next));

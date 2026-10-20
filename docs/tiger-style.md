@@ -1,8 +1,8 @@
 # TigerStyle for Horos
 
-This contract applies to new and materially changed Zig code, including tests,
+This contract applies to all tracked Zig code, including tests,
 examples and build tools. It adapts [TigerBeetle's TigerStyle](https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE.md)
-and the [skills-zig implementation](https://github.com/tkersey/skills-zig/blob/23d1fa5715ef50e2db1e9fa79b5b3fd6223ee4ca/docs/engineering/TIGER_STYLE.md).
+and the [skills-zig implementation](https://github.com/tkersey/skills-zig/blob/ac19a3fabd0b32fae3f6bf1becf5368c724e96f3/docs/engineering/TIGER_STYLE.md).
 The priorities are safety, performance and developer experience, in that order.
 
 ## Design and ownership
@@ -55,11 +55,14 @@ functions and test blocks within 70 physical lines and ordinary Zig lines within
 according to the domain's responsibilities; preserve compile-time contracts and
 independent test observations when restructuring.
 
-Generic type factories are compile-time construction. They do not imply runtime
-recursion. The pinned whole-file auditor counts the enclosing factory, including
-its nested declarations, as a function; account for this when introducing a new
-file. A scanner limitation is not evidence of a runtime defect and does not
-authorize removing a useful type boundary or bypassing the gate.
+Generic type factories are compile-time construction. Each nested method is
+checked independently; its declaration is excluded from the enclosing factory's
+line count. Explicitly `inline` type-driven expansion must terminate during
+compilation and introduces no recursive native call frames. Runtime traversal
+of recursive values uses caller-owned scratch storage and propagates allocation
+errors. Generic record traversal supports finite values of recursively defined
+types through allocator-taking operations; finite type expansion retains its
+allocation-free operations.
 
 Do not add explanatory source comments, docstrings or optional API comments.
 Use names, types and operations to communicate intent. Preserve unrelated
@@ -72,7 +75,7 @@ identify their key, invalidation and retained storage. Build inputs must remain
 tracked so a cached build observes changed source. Prefer the existing native
 Zig tools and shared checks over additional tooling dependencies.
 
-## Mechanical adoption gate
+## Mechanical gate
 
 `tools/tiger-style.sh` runs the immutable skills-zig native auditor and its tests.
 The auditor is a development dependency; it adds no dependency to the Horos
@@ -81,39 +84,34 @@ library, compiler, exported package or data-only consumer.
 Run from a clean committed checkout with Zig 0.17.0 and Git available:
 
 ```sh
-bash tools/tiger-style.sh <base-commit> HEAD
+bash tools/tiger-style.sh --all HEAD
 ```
 
-For a pull request, use the target branch as `<base-commit>`. The launcher computes
-the merge base and the workflow checks out the actual proposed head. Pushes compare their before
-and after commits; manual runs compare against the adoption base. Tool acquisition,
-auditor tests, malformed revisions and audit errors must fail the gate. Binary-classified
-Zig changes and changed Zig file types, such as replacing source with a symlink,
-fail rather than silently omit source from the audit.
+CI audits every tracked Zig file, including unchanged code. Whole-file checks
+reject lines over 100 columns, tabs, trailing whitespace, unresolved
+`TODO`/`FIXME`/`HACK` comments, discarded errors spelled `catch {}` or
+`catch unreachable`, unmarked `while (true)` loops, direct native recursion,
+and functions or test blocks longer than 70 lines. Zig's parser establishes
+function boundaries, nested declarations, and multiline direct calls; invalid
+syntax fails the audit. Tracked Zig symlinks and other nonregular source fail.
 
-The ratchet checks added lines in existing Zig files and fully audits new Zig
-files. Added-line checks reject lines over 100 columns, tabs, trailing whitespace,
-unresolved `TODO`/`FIXME`/`HACK` comments, discarded errors spelled `catch {}` or
-`catch unreachable`, and unmarked `while (true)` loops. Full-file checks also
-detect direct recursion and functions or test blocks longer than 70 lines.
-Unchanged code retained through a pure rename remains inherited debt.
-The inherited code is not declared fully compliant by adoption.
+The optional `bash tools/tiger-style.sh <base-commit> HEAD` mode audits added
+lines in existing files and fully audits new files. It is useful for inspecting
+a committed difference; CI requires the whole-source mode. Binary-classified
+Zig changes and changed file types fail this difference check.
 
-The checker is lexical. It cannot establish the absence of indirect recursion,
-multiline equivalents of prohibited constructs, lifetime errors or invalid
-operating-error handling. Function length and direct recursion in modified
-existing files remain source-review obligations. Passing the ratchet establishes
-only this mechanical subset; review still applies the full contract to changed
-code. The separate skills-zig repository-mapping audit is not a Horos check.
+Mechanical checks cannot establish the absence of indirect recursion, lifetime
+errors, invalid error handling, or semantic regressions. Passing them establishes
+only this subset. Review still applies the complete contract. The separate
+skills-zig repository-mapping audit is not a Horos check.
 
 The auditor bounds diff bytes, file bytes, file count, source lines and diagnostics.
 Hitting a bound is a failed check, never a successful truncated audit. Its pin is
-updated deliberately with the checker tests and the integration checked again.
+updated deliberately with the checker tests and integration checked again.
 Run `bash tools/test-tiger-style.sh` after changing the launcher or its pin. Its
-temporary Git histories check valid changes, unchanged legacy debt, added-line
-and new-file failures, invalid revisions, dirty indexes/worktrees, binary diffs
-and changed file types.
-CI runs these probes without retaining generated fixtures.
+temporary Git histories check complete-source selection, inherited violations,
+valid changes, added-line/new-file failures, invalid revisions, dirty indexes
+and worktrees, binary diffs and nonregular source. CI retains no generated fixtures.
 
 ## Verification and review
 

@@ -13,7 +13,12 @@ pub const Error = coalescing.Error || error{InvalidDeadArguments};
 pub const Witness = struct { function: usize, removed: []const usize };
 pub const Statistics = struct { parameters_removed: usize = 0, call_arguments_removed: usize = 0 };
 
-pub fn run(allocator: std.mem.Allocator, original: ir.Program, statistics: ?*Statistics, options: coalescing.Options) Error!coalescing.Owned {
+pub fn run(
+    allocator: std.mem.Allocator,
+    original: ir.Program,
+    statistics: ?*Statistics,
+    options: coalescing.Options,
+) Error!coalescing.Owned {
     var stats: Statistics = .{};
     defer if (statistics) |out| {
         out.* = stats;
@@ -32,7 +37,11 @@ pub fn run(allocator: std.mem.Allocator, original: ir.Program, statistics: ?*Sta
         var removed: std.ArrayList(usize) = .empty;
         for (function.inputs, 0..) |slot, index| {
             const schema = function.layout.slots[@intCast(slot)];
-            if (!permissions.copy[@intCast(schema)] or !permissions.drop[@intCast(schema)]) continue;
+            if (!permissions.copy[
+                @intCast(schema)
+            ] or !permissions.drop[
+                @intCast(schema)
+            ]) continue;
             if (flow.pool.contains(flow.live[@intCast(function.entry)][0], slot)) continue;
             try removed.append(a, index);
         }
@@ -47,10 +56,20 @@ pub fn run(allocator: std.mem.Allocator, original: ir.Program, statistics: ?*Sta
     candidate.functions = functions;
     candidate.blocks = blocks;
     for (witnesses.items) |witness| {
-        functions[witness.function].inputs = try without(a, original.functions[witness.function].inputs, witness.removed);
+        functions[witness.function].inputs = try without(
+            a,
+            original.functions[witness.function].inputs,
+            witness.removed,
+        );
         for (blocks) |*block| {
-            if (block.terminator != .call or block.terminator.call.function != witness.function) continue;
-            block.terminator.call.arguments = try without(a, block.terminator.call.arguments, witness.removed);
+            if (block.terminator != .call or
+                block.terminator.call.function != witness.function)
+                continue;
+            block.terminator.call.arguments = try without(
+                a,
+                block.terminator.call.arguments,
+                witness.removed,
+            );
             stats.call_arguments_removed += witness.removed.len;
         }
     }
@@ -58,7 +77,11 @@ pub fn run(allocator: std.mem.Allocator, original: ir.Program, statistics: ?*Sta
     return coalescing.run(allocator, candidate, options);
 }
 
-fn without(allocator: std.mem.Allocator, slots: []const p.Id, removed: []const usize) std.mem.Allocator.Error![]const p.Id {
+fn without(
+    allocator: std.mem.Allocator,
+    slots: []const p.Id,
+    removed: []const usize,
+) std.mem.Allocator.Error![]const p.Id {
     const result = try allocator.alloc(p.Id, slots.len - removed.len);
     var next: usize = 0;
     for (slots, 0..) |slot, index| {
@@ -85,7 +108,12 @@ fn subsequence(before: []const p.Id, after: []const p.Id, removed: []const usize
 
 /// Verify the complete original caller set, ordered ABI subsequences, and input
 /// liveness independently of the finder. No declaration or call may be omitted.
-pub fn validate(allocator: std.mem.Allocator, original: ir.Program, candidate: ir.Program, witnesses: []const Witness) Error!void {
+pub fn validate(
+    allocator: std.mem.Allocator,
+    original: ir.Program,
+    candidate: ir.Program,
+    witnesses: []const Witness,
+) Error!void {
     var admitted = try ownership.analyze(allocator, original);
     defer admitted.deinit();
     var flow = try @import("activation_flow.zig").analyzeInputDemand(allocator, original);
@@ -99,13 +127,19 @@ pub fn validate(allocator: std.mem.Allocator, original: ir.Program, candidate: i
     var unchanged = candidate;
     unchanged.functions = original.functions;
     unchanged.blocks = original.blocks;
-    if (!equal(ir.Program, original, unchanged) or original.functions.len != candidate.functions.len or original.blocks.len != candidate.blocks.len) return error.InvalidDeadArguments;
+    if (!equal(ir.Program, original, unchanged) or
+        original.functions.len != candidate.functions.len or
+        original.blocks.len != candidate.blocks.len)
+        return error.InvalidDeadArguments;
     const removals = try a.alloc([]const usize, original.functions.len);
     @memset(removals, &.{});
     const seen = try a.alloc(bool, original.functions.len);
     @memset(seen, false);
     for (witnesses) |witness| {
-        if (witness.function >= original.functions.len or seen[witness.function] or contexts.unknownEntry(original, witness.function)) return error.InvalidDeadArguments;
+        if (witness.function >= original.functions.len or
+            seen[witness.function] or
+            contexts.unknownEntry(original, witness.function))
+            return error.InvalidDeadArguments;
         seen[witness.function] = true;
         removals[witness.function] = witness.removed;
         const function = original.functions[witness.function];
@@ -113,20 +147,44 @@ pub fn validate(allocator: std.mem.Allocator, original: ir.Program, candidate: i
             if (index >= function.inputs.len) return error.InvalidDeadArguments;
             const slot = function.inputs[index];
             const schema = function.layout.slots[@intCast(slot)];
-            if (!permissions.copy[@intCast(schema)] or !permissions.drop[@intCast(schema)] or flow.pool.contains(flow.live[@intCast(function.entry)][0], slot)) return error.InvalidDeadArguments;
+            if (!permissions.copy[
+                @intCast(schema)
+            ] or !permissions.drop[
+                @intCast(schema)
+            ] or flow.pool.contains(
+                flow.live[@intCast(function.entry)][0],
+                slot,
+            )) return error.InvalidDeadArguments;
         }
     }
+    try validateSubsequences(original, candidate, removals);
+}
+fn validateSubsequences(
+    original: ir.Program,
+    candidate: ir.Program,
+    removals: []const []const usize,
+) Error!void {
     for (original.functions, candidate.functions, removals) |before, after, removed| {
         var same = after;
         same.inputs = before.inputs;
-        if (!equal(ir.Function, before, same) or !subsequence(before.inputs, after.inputs, removed)) return error.InvalidDeadArguments;
+        if (!equal(ir.Function, before, same) or !subsequence(
+            before.inputs,
+            after.inputs,
+            removed,
+        )) return error.InvalidDeadArguments;
     }
     for (original.blocks, candidate.blocks) |before, after| {
         var same = after;
         if (before.terminator == .call) {
-            if (after.terminator != .call or after.terminator.call.function != before.terminator.call.function) return error.InvalidDeadArguments;
+            if (after.terminator != .call or
+                after.terminator.call.function != before.terminator.call.function)
+                return error.InvalidDeadArguments;
             const removed = removals[@intCast(before.terminator.call.function)];
-            if (!subsequence(before.terminator.call.arguments, after.terminator.call.arguments, removed)) return error.InvalidDeadArguments;
+            if (!subsequence(
+                before.terminator.call.arguments,
+                after.terminator.call.arguments,
+                removed,
+            )) return error.InvalidDeadArguments;
             same.terminator.call.arguments = before.terminator.call.arguments;
         }
         if (!equal(ir.Block, before, same)) return error.InvalidDeadArguments;

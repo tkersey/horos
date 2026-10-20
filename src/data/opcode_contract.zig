@@ -13,23 +13,96 @@ pub const Description = struct {
     failure_count_encoding: FailureCountEncoding,
     immediate_role: ImmediateRole,
 };
+const unary = representation(.{ .fixed = 1 }, &.{}, .implied_one, .numeric);
+const binary = representation(.{ .fixed = 2 }, &.{}, .implied_one, .numeric);
+const overflowing = representation(
+    .{ .fixed = 2 },
+    &.{.arithmetic_overflow},
+    .implied_one,
+    .numeric,
+);
+const division = representation(
+    .{ .fixed = 2 },
+    &.{ .arithmetic_overflow, .division_by_zero },
+    .implied_two,
+    .numeric,
+);
+
 pub fn describe(opcode: p.Opcode) Description {
     return switch (opcode) {
-        .constant => .{ .operand_encoding = .{ .fixed = 0 }, .possible_wire_faults = &.{}, .failure_count_encoding = .implied_one, .immediate_role = .constant },
-        .move, .boolean_not, .clone_resumption, .package, .unpack, .integer_bit_not, .enum_tag => .{ .operand_encoding = .{ .fixed = 1 }, .possible_wire_faults = &.{}, .failure_count_encoding = .implied_one, .immediate_role = .numeric },
-        .integer_add, .integer_sub, .integer_mul => .{ .operand_encoding = .{ .fixed = 2 }, .possible_wire_faults = &.{.arithmetic_overflow}, .failure_count_encoding = .implied_one, .immediate_role = .numeric },
-        .integer_div, .integer_rem => .{ .operand_encoding = .{ .fixed = 2 }, .possible_wire_faults = &.{ .arithmetic_overflow, .division_by_zero }, .failure_count_encoding = .implied_two, .immediate_role = .numeric },
-        .integer_bit_and, .integer_bit_or, .integer_bit_xor, .equal, .less => .{ .operand_encoding = .{ .fixed = 2 }, .possible_wire_faults = &.{}, .failure_count_encoding = .implied_one, .immediate_role = .numeric },
-        .integer_convert => .{ .operand_encoding = .{ .fixed = 1 }, .possible_wire_faults = &.{.arithmetic_overflow}, .failure_count_encoding = .implied_one, .immediate_role = .numeric },
-        .variant_payload => .{ .operand_encoding = .counted, .possible_wire_faults = &.{.invalid_variant}, .failure_count_encoding = .implied_one, .immediate_role = .numeric },
-        .sequence_set => .{ .operand_encoding = .counted, .possible_wire_faults = &.{.invalid_index}, .failure_count_encoding = .implied_one, .immediate_role = .numeric },
-        .sequence_append, .sequence_concat, .blob_concat => .{ .operand_encoding = .counted, .possible_wire_faults = &.{.capacity_exceeded}, .failure_count_encoding = .implied_one, .immediate_role = .numeric },
-        .blob_slice => .{ .operand_encoding = .counted, .possible_wire_faults = &.{ .capacity_exceeded, .invalid_utf8 }, .failure_count_encoding = .counted, .immediate_role = .numeric },
-        .text_scalar => .{ .operand_encoding = .counted, .possible_wire_faults = &.{.invalid_utf8}, .failure_count_encoding = .implied_one, .immediate_role = .numeric },
-        .computation => .{ .operand_encoding = .counted, .possible_wire_faults = &.{}, .failure_count_encoding = .implied_one, .immediate_role = .constructor },
-        .product, .field, .variant, .variant_tag, .sequence, .sequence_length, .sequence_get, .sequence_pop, .cell_new, .cell_get, .cell_set, .resource_pack, .resource_unpack, .blob_length, .blob_compare, .blob_byte, .text_integer, .sequence_take, .blob_from_byte, .sequence_pop_last, .select => .{ .operand_encoding = .counted, .possible_wire_faults = &.{}, .failure_count_encoding = .implied_one, .immediate_role = .numeric },
+        .constant => representation(.{ .fixed = 0 }, &.{}, .implied_one, .constant),
+        .move,
+        .boolean_not,
+        .clone_resumption,
+        .package,
+        .unpack,
+        .integer_bit_not,
+        .enum_tag,
+        => unary,
+        .integer_add, .integer_sub, .integer_mul => overflowing,
+        .integer_div, .integer_rem => division,
+        .integer_bit_and, .integer_bit_or, .integer_bit_xor, .equal, .less => binary,
+        .integer_convert => representation(
+            .{ .fixed = 1 },
+            &.{.arithmetic_overflow},
+            .implied_one,
+            .numeric,
+        ),
+        .variant_payload => representation(.counted, &.{.invalid_variant}, .implied_one, .numeric),
+        .sequence_set => representation(.counted, &.{.invalid_index}, .implied_one, .numeric),
+        .sequence_append, .sequence_concat, .blob_concat => representation(
+            .counted,
+            &.{.capacity_exceeded},
+            .implied_one,
+            .numeric,
+        ),
+        .blob_slice => representation(
+            .counted,
+            &.{ .capacity_exceeded, .invalid_utf8 },
+            .counted,
+            .numeric,
+        ),
+        .text_scalar => representation(.counted, &.{.invalid_utf8}, .implied_one, .numeric),
+        .computation => representation(.counted, &.{}, .implied_one, .constructor),
+        .product,
+        .field,
+        .variant,
+        .variant_tag,
+        .sequence,
+        .sequence_length,
+        .sequence_get,
+        .sequence_pop,
+        .cell_new,
+        .cell_get,
+        .cell_set,
+        .resource_pack,
+        .resource_unpack,
+        .blob_length,
+        .blob_compare,
+        .blob_byte,
+        .text_integer,
+        .sequence_take,
+        .blob_from_byte,
+        .sequence_pop_last,
+        .select,
+        => representation(.counted, &.{}, .implied_one, .numeric),
     };
 }
+
+fn representation(
+    operands: OperandEncoding,
+    faults: []const p.Fault,
+    failures: FailureCountEncoding,
+    immediate: ImmediateRole,
+) Description {
+    return .{
+        .operand_encoding = operands,
+        .possible_wire_faults = faults,
+        .failure_count_encoding = failures,
+        .immediate_role = immediate,
+    };
+}
+
 test "opcode representation description analyzes every current numeric tag" {
     inline for (std.meta.tags(p.Opcode)) |opcode| {
         const description = describe(opcode);

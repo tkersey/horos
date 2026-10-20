@@ -9,10 +9,24 @@ const p01 = @import("coalescing.zig");
 const image = @import("program_image.zig");
 const equal = @import("record_equal.zig").equal;
 const profiles = @import("optimization_profile.zig");
-pub const Error = branches.Error || profiles.Error || error{ InvalidTailDuplication, TailDuplicationLimit };
-pub const Options = struct { work_limit: u64 = 1_000_000, max_copies: usize = 16, max_instructions: usize = 8, max_added_bytes: usize = 4096, profile: ?profiles.Record = null, coalescing: p01.Options = .{} };
+pub const Error = branches.Error || profiles.Error || error{
+    InvalidTailDuplication,
+    TailDuplicationLimit,
+};
+pub const Options = struct {
+    work_limit: u64 = 1_000_000,
+    max_copies: usize = 16,
+    max_instructions: usize = 8,
+    max_added_bytes: usize = 4096,
+    profile: ?profiles.Record = null,
+    coalescing: p01.Options = .{},
+};
 pub const Witness = struct { predecessor: usize, tail: usize, copy: usize, condition: bool };
-pub const Statistics = struct { copies: usize = 0, exposed_branches: usize = 0, work_limit: bool = false };
+pub const Statistics = struct {
+    copies: usize = 0,
+    exposed_branches: usize = 0,
+    work_limit: bool = false,
+};
 pub const Candidate = struct {
     arena: std.heap.ArenaAllocator,
     program: ir.Program,
@@ -36,7 +50,10 @@ fn incoming(program: ir.Program, target: usize, budget: *Budget) Error!usize {
         switch (block.terminator) {
             .return_value, .fail => {},
             .jump, .yield_value => |edge| count += @intFromBool(edge.block == target),
-            .branch => |branch| count += @intFromBool(branch.when_true.block == target) + @as(usize, @intFromBool(branch.when_false.block == target)),
+            .branch => |branch| count += @intFromBool(branch.when_true.block == target) + @as(
+                usize,
+                @intFromBool(branch.when_false.block == target),
+            ),
             .switch_variant => |branch| for (branch.cases) |edge| {
                 try budget.tick();
                 count += @intFromBool(edge.block == target);
@@ -46,13 +63,23 @@ fn incoming(program: ir.Program, target: usize, budget: *Budget) Error!usize {
     }
     return count;
 }
-fn selected(program: ir.Program, predecessor: usize, options: Options, proof: *origin.Prover, budget: *Budget) Error!?bool {
+fn selected(
+    program: ir.Program,
+    predecessor: usize,
+    options: Options,
+    proof: *origin.Prover,
+    budget: *Budget,
+) Error!?bool {
     try budget.tick();
     const block = program.blocks[predecessor];
     if (block.terminator != .jump) return null;
     const edge = block.terminator.jump;
     const tail = program.blocks[@intCast(edge.block)];
-    if (tail.function != block.function or tail.custody != block.custody or tail.terminator != .branch or tail.instructions.len > options.max_instructions) return null;
+    if (tail.function != block.function or
+        tail.custody != block.custody or
+        tail.terminator != .branch or
+        tail.instructions.len > options.max_instructions)
+        return null;
     if (try incoming(program, @intCast(edge.block), budget) < 2) return null;
     const condition = tail.terminator.branch.condition;
     for (tail.instructions) |op| {
@@ -74,10 +101,16 @@ fn selected(program: ir.Program, predecessor: usize, options: Options, proof: *o
     return if (certified == .boolean) certified.boolean else null;
 }
 pub fn possible(program: ir.Program) bool {
-    for (program.blocks) |block| if (block.terminator == .jump and program.blocks[@intCast(block.terminator.jump.block)].terminator == .branch) return true;
+    for (program.blocks) |block| if (block.terminator == .jump and program.blocks[
+        @intCast(block.terminator.jump.block)
+    ].terminator == .branch) return true;
     return false;
 }
-pub fn construct(allocator: std.mem.Allocator, original: ir.Program, options: Options) Error!?Candidate {
+pub fn construct(
+    allocator: std.mem.Allocator,
+    original: ir.Program,
+    options: Options,
+) Error!?Candidate {
     if (options.profile) |record| try profiles.validate(allocator, original, record);
     var admitted = try ownership.analyze(allocator, original);
     defer admitted.deinit();
@@ -86,11 +119,19 @@ pub fn construct(allocator: std.mem.Allocator, original: ir.Program, options: Op
     defer if (!keep) arena.deinit();
     const a = arena.allocator();
     var budget: Budget = .{ .left = options.work_limit };
-    var proof: origin.Prover = .{ .allocator = a, .program = original, .work_limit = options.work_limit };
+    var proof: origin.Prover = .{
+        .allocator = a,
+        .program = original,
+        .work_limit = options.work_limit,
+    };
     defer proof.deinit();
     var witnesses: std.ArrayList(Witness) = .empty;
     const order = if (options.profile) |record| blk: {
-        const charge = std.math.mul(u64, original.blocks.len, original.blocks.len) catch return error.TailDuplicationLimit;
+        const charge = std.math.mul(
+            u64,
+            original.blocks.len,
+            original.blocks.len,
+        ) catch return error.TailDuplicationLimit;
         if (charge > budget.left) return error.TailDuplicationLimit;
         budget.left -= charge;
         break :blk try profiles.orderedBlocks(a, original, record);
@@ -103,7 +144,15 @@ pub fn construct(allocator: std.mem.Allocator, original: ir.Program, options: Op
             if (options.profile != null) break;
             return error.TailDuplicationLimit;
         }
-        try witnesses.append(a, .{ .predecessor = bid, .tail = @intCast(block.terminator.jump.block), .copy = original.blocks.len + witnesses.items.len, .condition = condition });
+        try witnesses.append(
+            a,
+            .{
+                .predecessor = bid,
+                .tail = @intCast(block.terminator.jump.block),
+                .copy = original.blocks.len + witnesses.items.len,
+                .condition = condition,
+            },
+        );
     }
     if (witnesses.items.len == 0) return null;
     const blocks = try a.alloc(ir.Block, original.blocks.len + witnesses.items.len);
@@ -116,31 +165,58 @@ pub fn construct(allocator: std.mem.Allocator, original: ir.Program, options: Op
     program.blocks = blocks;
     const before = try image.encodedLength(original);
     const after = try image.encodedLength(program);
-    if (after > before and after - before > options.max_added_bytes) return error.TailDuplicationLimit;
+    if (after > before and
+        after - before > options.max_added_bytes)
+        return error.TailDuplicationLimit;
     const list = try witnesses.toOwnedSlice(a);
     keep = true;
     return .{ .arena = arena, .program = program, .witnesses = list };
 }
-pub fn validate(allocator: std.mem.Allocator, original: ir.Program, candidate: ir.Program, witnesses: []const Witness, options: Options) Error!void {
+pub fn validate(
+    allocator: std.mem.Allocator,
+    original: ir.Program,
+    candidate: ir.Program,
+    witnesses: []const Witness,
+    options: Options,
+) Error!void {
     var before = try ownership.analyze(allocator, original);
     defer before.deinit();
     var after = try ownership.analyze(allocator, candidate);
     defer after.deinit();
-    if (candidate.blocks.len != original.blocks.len + witnesses.len) return error.InvalidTailDuplication;
+    if (candidate.blocks.len != original.blocks.len + witnesses.len)
+        return error.InvalidTailDuplication;
     var unchanged = candidate;
     unchanged.blocks = original.blocks;
     if (!equal(ir.Program, original, unchanged)) return error.InvalidTailDuplication;
-    var proof: origin.Prover = .{ .allocator = allocator, .program = original, .work_limit = options.work_limit };
+    var proof: origin.Prover = .{
+        .allocator = allocator,
+        .program = original,
+        .work_limit = options.work_limit,
+    };
     defer proof.deinit();
     var budget: Budget = .{ .left = options.work_limit };
     for (witnesses, 0..) |witness, index| {
         try budget.tick();
-        if (witness.predecessor >= original.blocks.len or witness.tail >= original.blocks.len or witness.copy != original.blocks.len + index) return error.InvalidTailDuplication;
-        for (witnesses[0..index]) |earlier| if (earlier.predecessor == witness.predecessor) return error.InvalidTailDuplication;
+        if (witness.predecessor >= original.blocks.len or
+            witness.tail >= original.blocks.len or
+            witness.copy != original.blocks.len + index)
+            return error.InvalidTailDuplication;
+        for (witnesses[0..index]) |earlier|
+            if (earlier.predecessor == witness.predecessor)
+                return error.InvalidTailDuplication;
         const predecessor = original.blocks[witness.predecessor];
         const tail = original.blocks[witness.tail];
-        if (predecessor.terminator != .jump or predecessor.terminator.jump.block != witness.tail or !equal(ir.Block, tail, candidate.blocks[witness.copy])) return error.InvalidTailDuplication;
-        const condition = (try selected(original, witness.predecessor, options, &proof, &budget)) orelse return error.InvalidTailDuplication;
+        if (predecessor.terminator != .jump or
+            predecessor.terminator.jump.block != witness.tail or
+            !equal(ir.Block, tail, candidate.blocks[witness.copy]))
+            return error.InvalidTailDuplication;
+        const condition = (try selected(
+            original,
+            witness.predecessor,
+            options,
+            &proof,
+            &budget,
+        )) orelse return error.InvalidTailDuplication;
         if (condition != witness.condition) return error.InvalidTailDuplication;
     }
     for (original.blocks, candidate.blocks[0..original.blocks.len], 0..) |old, new, bid| {
@@ -150,14 +226,21 @@ pub fn validate(allocator: std.mem.Allocator, original: ir.Program, candidate: i
             witness = item;
         };
         if (witness) |item| {
-            if (new.terminator != .jump or new.terminator.jump.block != item.copy) return error.InvalidTailDuplication;
+            if (new.terminator != .jump or
+                new.terminator.jump.block != item.copy)
+                return error.InvalidTailDuplication;
             var restored = new;
             restored.terminator.jump.block = old.terminator.jump.block;
             if (!equal(ir.Block, old, restored)) return error.InvalidTailDuplication;
         } else if (!equal(ir.Block, old, new)) return error.InvalidTailDuplication;
     }
 }
-pub fn run(allocator: std.mem.Allocator, original: ir.Program, statistics: ?*Statistics, options: Options) Error!p01.Owned {
+pub fn run(
+    allocator: std.mem.Allocator,
+    original: ir.Program,
+    statistics: ?*Statistics,
+    options: Options,
+) Error!p01.Owned {
     var stats: Statistics = .{};
     defer if (statistics) |out| {
         out.* = stats;
@@ -170,7 +253,13 @@ pub fn run(allocator: std.mem.Allocator, original: ir.Program, statistics: ?*Sta
         else => return err,
     }) orelse return p01.run(allocator, original, options.coalescing);
     defer candidate.deinit();
-    validate(allocator, original, candidate.program, candidate.witnesses, options) catch |err| switch (err) {
+    validate(
+        allocator,
+        original,
+        candidate.program,
+        candidate.witnesses,
+        options,
+    ) catch |err| switch (err) {
         error.TailDuplicationLimit => {
             stats.work_limit = true;
             return p01.run(allocator, original, options.coalescing);
@@ -180,7 +269,12 @@ pub fn run(allocator: std.mem.Allocator, original: ir.Program, statistics: ?*Sta
     // Fresh facts and the existing independent branch checker consume the copies
     // before common-tail sharing can fold them back together.
     var branch_stats: branches.Statistics = .{};
-    var result = branches.run(allocator, candidate.program, &branch_stats, options.coalescing) catch |err| switch (err) {
+    var result = branches.run(
+        allocator,
+        candidate.program,
+        &branch_stats,
+        options.coalescing,
+    ) catch |err| switch (err) {
         error.SemanticWorkLimit => {
             stats.work_limit = true;
             return p01.run(allocator, original, options.coalescing);

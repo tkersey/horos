@@ -46,6 +46,16 @@ if ! bash "$launcher" "$base" HEAD > "$scratch/result" 2>&1; then
 fi
 grep -Fq 'TigerStyle passed:' "$scratch/result"
 valid=$(git rev-parse HEAD)
+expect_failure 'tiger-style/loop-bound' --all HEAD
+
+printf 'fn legacy() void {}\n' > legacy.zig
+commit_fixture whole-file-valid
+if ! bash "$launcher" --all HEAD > "$scratch/result" 2>&1; then
+    cat "$scratch/result" >&2
+    exit 1
+fi
+grep -Fq 'TigerStyle passed:' "$scratch/result"
+git reset --quiet --hard "$valid"
 
 expect_failure 'requires HEAD to be the requested candidate' "$base" "$base"
 expect_failure 'Needed a single revision' tiger-style-missing-revision HEAD
@@ -78,5 +88,6 @@ rm existing.zig
 ln -s source.txt existing.zig
 commit_fixture source-type
 expect_failure 'cannot audit changed Zig file types' "$base" HEAD
+expect_failure 'requires regular tracked Zig files' --all HEAD
 
-printf 'TigerStyle integration passed: legacy debt, valid change, added-line/new-file rejection, revisions, index/worktree, binary/type changes.\n'
+printf 'TigerStyle integration passed: full-source and diff audits, revisions, index/worktree, binary/type changes.\n'

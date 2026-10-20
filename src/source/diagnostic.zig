@@ -34,7 +34,12 @@ pub const CaptureObserver = struct {
     capture: *const fn (*anyopaque, *const data.activation_ownership.CaptureSite, p.Id) void,
     closure: *const fn (*anyopaque, p.Id, p.Id) void,
     /// Borrowed presentation; copy it to retain it after compile returns.
-    explanation: ?*const fn (*anyopaque, *const data.activation_ownership.CaptureSite, p.Id, ?data.activation_ownership.CaptureExplanation) void = null,
+    explanation: ?*const fn (
+        *anyopaque,
+        *const data.activation_ownership.CaptureSite,
+        p.Id,
+        ?data.activation_ownership.CaptureExplanation,
+    ) void = null,
 };
 pub const Options = struct {
     diagnostic: ?*Diagnostic = null,
@@ -58,7 +63,10 @@ pub const Options = struct {
     compilation_observer: ?data.closed_compilation.Observer = null,
 
     pub fn resetObservations(self: Options) void {
-        const compilation: data.closed_compilation.Options = .{ .statistics = self.semantic_statistics, .coalescing = self.coalescing };
+        const compilation: data.closed_compilation.Options = .{
+            .statistics = self.semantic_statistics,
+            .coalescing = self.coalescing,
+        };
         compilation.resetObservations();
         if (self.diagnostic) |diagnostic| diagnostic.* = .{};
     }

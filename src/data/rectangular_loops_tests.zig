@@ -9,15 +9,78 @@ pub const base: ir.Program = .{
     .roots = .{ .entry = 0, .result = 0, .failure = 1 },
     .schemas = &.{ .u64, .unit, .boolean },
     .effects = &.{},
-    .constants = &.{ .{ .schema = 0, .bytes = &.{ 8, 0, 0, 0, 0, 0, 0, 0 } }, .{ .schema = 0, .bytes = &.{ 2, 0, 0, 0, 0, 0, 0, 0 } }, .{ .schema = 0, .bytes = &.{ 0, 0, 0, 0, 0, 0, 0, 0 } }, .{ .schema = 0, .bytes = &.{ 1, 0, 0, 0, 0, 0, 0, 0 } }, .{ .schema = 1, .bytes = &.{} } },
-    .functions = &.{.{ .entry = 0, .inputs = &.{}, .layout = .{ .slots = &.{ 0, 0, 0, 0, 0, 0, 2, 0 } }, .result = 0 }},
+    .constants = &.{
+        .{ .schema = 0, .bytes = &.{ 8, 0, 0, 0, 0, 0, 0, 0 } },
+        .{ .schema = 0, .bytes = &.{ 2, 0, 0, 0, 0, 0, 0, 0 } },
+        .{ .schema = 0, .bytes = &.{ 0, 0, 0, 0, 0, 0, 0, 0 } },
+        .{ .schema = 0, .bytes = &.{ 1, 0, 0, 0, 0, 0, 0, 0 } },
+        .{ .schema = 1, .bytes = &.{} },
+    },
+    .functions = &.{.{
+        .entry = 0,
+        .inputs = &.{},
+        .layout = .{ .slots = &.{ 0, 0, 0, 0, 0, 0, 2, 0 } },
+        .result = 0,
+    }},
     .blocks = &.{
-        .{ .function = 0, .instructions = &.{ .{ .destination = 0, .opcode = .constant, .immediate = 0 }, .{ .destination = 1, .opcode = .constant, .immediate = 1 }, .{ .destination = 2, .opcode = .constant, .immediate = 2 }, .{ .destination = 4, .opcode = .constant, .immediate = 2 }, .{ .destination = 5, .opcode = .constant, .immediate = 3 } }, .terminator = .{ .jump = .{ .block = 1 } } },
-        .{ .function = 0, .instructions = &.{.{ .destination = 6, .opcode = .less, .operands = &.{ 2, 0 } }}, .terminator = .{ .branch = .{ .condition = 6, .when_true = .{ .block = 2 }, .when_false = .{ .block = 6 } } } },
-        .{ .function = 0, .instructions = &.{.{ .destination = 3, .opcode = .constant, .immediate = 2 }}, .terminator = .{ .jump = .{ .block = 3 } } },
-        .{ .function = 0, .instructions = &.{.{ .destination = 6, .opcode = .less, .operands = &.{ 3, 1 } }}, .terminator = .{ .branch = .{ .condition = 6, .when_true = .{ .block = 4 }, .when_false = .{ .block = 5 } } } },
-        .{ .function = 0, .instructions = &.{ .{ .destination = 7, .opcode = .integer_bit_xor, .operands = &.{ 2, 3 } }, .{ .destination = 4, .opcode = .integer_bit_xor, .operands = &.{ 4, 7 } }, .{ .destination = 3, .opcode = .integer_add, .operands = &.{ 3, 5 }, .failures = &.{.{ .kind = .arithmetic_overflow, .value = 4 }} } }, .terminator = .{ .jump = .{ .block = 3 } } },
-        .{ .function = 0, .instructions = &.{.{ .destination = 2, .opcode = .integer_add, .operands = &.{ 2, 5 }, .failures = &.{.{ .kind = .arithmetic_overflow, .value = 4 }} }}, .terminator = .{ .jump = .{ .block = 1 } } },
+        .{
+            .function = 0,
+            .instructions = &.{
+                .{ .destination = 0, .opcode = .constant, .immediate = 0 },
+                .{ .destination = 1, .opcode = .constant, .immediate = 1 },
+                .{ .destination = 2, .opcode = .constant, .immediate = 2 },
+                .{ .destination = 4, .opcode = .constant, .immediate = 2 },
+                .{ .destination = 5, .opcode = .constant, .immediate = 3 },
+            },
+            .terminator = .{ .jump = .{ .block = 1 } },
+        },
+        .{
+            .function = 0,
+            .instructions = &.{.{ .destination = 6, .opcode = .less, .operands = &.{ 2, 0 } }},
+            .terminator = .{ .branch = .{
+                .condition = 6,
+                .when_true = .{ .block = 2 },
+                .when_false = .{ .block = 6 },
+            } },
+        },
+        .{
+            .function = 0,
+            .instructions = &.{.{ .destination = 3, .opcode = .constant, .immediate = 2 }},
+            .terminator = .{ .jump = .{ .block = 3 } },
+        },
+        .{
+            .function = 0,
+            .instructions = &.{.{ .destination = 6, .opcode = .less, .operands = &.{ 3, 1 } }},
+            .terminator = .{ .branch = .{
+                .condition = 6,
+                .when_true = .{ .block = 4 },
+                .when_false = .{ .block = 5 },
+            } },
+        },
+        .{
+            .function = 0,
+            .instructions = &.{
+                .{ .destination = 7, .opcode = .integer_bit_xor, .operands = &.{ 2, 3 } },
+                .{ .destination = 4, .opcode = .integer_bit_xor, .operands = &.{ 4, 7 } },
+                .{
+                    .destination = 3,
+                    .opcode = .integer_add,
+                    .operands = &.{ 3, 5 },
+                    .failures = &.{.{ .kind = .arithmetic_overflow, .value = 4 }},
+                },
+            },
+            .terminator = .{ .jump = .{ .block = 3 } },
+        },
+        .{
+            .function = 0,
+            .instructions = &.{.{
+                .destination = 2,
+                .opcode = .integer_add,
+                .operands = &.{ 2, 5 },
+                .failures = &.{.{ .kind = .arithmetic_overflow, .value = 4 }},
+            }},
+            .terminator = .{ .jump = .{ .block = 1 } },
+        },
         .{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 4 } },
     },
 };
@@ -35,13 +98,40 @@ pub fn rectangle(allocator: std.mem.Allocator, rows: u64, columns: u64) !ir.Prog
 
 pub fn aliasedRectangle(allocator: std.mem.Allocator) !ir.Program {
     var result = base;
-    result.schemas = &.{ .u64, .unit, .boolean, .{ .internal = .{ .region = 0 } }, .{ .internal = .{ .cell = .{ .element = 0, .region = 0 } } }, .{ .internal = .{ .computation = .{ .parameters = &.{3}, .result = 0, .use = .reusable, .regions = &.{0} } } } };
+    result.schemas = &.{
+        .u64,
+        .unit,
+        .boolean,
+        .{ .internal = .{ .region = 0 } },
+        .{ .internal = .{ .cell = .{ .element = 0, .region = 0 } } },
+        .{ .internal = .{ .computation = .{
+            .parameters = &.{3},
+            .result = 0,
+            .use = .reusable,
+            .regions = &.{0},
+        } } },
+    };
     result.functions = &.{
         .{ .entry = 0, .inputs = &.{}, .layout = .{ .slots = &.{ 5, 0 } }, .result = 0 },
-        .{ .entry = 2, .inputs = &.{8}, .layout = .{ .slots = &.{ 0, 0, 0, 0, 0, 0, 2, 0, 3, 4, 4, 1, 0 } }, .result = 0, .regions = &.{0} },
+        .{
+            .entry = 2,
+            .inputs = &.{8},
+            .layout = .{ .slots = &.{ 0, 0, 0, 0, 0, 0, 2, 0, 3, 4, 4, 1, 0 } },
+            .result = 0,
+            .regions = &.{0},
+        },
     };
     const blocks = try allocator.alloc(ir.Block, 9);
-    blocks[0] = .{ .function = 0, .instructions = &.{.{ .destination = 0, .opcode = .computation, .immediate = 0 }}, .terminator = .{ .with_region = .{ .region = 0, .body = 0, .arguments = &.{}, .next = .{ .block = 1, .assignments = &.{.{ .destination = 1, .source = .returned }} } } } };
+    blocks[0] = .{
+        .function = 0,
+        .instructions = &.{.{ .destination = 0, .opcode = .computation, .immediate = 0 }},
+        .terminator = .{ .with_region = .{
+            .region = 0,
+            .body = 0,
+            .arguments = &.{},
+            .next = .{ .block = 1, .assignments = &.{.{ .destination = 1, .source = .returned }} },
+        } },
+    };
     blocks[1] = .{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 1 } };
     for (base.blocks, 0..) |source, id| {
         blocks[id + 2] = source;
@@ -81,7 +171,11 @@ test "admitted rectangular iteration through a mutable alias is outside reorderi
     var admitted = try own.analyze(a, original);
     admitted.deinit();
     try std.testing.expect(try pass.construct(a, original, .{}) == null);
-    try std.testing.expect(try @import("rectangular_tiling.zig").construct(a, original, .{}) == null);
+    try std.testing.expect(try @import("rectangular_tiling.zig").construct(
+        a,
+        original,
+        .{},
+    ) == null);
 }
 test "checked interchange preserves the rectangular domain and lowers outer control work" {
     var candidate = (try pass.construct(a, base, .{})).?;
@@ -128,7 +222,10 @@ test "an admitted changed reduction cannot masquerade as interchange" {
     forged.blocks = blocks;
     var admitted = try own.analyze(a, forged);
     admitted.deinit();
-    try std.testing.expectError(error.InvalidRectangularLoop, pass.validate(a, base, forged, candidate.shape, .{}));
+    try std.testing.expectError(
+        error.InvalidRectangularLoop,
+        pass.validate(a, base, forged, candidate.shape, .{}),
+    );
 }
 
 fn allocationAttempt(allocator: std.mem.Allocator) !void {
@@ -143,5 +240,9 @@ test "interchange allocation cleanup and deterministic work rollback retain admi
     try std.testing.expect(stats.work_limit);
     var baseline = try @import("coalescing.zig").run(a, base, .{});
     defer baseline.deinit();
-    try std.testing.expect(@import("record_equal.zig").equal(ir.Program, baseline.program, limited.program));
+    try std.testing.expect(@import("record_equal.zig").equal(
+        ir.Program,
+        baseline.program,
+        limited.program,
+    ));
 }

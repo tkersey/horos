@@ -22,9 +22,30 @@ test "current compact ID sequences preserve literals and full-width IDs" {
     try sequenceRoundTrip(p.Id, &.{ 5, 5, 5, 5, 5, 0, 1, 2, 3, 4, 1, 8, 1 });
 }
 test "range endpoint and expanded allocation overflow reject before expansion" {
-    var reader: wire.Reader = .{ .input = &.{ 3, 1, 2, 3, 255, 255, 255, 255, 255, 255, 255, 255, 255, 1 } };
+    var reader: wire.Reader = .{ .input = &.{
+        3,
+        1,
+        2,
+        3,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        1,
+    } };
     var requested: usize = 0;
-    try std.testing.expectError(error.InvalidLength, sequence.read(p.Id, false, &reader, std.testing.allocator, &requested));
+    try std.testing.expectError(
+        error.InvalidLength,
+        sequence.read(p.Id, false, &reader, std.testing.allocator, &requested),
+    );
     reader = .{ .input = &.{ 255, 255, 255, 255, 255, 255, 255, 255, 255, 1 } };
-    try std.testing.expectError(error.InvalidLength, sequence.read(p.Id, false, &reader, std.testing.allocator, &requested));
+    try std.testing.expectError(
+        error.InvalidLength,
+        sequence.read(p.Id, false, &reader, std.testing.allocator, &requested),
+    );
 }

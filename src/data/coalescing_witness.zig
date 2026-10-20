@@ -35,7 +35,14 @@ pub fn checkDomains(
     const before = try relocation.sizes(original);
     const after = try relocation.sizes(candidate);
     for (witness.representatives, witness.final, 0..) |representatives, final, kind| {
-        try checkCatalog(a, representatives, final, before[kind], after[kind], @fromBackingInt(@intCast(kind)));
+        try checkCatalog(
+            a,
+            representatives,
+            final,
+            before[kind],
+            after[kind],
+            @fromBackingInt(@intCast(kind)),
+        );
     }
     try checkPins(a, original, witness);
     if (witness.locals.len != original.functions.len) return error.InvalidCorrespondence;

@@ -15,9 +15,17 @@ fn Forward(comptime adjustment: u64, comptime lazy: bool) type {
             // Even the lazy case emits a real query; only demand may enter its peer.
             const ask = try q.ask(b, q.state);
             const result = if (lazy) q.state else try add(b, q.state, try b.reference(answer));
-            const final = if (adjustment == 0) result else try add(b, result, try b.constant(u64, adjustment));
+            const final = if (adjustment == 0) result else try add(
+                b,
+                result,
+                try b.constant(u64, adjustment),
+            );
             const done = try b.pure(final);
-            const body = if (lazy) done else try b.bind(answer, try hyper.force(b, try b.reference(delayed)), done);
+            const body = if (lazy) done else try b.bind(
+                answer,
+                try hyper.force(b, try b.reference(delayed)),
+                done,
+            );
             try b.define(thunk, try b.bind(delayed, ask, body));
             return b.pure(try b.lambda(thunk, q.types.answer_forward));
         }
@@ -58,9 +66,26 @@ pub fn build(b: *source.Builder, kind: Kind) !source.Module {
         try b.define(peer_function, try hyper.start(b, peer, try b.constant(u64, 10)));
     }
     const delayed_peer = try b.lambda(peer_function, types.peer_backward);
-    const result = try b.pure(try b.primitive(pair, .product, &.{ try b.reference(left), try b.reference(right) }, 0));
-    const second_call = try observe(b, types, second, try b.reference(b.parameter(main, 1)), delayed_peer);
-    const first_call = try observe(b, types, first, try b.reference(b.parameter(main, 0)), delayed_peer);
+    const result = try b.pure(try b.primitive(
+        pair,
+        .product,
+        &.{ try b.reference(left), try b.reference(right) },
+        0,
+    ));
+    const second_call = try observe(
+        b,
+        types,
+        second,
+        try b.reference(b.parameter(main, 1)),
+        delayed_peer,
+    );
+    const first_call = try observe(
+        b,
+        types,
+        first,
+        try b.reference(b.parameter(main, 0)),
+        delayed_peer,
+    );
     try b.define(main, try b.bind(left, first_call, try b.bind(right, second_call, result)));
     return b.module(main, try b.scalar(void));
 }
@@ -69,13 +94,20 @@ fn observe(b: *source.Builder, types: hyper.Pair, definition: hyper.Ana, state: 
     const participant = try b.variable(types.forward);
     const result = try b.variable(types.answer_forward);
     const invoke = try hyper.invoke(b, try b.reference(participant), peer);
-    return b.bind(participant, try hyper.start(b, definition, state), try b.bind(result, invoke, try hyper.force(b, try b.reference(result))));
+    return b.bind(
+        participant,
+        try hyper.start(b, definition, state),
+        try b.bind(result, invoke, try hyper.force(b, try b.reference(result))),
+    );
 }
 
 fn add(b: *source.Builder, left: Id, right: Id) !Id {
     return b.value(.{ .schema = try b.scalar(u64), .expression = .{ .primitive = .{
         .opcode = .integer_add,
         .operands = &.{ left, right },
-        .failures = &.{.{ .kind = .arithmetic_overflow, .value = try b.failureLiteral(try b.constant(void, {})) }},
+        .failures = &.{.{
+            .kind = .arithmetic_overflow,
+            .value = try b.failureLiteral(try b.constant(void, {})),
+        }},
     } } });
 }

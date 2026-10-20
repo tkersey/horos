@@ -4,7 +4,20 @@ const source = @import("../source.zig");
 const p = @import("horos_data").program;
 const Error = source.Error;
 pub const count = 12;
-const Kind = enum { binding, branch, call, apply, temporary_binding, temporary_branch, temporary_call, temporary_apply, returned_owner, match_payload, unpack_payload, unpack_operand };
+const Kind = enum {
+    binding,
+    branch,
+    call,
+    apply,
+    temporary_binding,
+    temporary_branch,
+    temporary_call,
+    temporary_apply,
+    returned_owner,
+    match_payload,
+    unpack_payload,
+    unpack_operand,
+};
 
 pub fn scenario(b: *source.Builder, index: usize, fail: bool) Error!p.Id {
     const kind: Kind = @fromBackingInt(@intCast(index));
@@ -30,31 +43,38 @@ pub fn scenario(b: *source.Builder, index: usize, fail: bool) Error!p.Id {
     return caller;
 }
 
-fn expression(b: *source.Builder, kind: Kind, integer: p.Id, queue: p.Id, empty: p.Id, length: p.Id) Error!p.Id {
+fn expression(
+    b: *source.Builder,
+    kind: Kind,
+    integer: p.Id,
+    queue: p.Id,
+    empty: p.Id,
+    length: p.Id,
+) Error!p.Id {
     const ordinary = try b.pure(try b.constant(u64, 3));
     switch (kind) {
         .binding, .temporary_binding => return b.pure(length),
         .branch, .temporary_branch => return b.term(.{ .conditional = .{
-            .condition = try b.primitive(try b.scalar(bool), .equal, &.{ length, try b.constant(u64, 0) }, 0),
+            .condition = try b.primitive(
+                try b.scalar(bool),
+                .equal,
+                &.{ length, try b.constant(u64, 0) },
+                0,
+            ),
             .when_true = try b.pure(try b.constant(u64, 1)),
             .when_false = try b.pure(try b.constant(u64, 2)),
         } }),
         .call, .temporary_call, .apply, .temporary_apply => {
-            const identity = try b.declare(&.{integer}, integer, &.{}, &.{});
-            try b.define(identity, try b.pure(try b.reference(b.parameter(identity, 0))));
-            if (kind == .call or kind == .temporary_call)
-                return b.term(.{ .call = .{ .function = identity, .arguments = &.{length} } });
-            const signature = try b.schema(.{ .internal = .{ .computation = .{
-                .parameters = &.{integer},
-                .result = integer,
-                .effects = &.{},
-            } } });
-            return b.term(.{ .apply = .{ .computation = try b.lambda(identity, signature), .arguments = &.{length} } });
+            return invokeIdentity(b, kind, integer, length);
         },
         .returned_owner => {
             const factory = try b.declare(&.{}, queue, &.{}, &.{});
             try b.define(factory, try b.pure(empty));
-            return b.bind(try b.variable(queue), try b.term(.{ .call = .{ .function = factory, .arguments = &.{} } }), ordinary);
+            return b.bind(
+                try b.variable(queue),
+                try b.term(.{ .call = .{ .function = factory, .arguments = &.{} } }),
+                ordinary,
+            );
         },
         .match_payload => {
             const unit = try b.scalar(void);
@@ -71,10 +91,36 @@ fn expression(b: *source.Builder, kind: Kind, integer: p.Id, queue: p.Id, empty:
             const schema = if (kind == .unpack_payload) queue else integer;
             const product = try b.schema(.{ .product = &.{schema} });
             return b.term(.{ .unpack_product = .{
-                .value = try b.primitive(product, .product, &.{if (kind == .unpack_payload) empty else length}, 0),
+                .value = try b.primitive(
+                    product,
+                    .product,
+                    &.{if (kind == .unpack_payload) empty else length},
+                    0,
+                ),
                 .variables = &.{try b.variable(schema)},
                 .body = ordinary,
             } });
         },
     }
+}
+
+fn invokeIdentity(
+    b: *source.Builder,
+    kind: Kind,
+    integer: p.Id,
+    length: p.Id,
+) source.Error!p.Id {
+    const identity = try b.declare(&.{integer}, integer, &.{}, &.{});
+    try b.define(identity, try b.pure(try b.reference(b.parameter(identity, 0))));
+    if (kind == .call or kind == .temporary_call)
+        return b.term(.{ .call = .{ .function = identity, .arguments = &.{length} } });
+    const signature = try b.schema(.{ .internal = .{ .computation = .{
+        .parameters = &.{integer},
+        .result = integer,
+        .effects = &.{},
+    } } });
+    return b.term(.{ .apply = .{
+        .computation = try b.lambda(identity, signature),
+        .arguments = &.{length},
+    } });
 }

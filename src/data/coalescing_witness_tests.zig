@@ -105,9 +105,7 @@ test "coalescing raw validator rejects separately admissible wrong output" {
             .terminator = .{ .return_value = 0 },
         }},
     };
-    const maps: r.Maps = .{
-        &.{ 0, 1 }, &.{0}, &.{}, &.{0}, &.{0}, &.{}, &.{}, &.{}, &.{}, &.{},
-    };
+    const maps: r.Maps = .{ &.{ 0, 1 }, &.{0}, &.{}, &.{0}, &.{0}, &.{}, &.{}, &.{}, &.{}, &.{} };
     const identity: w.Witness = .{
         .representatives = maps,
         .final = maps,

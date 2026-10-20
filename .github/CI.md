@@ -1,9 +1,9 @@
 # Qualification
 
 Source syntax/formatting, the tracked Zig source inventory and the
-[TigerStyle adoption gate](../docs/tiger-style.md) are checked before
+[TigerStyle gate](../docs/tiger-style.md) are checked before
 compilation. The source job checks out the actual proposed head with its history,
-tests the pinned native auditor and audits the selected committed difference.
+tests the pinned native auditor and audits every tracked Zig file.
 The source preflight retains its five-minute timeout. The existing installation
 and contracts jobs remain independent:
 

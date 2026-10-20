@@ -24,7 +24,9 @@ pub const Target = union(enum) {
 
     pub fn dimension(self: Target, program: ir.Program) usize {
         return switch (self) {
-            .capture => |id| program.scopes.captures[@intCast(program.constructors[id].capture)].fields.len,
+            .capture => |id| program.scopes.captures[
+                @intCast(program.constructors[id].capture)
+            ].fields.len,
             .parameters => |target| target.count,
         };
     }

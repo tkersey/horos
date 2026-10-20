@@ -18,7 +18,12 @@ pub fn parameters(
 ) Error![]const source.RecoveryBinding {
     var original = try lowering.lowerRecoveryInput(a, module);
     defer original.deinit();
-    try data.coalescing.validateCorrespondence(a, original.program, program, evidence.correspondence);
+    try data.coalescing.validateCorrespondence(
+        a,
+        original.program,
+        program,
+        evidence.correspondence,
+    );
     var result: std.ArrayList(source.RecoveryBinding) = .empty;
     errdefer result.deinit(a);
     for (original.parameters) |binding|
@@ -27,9 +32,17 @@ pub fn parameters(
     return result.toOwnedSlice(a);
 }
 
-pub fn validate(a: std.mem.Allocator, module: source.ast.Module, compiled: *const source.Compiled) Error!void {
+pub fn validate(
+    a: std.mem.Allocator,
+    module: source.ast.Module,
+    compiled: *const source.Compiled,
+) Error!void {
     const evidence = compiled.recovery_evidence orelse return error.InvalidCorrespondence;
     const expected = try parameters(a, module, compiled.program, evidence);
     defer a.free(expected);
-    if (!data.record.equal([]const source.RecoveryBinding, expected, compiled.parameters)) return error.InvalidCorrespondence;
+    if (!data.record.equal(
+        []const source.RecoveryBinding,
+        expected,
+        compiled.parameters,
+    )) return error.InvalidCorrespondence;
 }

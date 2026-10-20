@@ -19,16 +19,22 @@ pub fn Family(comptime S: type) type {
         pub fn put(self: *const @This()) *const a.Operation(Put(S)) {
             return @ptrCast(@as(*const runtime.Family, @ptrCast(self)).put());
         }
-        pub fn getCapability(self: *const @This()) *const a.Schema(a.Internal(.{ .capability = Get(S) })) {
+        pub fn getCapability(self: *const @This()) *const a.Schema(
+            a.Internal(.{ .capability = Get(S) }),
+        ) {
             return @ptrCast(@as(*const runtime.Family, @ptrCast(self)).getCapability());
         }
-        pub fn putCapability(self: *const @This()) *const a.Schema(a.Internal(.{ .capability = Put(S) })) {
+        pub fn putCapability(self: *const @This()) *const a.Schema(
+            a.Internal(.{ .capability = Put(S) }),
+        ) {
             return @ptrCast(@as(*const runtime.Family, @ptrCast(self)).putCapability());
         }
     };
 }
 fn familyShape(comptime T: type) type {
-    if (@typeInfo(T) != .pointer or @typeInfo(T).pointer.size != .one) @compileError("Horos State: expected canonical family");
+    if (@typeInfo(T) != .pointer or
+        @typeInfo(T).pointer.size != .one)
+        @compileError("Horos State: expected canonical family");
     const Child = @typeInfo(T).pointer.child;
     if (!@hasDecl(Child, "family_shape")) @compileError("Horos State: expected canonical family");
     const S = Child.family_shape;
@@ -38,15 +44,29 @@ fn familyShape(comptime T: type) type {
 fn answerShape(comptime S: type, comptime R: type, comptime policy: Answer) type {
     return switch (policy) {
         .value => R,
-        .with_state => native.Contract(.{ .product = native.Fields(&.{ "value", "state" }, &.{ R, S }) }),
+        .with_state => native.Contract(.{ .product = native.Fields(
+            &.{ "value", "state" },
+            &.{ R, S },
+        ) }),
         .optional => bridge.optional(R),
     };
 }
 pub fn Interpretation(comptime S: type, comptime R: type, comptime policy: Answer) type {
     const Result = answerShape(S, R, policy);
     const Cell = a.Internal(.{ .cell = S });
-    const H = a.HandlerShape(native.Fields(&.{ "get", "put" }, &.{ Get(S), Put(S) }), R, Result, native.Fields(&.{"state"}, &.{Cell}), bridge.Empty, .deep);
-    return struct { handler: *const a.Handler(H), answer: *const a.Schema(Result), cell: *const a.Schema(Cell) };
+    const H = a.HandlerShape(
+        native.Fields(&.{ "get", "put" }, &.{ Get(S), Put(S) }),
+        R,
+        Result,
+        native.Fields(&.{"state"}, &.{Cell}),
+        bridge.Empty,
+        .deep,
+    );
+    return struct {
+        handler: *const a.Handler(H),
+        answer: *const a.Schema(Result),
+        cell: *const a.Schema(Cell),
+    };
 }
 pub fn Selected(comptime S: type, comptime R: type) type {
     return union(Answer) {
@@ -55,14 +75,42 @@ pub fn Selected(comptime S: type, comptime R: type) type {
         optional: Interpretation(S, R, .optional),
     };
 }
-pub fn family(c: *a.Context, identity: []const u8, element: anytype) a.Error!*const Family(bridge.schemaShape(@TypeOf(element))) {
+pub fn family(
+    c: *a.Context,
+    identity: []const u8,
+    element: anytype,
+) a.Error!*const Family(bridge.schemaShape(@TypeOf(element))) {
     return @ptrCast(try runtime.family(bridge.context(c), identity, bridge.schema(element)));
 }
-pub fn interpret(c: *a.Context, state: anytype, result: anytype, region: *const a.Region, capture_bounds: anytype, residual: anytype, disposition: Answer) a.Error!Selected(familyShape(@TypeOf(state)), bridge.schemaShape(@TypeOf(result))) {
+pub fn interpret(
+    c: *a.Context,
+    state: anytype,
+    result: anytype,
+    region: *const a.Region,
+    capture_bounds: anytype,
+    residual: anytype,
+    disposition: Answer,
+) a.Error!Selected(familyShape(@TypeOf(state)), bridge.schemaShape(@TypeOf(result))) {
     const bounds = bridge.captures(capture_bounds);
     const effects = bridge.list(.operation, residual);
-    const raw = try runtime.interpret(bridge.context(c), @ptrCast(state), bridge.schema(result), region, bounds.value(), effects.slice(), disposition);
+    const raw = try runtime.interpret(
+        bridge.context(c),
+        @ptrCast(state),
+        bridge.schema(result),
+        region,
+        bounds.value(),
+        effects.slice(),
+        disposition,
+    );
     return switch (disposition) {
-        inline else => |policy| @unionInit(Selected(familyShape(@TypeOf(state)), bridge.schemaShape(@TypeOf(result))), @tagName(policy), .{ .handler = @ptrCast(raw.handler), .answer = @ptrCast(raw.answer), .cell = @ptrCast(raw.cell) }),
+        inline else => |policy| @unionInit(
+            Selected(familyShape(@TypeOf(state)), bridge.schemaShape(@TypeOf(result))),
+            @tagName(policy),
+            .{
+                .handler = @ptrCast(raw.handler),
+                .answer = @ptrCast(raw.answer),
+                .cell = @ptrCast(raw.cell),
+            },
+        ),
     };
 }

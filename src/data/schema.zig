@@ -64,7 +64,8 @@ pub fn canonicalize(allocator: std.mem.Allocator, types: []const p.Schema, root:
     var classes = try storage.alloc(usize, types.len);
     var next = try storage.alloc(usize, types.len);
     @memset(classes, 0);
-    while (true) {
+    var changed = true;
+    while (changed) {
         for (types, 0..) |schema, index| {
             next[index] = index;
             for (types[0..index], 0..) |prior, candidate| {
@@ -74,8 +75,8 @@ pub fn canonicalize(allocator: std.mem.Allocator, types: []const p.Schema, root:
                 }
             }
         }
-        if (std.mem.eql(usize, classes, next)) break;
-        std.mem.swap([]usize, &classes, &next);
+        changed = !std.mem.eql(usize, classes, next);
+        if (changed) std.mem.swap([]usize, &classes, &next);
     }
     const map = try storage.alloc(p.Id, types.len);
     @memset(map, std.math.maxInt(p.Id));
@@ -102,18 +103,32 @@ pub fn canonicalize(allocator: std.mem.Allocator, types: []const p.Schema, root:
             .product, .sum => |references| {
                 const mapped = try storage.alloc(p.Id, references.len);
                 for (mapped, references) |*id, old| id.* = map[classes[@intCast(old)]];
-                if (target.* == .product) target.* = .{ .product = mapped } else target.* = .{ .sum = mapped };
+                if (target.* == .product)
+                    target.* = .{ .product = mapped }
+                else
+                    target.* = .{ .sum = mapped };
             },
             .seq => |old| target.* = .{ .seq = map[classes[@intCast(old)]] },
-            .vector => |vector| target.* = .{ .vector = .{ .element = map[classes[@intCast(vector.element)]], .maximum = vector.maximum } },
-            .array => |array| target.* = .{ .array = .{ .element = map[classes[@intCast(array.element)]], .length = array.length } },
+            .vector => |vector| target.* = .{ .vector = .{
+                .element = map[classes[@intCast(vector.element)]],
+                .maximum = vector.maximum,
+            } },
+            .array => |array| target.* = .{ .array = .{
+                .element = map[classes[@intCast(array.element)]],
+                .length = array.length,
+            } },
             else => {},
         }
     }
     return .{ .arena = arena, .descriptor = .{ .types = result } };
 }
 
-pub fn encode(allocator: std.mem.Allocator, types: []const p.Schema, root: p.Id, output: []u8) Error![]const u8 {
+pub fn encode(
+    allocator: std.mem.Allocator,
+    types: []const p.Schema,
+    root: p.Id,
+    output: []u8,
+) Error![]const u8 {
     var canonical = try canonicalize(allocator, types, root);
     defer canonical.deinit();
     var measure: wire.Writer = .{};
@@ -140,7 +155,11 @@ pub fn decode(allocator: std.mem.Allocator, input: []const u8) Error!Owned {
     return decodeLimited(allocator, input, std.math.maxInt(usize));
 }
 
-pub fn decodeLimited(allocator: std.mem.Allocator, input: []const u8, max_decoded_bytes: usize) Error!Owned {
+pub fn decodeLimited(
+    allocator: std.mem.Allocator,
+    input: []const u8,
+    max_decoded_bytes: usize,
+) Error!Owned {
     if (input.len > max_decoded_bytes) return error.Capacity;
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
@@ -158,7 +177,12 @@ pub fn decodeLimited(allocator: std.mem.Allocator, input: []const u8, max_decode
 
 /// Validate an encoded value while the surrounding builder may contain unrelated
 /// unfinished declarations. Only the reachable, exportable schema graph is read.
-pub fn validateReachableValue(allocator: std.mem.Allocator, types: []const p.Schema, root: p.Id, value: []const u8) Error!void {
+pub fn validateReachableValue(
+    allocator: std.mem.Allocator,
+    types: []const p.Schema,
+    root: p.Id,
+    value: []const u8,
+) Error!void {
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
     const storage = scratch.allocator();
@@ -188,11 +212,20 @@ pub fn validateReachableValue(allocator: std.mem.Allocator, types: []const p.Sch
             .product, .sum => |refs| {
                 const remapped = try storage.alloc(p.Id, refs.len);
                 for (remapped, refs) |*out, old| out.* = map[@intCast(old)];
-                target.* = if (target.* == .product) .{ .product = remapped } else .{ .sum = remapped };
+                target.* = if (target.* == .product)
+                    .{ .product = remapped }
+                else
+                    .{ .sum = remapped };
             },
             .seq => |old| target.* = .{ .seq = map[@intCast(old)] },
-            .vector => |v| target.* = .{ .vector = .{ .element = map[@intCast(v.element)], .maximum = v.maximum } },
-            .array => |v| target.* = .{ .array = .{ .element = map[@intCast(v.element)], .length = v.length } },
+            .vector => |v| target.* = .{ .vector = .{
+                .element = map[@intCast(v.element)],
+                .maximum = v.maximum,
+            } },
+            .array => |v| target.* = .{ .array = .{
+                .element = map[@intCast(v.element)],
+                .length = v.length,
+            } },
             else => {},
         }
     }
@@ -200,11 +233,20 @@ pub fn validateReachableValue(allocator: std.mem.Allocator, types: []const p.Sch
     try admission.value(storage, reachable, facts, .{ .schema = 0, .bytes = value });
 }
 
-pub fn validateValue(allocator: std.mem.Allocator, descriptor: Descriptor, value: []const u8) Error!void {
+pub fn validateValue(
+    allocator: std.mem.Allocator,
+    descriptor: Descriptor,
+    value: []const u8,
+) Error!void {
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
     const facts = try admission.schemas(scratch.allocator(), descriptor.types);
-    try admission.value(scratch.allocator(), descriptor.types, facts, .{ .schema = descriptor.root, .bytes = value });
+    try admission.value(
+        scratch.allocator(),
+        descriptor.types,
+        facts,
+        .{ .schema = descriptor.root, .bytes = value },
+    );
 }
 
 test "equal definitions share one canonical schema independent of original IDs" {
@@ -228,7 +270,10 @@ test "recursive schema descriptors reject internal handles and noncanonical byte
     defer parsed.deinit();
     try validateValue(std.testing.allocator, parsed.descriptor, &.{ 1, 1, 0 });
     const internal: []const p.Schema = &.{.{ .internal = .{ .capability = 0 } }};
-    try std.testing.expectError(error.InvalidSchema, encode(std.testing.allocator, internal, 0, &output));
+    try std.testing.expectError(
+        error.InvalidSchema,
+        encode(std.testing.allocator, internal, 0, &output),
+    );
 }
 
 test "schema canonicalization preserves array lengths and text or byte bounds" {

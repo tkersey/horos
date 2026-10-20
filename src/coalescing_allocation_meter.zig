@@ -31,13 +31,25 @@ pub const Meter = struct {
         self.grow(0, len);
         return result;
     }
-    fn resize(context: *anyopaque, memory: []u8, alignment: Alignment, len: usize, ret: usize) bool {
+    fn resize(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: Alignment,
+        len: usize,
+        ret: usize,
+    ) bool {
         const self: *Meter = @ptrCast(@alignCast(context));
         if (!self.parent.rawResize(memory, alignment, len, ret)) return false;
         self.grow(memory.len, len);
         return true;
     }
-    fn remap(context: *anyopaque, memory: []u8, alignment: Alignment, len: usize, ret: usize) ?[*]u8 {
+    fn remap(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: Alignment,
+        len: usize,
+        ret: usize,
+    ) ?[*]u8 {
         const self: *Meter = @ptrCast(@alignCast(context));
         const result = self.parent.rawRemap(memory, alignment, len, ret) orelse return null;
         self.grow(memory.len, len);

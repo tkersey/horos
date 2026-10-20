@@ -16,7 +16,10 @@ pub fn main(init: std.process.Init) !void {
     var builder = horos.source.Builder.init(init.gpa);
     defer builder.deinit();
     const module = if (constant)
-        try @import("compact_fixtures.zig").storedConstant(&builder, std.math.mul(usize, count, 1024) catch return error.InvalidLength)
+        try @import("compact_fixtures.zig").storedConstant(
+            &builder,
+            std.math.mul(usize, count, 1024) catch return error.InvalidLength,
+        )
     else if (irregular)
         try @import("compact_fixtures.zig").variedMixed(&builder, count, .{ .seed = 11 })
     else if (mixed)
@@ -26,7 +29,10 @@ pub fn main(init: std.process.Init) !void {
     var compiled = try horos.program.compile(init.gpa, module);
     defer compiled.deinit();
     if (constant and compiled.program.constants.len != 1) return error.DuplicatedConstant;
-    const bytes = try init.gpa.alloc(u8, try horos.data.program_image.encodedLength(compiled.program));
+    const bytes = try init.gpa.alloc(
+        u8,
+        try horos.data.program_image.encodedLength(compiled.program),
+    );
     defer init.gpa.free(bytes);
     _ = try compiled.encode(init.gpa, bytes);
     var buffer: [4096]u8 = undefined;

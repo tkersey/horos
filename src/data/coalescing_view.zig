@@ -191,7 +191,12 @@ const Body = struct {
         }
     }
     pub const VisitError = names.Error;
-    pub fn reference(self: *Body, comptime role: roles.Role, comptime cardinality: roles.Cardinality, value: anytype) Error!void {
+    pub inline fn reference(
+        self: *Body,
+        comptime role: roles.Role,
+        comptime cardinality: roles.Cardinality,
+        value: anytype,
+    ) Error!void {
         if (comptime cardinality == .optional) {
             try self.sink.raw(value != null);
             if (value) |item| try self.reference(role, .one, item);
@@ -204,7 +209,9 @@ const Body = struct {
             .effect => try self.sink.global(.effect, value),
             .handler => try self.sink.global(.handler, value),
             .region => try self.sink.global(.region, value),
-            .block => try self.sink.natural(self.blocks.names.get(value) orelse return error.InvalidReference),
+            .block => try self.sink.natural(
+                self.blocks.names.get(value) orelse return error.InvalidReference,
+            ),
             .edge => try roles.visitEdge(value, self),
             .assignment => try roles.visitAssignment(value, self),
             .source => {

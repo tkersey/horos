@@ -133,7 +133,12 @@ pub const Trace = struct {
         if (diagnostic.target.phase == .constructor) {
             for (self.original.constructors, self.map(.constructor)) |constructor, live| {
                 if (live == r.missing) continue;
-                if (self.matches(next, .function, constructor.function, diagnostic.target.function) and
+                if (self.matches(
+                    next,
+                    .function,
+                    constructor.function,
+                    diagnostic.target.function,
+                ) and
                     self.matches(next, .capture, constructor.capture, diagnostic.target.capture) and
                     self.matches(next, .schema, constructor.schema, diagnostic.target.schema))
                     diagnostic.origins.add(constructor.function);

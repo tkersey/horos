@@ -21,11 +21,7 @@ test "coalescing selects exact economical candidate to an idempotent fixed point
     try testing.expectEqual(@as(usize, 2), full.program.functions.len);
     try testing.expect(stats.selected.bytes < stats.baseline.bytes);
     var again_stats: pass.Statistics = .{};
-    var again = try pass.run(
-        testing.allocator,
-        full.program,
-        .{ .statistics = &again_stats },
-    );
+    var again = try pass.run(testing.allocator, full.program, .{ .statistics = &again_stats });
     defer again.deinit();
     try testing.expectEqual(pass.Outcome.no_change, again_stats.outcome);
     try testing.expectEqual(@as(usize, 0), again_stats.validator_calls);
@@ -39,11 +35,7 @@ test "coalescing selects exact economical candidate to an idempotent fixed point
 
 test "coalescing work limit after an intermediate selection returns original baseline" {
     var stats: pass.Statistics = .{};
-    var measured = try pass.run(
-        testing.allocator,
-        fixture,
-        .{ .statistics = &stats },
-    );
+    var measured = try pass.run(testing.allocator, fixture, .{ .statistics = &stats });
     defer measured.deinit();
     try testing.expect(stats.first_selected_work > 0);
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -61,8 +53,18 @@ test "coalescing work limit after an intermediate selection returns original bas
         fn receive(context: *anyopaque, trace: *const pass.OriginsTrace) pass.Error!void {
             const self: *@This() = @ptrCast(@alignCast(context));
             if (self.called) return error.InvalidCorrespondence;
-            for (self.maps, trace.maps) |expected, actual| if (!std.mem.eql(@import("program.zig").Id, expected, actual)) return error.InvalidCorrespondence;
-            for (trace.locals) |local| for (local.slots, 0..) |slot, i| if (slot != i) return error.InvalidCorrespondence;
+            for (
+                self.maps,
+                trace.maps,
+            ) |expected, actual| if (!std.mem.eql(
+                @import("program.zig").Id,
+                expected,
+                actual,
+            )) return error.InvalidCorrespondence;
+            for (trace.locals) |local| for (
+                local.slots,
+                0..,
+            ) |slot, i| if (slot != i) return error.InvalidCorrespondence;
             self.called = true;
         }
     };
@@ -72,7 +74,11 @@ test "coalescing work limit after an intermediate selection returns original bas
         var limited = try pass.run(
             testing.allocator,
             fixture,
-            .{ .work_limit = limit, .statistics = &limited_stats, .correspondence = .{ .context = &capture, .receive = Capture.receive } },
+            .{
+                .work_limit = limit,
+                .statistics = &limited_stats,
+                .correspondence = .{ .context = &capture, .receive = Capture.receive },
+            },
         );
         defer limited.deinit();
         try testing.expectEqual(pass.Outcome.work_limit, limited_stats.outcome);
@@ -99,7 +105,12 @@ const description_only: @import("activation.zig").Program = .{
     .schemas = &.{ .u64, .u64, .{ .product = &.{ 0, 1 } } },
     .constants = &.{},
     .effects = &.{},
-    .functions = &.{.{ .entry = 0, .inputs = &.{ 0, 1 }, .layout = .{ .slots = &.{ 0, 1, 2 } }, .result = 2 }},
+    .functions = &.{.{
+        .entry = 0,
+        .inputs = &.{ 0, 1 },
+        .layout = .{ .slots = &.{ 0, 1, 2 } },
+        .result = 2,
+    }},
     .blocks = &.{.{ .function = 0, .instructions = &.{.{
         .destination = 2,
         .opcode = .product,
@@ -115,7 +126,10 @@ fn descriptionAllocationCase(allocator: std.mem.Allocator) !void {
     try testing.expectEqual(@as(usize, 1), stats.candidate_admissions);
     try testing.expectEqual(@as(usize, 2), stats.validator_calls);
     try testing.expectEqualDeep(stats.full, stats.descriptions);
-    try testing.expectEqual(@import("coalescing_discovery.zig").Profile.full, stats.selected_profile.?);
+    try testing.expectEqual(
+        @import("coalescing_discovery.zig").Profile.full,
+        stats.selected_profile.?,
+    );
 }
 
 test "coalescing reuses equal portfolios with identical bytes and allocation failure cleanup" {
@@ -126,7 +140,14 @@ test "coalescing reuses equal portfolios with identical bytes and allocation fai
     defer scratch.deinit();
     var work: @import("coalescing_graph.zig").Work = .{};
     const analysis = try discovery.analyze(scratch.allocator(), description_only, &work);
-    var separate = try candidate.build(testing.allocator, scratch.allocator(), description_only, analysis, .descriptions, &work);
+    var separate = try candidate.build(
+        testing.allocator,
+        scratch.allocator(),
+        description_only,
+        analysis,
+        .descriptions,
+        &work,
+    );
     defer separate.deinit();
     var selected = try pass.run(testing.allocator, description_only, .{});
     defer selected.deinit();
@@ -144,8 +165,17 @@ test "coalescing preserves duplicate sum alternatives and old duplicate-containi
         .schemas = &.{ .u64, .u64, .{ .sum = &.{ 0, 1 } }, .unit },
         .constants = &.{},
         .effects = &.{},
-        .functions = &.{.{ .entry = 0, .inputs = &.{0}, .layout = .{ .slots = &.{2} }, .result = 2 }},
-        .blocks = &.{.{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 0 } }},
+        .functions = &.{.{
+            .entry = 0,
+            .inputs = &.{0},
+            .layout = .{ .slots = &.{2} },
+            .result = 2,
+        }},
+        .blocks = &.{.{
+            .function = 0,
+            .instructions = &.{},
+            .terminator = .{ .return_value = 0 },
+        }},
     };
     const original = try bytes(program);
     defer testing.allocator.free(original);
@@ -171,9 +201,22 @@ test "coalescing preserves duplicate sum alternatives and old duplicate-containi
     for ([_]ir.Program{ decoded.program, optimized.program }) |subject| {
         const facts = try value.schemas(scratch.allocator(), subject.schemas);
         for ([_][]const u8{ &left, &right }) |payload|
-            try value.value(scratch.allocator(), subject.schemas, facts, .{ .schema = subject.roots.result, .bytes = payload });
+            try value.value(
+                scratch.allocator(),
+                subject.schemas,
+                facts,
+                .{ .schema = subject.roots.result, .bytes = payload },
+            );
         var invalid = right;
         invalid[0] = 2;
-        try testing.expectError(error.InvalidValue, value.value(scratch.allocator(), subject.schemas, facts, .{ .schema = subject.roots.result, .bytes = &invalid }));
+        try testing.expectError(
+            error.InvalidValue,
+            value.value(
+                scratch.allocator(),
+                subject.schemas,
+                facts,
+                .{ .schema = subject.roots.result, .bytes = &invalid },
+            ),
+        );
     }
 }

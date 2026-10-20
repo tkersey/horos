@@ -14,7 +14,8 @@ test "set overlays share immutable roots and isolate all eight-bit operations" {
     defer overlay.deinit();
     var roots: [256]sets.Root = @splat(sets.empty);
     for (&roots, 0..) |*root, bits| for (0..8) |member| {
-        if ((bits & (@as(usize, 1) << @intCast(member))) != 0) root.* = try overlay.insert(root.*, member);
+        if ((bits & (@as(usize, 1) << @intCast(member))) != 0)
+            root.* = try overlay.insert(root.*, member);
     };
     try testing.expectEqual(prefix, roots[15]);
     for (roots, 0..) |left, a| for (roots, 0..) |right, b| {
@@ -105,6 +106,43 @@ test "analysis sets handle high IDs and bounds without input-sized recursion" {
     try testing.expect(pool.contains(middle, high));
     try testing.expectError(error.InvalidReference, pool.insert(all, pool.limit));
     try testing.expectEqual(all, try pool.insert(middle, @as(u64, 1) << 63));
+}
+
+test "full-width sparse trees preserve every set operation and prior roots" {
+    var pool: sets.Pool = .{ .allocator = testing.allocator, .limit = std.math.maxInt(u64) };
+    defer pool.deinit();
+    var all = sets.empty;
+    var even = sets.empty;
+    var odd = sets.empty;
+    for (0..64) |bit| {
+        const member = @as(u64, 1) << @intCast(bit);
+        all = try pool.insert(all, member);
+        if (bit % 2 ==
+            0)
+            even =
+                try pool.insert(even, member)
+        else
+            odd =
+                try pool.insert(odd, member);
+    }
+    try testing.expectEqual(64, pool.count(all));
+    try testing.expectEqual(32, pool.count(even));
+    try testing.expectEqual(32, pool.count(odd));
+    try testing.expectEqual(all, try pool.unite(even, odd));
+    try testing.expectEqual(even, try pool.difference(all, odd));
+    try testing.expectEqual(odd, try pool.difference(all, even));
+    try testing.expectEqual(sets.empty, try pool.intersect(even, odd));
+    try testing.expectEqual(even, try pool.intersect(all, even));
+    var remaining = all;
+    for (0..64) |bit| {
+        const member = @as(u64, 1) << @intCast(bit);
+        remaining = try pool.remove(remaining, member);
+        try testing.expectEqual(63 - bit, pool.count(remaining));
+        try testing.expect(!pool.contains(remaining, member));
+        try testing.expect(pool.contains(all, member));
+    }
+    try testing.expectEqual(sets.empty, remaining);
+    try testing.expectEqual(64, pool.count(all));
 }
 
 fn failureCase(allocator: std.mem.Allocator) !void {
@@ -287,7 +325,10 @@ test "direct insertion agrees with independent union across range and word bound
                 try testing.expectEqual(expected, actual);
                 try testing.expectEqual(length, pool.count(before));
                 try testing.expect(pool.contains(actual, member));
-                try testing.expectEqual(length + @intFromBool(member < low or member >= low + length), pool.count(actual));
+                try testing.expectEqual(
+                    length + @intFromBool(member < low or member >= low + length),
+                    pool.count(actual),
+                );
             }
         }
     }

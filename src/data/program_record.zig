@@ -23,9 +23,19 @@ pub const Context = struct { previous_function: p.Id = 0 };
 
 /// The image owner may allocate a large outer block catalog exactly. Nested
 /// records still belong to its arena; the out allocation is owned on failure too.
-pub fn readProgram(reader: *wire.Reader, arena: std.mem.Allocator, catalog: std.mem.Allocator, blocks: *[]ir.Block, budget: *Budget, context: *Context) Error!ir.Program {
+pub fn readProgram(
+    reader: *wire.Reader,
+    arena: std.mem.Allocator,
+    catalog: std.mem.Allocator,
+    blocks: *[]ir.Block,
+    budget: *Budget,
+    context: *Context,
+) Error!ir.Program {
     var result: ir.Program = undefined;
-    inline for (@typeInfo(ir.Program).@"struct".field_names, @typeInfo(ir.Program).@"struct".field_types) |field_name, FieldType| {
+    inline for (
+        @typeInfo(ir.Program).@"struct".field_names,
+        @typeInfo(ir.Program).@"struct".field_types,
+    ) |field_name, FieldType| {
         if (comptime std.mem.eql(u8, field_name, "blocks")) {
             const count = try reader.count();
             if (count > reader.input.len - reader.position) return error.Truncated;
@@ -41,9 +51,28 @@ pub fn readProgram(reader: *wire.Reader, arena: std.mem.Allocator, catalog: std.
 }
 
 comptime {
-    fields(ir.Program, &.{ "roots", "schemas", "constants", "effects", "functions", "blocks", "handlers", "scopes", "constructors" });
-    fields(ir.Function, &.{ "entry", "inputs", "layout", "custody", "result", "effects", "regions" });
-    fields(ir.Handler, &.{ "mode", "input", "answer", "return_function", "clauses", "state", "effects" });
+    fields(
+        ir.Program,
+        &.{
+            "roots",
+            "schemas",
+            "constants",
+            "effects",
+            "functions",
+            "blocks",
+            "handlers",
+            "scopes",
+            "constructors",
+        },
+    );
+    fields(
+        ir.Function,
+        &.{ "entry", "inputs", "layout", "custody", "result", "effects", "regions" },
+    );
+    fields(
+        ir.Handler,
+        &.{ "mode", "input", "answer", "return_function", "clauses", "state", "effects" },
+    );
     fields(ir.Block, &.{ "function", "custody", "instructions", "terminator" });
     fields(ir.Instruction, &.{ "destination", "opcode", "operands", "immediate", "failures" });
     fields(ir.Edge, &.{ "block", "assignments" });
@@ -57,7 +86,12 @@ fn fields(comptime T: type, comptime names: []const []const u8) void {
     for (declared, names) |field_name, name| std.debug.assert(std.mem.eql(u8, field_name, name));
 }
 
-pub fn write(comptime T: type, value: T, writer: *wire.Writer, context: *Context) Error!void {
+pub inline fn write(
+    comptime T: type,
+    value: T,
+    writer: *wire.Writer,
+    context: *Context,
+) Error!void {
     if (T == ir.Function) return writeFunction(value, writer, context);
     if (T == ir.Block) return writeBlock(value, writer, context);
     if (T == ir.Instruction) return writeInstruction(value, writer);
@@ -70,7 +104,10 @@ pub fn write(comptime T: type, value: T, writer: *wire.Writer, context: *Context
             if (info.child == u8) return writer.put(value);
             for (value) |element| try write(info.child, element, writer, context);
         },
-        .@"struct" => |info| inline for (info.field_names, info.field_types) |field_name, FieldType| {
+        .@"struct" => |info| inline for (
+            info.field_names,
+            info.field_types,
+        ) |field_name, FieldType| {
             // Retired optional forwarding field: accepted images always encoded zero.
             if (T == ir.Handler and comptime std.mem.eql(u8, field_name, "state"))
                 try writer.byte(0);
@@ -90,7 +127,13 @@ pub fn write(comptime T: type, value: T, writer: *wire.Writer, context: *Context
     }
 }
 
-pub fn read(comptime T: type, reader: *wire.Reader, allocator: std.mem.Allocator, budget: *Budget, context: *Context) Error!T {
+pub inline fn read(
+    comptime T: type,
+    reader: *wire.Reader,
+    allocator: std.mem.Allocator,
+    budget: *Budget,
+    context: *Context,
+) Error!T {
     if (T == ir.Function) return readFunction(reader, allocator, budget, context);
     if (T == ir.Block) return readBlock(reader, allocator, budget, context);
     if (T == ir.Instruction) return readInstruction(reader, allocator, budget, context);
@@ -109,7 +152,13 @@ pub fn read(comptime T: type, reader: *wire.Reader, allocator: std.mem.Allocator
             if (info.child == u8) break :blk try reader.take(count);
             try budget.account(info.child, count);
             const output = try allocator.alloc(info.child, count);
-            for (output) |*element| element.* = try read(info.child, reader, allocator, budget, context);
+            for (output) |*element| element.* = try read(
+                info.child,
+                reader,
+                allocator,
+                budget,
+                context,
+            );
             break :blk output;
         },
         .@"struct" => |info| blk: {
@@ -117,7 +166,13 @@ pub fn read(comptime T: type, reader: *wire.Reader, allocator: std.mem.Allocator
             inline for (info.field_names, info.field_types) |field_name, FieldType| {
                 if (T == ir.Handler and comptime std.mem.eql(u8, field_name, "state"))
                     if (try reader.byte() != 0) return error.InvalidFlags;
-                @field(result, field_name) = try read(FieldType, reader, allocator, budget, context);
+                @field(result, field_name) = try read(
+                    FieldType,
+                    reader,
+                    allocator,
+                    budget,
+                    context,
+                );
             }
             break :blk result;
         },
@@ -125,7 +180,11 @@ pub fn read(comptime T: type, reader: *wire.Reader, allocator: std.mem.Allocator
             const tag = try reader.natural();
             inline for (info.field_names, info.field_types) |field_name, FieldType| {
                 if (tag == @backingInt(@field(info.tag_type.?, field_name)))
-                    break :blk @unionInit(T, field_name, try read(FieldType, reader, allocator, budget, context));
+                    break :blk @unionInit(
+                        T,
+                        field_name,
+                        try read(FieldType, reader, allocator, budget, context),
+                    );
             }
             break :blk error.InvalidTag;
         },
@@ -138,7 +197,11 @@ pub fn read(comptime T: type, reader: *wire.Reader, allocator: std.mem.Allocator
     };
 }
 
-fn writeFunction(value: ir.Function, writer: *wire.Writer, context: *Context) Error!void {
+fn writeFunction(
+    value: ir.Function,
+    writer: *wire.Writer,
+    context: *Context,
+) Error!void {
     const scopes = value.custody.len != 1 or value.custody[0].parent != null;
     const flags: u8 = @as(u8, @intFromBool(value.effects.len != 0)) |
         (@as(u8, @intFromBool(value.regions.len != 0)) << 1) |
@@ -152,7 +215,12 @@ fn writeFunction(value: ir.Function, writer: *wire.Writer, context: *Context) Er
     if (flags & 2 != 0) try write([]const p.Id, value.regions, writer, context);
     if (flags & 4 != 0) try write([]const ir.CustodyScope, value.custody, writer, context);
 }
-fn readFunction(reader: *wire.Reader, allocator: std.mem.Allocator, budget: *Budget, context: *Context) Error!ir.Function {
+fn readFunction(
+    reader: *wire.Reader,
+    allocator: std.mem.Allocator,
+    budget: *Budget,
+    context: *Context,
+) Error!ir.Function {
     const flags = try reader.byte();
     if (flags & ~@as(u8, 7) != 0) return error.InvalidFlags;
     return .{
@@ -160,8 +228,20 @@ fn readFunction(reader: *wire.Reader, allocator: std.mem.Allocator, budget: *Bud
         .inputs = try read([]const p.Id, reader, allocator, budget, context),
         .layout = .{ .slots = try read([]const p.Id, reader, allocator, budget, context) },
         .result = try reader.natural(),
-        .effects = if (flags & 1 != 0) try read([]const p.Id, reader, allocator, budget, context) else &.{},
-        .regions = if (flags & 2 != 0) try read([]const p.Id, reader, allocator, budget, context) else &.{},
+        .effects = if (flags & 1 != 0) try read(
+            []const p.Id,
+            reader,
+            allocator,
+            budget,
+            context,
+        ) else &.{},
+        .regions = if (flags & 2 != 0) try read(
+            []const p.Id,
+            reader,
+            allocator,
+            budget,
+            context,
+        ) else &.{},
         .custody = if (flags & 4 != 0)
             try read([]const ir.CustodyScope, reader, allocator, budget, context)
         else
@@ -169,7 +249,11 @@ fn readFunction(reader: *wire.Reader, allocator: std.mem.Allocator, budget: *Bud
     };
 }
 
-fn writeBlock(value: ir.Block, writer: *wire.Writer, context: *Context) Error!void {
+fn writeBlock(
+    value: ir.Block,
+    writer: *wire.Writer,
+    context: *Context,
+) Error!void {
     const flags: u8 = @as(u8, @intFromBool(value.function != context.previous_function)) |
         (@as(u8, @intFromBool(value.custody != 0)) << 1);
     try writer.byte(flags);
@@ -179,13 +263,23 @@ fn writeBlock(value: ir.Block, writer: *wire.Writer, context: *Context) Error!vo
     try write([]const ir.Instruction, value.instructions, writer, context);
     try write(ir.Terminator, value.terminator, writer, context);
 }
-fn readBlock(reader: *wire.Reader, allocator: std.mem.Allocator, budget: *Budget, context: *Context) Error!ir.Block {
+fn readBlock(
+    reader: *wire.Reader,
+    allocator: std.mem.Allocator,
+    budget: *Budget,
+    context: *Context,
+) Error!ir.Block {
     const flags = try reader.byte();
     if (flags & ~@as(u8, 3) != 0) return error.InvalidFlags;
     const owner = if (flags & 1 != 0) try reader.natural() else context.previous_function;
     const custody = if (flags & 2 != 0) try reader.natural() else 0;
     context.previous_function = owner;
-    return .{ .function = owner, .custody = custody, .instructions = try read([]const ir.Instruction, reader, allocator, budget, context), .terminator = try read(ir.Terminator, reader, allocator, budget, context) };
+    return .{
+        .function = owner,
+        .custody = custody,
+        .instructions = try read([]const ir.Instruction, reader, allocator, budget, context),
+        .terminator = try read(ir.Terminator, reader, allocator, budget, context),
+    };
 }
 
 fn writeEdge(value: ir.Edge, writer: *wire.Writer) Error!void {
@@ -215,7 +309,10 @@ fn readEdge(reader: *wire.Reader, allocator: std.mem.Allocator, budget: *Budget)
     for (assignments) |*assignment| {
         const destination = try reader.natural();
         const source = if (header == 1) 0 else try reader.natural();
-        assignment.* = .{ .destination = destination, .source = if (source == 0) .returned else .{ .slot = source - 1 } };
+        assignment.* = .{
+            .destination = destination,
+            .source = if (source == 0) .returned else .{ .slot = source - 1 },
+        };
     }
     return .{ .block = block, .assignments = assignments };
 }
@@ -236,13 +333,20 @@ fn writeInstruction(value: ir.Instruction, writer: *wire.Writer) Error!void {
     } else try sequence.write(p.Id, value.operands, writer);
     if (header & 64 != 0) try writer.natural(value.immediate);
     if (value.failures.len == 0) return;
-    if (opcode_contract.describe(value.opcode).failure_count_encoding == .counted) try writer.natural(value.failures.len);
+    if (opcode_contract.describe(
+        value.opcode,
+    ).failure_count_encoding == .counted) try writer.natural(value.failures.len);
     for (value.failures, 0..) |failure, index| {
         if (failure.kind != try faultKind(value.opcode, index)) return error.InvalidTag;
         try writer.natural(failure.value);
     }
 }
-fn readInstruction(reader: *wire.Reader, allocator: std.mem.Allocator, budget: *Budget, context: *Context) Error!ir.Instruction {
+fn readInstruction(
+    reader: *wire.Reader,
+    allocator: std.mem.Allocator,
+    budget: *Budget,
+    context: *Context,
+) Error!ir.Instruction {
     const header = try reader.byte();
     const opcode = std.enums.fromInt(p.Opcode, header & 63) orelse return error.InvalidTag;
     const destination = try reader.natural();
@@ -253,7 +357,9 @@ fn readInstruction(reader: *wire.Reader, allocator: std.mem.Allocator, budget: *
         break :blk operands;
     } else try read([]const p.Id, reader, allocator, budget, context);
     const immediate = if (header & 64 != 0) try reader.natural() else 0;
-    const count: usize = if (header & 128 == 0) 0 else switch (opcode_contract.describe(opcode).failure_count_encoding) {
+    const count: usize = if (header & 128 == 0) 0 else switch (opcode_contract.describe(
+        opcode,
+    ).failure_count_encoding) {
         .implied_two => 2,
         .counted => try reader.count(),
         .implied_one => 1,
@@ -265,7 +371,13 @@ fn readInstruction(reader: *wire.Reader, allocator: std.mem.Allocator, budget: *
         .kind = try faultKind(opcode, index),
         .value = try reader.natural(),
     };
-    return .{ .destination = destination, .opcode = opcode, .operands = operands, .immediate = immediate, .failures = failures };
+    return .{
+        .destination = destination,
+        .opcode = opcode,
+        .operands = operands,
+        .immediate = immediate,
+        .failures = failures,
+    };
 }
 
 fn operandCount(opcode: p.Opcode) ?usize {
@@ -288,7 +400,11 @@ fn writeLiteral(value: p.Literal, writer: *wire.Writer) Error!void {
     }
     try writer.put(value.bytes);
 }
-fn readLiteral(reader: *wire.Reader, allocator: std.mem.Allocator, budget: *Budget) Error!p.Literal {
+fn readLiteral(
+    reader: *wire.Reader,
+    allocator: std.mem.Allocator,
+    budget: *Budget,
+) Error!p.Literal {
     const schema = try reader.natural();
     const count = try reader.count();
     if (count == 8) switch (try reader.byte()) {

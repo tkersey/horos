@@ -10,7 +10,11 @@ const equal = @import("record_equal.zig").equal;
 const p01 = @import("coalescing.zig");
 pub const Error = p01.Error || error{ InvalidCommonTail, CommonTailLimit };
 pub const Options = struct { work_limit: usize = 1_000_000, coalescing: p01.Options = .{} };
-pub const Statistics = struct { tails_shared: usize = 0, branches_removed: usize = 0, work_limit: bool = false };
+pub const Statistics = struct {
+    tails_shared: usize = 0,
+    branches_removed: usize = 0,
+    work_limit: bool = false,
+};
 pub const Candidate = struct {
     arena: std.heap.ArenaAllocator,
     program: ir.Program,
@@ -28,15 +32,23 @@ const Budget = struct {
     }
 };
 fn charge(comptime T: type, value: T, budget: *Budget) Error!void {
+    @setEvalBranchQuota(10000);
+    return chargeFields(T, value, budget);
+}
+
+inline fn chargeFields(comptime T: type, value: T, budget: *Budget) Error!void {
     try budget.tick();
     switch (@typeInfo(T)) {
-        .@"struct" => |info| inline for (info.field_names, info.field_types) |field_name, FieldType| try charge(FieldType, @field(value, field_name), budget),
+        .@"struct" => |info| inline for (
+            info.field_names,
+            info.field_types,
+        ) |field_name, FieldType| try chargeFields(FieldType, @field(value, field_name), budget),
         .@"union" => switch (value) {
-            inline else => |payload| try charge(@TypeOf(payload), payload, budget),
+            inline else => |payload| try chargeFields(@TypeOf(payload), payload, budget),
         },
-        .pointer => |info| for (value) |item| try charge(info.child, item, budget),
+        .pointer => |info| for (value) |item| try chargeFields(info.child, item, budget),
         .optional => |info| if (value) |item| {
-            try charge(info.child, item, budget);
+            try chargeFields(info.child, item, budget);
         },
         else => {},
     }
@@ -49,7 +61,13 @@ fn domain(a: std.mem.Allocator, program: ir.Program, budget: *Budget) Error![]bo
         allowed.* = function.effects.len == 0 and function.regions.len == 0;
         for (function.layout.slots) |schema| {
             try budget.tick();
-            if (!permissions.copy[@intCast(schema)] or !permissions.drop[@intCast(schema)] or !schemas.exportable[@intCast(schema)]) allowed.* = false;
+            if (!permissions.copy[
+                @intCast(schema)
+            ] or !permissions.drop[
+                @intCast(schema)
+            ] or !schemas.exportable[
+                @intCast(schema)
+            ]) allowed.* = false;
         }
     }
     for (program.blocks) |block| {
@@ -70,7 +88,11 @@ fn edge(map: []const p.Id, before: ir.Edge) ir.Edge {
     after.block = map[@intCast(before.block)];
     return after;
 }
-pub fn construct(allocator: std.mem.Allocator, original: ir.Program, options: Options) Error!?Candidate {
+pub fn construct(
+    allocator: std.mem.Allocator,
+    original: ir.Program,
+    options: Options,
+) Error!?Candidate {
     var admitted = try ownership.analyze(allocator, original);
     defer admitted.deinit();
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -108,7 +130,11 @@ pub fn construct(allocator: std.mem.Allocator, original: ir.Program, options: Op
                 if (eligible[@intCast(block.function)] and equal(ir.Edge, yes, no)) {
                     block.terminator = .{ .jump = yes };
                     changed = true;
-                } else block.terminator = .{ .branch = .{ .condition = branch.condition, .when_true = yes, .when_false = no } };
+                } else block.terminator = .{ .branch = .{
+                    .condition = branch.condition,
+                    .when_true = yes,
+                    .when_false = no,
+                } };
             },
             else => {},
         }
@@ -121,14 +147,27 @@ pub fn construct(allocator: std.mem.Allocator, original: ir.Program, options: Op
     return .{ .arena = arena, .program = program, .representatives = map };
 }
 fn edgeMatches(map: []const p.Id, before: ir.Edge, after: ir.Edge) bool {
-    return after.block == map[@intCast(before.block)] and equal([]const ir.Assignment, before.assignments, after.assignments);
+    return after.block == map[@intCast(before.block)] and equal(
+        []const ir.Assignment,
+        before.assignments,
+        after.assignments,
+    );
 }
-pub fn validate(allocator: std.mem.Allocator, original: ir.Program, candidate: ir.Program, map: []const p.Id, options: Options) Error!void {
+pub fn validate(
+    allocator: std.mem.Allocator,
+    original: ir.Program,
+    candidate: ir.Program,
+    map: []const p.Id,
+    options: Options,
+) Error!void {
     var before = try ownership.analyze(allocator, original);
     defer before.deinit();
     var after = try ownership.analyze(allocator, candidate);
     defer after.deinit();
-    if (map.len != original.blocks.len or candidate.blocks.len != original.blocks.len or candidate.functions.len != original.functions.len) return error.InvalidCommonTail;
+    if (map.len != original.blocks.len or
+        candidate.blocks.len != original.blocks.len or
+        candidate.functions.len != original.functions.len)
+        return error.InvalidCommonTail;
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     var budget: Budget = .{ .left = options.work_limit };
@@ -139,33 +178,77 @@ pub fn validate(allocator: std.mem.Allocator, original: ir.Program, candidate: i
     if (!equal(ir.Program, original, unchanged)) return error.InvalidCommonTail;
     for (map, original.blocks, 0..) |representative, block, id| {
         try charge(ir.Block, block, &budget);
-        if (representative > id or map[@intCast(representative)] != representative) return error.InvalidCommonTail;
-        if (representative != id and (!eligible[@intCast(block.function)] or !equal(ir.Block, block, original.blocks[@intCast(representative)]))) return error.InvalidCommonTail;
+        if (representative > id or map[
+            @intCast(representative)
+        ] != representative) return error.InvalidCommonTail;
+        if (representative != id and (!eligible[@intCast(block.function)] or !equal(
+            ir.Block,
+            block,
+            original.blocks[@intCast(representative)],
+        ))) return error.InvalidCommonTail;
     }
     for (original.functions, candidate.functions) |old, new| {
         var restored = new;
         restored.entry = old.entry;
-        if (new.entry != map[@intCast(old.entry)] or !equal(ir.Function, old, restored)) return error.InvalidCommonTail;
+        if (new.entry != map[@intCast(old.entry)] or !equal(
+            ir.Function,
+            old,
+            restored,
+        )) return error.InvalidCommonTail;
     }
+    try validateBlocks(original, candidate, map, eligible, &budget);
+}
+fn validateBlocks(
+    original: ir.Program,
+    candidate: ir.Program,
+    map: []const p.Id,
+    eligible: []const bool,
+    budget: *Budget,
+) Error!void {
     for (original.blocks, candidate.blocks) |old, new| {
-        try charge(ir.Block, old, &budget);
+        try charge(ir.Block, old, budget);
         var restored = new;
         restored.terminator = old.terminator;
         if (!equal(ir.Block, old, restored)) return error.InvalidCommonTail;
         switch (old.terminator) {
-            .jump => |next| if (new.terminator != .jump or !edgeMatches(map, next, new.terminator.jump)) return error.InvalidCommonTail,
+            .jump => |next| if (new.terminator != .jump or !edgeMatches(
+                map,
+                next,
+                new.terminator.jump,
+            )) return error.InvalidCommonTail,
             .branch => |branch| {
                 if (new.terminator == .jump) {
-                    if (!eligible[@intCast(old.function)] or !edgeMatches(map, branch.when_true, new.terminator.jump) or !edgeMatches(map, branch.when_false, new.terminator.jump)) return error.InvalidCommonTail;
+                    if (!eligible[@intCast(old.function)] or !edgeMatches(
+                        map,
+                        branch.when_true,
+                        new.terminator.jump,
+                    ) or !edgeMatches(
+                        map,
+                        branch.when_false,
+                        new.terminator.jump,
+                    )) return error.InvalidCommonTail;
                 } else {
-                    if (new.terminator != .branch or new.terminator.branch.condition != branch.condition or !edgeMatches(map, branch.when_true, new.terminator.branch.when_true) or !edgeMatches(map, branch.when_false, new.terminator.branch.when_false)) return error.InvalidCommonTail;
+                    if (new.terminator != .branch or
+                        new.terminator.branch.condition != branch.condition or
+                        !edgeMatches(map, branch.when_true, new.terminator.branch.when_true) or
+                        !edgeMatches(map, branch.when_false, new.terminator.branch.when_false))
+                        return error.InvalidCommonTail;
                 }
             },
-            else => if (!equal(ir.Terminator, old.terminator, new.terminator)) return error.InvalidCommonTail,
+            else => if (!equal(
+                ir.Terminator,
+                old.terminator,
+                new.terminator,
+            )) return error.InvalidCommonTail,
         }
     }
 }
-pub fn run(allocator: std.mem.Allocator, original: ir.Program, statistics: ?*Statistics, options: Options) Error!p01.Owned {
+pub fn run(
+    allocator: std.mem.Allocator,
+    original: ir.Program,
+    statistics: ?*Statistics,
+    options: Options,
+) Error!p01.Owned {
     var stats: Statistics = .{};
     defer if (statistics) |out| {
         out.* = stats;
@@ -178,7 +261,13 @@ pub fn run(allocator: std.mem.Allocator, original: ir.Program, statistics: ?*Sta
         else => return err,
     }) orelse return p01.run(allocator, original, options.coalescing);
     defer candidate.deinit();
-    validate(allocator, original, candidate.program, candidate.representatives, options) catch |err| switch (err) {
+    validate(
+        allocator,
+        original,
+        candidate.program,
+        candidate.representatives,
+        options,
+    ) catch |err| switch (err) {
         error.CommonTailLimit => {
             stats.work_limit = true;
             return p01.run(allocator, original, options.coalescing);

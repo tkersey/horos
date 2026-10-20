@@ -10,7 +10,11 @@ pub const Expression = struct {
     input: space.Row = 0,
     constant: u64 = 0,
     pub fn xor(left: Expression, right: Expression) Expression {
-        return .{ .state = left.state ^ right.state, .input = left.input ^ right.input, .constant = left.constant ^ right.constant };
+        return .{
+            .state = left.state ^ right.state,
+            .input = left.input ^ right.input,
+            .constant = left.constant ^ right.constant,
+        };
     }
 };
 pub const Error = std.mem.Allocator.Error || space.Error;
@@ -27,9 +31,18 @@ pub fn unsignedWidth(schema: p.Schema) ?usize {
 
 /// Unsupported expressions become unknown. Their observers must seed original
 /// coordinates or make the enclosing slice ineligible; unknown is never zero.
-pub fn instruction(program: ir.Program, function: ir.Function, op: ir.Instruction, values: []const ?Expression, word_schema: p.Id, budget: *space.Budget) Error!?Expression {
+pub fn instruction(
+    program: ir.Program,
+    function: ir.Function,
+    op: ir.Instruction,
+    values: []const ?Expression,
+    word_schema: p.Id,
+    budget: *space.Budget,
+) Error!?Expression {
     try budget.charge();
-    if (op.destination >= function.layout.slots.len or function.layout.slots[@intCast(op.destination)] != word_schema or op.failures.len != 0) return null;
+    if (op.destination >= function.layout.slots.len or function.layout.slots[
+        @intCast(op.destination)
+    ] != word_schema or op.failures.len != 0) return null;
     switch (op.opcode) {
         .move => {
             if (op.operands.len != 1 or op.immediate != 0) return null;
@@ -47,14 +60,23 @@ pub fn instruction(program: ir.Program, function: ir.Function, op: ir.Instructio
             const width = unsignedWidth(program.schemas[@intCast(word_schema)]) orelse return null;
             if (literal.schema != word_schema or literal.bytes.len != width) return null;
             var constant: u64 = 0;
-            for (literal.bytes, 0..) |byte, index| constant |= @as(u64, byte) << @intCast(8 * index);
+            for (
+                literal.bytes,
+                0..,
+            ) |byte, index| constant |= @as(u64, byte) << @intCast(8 * index);
             return .{ .constant = constant };
         },
         else => return null,
     }
 }
 
-pub fn execute(program: ir.Program, block: ir.Block, values: []?Expression, word_schema: p.Id, budget: *space.Budget) Error!void {
+pub fn execute(
+    program: ir.Program,
+    block: ir.Block,
+    values: []?Expression,
+    word_schema: p.Id,
+    budget: *space.Budget,
+) Error!void {
     const function = program.functions[@intCast(block.function)];
     for (block.instructions) |op| {
         const value = try instruction(program, function, op, values, word_schema, budget);
@@ -62,7 +84,13 @@ pub fn execute(program: ir.Program, block: ir.Block, values: []?Expression, word
     }
 }
 
-pub fn transfer(a: std.mem.Allocator, old: []const ?Expression, edge: ir.Edge, returned: ?Expression, budget: *space.Budget) Error![]?Expression {
+pub fn transfer(
+    a: std.mem.Allocator,
+    old: []const ?Expression,
+    edge: ir.Edge,
+    returned: ?Expression,
+    budget: *space.Budget,
+) Error![]?Expression {
     const next = try a.dupe(?Expression, old);
     errdefer a.free(next);
     for (edge.assignments) |assignment| {
@@ -77,7 +105,12 @@ pub fn transfer(a: std.mem.Allocator, old: []const ?Expression, edge: ir.Edge, r
 
 /// Extract the next capture coordinates in their actual constructor/call order.
 /// Closure consumes these state rows; synthesis retains input and affine terms.
-pub fn interface(a: std.mem.Allocator, values: []const ?Expression, operands: []const p.Id, budget: *space.Budget) Error!?[]Expression {
+pub fn interface(
+    a: std.mem.Allocator,
+    values: []const ?Expression,
+    operands: []const p.Id,
+    budget: *space.Budget,
+) Error!?[]Expression {
     const result = try a.alloc(Expression, operands.len);
     errdefer a.free(result);
     for (operands, result) |slot, *out| {
@@ -97,12 +130,30 @@ test "record extraction preserves overwritten operands and parallel predecessor 
         .schemas = &.{ .u64, .unit },
         .constants = &.{},
         .effects = &.{},
-        .functions = &.{.{ .entry = 0, .inputs = &.{ 0, 1, 2, 3 }, .layout = .{ .slots = &.{ 0, 0, 0, 0 } }, .result = 0 }},
-        .blocks = &.{.{ .function = 0, .instructions = &.{.{ .destination = 0, .opcode = .integer_bit_xor, .operands = &.{ 0, 3 } }}, .terminator = .{ .return_value = 0 } }},
+        .functions = &.{.{
+            .entry = 0,
+            .inputs = &.{ 0, 1, 2, 3 },
+            .layout = .{ .slots = &.{ 0, 0, 0, 0 } },
+            .result = 0,
+        }},
+        .blocks = &.{.{
+            .function = 0,
+            .instructions = &.{.{
+                .destination = 0,
+                .opcode = .integer_bit_xor,
+                .operands = &.{ 0, 3 },
+            }},
+            .terminator = .{ .return_value = 0 },
+        }},
     };
     var admitted = try @import("activation_ownership.zig").analyze(a, program);
     defer admitted.deinit();
-    var values = [_]?Expression{ .{ .state = 1 }, .{ .state = 2 }, .{ .state = 4 }, .{ .input = 1 } };
+    var values = [_]?Expression{
+        .{ .state = 1 },
+        .{ .state = 2 },
+        .{ .state = 4 },
+        .{ .input = 1 },
+    };
     var budget: space.Budget = .{ .remaining = 10000 };
     try execute(program, program.blocks[0], &values, 0, &budget);
     try std.testing.expectEqualDeep(Expression{ .state = 1, .input = 1 }, values[0].?);

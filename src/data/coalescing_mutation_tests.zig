@@ -33,7 +33,10 @@ fn rejectMutation(before: ir.Program, after: ir.Program) !void {
     defer scratch.deinit();
     const map = try identity(scratch.allocator(), before);
     try validator.validate(testing.allocator, before, before, map);
-    try testing.expectError(error.InvalidCorrespondence, validator.validate(testing.allocator, before, after, map));
+    try testing.expectError(
+        error.InvalidCorrespondence,
+        validator.validate(testing.allocator, before, after, map),
+    );
 }
 
 test "coalescing preserves callable use effect and capture-bound distinctions" {
@@ -48,8 +51,17 @@ test "coalescing preserves callable use effect and capture-bound distinctions" {
         .schemas = &.{ .u64, .unit, callable, callable },
         .constants = &.{},
         .effects = &.{.{ .identity = "latent", .payload = 1, .result = 0 }},
-        .functions = &.{.{ .entry = 0, .inputs = &.{0}, .layout = .{ .slots = &.{ 0, 2, 3 } }, .result = 0 }},
-        .blocks = &.{.{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 0 } }},
+        .functions = &.{.{
+            .entry = 0,
+            .inputs = &.{0},
+            .layout = .{ .slots = &.{ 0, 2, 3 } },
+            .result = 0,
+        }},
+        .blocks = &.{.{
+            .function = 0,
+            .instructions = &.{},
+            .terminator = .{ .return_value = 0 },
+        }},
     };
     var equivalent = try pass.run(testing.allocator, program, .{});
     defer equivalent.deinit();
@@ -73,11 +85,31 @@ test "coalescing preserves callable use effect and capture-bound distinctions" {
 test "coalescing rejects changed region and resource contracts independently" {
     const program: ir.Program = .{
         .roots = .{ .entry = 0, .result = 0, .failure = 1 },
-        .schemas = &.{ .u64, .unit, .{ .internal = .{ .cell = .{ .element = 0, .region = 0 } } }, .{ .internal = .{ .cell = .{ .element = 0, .region = 1 } } }, .{ .internal = .{ .abstract_resource = 0 } }, .{ .internal = .{ .abstract_resource = 1 } } },
+        .schemas = &.{
+            .u64,                                                         .unit,
+            .{ .internal = .{ .cell = .{ .element = 0, .region = 0 } } },
+            .{
+                .internal = .{ .cell = .{ .element = 0, .region = 1 } },
+            },
+            .{ .internal = .{ .abstract_resource = 0 } },
+            .{
+                .internal = .{ .abstract_resource = 1 },
+            },
+        },
         .constants = &.{},
         .effects = &.{},
-        .functions = &.{.{ .entry = 0, .inputs = &.{0}, .layout = .{ .slots = &.{ 0, 2, 3, 4, 5 } }, .result = 0, .regions = &.{ 0, 1 } }},
-        .blocks = &.{.{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 0 } }},
+        .functions = &.{.{
+            .entry = 0,
+            .inputs = &.{0},
+            .layout = .{ .slots = &.{ 0, 2, 3, 4, 5 } },
+            .result = 0,
+            .regions = &.{ 0, 1 },
+        }},
+        .blocks = &.{.{
+            .function = 0,
+            .instructions = &.{},
+            .terminator = .{ .return_value = 0 },
+        }},
         .scopes = .{ .region_count = 2, .resources = &.{
             .{ .representation = 0, .introducers = &.{0}, .eliminators = &.{0} },
             .{ .representation = 0, .introducers = &.{0}, .eliminators = &.{0} },
@@ -116,7 +148,12 @@ const arithmetic: ir.Program = .{
     .functions = &.{
         .{ .entry = 0, .inputs = &.{ 0, 1 }, .layout = .{ .slots = &.{ 0, 0, 0 } }, .result = 0 },
         .{ .entry = 1, .inputs = &.{ 0, 1 }, .layout = .{ .slots = &.{ 0, 0, 0 } }, .result = 0 },
-        .{ .entry = 2, .inputs = &.{ 0, 1 }, .layout = .{ .slots = &.{ 0, 0, 0, 0, 1 } }, .result = 1 },
+        .{
+            .entry = 2,
+            .inputs = &.{ 0, 1 },
+            .layout = .{ .slots = &.{ 0, 0, 0, 0, 1 } },
+            .result = 1,
+        },
     },
     .blocks = &.{
         .{ .function = 0, .instructions = &.{.{
@@ -134,18 +171,12 @@ const arithmetic: ir.Program = .{
         .{ .function = 2, .instructions = &.{}, .terminator = .{ .call = .{
             .function = 0,
             .arguments = &.{ 0, 1 },
-            .next = .{
-                .block = 3,
-                .assignments = &.{.{ .destination = 2, .source = .returned }},
-            },
+            .next = .{ .block = 3, .assignments = &.{.{ .destination = 2, .source = .returned }} },
         } } },
         .{ .function = 2, .instructions = &.{}, .terminator = .{ .call = .{
             .function = 1,
             .arguments = &.{ 0, 1 },
-            .next = .{
-                .block = 4,
-                .assignments = &.{.{ .destination = 3, .source = .returned }},
-            },
+            .next = .{ .block = 4, .assignments = &.{.{ .destination = 3, .source = .returned }} },
         } } },
         .{ .function = 2, .instructions = &.{.{
             .destination = 4,
@@ -186,7 +217,12 @@ test "coalescing raw checker distinguishes immediate ordinals and complete failu
         .schemas = arithmetic.schemas,
         .constants = &.{},
         .effects = &.{},
-        .functions = &.{.{ .entry = 0, .inputs = &.{0}, .layout = .{ .slots = &.{ 1, 0 } }, .result = 0 }},
+        .functions = &.{.{
+            .entry = 0,
+            .inputs = &.{0},
+            .layout = .{ .slots = &.{ 1, 0 } },
+            .result = 0,
+        }},
         .blocks = &.{.{ .function = 0, .instructions = &.{.{
             .destination = 1,
             .opcode = .field,
@@ -232,12 +268,24 @@ test "coalescing raw checker rejects swapped branch and sum-case roles" {
             .schemas = &.{ .u64, if (sum) .{ .sum = &.{ 0, 0 } } else .boolean },
             .constants = arithmetic.constants,
             .effects = &.{},
-            .functions = &.{.{ .entry = 0, .inputs = &.{0}, .layout = .{ .slots = &.{ 1, 0 } }, .result = 0 }},
+            .functions = &.{.{
+                .entry = 0,
+                .inputs = &.{0},
+                .layout = .{ .slots = &.{ 1, 0 } },
+                .result = 0,
+            }},
             .blocks = &.{
                 .{ .function = 0, .instructions = &.{}, .terminator = if (sum)
-                    .{ .switch_variant = .{ .value = 0, .cases = &.{ .{ .block = 1 }, .{ .block = 2 } } } }
+                    .{ .switch_variant = .{
+                        .value = 0,
+                        .cases = &.{ .{ .block = 1 }, .{ .block = 2 } },
+                    } }
                 else
-                    .{ .branch = .{ .condition = 0, .when_true = .{ .block = 1 }, .when_false = .{ .block = 2 } } } },
+                    .{ .branch = .{
+                        .condition = 0,
+                        .when_true = .{ .block = 1 },
+                        .when_false = .{ .block = 2 },
+                    } } },
                 .{ .function = 0, .instructions = &.{.{
                     .destination = 1,
                     .opcode = .constant,
@@ -274,17 +322,29 @@ test "coalescing rejects changed nominal effect use and forged many-to-one effec
             .{ .identity = "same-name", .payload = 0, .result = 0 },
             .{ .identity = "same-name", .payload = 0, .result = 0 },
         },
-        .functions = &.{.{ .entry = 0, .inputs = &.{0}, .layout = .{ .slots = &.{ 0, 0 } }, .result = 0, .effects = &.{ 0, 1 } }},
+        .functions = &.{.{
+            .entry = 0,
+            .inputs = &.{0},
+            .layout = .{ .slots = &.{ 0, 0 } },
+            .result = 0,
+            .effects = &.{ 0, 1 },
+        }},
         .blocks = &.{
             .{ .function = 0, .instructions = &.{}, .terminator = .{ .perform = .{
                 .effect = 0,
                 .payload = 0,
-                .next = .{ .block = 1, .assignments = &.{.{ .destination = 1, .source = .returned }} },
+                .next = .{
+                    .block = 1,
+                    .assignments = &.{.{ .destination = 1, .source = .returned }},
+                },
             } } },
             .{ .function = 0, .instructions = &.{}, .terminator = .{ .perform = .{
                 .effect = 1,
                 .payload = 1,
-                .next = .{ .block = 2, .assignments = &.{.{ .destination = 1, .source = .returned }} },
+                .next = .{
+                    .block = 2,
+                    .assignments = &.{.{ .destination = 1, .source = .returned }},
+                },
             } } },
             .{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 1 } },
         },
@@ -299,7 +359,10 @@ test "coalescing rejects changed nominal effect use and forged many-to-one effec
     var forged = try identity(scratch.allocator(), program);
     forged.representatives[@backingInt(r.Kind.effect)] = &.{ 0, 0 };
     forged.final[@backingInt(r.Kind.effect)] = &.{ 0, 0 };
-    try testing.expectError(error.InvalidCorrespondence, validator.validate(testing.allocator, program, program, forged));
+    try testing.expectError(
+        error.InvalidCorrespondence,
+        validator.validate(testing.allocator, program, program, forged),
+    );
     var optimized = try pass.run(testing.allocator, program, .{});
     defer optimized.deinit();
     try testing.expectEqual(@as(usize, 2), optimized.program.effects.len);
@@ -309,9 +372,15 @@ test "coalescing rejects changed nominal effect use and forged many-to-one effec
 
 test "coalescing does not erase same-shaped code type width sign bound or tag contracts" {
     const pairs = [_][2]p.Schema{
-        .{ .u32, .i32 },                                                                                 .{ .u32, .u64 },
-        .{ .{ .bounded_bytes = 8 }, .{ .bounded_bytes = 9 } },                                           .{ .{ .bounded_text = 8 }, .{ .bounded_text = 9 } },
-        .{ .{ .array = .{ .element = 4, .length = 1 } }, .{ .array = .{ .element = 4, .length = 2 } } }, .{ .{ .enumeration = &.{ 0, 1 } }, .{ .enumeration = &.{ 0, 2 } } },
+        .{ .u32, .i32 },
+        .{ .u32, .u64 },
+        .{ .{ .bounded_bytes = 8 }, .{ .bounded_bytes = 9 } },
+        .{ .{ .bounded_text = 8 }, .{ .bounded_text = 9 } },
+        .{
+            .{ .array = .{ .element = 4, .length = 1 } },
+            .{ .array = .{ .element = 4, .length = 2 } },
+        },
+        .{ .{ .enumeration = &.{ 0, 1 } }, .{ .enumeration = &.{ 0, 2 } } },
     };
     for (pairs) |pair| {
         const schemas = [_]p.Schema{ pair[0], pair[1], .{ .product = &.{ 0, 1 } }, .unit, .u8 };
@@ -323,7 +392,12 @@ test "coalescing does not erase same-shaped code type width sign bound or tag co
             .functions = &.{
                 .{ .entry = 0, .inputs = &.{0}, .layout = .{ .slots = &.{0} }, .result = 0 },
                 .{ .entry = 1, .inputs = &.{0}, .layout = .{ .slots = &.{1} }, .result = 1 },
-                .{ .entry = 2, .inputs = &.{ 0, 1 }, .layout = .{ .slots = &.{ 0, 1, 0, 1, 2 } }, .result = 2 },
+                .{
+                    .entry = 2,
+                    .inputs = &.{ 0, 1 },
+                    .layout = .{ .slots = &.{ 0, 1, 0, 1, 2 } },
+                    .result = 2,
+                },
             },
             .blocks = &.{
                 .{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 0 } },
@@ -331,12 +405,18 @@ test "coalescing does not erase same-shaped code type width sign bound or tag co
                 .{ .function = 2, .instructions = &.{}, .terminator = .{ .call = .{
                     .function = 0,
                     .arguments = &.{0},
-                    .next = .{ .block = 3, .assignments = &.{.{ .destination = 2, .source = .returned }} },
+                    .next = .{
+                        .block = 3,
+                        .assignments = &.{.{ .destination = 2, .source = .returned }},
+                    },
                 } } },
                 .{ .function = 2, .instructions = &.{}, .terminator = .{ .call = .{
                     .function = 1,
                     .arguments = &.{1},
-                    .next = .{ .block = 4, .assignments = &.{.{ .destination = 3, .source = .returned }} },
+                    .next = .{
+                        .block = 4,
+                        .assignments = &.{.{ .destination = 3, .source = .returned }},
+                    },
                 } } },
                 .{ .function = 2, .instructions = &.{.{
                     .opcode = .product,
@@ -356,26 +436,50 @@ test "coalescing does not erase same-shaped code type width sign bound or tag co
 
 const handler_strategies: ir.Program = .{
     .roots = .{ .entry = 4, .result = 5, .failure = 0 },
-    .schemas = &.{ .unit, .u64, .{ .internal = .{ .capability = 0 } }, .{ .internal = .{ .resumption = .{
-        .effect = 0,
-        .input = 1,
-        .answer = 1,
-        .handled = &.{0},
-        .capture_bound = &.{ 0, 1, 2 },
-        .mode = .deep,
-        .use = .linear,
-    } } }, .{ .internal = .{ .computation = .{
-        .parameters = &.{2},
-        .result = 1,
-        .effects = &.{0},
-    } } }, .{ .product = &.{ 1, 1 } } },
-    .constants = &.{ .{ .schema = 0, .bytes = &.{} }, .{ .schema = 1, .bytes = &.{ 42, 0, 0, 0, 0, 0, 0, 0 } } },
+    .schemas = &.{
+        .unit,                                 .u64,
+        .{ .internal = .{ .capability = 0 } },
+        .{
+            .internal = .{
+                .resumption = .{
+                    .effect = 0,
+                    .input = 1,
+                    .answer = 1,
+                    .handled = &.{0},
+                    .capture_bound = &.{ 0, 1, 2 },
+                    .mode = .deep,
+                    .use = .linear,
+                },
+            },
+        },
+        .{ .internal = .{ .computation = .{
+            .parameters = &.{2},
+            .result = 1,
+            .effects = &.{0},
+        } } },
+        .{ .product = &.{ 1, 1 } },
+    },
+    .constants = &.{
+        .{ .schema = 0, .bytes = &.{} },
+        .{ .schema = 1, .bytes = &.{ 42, 0, 0, 0, 0, 0, 0, 0 } },
+    },
     .effects = &.{.{ .identity = "handled", .payload = 0, .result = 1, .external = false }},
     .functions = &.{
         .{ .entry = 0, .inputs = &.{0}, .layout = .{ .slots = &.{1} }, .result = 1 },
         .{ .entry = 1, .inputs = &.{0}, .layout = .{ .slots = &.{ 0, 1 } }, .result = 1 },
-        .{ .entry = 2, .inputs = &.{ 0, 1 }, .layout = .{ .slots = &.{ 0, 3, 1, 1 } }, .result = 1 },
-        .{ .entry = 4, .inputs = &.{0}, .layout = .{ .slots = &.{ 2, 0, 1 } }, .result = 1, .effects = &.{0} },
+        .{
+            .entry = 2,
+            .inputs = &.{ 0, 1 },
+            .layout = .{ .slots = &.{ 0, 3, 1, 1 } },
+            .result = 1,
+        },
+        .{
+            .entry = 4,
+            .inputs = &.{0},
+            .layout = .{ .slots = &.{ 2, 0, 1 } },
+            .result = 1,
+            .effects = &.{0},
+        },
         .{ .entry = 6, .inputs = &.{}, .layout = .{ .slots = &.{ 4, 1, 1, 5 } }, .result = 5 },
     },
     .blocks = &.{
@@ -395,32 +499,32 @@ const handler_strategies: ir.Program = .{
             .next = .{ .block = 3, .assignments = &.{.{ .destination = 3, .source = .returned }} },
         } } },
         .{ .function = 2, .instructions = &.{}, .terminator = .{ .return_value = 3 } },
-        .{ .function = 3, .instructions = &.{.{ .opcode = .constant, .destination = 1 }}, .terminator = .{ .perform = .{
+        .{ .function = 3, .instructions = &.{.{
+            .opcode = .constant,
+            .destination = 1,
+        }}, .terminator = .{ .perform = .{
             .effect = 0,
             .capability = 0,
             .payload = 1,
             .next = .{ .block = 5, .assignments = &.{.{ .destination = 2, .source = .returned }} },
         } } },
         .{ .function = 3, .instructions = &.{}, .terminator = .{ .return_value = 2 } },
-        .{ .function = 4, .instructions = &.{.{ .opcode = .computation, .destination = 0 }}, .terminator = .{ .handle = .{
+        .{ .function = 4, .instructions = &.{.{
+            .opcode = .computation,
+            .destination = 0,
+        }}, .terminator = .{ .handle = .{
             .handler = 0,
             .body = 0,
             .arguments = &.{},
             .state = &.{},
-            .next = .{
-                .block = 7,
-                .assignments = &.{.{ .destination = 1, .source = .returned }},
-            },
+            .next = .{ .block = 7, .assignments = &.{.{ .destination = 1, .source = .returned }} },
         } } },
         .{ .function = 4, .instructions = &.{}, .terminator = .{ .handle = .{
             .handler = 1,
             .body = 0,
             .arguments = &.{},
             .state = &.{},
-            .next = .{
-                .block = 8,
-                .assignments = &.{.{ .destination = 2, .source = .returned }},
-            },
+            .next = .{ .block = 8, .assignments = &.{.{ .destination = 2, .source = .returned }} },
         } } },
         .{ .function = 4, .instructions = &.{.{
             .opcode = .product,
@@ -429,8 +533,20 @@ const handler_strategies: ir.Program = .{
         }}, .terminator = .{ .return_value = 3 } },
     },
     .handlers = &.{
-        .{ .mode = .deep, .input = 1, .answer = 1, .return_function = 0, .clauses = &.{.{ .effect = 0, .function = 1, .resumption = 3, .strategy = .tail }} },
-        .{ .mode = .deep, .input = 1, .answer = 1, .return_function = 0, .clauses = &.{.{ .effect = 0, .function = 2, .resumption = 3, .strategy = .general }} },
+        .{
+            .mode = .deep,
+            .input = 1,
+            .answer = 1,
+            .return_function = 0,
+            .clauses = &.{.{ .effect = 0, .function = 1, .resumption = 3, .strategy = .tail }},
+        },
+        .{
+            .mode = .deep,
+            .input = 1,
+            .answer = 1,
+            .return_function = 0,
+            .clauses = &.{.{ .effect = 0, .function = 2, .resumption = 3, .strategy = .general }},
+        },
     },
     .constructors = &.{.{ .function = 3, .capture = 0, .schema = 4 }},
     .scopes = .{ .captures = &.{.{ .fields = &.{}, .use = .reusable }} },

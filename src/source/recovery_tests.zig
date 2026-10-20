@@ -26,9 +26,20 @@ test "source recovery bounds target domains before allocation" {
         var admitted = try data.activation_ownership.analyze(a, forged.program);
         admitted.deinit();
         bounded.reset();
-        try std.testing.expectError(error.InvalidCorrespondence, source.recovery.parameters(bounded.allocator(), module, forged.program, forged.recovery_evidence.?));
+        try std.testing.expectError(
+            error.InvalidCorrespondence,
+            source.recovery.parameters(
+                bounded.allocator(),
+                module,
+                forged.program,
+                forged.recovery_evidence.?,
+            ),
+        );
         bounded.reset();
-        try std.testing.expectError(error.InvalidCorrespondence, source.recovery.validate(bounded.allocator(), module, &forged));
+        try std.testing.expectError(
+            error.InvalidCorrespondence,
+            source.recovery.validate(bounded.allocator(), module, &forged),
+        );
     }
 }
 
@@ -67,9 +78,11 @@ test "source recovery evidence owns arrays of relocation slices" {
     try std.testing.expectEqualSlices(u64, &.{ 7, 11 }, copied[1]);
 }
 
-test "source recovery retains binding aliases through checked function coalescing" {
-    var b = source.Builder.init(a);
-    defer b.deinit();
+fn coalescedBindingModule(b: *source.Builder) !struct {
+    module: source.Module,
+    first: source.Id,
+    second: source.Id,
+} {
     const unit = try b.scalar(void);
     const word = try b.scalar(u64);
     const pair = try b.schema(.{ .product = &.{ word, word } });
@@ -80,33 +93,34 @@ test "source recovery retains binding aliases through checked function coalescin
     try b.define(second, try b.pure(try b.reference(b.parameter(second, 0))));
     const left = try b.variable(word);
     const right = try b.variable(word);
-    const result = try b.pure(try b.primitive(pair, .product, &.{ try b.reference(left), try b.reference(right) }, 0));
-    try b.define(entry, try b.bind(left, try b.term(.{ .call = .{ .function = first, .arguments = &.{try b.reference(b.parameter(entry, 0))} } }), try b.bind(right, try b.term(.{ .call = .{ .function = second, .arguments = &.{try b.reference(b.parameter(entry, 1))} } }), result)));
-    var compiled = try source.lowerObserved(a, b.module(entry, unit), .{ .recovery = true });
-    defer compiled.deinit();
-    try source.recovery.validate(a, b.module(entry, unit), &compiled);
-    var first_location: ?source.RecoveryBinding = null;
-    var second_location: ?source.RecoveryBinding = null;
-    for (compiled.recovery) |binding| {
-        if (binding.source_function == first and binding.variable == b.parameter(first, 0)) first_location = binding;
-        if (binding.source_function == second and binding.variable == b.parameter(second, 0)) second_location = binding;
-        try std.testing.expectEqual(compiled.program.functions[@intCast(binding.function)].layout.slots[@intCast(binding.slot)], binding.schema);
-    }
-    try std.testing.expect(first_location != null and second_location != null);
-    try std.testing.expectEqual(first_location.?.function, second_location.?.function);
-    try std.testing.expectEqual(first_location.?.slot, second_location.?.slot);
-    try std.testing.expectEqual(compiled.program.functions[@intCast(first_location.?.function)].inputs[0], first_location.?.slot);
-    try std.testing.expectEqual(@as(usize, 2), compiled.program.functions.len);
-    try std.testing.expectError(error.InvalidCorrespondence, source.lowerObserved(a, b.module(entry, unit), .{ .recovery = true, .contract = .semantic }));
-    var bounded = try source.lowerObserved(a, b.module(entry, unit), .{ .recovery = true, .coalescing = .{ .work_limit = 0 } });
-    defer bounded.deinit();
-    for (bounded.recovery) |binding| {
-        const target = bounded.program.functions[@intCast(binding.function)];
-        if (binding.variable == b.parameter(binding.source_function, 0))
-            try std.testing.expectEqual(target.inputs[0], binding.slot);
-    }
-    try source.recovery.validate(a, b.module(entry, unit), &bounded);
+    const result = try b.pure(try b.primitive(
+        pair,
+        .product,
+        &.{ try b.reference(left), try b.reference(right) },
+        0,
+    ));
+    try b.define(
+        entry,
+        try b.bind(
+            left,
+            try b.term(.{ .call = .{
+                .function = first,
+                .arguments = &.{try b.reference(b.parameter(entry, 0))},
+            } }),
+            try b.bind(
+                right,
+                try b.term(.{ .call = .{
+                    .function = second,
+                    .arguments = &.{try b.reference(b.parameter(entry, 1))},
+                } }),
+                result,
+            ),
+        ),
+    );
+    return .{ .module = b.module(entry, unit), .first = first, .second = second };
+}
 
+fn rejectForgedBindingParameters(module: source.Module, compiled: source.Compiled) !void {
     // A different same-typed input is not an admissible recovery substitution.
     const parameters = try a.dupe(source.RecoveryBinding, compiled.parameters);
     defer a.free(parameters);
@@ -117,10 +131,16 @@ test "source recovery retains binding aliases through checked function coalescin
     try std.testing.expectEqual(@as(usize, 2), target.inputs.len);
     parameters[0].slot = target.inputs[1];
     try std.testing.expectEqual(target.layout.slots[@intCast(parameters[0].slot)], old.schema);
-    try std.testing.expectError(error.InvalidCorrespondence, source.recovery.validate(a, b.module(entry, unit), &forged));
+    try std.testing.expectError(
+        error.InvalidCorrespondence,
+        source.recovery.validate(a, module, &forged),
+    );
     parameters[0] = old;
     forged.parameters = parameters[1..];
-    try std.testing.expectError(error.InvalidCorrespondence, source.recovery.validate(a, b.module(entry, unit), &forged));
+    try std.testing.expectError(
+        error.InvalidCorrespondence,
+        source.recovery.validate(a, module, &forged),
+    );
     forged.parameters = parameters;
 
     // Altering actual final input records remains well typed. Checking merely
@@ -132,7 +152,72 @@ test "source recovery retains binding aliases through checked function coalescin
     forged.program.functions = functions;
     var admitted = try data.activation_ownership.analyze(a, forged.program);
     admitted.deinit();
-    try std.testing.expectError(error.InvalidCorrespondence, source.recovery.validate(a, b.module(entry, unit), &forged));
+    try std.testing.expectError(
+        error.InvalidCorrespondence,
+        source.recovery.validate(a, module, &forged),
+    );
+}
+
+test "source recovery retains binding aliases through checked function coalescing" {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const fixture = try coalescedBindingModule(&b);
+    const module = fixture.module;
+    const first = fixture.first;
+    const second = fixture.second;
+    var compiled = try source.lowerObserved(a, module, .{ .recovery = true });
+    defer compiled.deinit();
+    try source.recovery.validate(a, module, &compiled);
+    var first_location: ?source.RecoveryBinding = null;
+    var second_location: ?source.RecoveryBinding = null;
+    for (compiled.recovery) |binding| {
+        if (binding.source_function == first and binding.variable == b.parameter(
+            first,
+            0,
+        )) first_location = binding;
+        if (binding.source_function == second and binding.variable == b.parameter(
+            second,
+            0,
+        )) second_location = binding;
+        try std.testing.expectEqual(
+            compiled.program.functions[
+                @intCast(binding.function)
+            ].layout.slots[
+                @intCast(binding.slot)
+            ],
+            binding.schema,
+        );
+    }
+    try std.testing.expect(first_location != null and second_location != null);
+    try std.testing.expectEqual(first_location.?.function, second_location.?.function);
+    try std.testing.expectEqual(first_location.?.slot, second_location.?.slot);
+    try std.testing.expectEqual(
+        compiled.program.functions[@intCast(first_location.?.function)].inputs[0],
+        first_location.?.slot,
+    );
+    try std.testing.expectEqual(@as(usize, 2), compiled.program.functions.len);
+    try std.testing.expectError(
+        error.InvalidCorrespondence,
+        source.lowerObserved(
+            a,
+            module,
+            .{ .recovery = true, .contract = .semantic },
+        ),
+    );
+    var bounded = try source.lowerObserved(
+        a,
+        module,
+        .{ .recovery = true, .coalescing = .{ .work_limit = 0 } },
+    );
+    defer bounded.deinit();
+    for (bounded.recovery) |binding| {
+        const target = bounded.program.functions[@intCast(binding.function)];
+        if (binding.variable == b.parameter(binding.source_function, 0))
+            try std.testing.expectEqual(target.inputs[0], binding.slot);
+    }
+    try source.recovery.validate(a, module, &bounded);
+
+    try rejectForgedBindingParameters(module, compiled);
 }
 
 test "source recovery derives formal parameters after captured inputs" {
@@ -169,7 +254,15 @@ test "source recovery rejects a same-typed source parameter permutation" {
     const word = try b.scalar(u64);
     const pair = try b.schema(.{ .product = &.{ word, word } });
     const f = try b.declare(&.{ word, word }, pair, &.{}, &.{});
-    try b.define(f, try b.pure(try b.primitive(pair, .product, &.{ try b.reference(b.parameter(f, 0)), try b.reference(b.parameter(f, 1)) }, 0)));
+    try b.define(
+        f,
+        try b.pure(try b.primitive(
+            pair,
+            .product,
+            &.{ try b.reference(b.parameter(f, 0)), try b.reference(b.parameter(f, 1)) },
+            0,
+        )),
+    );
     const module = b.module(f, unit);
     var compiled = try source.lowerObserved(a, module, .{ .recovery = true });
     defer compiled.deinit();
@@ -187,5 +280,155 @@ test "source recovery rejects a same-typed source parameter permutation" {
     for (parameters, reversed) |*binding, variable| binding.variable = variable;
     var forged = compiled;
     forged.parameters = parameters;
-    try std.testing.expectError(error.InvalidCorrespondence, source.recovery.validate(a, substituted, &forged));
+    try std.testing.expectError(
+        error.InvalidCorrespondence,
+        source.recovery.validate(a, substituted, &forged),
+    );
+}
+
+const OwnedRecursive = union(enum) {
+    branch: []const OwnedRecursive,
+    leaf: struct {
+        aliases: [2][]const u8,
+        optional: ?[]const u8,
+        empty: ?[]const u8,
+        scalar: u64,
+        sentinel: [0:171]u8,
+    },
+};
+
+fn checkRecursiveOwnership(
+    allocator: std.mem.Allocator,
+    original: OwnedRecursive,
+    depth: usize,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const copied = try source.own(OwnedRecursive, arena.allocator(), original);
+    var before = original;
+    var after = copied;
+    for (0..depth) |_| {
+        try std.testing.expect(before.branch.ptr != after.branch.ptr);
+        try std.testing.expectEqual(@as(usize, 1), after.branch.len);
+        before = before.branch[0];
+        after = after.branch[0];
+    }
+    const leaf = after.leaf;
+    try std.testing.expectEqualSlices(u8, "owned", leaf.aliases[0]);
+    try std.testing.expectEqualSlices(u8, "owned", leaf.aliases[1]);
+    try std.testing.expectEqualSlices(u8, "owned", leaf.optional.?);
+    try std.testing.expect(leaf.aliases[0].ptr != before.leaf.aliases[0].ptr);
+    try std.testing.expect(leaf.aliases[0].ptr != leaf.aliases[1].ptr);
+    try std.testing.expect(leaf.aliases[0].ptr != leaf.optional.?.ptr);
+    try std.testing.expect(leaf.empty == null);
+    try std.testing.expectEqual(@as(u64, 42), leaf.scalar);
+    try std.testing.expectEqualSlices(u8, &.{171}, std.mem.asBytes(&leaf.sentinel));
+    @constCast(leaf.aliases[0])[0] = 'O';
+    try std.testing.expectEqualSlices(u8, "owned", leaf.aliases[1]);
+    try std.testing.expectEqualSlices(u8, "owned", before.leaf.aliases[0]);
+}
+
+test "source ownership copies deep recursive generic values with allocation failures" {
+    const nodes = try a.alloc(OwnedRecursive, 4097);
+    defer a.free(nodes);
+    nodes[0] = .{ .leaf = .{
+        .aliases = .{ "owned", "owned" },
+        .optional = "owned",
+        .empty = null,
+        .scalar = 42,
+        .sentinel = .{},
+    } };
+    for (nodes[1..], 1..) |*node, index| node.* = .{ .branch = nodes[index - 1 .. index] };
+    try checkRecursiveOwnership(a, nodes[nodes.len - 1], nodes.len - 1);
+    try std.testing.checkAllAllocationFailures(
+        a,
+        checkRecursiveOwnership,
+        .{ nodes[nodes.len - 1], nodes.len - 1 },
+    );
+}
+
+fn checkSpecializationOwnership(allocator: std.mem.Allocator) !void {
+    const pe = source.specialize;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const fields: []const pe.Knowledge = &.{
+        .{ .known = .{ .schema = 3, .bytes = "source" } },
+        .dynamic,
+    };
+    const arguments: []const pe.Knowledge = &.{.{ .product = .{ .schema = 7, .fields = fields } }};
+    const requested: pe.Request = .{
+        .context = std.mem.zeroes(pe.Context),
+        .function = 8,
+        .arguments = arguments,
+    };
+    const copied = try source.own(pe.Request, arena.allocator(), requested);
+    const copied_slice = try source.own([]const pe.Knowledge, arena.allocator(), arguments);
+    try std.testing.expectEqualDeep(requested.context, copied.context);
+    try std.testing.expectEqualDeep(requested.policy, copied.policy);
+    try std.testing.expectEqual(requested.function, copied.function);
+    for ([_][]const pe.Knowledge{ copied.arguments, copied_slice }) |values| {
+        try std.testing.expect(values.ptr != arguments.ptr);
+        try std.testing.expectEqual(@as(u64, 7), values[0].product.schema);
+        const children = values[0].product.fields;
+        try std.testing.expect(children.ptr != fields.ptr);
+        try std.testing.expectEqual(@as(usize, 2), children.len);
+        try std.testing.expectEqual(@as(u64, 3), children[0].known.schema);
+        try std.testing.expectEqualSlices(u8, "source", children[0].known.bytes);
+        try std.testing.expect(children[0].known.bytes.ptr != fields[0].known.bytes.ptr);
+        try std.testing.expect(children[1] == .dynamic);
+    }
+}
+
+test "source ownership accepts public specialization requests and knowledge slices" {
+    try std.testing.checkAllAllocationFailures(a, checkSpecializationOwnership, .{});
+}
+
+fn checkOwnedBytes(allocator: std.mem.Allocator) !void {
+    const copied = try source.own([]const u8, allocator, "independent");
+    defer allocator.free(copied);
+    try std.testing.expectEqualSlices(u8, "independent", copied);
+}
+
+test "source ownership releases temporary traversal storage on every outcome" {
+    try std.testing.checkAllAllocationFailures(a, checkOwnedBytes, .{});
+}
+
+const QualifiedOwned = struct {
+    bytes: []const u8 align(1),
+    words: []align(1) const volatile u32 align(1),
+    children: []align(1) const @This() align(1),
+    flags: packed struct { low: u3, high: u5 },
+};
+
+fn checkQualifiedOwnership(allocator: std.mem.Allocator) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var storage: [9]u8 align(4) = undefined;
+    const words: *align(1) [2]u32 = @ptrCast(&storage[1]);
+    words.* = .{ 3, 7 };
+    var bytes = [_]u8{ 'a', 'b', 'c' };
+    const leaf: QualifiedOwned = .{
+        .bytes = &bytes,
+        .words = words,
+        .children = &.{},
+        .flags = .{ .low = 3, .high = 9 },
+    };
+    var root = leaf;
+    root.children = &.{leaf};
+    const copied = try source.own(QualifiedOwned, arena.allocator(), root);
+    bytes[0] = 'z';
+    words[0] = 99;
+    for ([_]QualifiedOwned{ copied, copied.children[0] }) |node| {
+        try std.testing.expectEqualSlices(u8, "abc", node.bytes);
+        try std.testing.expectEqual(@as(u32, 3), node.words[0]);
+        try std.testing.expectEqual(@as(u32, 7), node.words[1]);
+        try std.testing.expectEqual(@as(u3, 3), node.flags.low);
+        try std.testing.expectEqual(@as(u5, 9), node.flags.high);
+    }
+    try std.testing.expect(copied.bytes.ptr != copied.children[0].bytes.ptr);
+    try std.testing.expect(copied.words.ptr != copied.children[0].words.ptr);
+}
+
+test "source ownership preserves qualified slices and underaligned fields" {
+    try std.testing.checkAllAllocationFailures(a, checkQualifiedOwnership, .{});
 }

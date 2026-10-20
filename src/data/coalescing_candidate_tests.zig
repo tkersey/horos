@@ -127,7 +127,11 @@ test "coalescing public pass separates privileged and unprivileged identical cod
         try testing.expectEqual(@as(usize, 3), result.program.functions.len);
         try testing.expectEqual(@as(usize, 1), result.program.scopes.resources.len);
         try testing.expectEqualSlices(ir.Id, &.{0}, result.program.scopes.resources[0].introducers);
-        try testing.expectEqualSlices(ir.Id, if (both) &.{1} else &.{}, result.program.scopes.resources[0].eliminators);
+        try testing.expectEqualSlices(
+            ir.Id,
+            if (both) &.{1} else &.{},
+            result.program.scopes.resources[0].eliminators,
+        );
     }
 }
 
@@ -136,17 +140,24 @@ test "discarded authority neither pins live helpers nor hides an invalid unused 
     inline for (.{ false, true }) |eliminate| {
         var program = fixture;
         program.schemas = &.{ .u64, .unit, .{ .internal = .{ .abstract_resource = 0 } } };
-        var functions = [_]ir.Function{ fixture.functions[0], fixture.functions[1], fixture.functions[2], .{
-            .entry = fixture.blocks.len,
-            .inputs = &.{0},
-            .layout = .{ .slots = if (eliminate) &.{ 2, 0 } else &.{ 0, 2 } },
-            .result = if (eliminate) 0 else 2,
-        } };
+        var functions = [_]ir.Function{
+            fixture.functions[0], fixture.functions[1], fixture.functions[2],
+            .{
+                .entry = fixture.blocks.len,
+                .inputs = &.{0},
+                .layout = .{ .slots = if (eliminate) &.{ 2, 0 } else &.{ 0, 2 } },
+                .result = if (eliminate) 0 else 2,
+            },
+        };
         var blocks: [fixture.blocks.len + 1]ir.Block = undefined;
         @memcpy(blocks[0..fixture.blocks.len], fixture.blocks);
         blocks[fixture.blocks.len] = .{
             .function = 3,
-            .instructions = &.{.{ .opcode = if (eliminate) .resource_unpack else .resource_pack, .destination = 1, .operands = &.{0} }},
+            .instructions = &.{.{
+                .opcode = if (eliminate) .resource_unpack else .resource_pack,
+                .destination = 1,
+                .operands = &.{0},
+            }},
             .terminator = .{ .return_value = 1 },
         };
         program.functions = &functions;
@@ -168,6 +179,9 @@ test "discarded authority neither pins live helpers nor hides an invalid unused 
         try testing.expectEqual(@as(usize, 2), result.program.functions.len);
         var repeated = try pass.run(testing.allocator, result.program, .{});
         defer repeated.deinit();
-        try testing.expectEqual(try image.identity(testing.allocator, result.program), try image.identity(testing.allocator, repeated.program));
+        try testing.expectEqual(
+            try image.identity(testing.allocator, result.program),
+            try image.identity(testing.allocator, repeated.program),
+        );
     }
 }

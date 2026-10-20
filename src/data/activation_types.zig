@@ -16,7 +16,11 @@ pub fn validate(allocator: std.mem.Allocator, image: ir.Program) Error!void {
     return validateDiagnosed(allocator, image, null);
 }
 
-pub fn validateDiagnosed(allocator: std.mem.Allocator, image: ir.Program, diagnostic: ?*a.Diagnostic) Error!void {
+pub fn validateDiagnosed(
+    allocator: std.mem.Allocator,
+    image: ir.Program,
+    diagnostic: ?*a.Diagnostic,
+) Error!void {
     return validateInternal(allocator, image, &.{}, false, &.{}, diagnostic);
 }
 
@@ -57,7 +61,15 @@ pub fn validateWithFacts(
     borrows: []const @import("borrow_contract.zig").Summary,
     diagnostic: ?*a.Diagnostic,
 ) Error!ContextualFacts {
-    return validateWithObservedFacts(scratch, image, imports, component, borrows, diagnostic, false);
+    return validateWithObservedFacts(
+        scratch,
+        image,
+        imports,
+        component,
+        borrows,
+        diagnostic,
+        false,
+    );
 }
 
 pub fn validateWithObservedFacts(
@@ -73,8 +85,61 @@ pub fn validateWithObservedFacts(
     const exportable = try catalogs(scratch, image, component);
     const uses = try contracts.validateDiagnosed(scratch, image, diagnostic);
     const effects = try effect_scope.deriveComponent(scratch, image, imports);
+    try validateBlockTypes(image, uses, effects, diagnostic);
+    try @import("region_admission.zig").validate(scratch, image);
+    const control = try provenance.deriveObserved(scratch, image, imports, component, explanations);
     for (image.blocks, 0..) |block, block_id| {
-        if (diagnostic) |d| d.* = .{ .phase = .block, .function = block.function, .block = block_id };
+        if (diagnostic) |d| d.* = .{
+            .phase = .block,
+            .function = block.function,
+            .block = block_id,
+        };
+        try terminator(
+            image,
+            block,
+            image.functions[@intCast(block.function)].layout.slots,
+            effects,
+            .{ .analysis = control, .block = block_id },
+        );
+    }
+    if (component) {
+        var solver = try @import("borrow_flow.zig").contractedWithControl(
+            scratch,
+            image,
+            imports,
+            exportable,
+            borrows,
+            control,
+        );
+        for (borrows) |summary| {
+            if (image.functions[
+                @intCast(summary.function)
+            ].entry == @import("relocation.zig").missing)
+                continue;
+            try @import("borrow_contract.zig").check(&solver, summary);
+        }
+    } else try @import("borrow_flow.zig").validateWithControl(
+        scratch,
+        image,
+        exportable,
+        diagnostic,
+        control,
+    );
+    return .{ .uses = uses, .effects = effects, .control = control };
+}
+
+fn validateBlockTypes(
+    image: ir.Program,
+    uses: @import("traits.zig").Facts,
+    effects: effect_scope.Facts,
+    diagnostic: ?*a.Diagnostic,
+) Error!void {
+    for (image.blocks, 0..) |block, block_id| {
+        if (diagnostic) |d| d.* = .{
+            .phase = .block,
+            .function = block.function,
+            .block = block_id,
+        };
         const layout = image.functions[@intCast(block.function)].layout.slots;
         for (block.instructions) |instruction| {
             // A single-operation typing view, not a predecessor Program or block.
@@ -91,28 +156,6 @@ pub fn validateWithObservedFacts(
         }
         try terminator(image, block, layout, effects, null);
     }
-    try @import("region_admission.zig").validate(scratch, image);
-    const control = try provenance.deriveObserved(scratch, image, imports, component, explanations);
-    for (image.blocks, 0..) |block, block_id| {
-        if (diagnostic) |d| d.* = .{ .phase = .block, .function = block.function, .block = block_id };
-        try terminator(image, block, image.functions[@intCast(block.function)].layout.slots, effects, .{ .analysis = control, .block = block_id });
-    }
-    if (component) {
-        var solver = try @import("borrow_flow.zig").contractedWithControl(
-            scratch,
-            image,
-            imports,
-            exportable,
-            borrows,
-            control,
-        );
-        for (borrows) |summary| {
-            if (image.functions[@intCast(summary.function)].entry == @import("relocation.zig").missing)
-                continue;
-            try @import("borrow_contract.zig").check(&solver, summary);
-        }
-    } else try @import("borrow_flow.zig").validateWithControl(scratch, image, exportable, diagnostic, control);
-    return .{ .uses = uses, .effects = effects, .control = control };
 }
 
 /// Exportability remains valid for the immutable image throughout this call.
@@ -123,7 +166,9 @@ fn catalogs(allocator: std.mem.Allocator, image: ir.Program, component: bool) Er
     const entry = image.functions[@intCast(image.roots.entry)];
     const parameters = @import("function_inputs.zig").of(entry);
     for (0..parameters.len) |index| {
-        if (!component and !facts.exportable[@intCast(parameters.at(index))]) return error.InvalidSchema;
+        if (!component and !facts.exportable[
+            @intCast(parameters.at(index))
+        ]) return error.InvalidSchema;
     }
     for (image.constants) |literal| try a.value(allocator, image.schemas, facts, literal);
     for (image.effects) |effect| {
@@ -140,7 +185,12 @@ fn catalogs(allocator: std.mem.Allocator, image: ir.Program, component: bool) Er
     return facts.exportable;
 }
 
-fn instructionUses(image: ir.Program, operation: anytype, slots: []const p.Id, uses: @import("traits.zig").Facts) Error!void {
+fn instructionUses(
+    image: ir.Program,
+    operation: anytype,
+    slots: []const p.Id,
+    uses: @import("traits.zig").Facts,
+) Error!void {
     switch (operation.opcode) {
         .sequence_get => {
             const source = image.schemas[@intCast(slots[@intCast(operation.operands[0])])];
@@ -164,7 +214,13 @@ fn instructionUses(image: ir.Program, operation: anytype, slots: []const p.Id, u
     }
 }
 
-fn terminator(image: ir.Program, block: ir.Block, slots: []const p.Id, effects: effect_scope.Facts, control: ?provenance.Context) Error!void {
+fn terminator(
+    image: ir.Program,
+    block: ir.Block,
+    slots: []const p.Id,
+    effects: effect_scope.Facts,
+    control: ?provenance.Context,
+) Error!void {
     const function = image.functions[@intCast(block.function)];
     switch (block.terminator) {
         .call => |call| {

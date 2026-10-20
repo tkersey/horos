@@ -96,8 +96,15 @@ fn childPath(comptime path: []const u8, comptime child: []const u8) []const u8 {
     return path ++ "." ++ child;
 }
 
-fn describe(comptime T: type, comptime path: []const u8, comptime ancestors: []const type) Info {
-    for (ancestors) |Ancestor| if (T == Ancestor) invalid(path, "recursive native type requires an explicit runtime declaration");
+inline fn describe(
+    comptime T: type,
+    comptime path: []const u8,
+    comptime ancestors: []const type,
+) Info {
+    for (ancestors) |Ancestor| if (T == Ancestor) invalid(
+        path,
+        "recursive native type requires an explicit runtime declaration",
+    );
     const seen = ancestors ++ &[_]type{T};
     if (wrapped(T)) {
         if (T.protean_value_kind == .text) return .{ .text = T.max_length };
@@ -117,22 +124,8 @@ fn describe(comptime T: type, comptime path: []const u8, comptime ancestors: []c
             }
             break :blk .{ .integer = @Int(integer.signedness, integer.bits) };
         },
-        .@"struct" => |record| blk: {
-            var children: [record.field_types.len]type = undefined;
-            for (record.field_names, record.field_types, record.field_attrs, 0..) |name, Child, attrs, index| {
-                if (attrs.@"comptime") invalid(childPath(path, name), "fields must be runtime values");
-                children[index] = Contract(describe(Child, childPath(path, name), seen));
-            }
-            break :blk .{ .product = Fields(record.field_names, &children) };
-        },
-        .@"union" => |sum| blk: {
-            if (sum.tag_type == null) invalid(path, "union must be tagged");
-            if (sum.field_types.len == 0) invalid(path, "sum must have at least one case");
-            var children: [sum.field_types.len]type = undefined;
-            for (sum.field_names, sum.field_types, 0..) |name, Child, index|
-                children[index] = Contract(describe(Child, childPath(path, name), seen));
-            break :blk .{ .sum = Fields(sum.field_names, &children) };
-        },
+        .@"struct" => |record| describeRecord(record, path, seen),
+        .@"union" => |sum| describeSum(sum, path, seen),
         .optional => |optional| .{ .sum = Fields(&.{ "none", "some" }, &.{
             Contract(.unit), Contract(describe(optional.child, childPath(path, "some"), seen)),
         }) },
@@ -149,21 +142,64 @@ fn describe(comptime T: type, comptime path: []const u8, comptime ancestors: []c
                 .maximum = null,
             } };
         },
-        .@"enum" => |enumeration| blk: {
-            if (enumeration.mode != .exhaustive) invalid(path, "enum must be exhaustive");
-            if (enumeration.field_values.len == 0) break :blk .{ .enumeration = @Enum(noreturn, .exhaustive, &.{}, &.{}) };
-            for (enumeration.field_values) |value| {
-                if (value < 0 or value > std.math.maxInt(u32)) invalid(path, "enum tag must fit u32");
-            }
-            break :blk .{ .enumeration = canonicalEnum(T) };
-        },
+        .@"enum" => describeEnumeration(T, path),
         else => invalid(path, "unsupported native type " ++ @typeName(T)),
     };
 }
 
+fn describeRecord(
+    comptime record: anytype,
+    comptime path: []const u8,
+    comptime seen: []const type,
+) Info {
+    var children: [record.field_types.len]type = undefined;
+    for (
+        record.field_names,
+        record.field_types,
+        record.field_attrs,
+        0..,
+    ) |name, Child, attrs, index| {
+        if (attrs.@"comptime") invalid(
+            childPath(path, name),
+            "fields must be runtime values",
+        );
+        children[index] = Contract(describe(Child, childPath(path, name), seen));
+    }
+    return .{ .product = Fields(record.field_names, &children) };
+}
+fn describeSum(
+    comptime sum: anytype,
+    comptime path: []const u8,
+    comptime seen: []const type,
+) Info {
+    if (sum.tag_type == null) invalid(path, "union must be tagged");
+    if (sum.field_types.len == 0) invalid(path, "sum must have at least one case");
+    var children: [sum.field_types.len]type = undefined;
+    for (sum.field_names, sum.field_types, 0..) |name, Child, index|
+        children[index] = Contract(describe(Child, childPath(path, name), seen));
+    return .{ .sum = Fields(sum.field_names, &children) };
+}
+fn describeEnumeration(comptime T: type, comptime path: []const u8) Info {
+    const enumeration = @typeInfo(T).@"enum";
+    if (enumeration.mode != .exhaustive) invalid(path, "enum must be exhaustive");
+    if (enumeration.field_values.len == 0) return .{ .enumeration = @Enum(
+        noreturn,
+        .exhaustive,
+        &.{},
+        &.{},
+    ) };
+    for (enumeration.field_values) |value| {
+        if (value < 0 or value > std.math.maxInt(u32)) invalid(
+            path,
+            "enum tag must fit u32",
+        );
+    }
+    return .{ .enumeration = canonicalEnum(T) };
+}
+
 // Independent of diagnostic paths, so repeated uses of one enum share its
 // normalized type. Decimal tags need no general-purpose formatting machinery.
-fn enumName(comptime tag: u32) [:0]const u8 {
+inline fn enumName(comptime tag: u32) [:0]const u8 {
     const digit = [_]u8{@intCast('0' + tag % 10)};
     return if (tag < 10) digit ++ "" else enumName(tag / 10) ++ digit ++ "";
 }
@@ -180,7 +216,13 @@ fn canonicalEnum(comptime T: type) type {
 /// Struct construction interns the ordered names and canonical child types.
 /// Do not pass native field defaults, layout, alignment, or declaration identity.
 pub fn Fields(comptime names: []const [:0]const u8, comptime children: []const type) type {
-    return @Struct(.auto, null, names, children, &(@as([names.len]std.lang.Type.Struct.FieldAttributes, @splat(.{}))));
+    return @Struct(
+        .auto,
+        null,
+        names,
+        children,
+        &(@as([names.len]std.lang.Type.Struct.FieldAttributes, @splat(.{}))),
+    );
 }
 
 pub fn enumTags(comptime T: type) [@typeInfo(T).@"enum".field_values.len]u32 {
@@ -193,7 +235,7 @@ pub fn enumTags(comptime T: type) [@typeInfo(T).@"enum".field_values.len]u32 {
 
 /// Raw compiler integration folds the same contract as checked authoring.
 /// Value encoding, allocation ownership, and JSON projection remain codec work.
-pub fn lower(comptime description: Info, builder: anytype) @TypeOf(builder.schema(.unit)) {
+pub inline fn lower(comptime description: Info, builder: anytype) @TypeOf(builder.schema(.unit)) {
     const p = @import("program.zig");
     return switch (description) {
         .unit => builder.schema(.unit),
@@ -208,7 +250,10 @@ pub fn lower(comptime description: Info, builder: anytype) @TypeOf(builder.schem
         .product, .sum => |Children, kind| blk: {
             const fields = @typeInfo(Children).@"struct";
             var ids: [fields.field_types.len]p.Id = undefined;
-            inline for (fields.field_types, 0..) |Child, i| ids[i] = try lower(Child.contract, builder);
+            inline for (
+                fields.field_types,
+                0..,
+            ) |Child, i| ids[i] = try lower(Child.contract, builder);
             break :blk builder.schema(@unionInit(p.Schema, @tagName(kind), &ids));
         },
         .array => |array| builder.schema(.{ .array = .{

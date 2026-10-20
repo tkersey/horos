@@ -30,7 +30,10 @@ fn shape(state: s.State, allocator: std.mem.Allocator) Error!void {
         if (owned_count != activation.owners.len) return error.InvalidState;
         owners.clearRetainingCapacity();
         for (activation.owners) |owner| {
-            if ((try owners.getOrPut(allocator, owner.slot)).found_existing) return error.InvalidState;
+            if ((try owners.getOrPut(
+                allocator,
+                owner.slot,
+            )).found_existing) return error.InvalidState;
             const binding = find(activation.bindings, owner.slot) orelse return error.InvalidState;
             if (binding.value.body != .owned) return error.InvalidState;
         }
@@ -86,7 +89,12 @@ pub const Serialization = struct {
 /// One canonical PST3 emission, optionally materialized and/or hashed. The
 /// codec adds no hash domain. Normalization owns inputs before output may
 /// overlap them; capacity/allocation failures precede emission to either sink.
-pub fn serialize(allocator: std.mem.Allocator, state: s.State, destination: Destination, hasher: ?*std.crypto.hash.sha2.Sha256) Error!Serialization {
+pub fn serialize(
+    allocator: std.mem.Allocator,
+    state: s.State,
+    destination: Destination,
+    hasher: ?*std.crypto.hash.sha2.Sha256,
+) Error!Serialization {
     var normalized = try canonicalize(allocator, state);
     defer normalized.deinit();
     const size = try length(normalized.state);
@@ -110,7 +118,11 @@ pub fn emit(allocator: std.mem.Allocator, state: s.State) Error![]u8 {
     return emitWith(allocator, state, allocator);
 }
 
-pub fn emitWith(allocator: std.mem.Allocator, state: s.State, output_allocator: std.mem.Allocator) Error![]u8 {
+pub fn emitWith(
+    allocator: std.mem.Allocator,
+    state: s.State,
+    output_allocator: std.mem.Allocator,
+) Error![]u8 {
     return (try serialize(allocator, state, .{ .allocate = output_allocator }, null)).bytes.?;
 }
 
@@ -118,7 +130,11 @@ pub fn decodeGraph(allocator: std.mem.Allocator, input: []const u8) Error!Owned 
     return decodeGraphLimited(allocator, input, .{});
 }
 
-pub fn decodeGraphLimited(allocator: std.mem.Allocator, input: []const u8, limits: Limits) Error!Owned {
+pub fn decodeGraphLimited(
+    allocator: std.mem.Allocator,
+    input: []const u8,
+    limits: Limits,
+) Error!Owned {
     if (input.len < wire.header_length) return error.Truncated;
     if (input.len > limits.max_decoded_bytes) return error.Capacity;
     var arena = std.heap.ArenaAllocator.init(allocator);

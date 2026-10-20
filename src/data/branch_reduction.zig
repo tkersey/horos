@@ -9,8 +9,17 @@ const coalescing = @import("coalescing.zig");
 const equal = @import("record_equal.zig").equal;
 pub const Error = facts.Error || coalescing.Error || error{InvalidBranchReduction};
 pub const Witness = struct { block: usize, condition: bool };
-pub const Statistics = struct { branches_removed: usize = 0, proof_unavailable: usize = 0, proof_work_limit: bool = false };
-pub fn run(allocator: std.mem.Allocator, original: ir.Program, statistics: ?*Statistics, options: coalescing.Options) Error!coalescing.Owned {
+pub const Statistics = struct {
+    branches_removed: usize = 0,
+    proof_unavailable: usize = 0,
+    proof_work_limit: bool = false,
+};
+pub fn run(
+    allocator: std.mem.Allocator,
+    original: ir.Program,
+    statistics: ?*Statistics,
+    options: coalescing.Options,
+) Error!coalescing.Owned {
     var stats: Statistics = .{};
     defer if (statistics) |out| {
         out.* = stats;
@@ -28,7 +37,11 @@ pub fn run(allocator: std.mem.Allocator, original: ir.Program, statistics: ?*Sta
     for (original.blocks, known.blocks, 0..) |block, state, id| {
         if (!state.reachable or block.terminator != .branch) continue;
         const branch = block.terminator.branch;
-        const value = state.definitions[state.exit[@intCast(branch.condition)]].value.boolean orelse continue;
+        const value = state.definitions[
+            state.exit[
+                @intCast(branch.condition)
+            ]
+        ].value.boolean orelse continue;
         const certified = try proof.resolve(id, block.instructions.len, branch.condition);
         if (certified == null or certified.? != .boolean or certified.?.boolean != value) {
             stats.proof_unavailable += 1;
@@ -46,12 +59,21 @@ pub fn run(allocator: std.mem.Allocator, original: ir.Program, statistics: ?*Sta
     stats.proof_work_limit = proof.exhausted;
     return coalescing.run(allocator, candidate, options);
 }
-pub fn validate(allocator: std.mem.Allocator, original: ir.Program, candidate: ir.Program, witnesses: []const Witness) Error!void {
+pub fn validate(
+    allocator: std.mem.Allocator,
+    original: ir.Program,
+    candidate: ir.Program,
+    witnesses: []const Witness,
+) Error!void {
     var checked = try ownership.analyze(allocator, original);
     defer checked.deinit();
     var same = candidate;
     same.blocks = original.blocks;
-    if (!equal(ir.Program, original, same) or candidate.blocks.len != original.blocks.len) return error.InvalidBranchReduction;
+    if (!equal(
+        ir.Program,
+        original,
+        same,
+    ) or candidate.blocks.len != original.blocks.len) return error.InvalidBranchReduction;
     var proof: origin.Prover = .{ .allocator = allocator, .program = original };
     defer proof.deinit();
     for (original.blocks, candidate.blocks, 0..) |before, after, id| {
@@ -61,14 +83,26 @@ pub fn validate(allocator: std.mem.Allocator, original: ir.Program, candidate: i
             witness = item;
         };
         if (witness) |item| {
-            if (before.terminator != .branch or after.terminator != .jump) return error.InvalidBranchReduction;
+            if (before.terminator != .branch or
+                after.terminator != .jump)
+                return error.InvalidBranchReduction;
             const branch = before.terminator.branch;
-            const value = (try proof.resolve(id, before.instructions.len, branch.condition)) orelse return error.InvalidBranchReduction;
-            if (value != .boolean or value.boolean != item.condition) return error.InvalidBranchReduction;
+            const value = (try proof.resolve(
+                id,
+                before.instructions.len,
+                branch.condition,
+            )) orelse return error.InvalidBranchReduction;
+            if (value != .boolean or
+                value.boolean != item.condition)
+                return error.InvalidBranchReduction;
             var expected = before;
-            expected.terminator = .{ .jump = if (item.condition) branch.when_true else branch.when_false };
+            expected.terminator = .{
+                .jump = if (item.condition) branch.when_true else branch.when_false,
+            };
             if (!equal(ir.Block, expected, after)) return error.InvalidBranchReduction;
         } else if (!equal(ir.Block, before, after)) return error.InvalidBranchReduction;
     }
-    for (witnesses) |item| if (item.block >= original.blocks.len) return error.InvalidBranchReduction;
+    for (witnesses) |item|
+        if (item.block >= original.blocks.len)
+            return error.InvalidBranchReduction;
 }

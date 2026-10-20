@@ -8,16 +8,46 @@ const a = std.testing.allocator;
 pub const counted: ir.Program = .{
     .roots = .{ .entry = 0, .result = 0, .failure = 1 },
     .schemas = &.{ .u64, .unit, .boolean },
-    .constants = &.{ .{ .schema = 0, .bytes = &.{ 0, 0, 0, 0, 0, 0, 0, 0 } }, .{ .schema = 0, .bytes = &.{ 1, 0, 0, 0, 0, 0, 0, 0 } }, .{ .schema = 1, .bytes = &.{} } },
+    .constants = &.{
+        .{ .schema = 0, .bytes = &.{ 0, 0, 0, 0, 0, 0, 0, 0 } },
+        .{ .schema = 0, .bytes = &.{ 1, 0, 0, 0, 0, 0, 0, 0 } },
+        .{ .schema = 1, .bytes = &.{} },
+    },
     .effects = &.{},
-    .functions = &.{.{ .entry = 0, .inputs = &.{ 0, 1, 2 }, .layout = .{ .slots = &.{ 0, 0, 0, 0, 0, 2, 0, 0 } }, .result = 0 }},
+    .functions = &.{.{
+        .entry = 0,
+        .inputs = &.{ 0, 1, 2 },
+        .layout = .{ .slots = &.{ 0, 0, 0, 0, 0, 2, 0, 0 } },
+        .result = 0,
+    }},
     .blocks = &.{
-        .{ .function = 0, .instructions = &.{ .{ .destination = 3, .opcode = .constant, .immediate = 0 }, .{ .destination = 4, .opcode = .constant, .immediate = 0 }, .{ .destination = 7, .opcode = .constant, .immediate = 1 } }, .terminator = .{ .jump = .{ .block = 1 } } },
-        .{ .function = 0, .instructions = &.{.{ .destination = 5, .opcode = .less, .operands = &.{ 3, 0 } }}, .terminator = .{ .branch = .{ .condition = 5, .when_true = .{ .block = 2 }, .when_false = .{ .block = 3 } } } },
+        .{
+            .function = 0,
+            .instructions = &.{
+                .{ .destination = 3, .opcode = .constant, .immediate = 0 },
+                .{ .destination = 4, .opcode = .constant, .immediate = 0 },
+                .{ .destination = 7, .opcode = .constant, .immediate = 1 },
+            },
+            .terminator = .{ .jump = .{ .block = 1 } },
+        },
+        .{
+            .function = 0,
+            .instructions = &.{.{ .destination = 5, .opcode = .less, .operands = &.{ 3, 0 } }},
+            .terminator = .{ .branch = .{
+                .condition = 5,
+                .when_true = .{ .block = 2 },
+                .when_false = .{ .block = 3 },
+            } },
+        },
         .{ .function = 0, .instructions = &.{
             .{ .destination = 6, .opcode = .integer_bit_xor, .operands = &.{ 1, 2 } },
             .{ .destination = 4, .opcode = .integer_bit_xor, .operands = &.{ 4, 6 } },
-            .{ .destination = 3, .opcode = .integer_add, .operands = &.{ 3, 7 }, .failures = &.{.{ .kind = .arithmetic_overflow, .value = 2 }} },
+            .{
+                .destination = 3,
+                .opcode = .integer_add,
+                .operands = &.{ 3, 7 },
+                .failures = &.{.{ .kind = .arithmetic_overflow, .value = 2 }},
+            },
         }, .terminator = .{ .jump = .{ .block = 1 } } },
         .{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 4 } },
     },
@@ -27,8 +57,18 @@ pub const guarded: ir.Program = .{
     .schemas = counted.schemas,
     .constants = counted.constants,
     .effects = &.{},
-    .functions = &.{.{ .entry = 0, .inputs = &.{ 0, 1, 2, 6 }, .layout = counted.functions[0].layout, .result = 0 }},
-    .blocks = &.{ counted.blocks[0], counted.blocks[1], counted.blocks[2], .{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 6 } } },
+    .functions = &.{.{
+        .entry = 0,
+        .inputs = &.{ 0, 1, 2, 6 },
+        .layout = counted.functions[0].layout,
+        .result = 0,
+    }},
+    .blocks = &.{
+        counted.blocks[0],
+        counted.blocks[1],
+        counted.blocks[2],
+        .{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 6 } },
+    },
 };
 test "dead loop-entry destinations reuse an existing preheader" {
     var candidate = (try motion.construct(a, counted, .{})).?;
@@ -55,12 +95,18 @@ test "admitted wrong hoisted operands and guard routing fail independent validat
     forged.blocks = blocks;
     var admitted = try own.analyze(a, forged);
     admitted.deinit();
-    try std.testing.expectError(error.InvalidLoopMotion, motion.validate(a, guarded, forged, candidate.witness, .{}));
+    try std.testing.expectError(
+        error.InvalidLoopMotion,
+        motion.validate(a, guarded, forged, candidate.witness, .{}),
+    );
     @memcpy(blocks, candidate.program.blocks);
     blocks[4].terminator.branch.when_false.block = 5;
     admitted = try own.analyze(a, forged);
     admitted.deinit();
-    try std.testing.expectError(error.InvalidLoopMotion, motion.validate(a, guarded, forged, candidate.witness, .{}));
+    try std.testing.expectError(
+        error.InvalidLoopMotion,
+        motion.validate(a, guarded, forged, candidate.witness, .{}),
+    );
 }
 test "loop-carried slot identity is not an invariant value" {
     var program = counted;
@@ -97,10 +143,16 @@ test "loop motion releases every allocation failure and rolls back exact work ex
     var baseline = try @import("coalescing.zig").run(a, counted, .{});
     defer baseline.deinit();
     try std.testing.expect(stats.work_limit);
-    try std.testing.expectEqual(try @import("program_image.zig").identity(a, baseline.program), try @import("program_image.zig").identity(a, limited.program));
+    try std.testing.expectEqual(
+        try @import("program_image.zig").identity(a, baseline.program),
+        try @import("program_image.zig").identity(a, limited.program),
+    );
     var invalid = counted;
     invalid.roots.entry = 99;
-    try std.testing.expectError(error.InvalidReference, motion.run(a, invalid, null, .{ .work_limit = 0 }));
+    try std.testing.expectError(
+        error.InvalidReference,
+        motion.run(a, invalid, null, .{ .work_limit = 0 }),
+    );
 }
 
 pub const nested: ir.Program = .{
@@ -108,18 +160,65 @@ pub const nested: ir.Program = .{
     .schemas = counted.schemas,
     .constants = counted.constants,
     .effects = &.{},
-    .functions = &.{.{ .entry = 0, .inputs = &.{ 0, 1, 2 }, .layout = .{ .slots = &.{ 0, 0, 0, 0, 0, 0, 2, 0, 0 } }, .result = 0 }},
+    .functions = &.{.{
+        .entry = 0,
+        .inputs = &.{ 0, 1, 2 },
+        .layout = .{ .slots = &.{ 0, 0, 0, 0, 0, 0, 2, 0, 0 } },
+        .result = 0,
+    }},
     .blocks = &.{
-        .{ .function = 0, .instructions = &.{ .{ .destination = 3, .opcode = .constant, .immediate = 0 }, .{ .destination = 5, .opcode = .constant, .immediate = 0 }, .{ .destination = 8, .opcode = .constant, .immediate = 1 } }, .terminator = .{ .jump = .{ .block = 1 } } },
-        .{ .function = 0, .instructions = &.{.{ .destination = 6, .opcode = .less, .operands = &.{ 3, 0 } }}, .terminator = .{ .branch = .{ .condition = 6, .when_true = .{ .block = 2 }, .when_false = .{ .block = 6 } } } },
-        .{ .function = 0, .instructions = &.{.{ .destination = 4, .opcode = .constant, .immediate = 0 }}, .terminator = .{ .jump = .{ .block = 3 } } },
-        .{ .function = 0, .instructions = &.{.{ .destination = 6, .opcode = .less, .operands = &.{ 4, 1 } }}, .terminator = .{ .branch = .{ .condition = 6, .when_true = .{ .block = 4 }, .when_false = .{ .block = 5 } } } },
+        .{
+            .function = 0,
+            .instructions = &.{
+                .{ .destination = 3, .opcode = .constant, .immediate = 0 },
+                .{ .destination = 5, .opcode = .constant, .immediate = 0 },
+                .{ .destination = 8, .opcode = .constant, .immediate = 1 },
+            },
+            .terminator = .{ .jump = .{ .block = 1 } },
+        },
+        .{
+            .function = 0,
+            .instructions = &.{.{ .destination = 6, .opcode = .less, .operands = &.{ 3, 0 } }},
+            .terminator = .{ .branch = .{
+                .condition = 6,
+                .when_true = .{ .block = 2 },
+                .when_false = .{ .block = 6 },
+            } },
+        },
+        .{
+            .function = 0,
+            .instructions = &.{.{ .destination = 4, .opcode = .constant, .immediate = 0 }},
+            .terminator = .{ .jump = .{ .block = 3 } },
+        },
+        .{
+            .function = 0,
+            .instructions = &.{.{ .destination = 6, .opcode = .less, .operands = &.{ 4, 1 } }},
+            .terminator = .{ .branch = .{
+                .condition = 6,
+                .when_true = .{ .block = 4 },
+                .when_false = .{ .block = 5 },
+            } },
+        },
         .{ .function = 0, .instructions = &.{
             .{ .destination = 7, .opcode = .integer_bit_xor, .operands = &.{ 3, 2 } },
             .{ .destination = 5, .opcode = .integer_bit_xor, .operands = &.{ 5, 7 } },
-            .{ .destination = 4, .opcode = .integer_add, .operands = &.{ 4, 8 }, .failures = &.{.{ .kind = .arithmetic_overflow, .value = 2 }} },
+            .{
+                .destination = 4,
+                .opcode = .integer_add,
+                .operands = &.{ 4, 8 },
+                .failures = &.{.{ .kind = .arithmetic_overflow, .value = 2 }},
+            },
         }, .terminator = .{ .jump = .{ .block = 3 } } },
-        .{ .function = 0, .instructions = &.{.{ .destination = 3, .opcode = .integer_add, .operands = &.{ 3, 8 }, .failures = &.{.{ .kind = .arithmetic_overflow, .value = 2 }} }}, .terminator = .{ .jump = .{ .block = 1 } } },
+        .{
+            .function = 0,
+            .instructions = &.{.{
+                .destination = 3,
+                .opcode = .integer_add,
+                .operands = &.{ 3, 8 },
+                .failures = &.{.{ .kind = .arithmetic_overflow, .value = 2 }},
+            }},
+            .terminator = .{ .jump = .{ .block = 1 } },
+        },
         .{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 5 } },
     },
 };
@@ -129,7 +228,10 @@ test "nested placement uses the inner guard because the outer iteration changes 
     try std.testing.expectEqual(@as(usize, 3), candidate.witness.header);
     try std.testing.expectEqual(@as(usize, 4), candidate.witness.body);
     try motion.validate(a, nested, candidate.program, candidate.witness, .{});
-    try std.testing.expect((try motion.repeatedScalarWork(a, candidate.program)).? < (try motion.repeatedScalarWork(a, nested)).?);
+    try std.testing.expect((try motion.repeatedScalarWork(
+        a,
+        candidate.program,
+    )).? < (try motion.repeatedScalarWork(a, nested)).?);
 }
 test "an old destination read before the definition and header-edge overwrites prevent hoisting" {
     var program = counted;
@@ -146,7 +248,10 @@ test "an old destination read before the definition and header-edge overwrites p
     try std.testing.expect(try motion.construct(a, program, .{}) == null);
     program = counted;
     blocks = counted.blocks[0..4].*;
-    blocks[1].terminator.branch.when_true.assignments = &.{.{ .destination = 6, .source = .{ .slot = 1 } }};
+    blocks[1].terminator.branch.when_true.assignments = &.{.{
+        .destination = 6,
+        .source = .{ .slot = 1 },
+    }};
     program.blocks = &blocks;
     admitted = try own.analyze(a, program);
     admitted.deinit();
@@ -177,7 +282,12 @@ test "dependent scalar batch is checked in definition order" {
     functions[0].layout.slots = &.{ 0, 0, 0, 0, 0, 2, 0, 0, 0 };
     program.functions = &functions;
     var blocks = counted.blocks[0..4].*;
-    blocks[2].instructions = &.{ counted.blocks[2].instructions[0], .{ .destination = 8, .opcode = .integer_bit_not, .operands = &.{6} }, .{ .destination = 4, .opcode = .integer_bit_xor, .operands = &.{ 4, 8 } }, counted.blocks[2].instructions[2] };
+    blocks[2].instructions = &.{
+        counted.blocks[2].instructions[0],
+        .{ .destination = 8, .opcode = .integer_bit_not, .operands = &.{6} },
+        .{ .destination = 4, .opcode = .integer_bit_xor, .operands = &.{ 4, 8 } },
+        counted.blocks[2].instructions[2],
+    };
     program.blocks = &blocks;
     var candidate = (try motion.construct(a, program, .{})).?;
     defer candidate.deinit();
@@ -185,7 +295,10 @@ test "dependent scalar batch is checked in definition order" {
     try motion.validate(a, program, candidate.program, candidate.witness, .{});
     var wrong = candidate.witness;
     wrong.instructions = &.{ 1, 0 };
-    try std.testing.expectError(error.InvalidLoopMotion, motion.validate(a, program, candidate.program, wrong, .{}));
+    try std.testing.expectError(
+        error.InvalidLoopMotion,
+        motion.validate(a, program, candidate.program, wrong, .{}),
+    );
 }
 test "a loop headed at function entry redirects the actual entry" {
     var program = counted;
@@ -197,21 +310,60 @@ test "a loop headed at function entry redirects the actual entry" {
     admitted.deinit();
     var candidate = (try motion.construct(a, program, .{})).?;
     defer candidate.deinit();
-    try std.testing.expectEqual(@as(p.Id, counted.blocks.len), candidate.program.functions[0].entry);
+    try std.testing.expectEqual(
+        @as(p.Id, counted.blocks.len),
+        candidate.program.functions[0].entry,
+    );
     try motion.validate(a, program, candidate.program, candidate.witness, .{});
 }
 
 pub const mutable: ir.Program = .{
     .roots = counted.roots,
-    .schemas = &.{ .u64, .unit, .boolean, .{ .internal = .{ .region = 0 } }, .{ .internal = .{ .cell = .{ .element = 0, .region = 0 } } }, .{ .internal = .{ .computation = .{ .parameters = &.{ 3, 0, 0 }, .result = 0, .use = .reusable, .regions = &.{0} } } }, .{ .product = &.{4} } },
+    .schemas = &.{
+        .u64,
+        .unit,
+        .boolean,
+        .{ .internal = .{ .region = 0 } },
+        .{ .internal = .{ .cell = .{ .element = 0, .region = 0 } } },
+        .{ .internal = .{ .computation = .{
+            .parameters = &.{ 3, 0, 0 },
+            .result = 0,
+            .use = .reusable,
+            .regions = &.{0},
+        } } },
+        .{ .product = &.{4} },
+    },
     .constants = counted.constants,
     .effects = &.{},
     .functions = &.{
-        .{ .entry = 0, .inputs = &.{ 0, 1 }, .layout = .{ .slots = &.{ 0, 0, 5, 0 } }, .result = 0 },
-        .{ .entry = 2, .inputs = &.{ 0, 1, 2 }, .layout = .{ .slots = &.{ 3, 0, 0, 4, 6, 0, 0, 2, 0, 1, 4 } }, .result = 0, .regions = &.{0} },
+        .{
+            .entry = 0,
+            .inputs = &.{ 0, 1 },
+            .layout = .{ .slots = &.{ 0, 0, 5, 0 } },
+            .result = 0,
+        },
+        .{
+            .entry = 2,
+            .inputs = &.{ 0, 1, 2 },
+            .layout = .{ .slots = &.{ 3, 0, 0, 4, 6, 0, 0, 2, 0, 1, 4 } },
+            .result = 0,
+            .regions = &.{0},
+        },
     },
     .blocks = &.{
-        .{ .function = 0, .instructions = &.{.{ .destination = 2, .opcode = .computation, .immediate = 0 }}, .terminator = .{ .with_region = .{ .region = 0, .body = 2, .arguments = &.{ 0, 1 }, .next = .{ .block = 1, .assignments = &.{.{ .destination = 3, .source = .returned }} } } } },
+        .{
+            .function = 0,
+            .instructions = &.{.{ .destination = 2, .opcode = .computation, .immediate = 0 }},
+            .terminator = .{ .with_region = .{
+                .region = 0,
+                .body = 2,
+                .arguments = &.{ 0, 1 },
+                .next = .{
+                    .block = 1,
+                    .assignments = &.{.{ .destination = 3, .source = .returned }},
+                },
+            } },
+        },
         .{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 3 } },
         .{ .function = 1, .instructions = &.{
             .{ .destination = 3, .opcode = .cell_new, .operands = &.{ 0, 2 } },
@@ -220,13 +372,31 @@ pub const mutable: ir.Program = .{
             .{ .destination = 6, .opcode = .constant, .immediate = 1 },
             .{ .destination = 8, .opcode = .move, .operands = &.{2} },
         }, .terminator = .{ .jump = .{ .block = 3 } } },
-        .{ .function = 1, .instructions = &.{.{ .destination = 7, .opcode = .less, .operands = &.{ 5, 1 } }}, .terminator = .{ .branch = .{ .condition = 7, .when_true = .{ .block = 4 }, .when_false = .{ .block = 5 } } } },
+        .{
+            .function = 1,
+            .instructions = &.{.{ .destination = 7, .opcode = .less, .operands = &.{ 5, 1 } }},
+            .terminator = .{ .branch = .{
+                .condition = 7,
+                .when_true = .{ .block = 4 },
+                .when_false = .{ .block = 5 },
+            } },
+        },
         .{ .function = 1, .instructions = &.{
             .{ .destination = 10, .opcode = .field, .operands = &.{4}, .immediate = 0 },
             .{ .destination = 8, .opcode = .cell_get, .operands = &.{10} },
-            .{ .destination = 8, .opcode = .integer_add, .operands = &.{ 8, 6 }, .failures = &.{.{ .kind = .arithmetic_overflow, .value = 2 }} },
+            .{
+                .destination = 8,
+                .opcode = .integer_add,
+                .operands = &.{ 8, 6 },
+                .failures = &.{.{ .kind = .arithmetic_overflow, .value = 2 }},
+            },
             .{ .destination = 9, .opcode = .cell_set, .operands = &.{ 3, 8 } },
-            .{ .destination = 5, .opcode = .integer_add, .operands = &.{ 5, 6 }, .failures = &.{.{ .kind = .arithmetic_overflow, .value = 2 }} },
+            .{
+                .destination = 5,
+                .opcode = .integer_add,
+                .operands = &.{ 5, 6 },
+                .failures = &.{.{ .kind = .arithmetic_overflow, .value = 2 }},
+            },
         }, .terminator = .{ .jump = .{ .block = 3 } } },
         .{ .function = 1, .instructions = &.{}, .terminator = .{ .return_value = 8 } },
     },
@@ -243,7 +413,10 @@ test "an aliased mutable loop read cannot acquire scalar invariance" {
     try std.testing.expectEqual(@as(usize, 0), stats.hoisted);
     var baseline = try @import("coalescing.zig").run(a, mutable, .{});
     defer baseline.deinit();
-    try std.testing.expectEqual(try @import("program_image.zig").identity(a, baseline.program), try @import("program_image.zig").identity(a, result.program));
+    try std.testing.expectEqual(
+        try @import("program_image.zig").identity(a, baseline.program),
+        try @import("program_image.zig").identity(a, result.program),
+    );
 }
 
 pub const yielding_infinite: ir.Program = .{
@@ -251,11 +424,27 @@ pub const yielding_infinite: ir.Program = .{
     .schemas = counted.schemas,
     .effects = &.{},
     .functions = counted.functions,
-    .constants = &.{ counted.constants[0], counted.constants[1], counted.constants[2], .{ .schema = 2, .bytes = &.{1} } },
+    .constants = &.{
+        counted.constants[0],             counted.constants[1], counted.constants[2],
+        .{ .schema = 2, .bytes = &.{1} },
+    },
     .blocks = &.{
-        .{ .function = 0, .instructions = &.{ counted.blocks[0].instructions[0], counted.blocks[0].instructions[1], counted.blocks[0].instructions[2], .{ .destination = 5, .opcode = .constant, .immediate = 3 } }, .terminator = .{ .jump = .{ .block = 1 } } },
+        .{
+            .function = 0,
+            .instructions = &.{
+                counted.blocks[0].instructions[0],
+                counted.blocks[0].instructions[1],
+                counted.blocks[0].instructions[2],
+                .{ .destination = 5, .opcode = .constant, .immediate = 3 },
+            },
+            .terminator = .{ .jump = .{ .block = 1 } },
+        },
         .{ .function = 0, .instructions = &.{}, .terminator = counted.blocks[1].terminator },
-        .{ .function = 0, .instructions = counted.blocks[2].instructions[0..2], .terminator = .{ .yield_value = .{ .block = 1 } } },
+        .{
+            .function = 0,
+            .instructions = counted.blocks[2].instructions[0..2],
+            .terminator = .{ .yield_value = .{ .block = 1 } },
+        },
         counted.blocks[3],
     },
 };
@@ -280,5 +469,8 @@ test "a live zero-trip destination requires the guard even for a total scalar" {
     forged.functions = guarded.functions;
     var admitted = try own.analyze(a, forged);
     admitted.deinit();
-    try std.testing.expectError(error.InvalidLoopMotion, motion.validate(a, guarded, forged, speculative.witness, .{}));
+    try std.testing.expectError(
+        error.InvalidLoopMotion,
+        motion.validate(a, guarded, forged, speculative.witness, .{}),
+    );
 }
