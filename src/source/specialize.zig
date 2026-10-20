@@ -92,43 +92,9 @@ pub fn identity(a: std.mem.Allocator, m: ast.Module, request: Request) Error![32
     var writer: data.wire.Writer = .{ .hasher = &digest };
     try writer.put("horos.source-specialization/1\x00");
     try data.record.write(ast.Module, m, &writer);
-    try encodeRequest(a, request, &writer);
+    try data.record.writeAlloc(Request, a, request, &writer);
     return digest.finalResult();
 }
-fn encodeRequest(a: std.mem.Allocator, request: Request, writer: *data.wire.Writer) Error!void {
-    try data.record.write(Context, request.context, writer);
-    try writer.natural(request.function);
-    try encodeKnowledge(a, request.arguments, writer);
-    try data.record.write(Policy, request.policy, writer);
-}
-fn encodeKnowledge(
-    a: std.mem.Allocator,
-    arguments: []const Knowledge,
-    writer: *data.wire.Writer,
-) Error!void {
-    var pending: std.ArrayList([]const Knowledge) = .empty;
-    defer pending.deinit(a);
-    try writer.natural(arguments.len);
-    var current = arguments;
-    while (current.len != 0 or pending.items.len != 0) {
-        if (current.len == 0) current = pending.pop().?;
-        const value = current[0];
-        current = current[1..];
-        try writer.natural(@backingInt(std.meta.activeTag(value)));
-        switch (value) {
-            .dynamic => {},
-            .known => |literal| try data.record.write(p.Literal, literal, writer),
-            .product => |product| {
-                try writer.natural(product.schema);
-                try writer.natural(product.fields.len);
-                if (product.fields.len == 0) continue;
-                if (current.len != 0) try pending.append(a, current);
-                current = product.fields;
-            },
-        }
-    }
-}
-
 fn checkRequestEncoding(a: std.mem.Allocator) !void {
     const request: Request = .{
         .context = .{
@@ -153,7 +119,7 @@ fn checkRequestEncoding(a: std.mem.Allocator) !void {
     };
     var bytes: [256]u8 = undefined;
     var writer: data.wire.Writer = .{ .output = &bytes };
-    try encodeRequest(a, request, &writer);
+    try data.record.writeAlloc(Request, a, request, &writer);
     const expected = @as([192]u8, @splat(0)) ++ [_]u8{
         7, 4, 0, 1, 5, 2, 0xaa, 0xbb, 2, 9, 2, 0, 1, 3, 0, 0, 128, 1, 32, 128, 4,
     };
@@ -177,8 +143,7 @@ pub fn specialize(a: std.mem.Allocator, original: ast.Module, requested: Request
     errdefer out.deinit();
     const storage = out.builder.allocator();
     out.original = try source.own(ast.Module, storage, original);
-    out.request = requested;
-    out.request.arguments = try values.ownMany(storage, requested.arguments);
+    out.request = try source.own(Request, storage, requested);
     const m = out.original;
     inline for (.{
         "schemas",
@@ -330,7 +295,7 @@ const Engine = struct {
             .{
                 .before = id,
                 .after = residual,
-                .arguments = try values.ownMany(self.a(), arguments),
+                .arguments = try source.own([]const Knowledge, self.a(), arguments),
             },
         );
         return index;
@@ -714,13 +679,7 @@ const Engine = struct {
 pub const validate = @import("specialize_validate.zig").validate;
 
 pub fn requestEqual(a: std.mem.Allocator, lhs: Request, rhs: Request) Error!bool {
-    if (lhs.function != rhs.function or lhs.arguments.len != rhs.arguments.len) return false;
-    if (!data.record.equal(Context, lhs.context, rhs.context)) return false;
-    if (!data.record.equal(Policy, lhs.policy, rhs.policy)) return false;
-    for (lhs.arguments, rhs.arguments) |left, right| {
-        if (!try values.equal(a, left, right)) return false;
-    }
-    return true;
+    return data.record.equalAlloc(Request, a, lhs, rhs);
 }
 
 test "specialization traverses deep value and term derivations" {

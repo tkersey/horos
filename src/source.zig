@@ -377,64 +377,96 @@ pub fn own(
     value_item: T,
 ) std.mem.Allocator.Error!T {
     @setEvalBranchQuota(10000);
-    return ownFields(T, allocator, value_item);
+    var output = value_item;
+    var pending: std.ArrayList(OwnTask) = .empty;
+    defer pending.deinit(allocator);
+    try enqueueOwn(T, allocator, &pending, &output);
+    while (pending.pop()) |task| try task.apply(allocator, &pending, task.output);
+    return output;
 }
 
-inline fn ownFields(
-    comptime T: type,
-    allocator: std.mem.Allocator,
-    value_item: T,
-) std.mem.Allocator.Error!T {
+const OwnTask = struct {
+    output: *anyopaque,
+    apply: *const fn (
+        std.mem.Allocator,
+        *std.ArrayList(OwnTask),
+        *anyopaque,
+    ) std.mem.Allocator.Error!void,
+};
+
+inline fn ownershipRequired(comptime T: type) bool {
     return switch (@typeInfo(T)) {
         .pointer => |pointer| blk: {
             if (pointer.size != .slice) @compileError("source records contain only owned slices");
-            const output = try allocator.alloc(pointer.child, value_item.len);
-            for (output, value_item) |*to, from|
-                to.* =
-                    try ownFields(
-                        pointer.child,
+            break :blk true;
+        },
+        .@"struct" => |info| blk: {
+            inline for (info.field_types) |FieldType|
+                if (ownershipRequired(FieldType)) break :blk true;
+            break :blk false;
+        },
+        .@"union" => |info| blk: {
+            inline for (info.field_types) |FieldType|
+                if (ownershipRequired(FieldType)) break :blk true;
+            break :blk false;
+        },
+        .optional => |optional| ownershipRequired(optional.child),
+        .array => |array| ownershipRequired(array.child),
+        else => false,
+    };
+}
+
+fn enqueueOwn(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    pending: *std.ArrayList(OwnTask),
+    output: *T,
+) std.mem.Allocator.Error!void {
+    if (comptime ownershipRequired(T)) try pending.append(allocator, .{
+        .output = @ptrCast(output),
+        .apply = OwnValue(T).apply,
+    });
+}
+
+fn OwnValue(comptime T: type) type {
+    return struct {
+        fn apply(
+            allocator: std.mem.Allocator,
+            pending: *std.ArrayList(OwnTask),
+            address: *anyopaque,
+        ) std.mem.Allocator.Error!void {
+            const output: *T = @ptrCast(@alignCast(address));
+            switch (@typeInfo(T)) {
+                .pointer => |pointer| {
+                    const elements = try allocator.dupe(pointer.child, output.*);
+                    output.* = elements;
+                    for (elements) |*element|
+                        try enqueueOwn(pointer.child, allocator, pending, element);
+                },
+                .@"struct" => |info| inline for (
+                    info.field_names,
+                    info.field_types,
+                ) |name, FieldType| {
+                    if (comptime ownershipRequired(FieldType))
+                        try enqueueOwn(FieldType, allocator, pending, &@field(output, name));
+                },
+                .@"union" => switch (output.*) {
+                    inline else => |*payload| try enqueueOwn(
+                        @TypeOf(payload.*),
                         allocator,
-                        from,
-                    );
-            break :blk output;
-        },
-        .@"struct" => blk: {
-            var output: T = undefined;
-            inline for (
-                @typeInfo(T).@"struct".field_names,
-                @typeInfo(T).@"struct".field_types,
-            ) |field_name, FieldType| @field(output, field_name) = try ownFields(
-                FieldType,
-                allocator,
-                @field(value_item, field_name),
-            );
-            break :blk output;
-        },
-        .@"union" => switch (value_item) {
-            inline else => |payload, tag| @unionInit(
-                T,
-                @tagName(tag),
-                try ownFields(@TypeOf(payload), allocator, payload),
-            ),
-        },
-        .optional => |optional| if (value_item) |present| try ownFields(
-            optional.child,
-            allocator,
-            present,
-        ) else null,
-        .array => |array| blk: {
-            // Preserve the complete array, including any sentinel outside len.
-            var output = value_item;
-            for (&output, value_item) |*to, from|
-                to.* =
-                    try ownFields(
-                        array.child,
-                        allocator,
-                        from,
-                    );
-            break :blk output;
-        },
-        else => value_item,
+                        pending,
+                        payload,
+                    ),
+                },
+                .optional => |optional| {
+                    if (output.*) |*present|
+                        try enqueueOwn(optional.child, allocator, pending, present);
+                },
+                .array => |array| for (output) |*element|
+                    try enqueueOwn(array.child, allocator, pending, element),
+                else => {},
+            }
+        }
     };
 }
 inline fn equal(comptime T: type, left: T, right: T) bool {

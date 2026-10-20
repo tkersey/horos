@@ -3,19 +3,8 @@
 //! Only the checked logical catalog types call this module; no native layout is used.
 const std = @import("std");
 const wire = @import("wire.zig");
+const traversal = @import("record_walk.zig");
 pub const Error = wire.Error || std.mem.Allocator.Error;
-
-// A sizing sink can sum numeric sequence widths without generating each byte.
-// Hashing, comparison and real output always use the original writer below.
-fn measuredSequence(comptime T: type, values: []const T) wire.Error!usize {
-    var total: usize = 0;
-    for (values) |value| {
-        comptime std.debug.assert(T == u64);
-        const length = wire.naturalLength(value);
-        total = std.math.add(usize, total, length) catch return error.InvalidLength;
-    }
-    return total;
-}
 
 /// Traverses borrowed record storage, including nested arrays of slices, before
 /// a caller-owned encoder writes its first byte. Native bytes are never encoded.
@@ -113,7 +102,7 @@ fn RecordOps(comptime T: type, comptime ancestors: []const type) type {
                     writer.position = std.math.add(
                         usize,
                         writer.position,
-                        try measuredSequence(info.child, value),
+                        try traversal.measuredSequence(info.child, value),
                     ) catch return error.InvalidLength;
                     return;
                 }
@@ -375,7 +364,16 @@ pub fn readBounded(
     allocator: std.mem.Allocator,
     remaining: *usize,
 ) Error!T {
-    return RecordOps(T, &.{}).read(reader, allocator, remaining);
+    if (comptime !traversal.Shape(T, &.{}).recursive)
+        return RecordOps(T, &.{}).read(reader, allocator, remaining);
+    var result: T = undefined;
+    var walk: traversal.Walk(.read) = .{
+        .allocator = allocator,
+        .reader = reader,
+        .remaining = remaining,
+    };
+    _ = try walk.run(T, &result, null);
+    return result;
 }
 
 test "union decoding uses declared wire tags instead of field indexes" {
@@ -440,4 +438,41 @@ test "current record hashes preserve long full-width vectors" {
 /// Compare declared record contents, including borrowed slice elements.
 pub fn equal(comptime T: type, a: T, b: T) bool {
     return RecordOps(T, &.{}).equal(a, b);
+}
+
+pub fn writeAlloc(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    value: T,
+    writer: *wire.Writer,
+) Error!void {
+    if (comptime !traversal.Shape(T, &.{}).recursive) return write(T, value, writer);
+    var walk: traversal.Walk(.write) = .{ .allocator = allocator, .writer = writer };
+    _ = try walk.run(T, &value, null);
+}
+
+pub fn equalAlloc(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    a: T,
+    b: T,
+) std.mem.Allocator.Error!bool {
+    if (comptime !traversal.Shape(T, &.{}).recursive) return equal(T, a, b);
+    var walk: traversal.Walk(.equal) = .{ .allocator = allocator };
+    return walk.run(T, &a, &b);
+}
+
+pub fn overlapsAlloc(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    value: T,
+    output: []const u8,
+) std.mem.Allocator.Error!bool {
+    if (comptime !traversal.Shape(T, &.{}).recursive) return overlaps(T, value, output);
+    var walk: traversal.Walk(.overlaps) = .{ .allocator = allocator, .output = output };
+    return walk.run(T, &value, null);
+}
+
+test {
+    _ = @import("record_test.zig");
 }

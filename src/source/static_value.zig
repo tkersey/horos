@@ -15,75 +15,14 @@ pub const Knowledge = union(enum) {
     known: p.Literal,
     product: struct { schema: p.Id, fields: []const Knowledge },
 };
-const Copy = struct { input: Knowledge, output: *Knowledge };
 pub fn own(a: std.mem.Allocator, value: Knowledge) Error!Knowledge {
-    var result: Knowledge = undefined;
-    var pending: std.ArrayList(Copy) = .empty;
-    defer pending.deinit(a);
-    try pending.append(a, .{ .input = value, .output = &result });
-    try copyPending(a, &pending);
-    return result;
+    return source.own(Knowledge, a, value);
 }
 pub fn ownMany(a: std.mem.Allocator, values: []const Knowledge) Error![]const Knowledge {
-    const result = try a.alloc(Knowledge, values.len);
-    var pending: std.ArrayList(Copy) = .empty;
-    defer pending.deinit(a);
-    for (values, result) |input, *output| {
-        try pending.append(a, .{ .input = input, .output = output });
-    }
-    try copyPending(a, &pending);
-    return result;
+    return source.own([]const Knowledge, a, values);
 }
-fn copyPending(a: std.mem.Allocator, pending: *std.ArrayList(Copy)) Error!void {
-    while (pending.pop()) |task| {
-        task.output.* = switch (task.input) {
-            .dynamic => .dynamic,
-            .known => |literal| .{ .known = .{
-                .schema = literal.schema,
-                .bytes = try a.dupe(u8, literal.bytes),
-            } },
-            .product => |product| block: {
-                const fields = try a.alloc(Knowledge, product.fields.len);
-                for (product.fields, fields) |input, *output| {
-                    try pending.append(a, .{ .input = input, .output = output });
-                }
-                break :block .{ .product = .{ .schema = product.schema, .fields = fields } };
-            },
-        };
-    }
-}
-const Comparison = struct { lhs: Knowledge, rhs: Knowledge };
 pub fn equal(a: std.mem.Allocator, lhs: Knowledge, rhs: Knowledge) Error!bool {
-    var pending: std.ArrayList(Comparison) = .empty;
-    defer pending.deinit(a);
-    var current: Comparison = .{ .lhs = lhs, .rhs = rhs };
-    var remaining = true;
-    while (remaining) {
-        const x = current.lhs;
-        const y = current.rhs;
-        if (std.meta.activeTag(x) != std.meta.activeTag(y)) return false;
-        switch (x) {
-            .dynamic => {},
-            .known => |v| {
-                if (v.schema != y.known.schema or
-                    !std.mem.eql(u8, v.bytes, y.known.bytes)) return false;
-            },
-            .product => |v| {
-                if (v.schema != y.product.schema or
-                    v.fields.len != y.product.fields.len) return false;
-                var index = v.fields.len;
-                while (index > 0) {
-                    index -= 1;
-                    try pending.append(a, .{
-                        .lhs = v.fields[index],
-                        .rhs = y.product.fields[index],
-                    });
-                }
-            },
-        }
-        if (pending.pop()) |next| current = next else remaining = false;
-    }
-    return true;
+    return data.record.equalAlloc(Knowledge, a, lhs, rhs);
 }
 const Validation = struct { schema: p.Id, value: Knowledge };
 pub fn validate(

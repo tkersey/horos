@@ -285,3 +285,110 @@ test "source recovery rejects a same-typed source parameter permutation" {
         source.recovery.validate(a, substituted, &forged),
     );
 }
+
+const OwnedRecursive = union(enum) {
+    branch: []const OwnedRecursive,
+    leaf: struct {
+        aliases: [2][]const u8,
+        optional: ?[]const u8,
+        empty: ?[]const u8,
+        scalar: u64,
+        sentinel: [0:171]u8,
+    },
+};
+
+fn checkRecursiveOwnership(
+    allocator: std.mem.Allocator,
+    original: OwnedRecursive,
+    depth: usize,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const copied = try source.own(OwnedRecursive, arena.allocator(), original);
+    var before = original;
+    var after = copied;
+    for (0..depth) |_| {
+        try std.testing.expect(before.branch.ptr != after.branch.ptr);
+        try std.testing.expectEqual(@as(usize, 1), after.branch.len);
+        before = before.branch[0];
+        after = after.branch[0];
+    }
+    const leaf = after.leaf;
+    try std.testing.expectEqualSlices(u8, "owned", leaf.aliases[0]);
+    try std.testing.expectEqualSlices(u8, "owned", leaf.aliases[1]);
+    try std.testing.expectEqualSlices(u8, "owned", leaf.optional.?);
+    try std.testing.expect(leaf.aliases[0].ptr != before.leaf.aliases[0].ptr);
+    try std.testing.expect(leaf.aliases[0].ptr != leaf.aliases[1].ptr);
+    try std.testing.expect(leaf.aliases[0].ptr != leaf.optional.?.ptr);
+    try std.testing.expect(leaf.empty == null);
+    try std.testing.expectEqual(@as(u64, 42), leaf.scalar);
+    try std.testing.expectEqualSlices(u8, &.{171}, std.mem.asBytes(&leaf.sentinel));
+    @constCast(leaf.aliases[0])[0] = 'O';
+    try std.testing.expectEqualSlices(u8, "owned", leaf.aliases[1]);
+    try std.testing.expectEqualSlices(u8, "owned", before.leaf.aliases[0]);
+}
+
+test "source ownership copies deep recursive generic values with allocation failures" {
+    const nodes = try a.alloc(OwnedRecursive, 4097);
+    defer a.free(nodes);
+    nodes[0] = .{ .leaf = .{
+        .aliases = .{ "owned", "owned" },
+        .optional = "owned",
+        .empty = null,
+        .scalar = 42,
+        .sentinel = .{},
+    } };
+    for (nodes[1..], 1..) |*node, index| node.* = .{ .branch = nodes[index - 1 .. index] };
+    try checkRecursiveOwnership(a, nodes[nodes.len - 1], nodes.len - 1);
+    try std.testing.checkAllAllocationFailures(
+        a,
+        checkRecursiveOwnership,
+        .{ nodes[nodes.len - 1], nodes.len - 1 },
+    );
+}
+
+fn checkSpecializationOwnership(allocator: std.mem.Allocator) !void {
+    const pe = source.specialize;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const fields: []const pe.Knowledge = &.{
+        .{ .known = .{ .schema = 3, .bytes = "source" } },
+        .dynamic,
+    };
+    const arguments: []const pe.Knowledge = &.{.{ .product = .{ .schema = 7, .fields = fields } }};
+    const requested: pe.Request = .{
+        .context = std.mem.zeroes(pe.Context),
+        .function = 8,
+        .arguments = arguments,
+    };
+    const copied = try source.own(pe.Request, arena.allocator(), requested);
+    const copied_slice = try source.own([]const pe.Knowledge, arena.allocator(), arguments);
+    try std.testing.expectEqualDeep(requested.context, copied.context);
+    try std.testing.expectEqualDeep(requested.policy, copied.policy);
+    try std.testing.expectEqual(requested.function, copied.function);
+    for ([_][]const pe.Knowledge{ copied.arguments, copied_slice }) |values| {
+        try std.testing.expect(values.ptr != arguments.ptr);
+        try std.testing.expectEqual(@as(u64, 7), values[0].product.schema);
+        const children = values[0].product.fields;
+        try std.testing.expect(children.ptr != fields.ptr);
+        try std.testing.expectEqual(@as(usize, 2), children.len);
+        try std.testing.expectEqual(@as(u64, 3), children[0].known.schema);
+        try std.testing.expectEqualSlices(u8, "source", children[0].known.bytes);
+        try std.testing.expect(children[0].known.bytes.ptr != fields[0].known.bytes.ptr);
+        try std.testing.expect(children[1] == .dynamic);
+    }
+}
+
+test "source ownership accepts public specialization requests and knowledge slices" {
+    try std.testing.checkAllAllocationFailures(a, checkSpecializationOwnership, .{});
+}
+
+fn checkOwnedBytes(allocator: std.mem.Allocator) !void {
+    const copied = try source.own([]const u8, allocator, "independent");
+    defer allocator.free(copied);
+    try std.testing.expectEqualSlices(u8, "independent", copied);
+}
+
+test "source ownership releases temporary traversal storage on every outcome" {
+    try std.testing.checkAllAllocationFailures(a, checkOwnedBytes, .{});
+}

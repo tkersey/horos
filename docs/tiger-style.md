@@ -2,7 +2,7 @@
 
 This contract applies to all tracked Zig code, including tests,
 examples and build tools. It adapts [TigerBeetle's TigerStyle](https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE.md)
-and the [skills-zig implementation](https://github.com/tkersey/skills-zig/blob/d91552e788863ab43306164001c35ae99d2fbf53/docs/engineering/TIGER_STYLE.md).
+and the [skills-zig implementation](https://github.com/tkersey/skills-zig/blob/ac19a3fabd0b32fae3f6bf1becf5368c724e96f3/docs/engineering/TIGER_STYLE.md).
 The priorities are safety, performance and developer experience, in that order.
 
 ## Design and ownership
@@ -60,8 +60,9 @@ checked independently; its declaration is excluded from the enclosing factory's
 line count. Explicitly `inline` type-driven expansion must terminate during
 compilation and introduces no recursive native call frames. Runtime traversal
 of recursive values uses caller-owned scratch storage and propagates allocation
-errors. Recursive specialization knowledge has dedicated copying, comparison,
-and encoding operations rather than generic finite-record traversal.
+errors. Generic record traversal supports finite values of recursively defined
+types through allocator-taking operations; finite type expansion retains its
+allocation-free operations.
 
 Do not add explanatory source comments, docstrings or optional API comments.
 Use names, types and operations to communicate intent. Preserve unrelated
