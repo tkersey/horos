@@ -201,7 +201,10 @@ pub fn Walk(comptime mode: Mode) type {
                     const Child = @typeInfo(T).optional.child;
                     if (mode == .read) @constCast(first).* = switch (try self.reader.byte()) {
                         0 => null,
-                        1 => @as(Child, undefined),
+                        1 => switch (@typeInfo(Child)) {
+                            .pointer => |pointer| try self.allocator.alloc(pointer.child, 0),
+                            else => @as(Child, undefined),
+                        },
                         else => return error.InvalidTag,
                     };
                     if (mode == .write) try self.writer.byte(@intFromBool(first.* != null));

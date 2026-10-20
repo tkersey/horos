@@ -348,3 +348,129 @@ test "recursive record equality retains volatile finite byte slice semantics" {
     right[1] = 'c';
     try std.testing.expect(!try record.equalAlloc(Row, std.testing.allocator, first, second));
 }
+
+const OptionalRow = struct { next: ?[]const @This() };
+
+fn expectDecoded(comptime T: type, bytes: []const u8, expected: T) !void {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var reader: wire.Reader = .{ .input = bytes };
+    const decoded = try record.read(T, &reader, arena.allocator());
+    try reader.finish();
+    try std.testing.expect(try record.equalAlloc(T, std.testing.allocator, expected, decoded));
+    var writer: wire.Writer = .{ .expected = bytes };
+    try record.writeAlloc(T, std.testing.allocator, decoded, &writer);
+    try std.testing.expectEqual(bytes.len, writer.position);
+}
+
+test "recursive optional slice decoding distinguishes null empty and nonempty" {
+    try expectDecoded(OptionalRow, &.{0}, .{ .next = null });
+    try expectDecoded(OptionalRow, &.{ 1, 0 }, .{ .next = &.{} });
+    try expectDecoded(OptionalRow, &.{ 1, 1, 0 }, .{ .next = &.{.{ .next = null }} });
+    const Nested = struct { next: ??[]const @This() };
+    try expectDecoded(Nested, &.{0}, .{ .next = null });
+    try expectDecoded(Nested, &.{ 1, 0 }, .{ .next = @as(?[]const Nested, null) });
+    try expectDecoded(Nested, &.{ 1, 1, 0 }, .{ .next = @as(?[]const Nested, &.{}) });
+}
+
+test "recursive optional aggregates establish their separate discriminators" {
+    const Struct = struct { next: ?struct { rows: []const @This() } };
+    try expectDecoded(Struct, &.{0}, .{ .next = null });
+    try expectDecoded(Struct, &.{ 1, 0 }, .{ .next = .{ .rows = &.{} } });
+    const Union = struct {
+        next: ?union(enum(u8)) { none = 3, rows: []const @This() = 11 },
+    };
+    try expectDecoded(Union, &.{ 1, 3 }, .{ .next = .none });
+    try expectDecoded(Union, &.{ 1, 11, 0 }, .{ .next = .{ .rows = &.{} } });
+    const Array = struct { next: ?[1][]const @This() };
+    try expectDecoded(Array, &.{ 1, 0 }, .{ .next = .{&.{}} });
+}
+
+test "recursive optional slice decoding preserves unaligned volatile qualifiers" {
+    const Row = struct {
+        next: ?[]align(1) const volatile @This() align(1),
+        marker: u64,
+    };
+    try expectDecoded(Row, &.{ 1, 0, 7 }, .{ .next = &.{}, .marker = 7 });
+    var backing: [@sizeOf(Row) + 1]u8 align(@alignOf(Row)) = undefined;
+    const child: *align(1) Row = @ptrCast(&backing[1]);
+    child.* = .{ .next = null, .marker = 3 };
+    const children: []align(1) const volatile Row =
+        @as([*]align(1) const volatile Row, @ptrCast(child))[0..1];
+    try expectDecoded(Row, &.{ 1, 1, 0, 3, 7 }, .{ .next = children, .marker = 7 });
+}
+
+test "recursive optional slices preserve malformed input and budget boundaries" {
+    const T = ?[]const OptionalRow;
+    var remaining: usize = 0;
+    var reader: wire.Reader = .{ .input = &.{2} };
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.InvalidTag, record.readBounded(
+        T,
+        &reader,
+        failing.allocator(),
+        &remaining,
+    ));
+    try std.testing.expectEqual(1, reader.position);
+    try std.testing.expectEqual(0, failing.alloc_index);
+    reader = .{ .input = &.{0} };
+    try std.testing.expectEqual(null, try record.readBounded(
+        T,
+        &reader,
+        failing.allocator(),
+        &remaining,
+    ));
+    try std.testing.expectEqual(0, failing.alloc_index);
+    for ([_][]const u8{ &.{1}, &.{ 1, 2 } }) |bytes| {
+        reader = .{ .input = bytes };
+        try std.testing.expectError(error.Truncated, record.readBounded(
+            T,
+            &reader,
+            std.testing.allocator,
+            &remaining,
+        ));
+        try std.testing.expectEqual(bytes.len, reader.position);
+        try std.testing.expectEqual(0, remaining);
+    }
+    reader = .{ .input = &.{ 1, 1, 0 } };
+    try std.testing.expectError(error.Capacity, record.readBounded(
+        T,
+        &reader,
+        std.testing.allocator,
+        &remaining,
+    ));
+    try std.testing.expectEqual(2, reader.position);
+    try std.testing.expectEqual(0, remaining);
+    reader = .{ .input = &.{ 1, 0 } };
+    const empty = try record.readBounded(T, &reader, std.testing.allocator, &remaining);
+    try std.testing.expect(empty != null);
+    try std.testing.expectEqual(0, empty.?.len);
+    try reader.finish();
+}
+
+fn failOptionalDecode(allocator: std.mem.Allocator) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var reader: wire.Reader = .{ .input = &.{ 1, 1, 1, 1, 1, 0 } };
+    const decoded = try record.read(OptionalRow, &reader, arena.allocator());
+    try reader.finish();
+    try std.testing.expect(decoded.next.?[0].next.?[0].next != null);
+    try std.testing.expectEqual(0, decoded.next.?[0].next.?[0].next.?.len);
+}
+
+test "recursive optional slice allocation failures clean up partial payloads" {
+    try @import("allocation_testing.zig").check(std.testing.allocator, failOptionalDecode, .{});
+}
+
+test "deep recursive optional slices decode without native stack growth" {
+    const rows = try std.testing.allocator.alloc(OptionalRow, 8192);
+    defer std.testing.allocator.free(rows);
+    rows[rows.len - 1] = .{ .next = null };
+    for (0..rows.len - 1) |index| rows[index] = .{ .next = rows[index + 1 ..][0..1] };
+    const bytes = try std.testing.allocator.alloc(u8, 2 * rows.len - 1);
+    defer std.testing.allocator.free(bytes);
+    var writer: wire.Writer = .{ .output = bytes };
+    try record.writeAlloc(OptionalRow, std.testing.allocator, rows[0], &writer);
+    try std.testing.expectEqual(bytes.len, writer.position);
+    try expectDecoded(OptionalRow, bytes, rows[0]);
+}
