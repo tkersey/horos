@@ -21,10 +21,10 @@ pub const Error = wire.Error || std.mem.Allocator.Error || error{
     RelationLimit,
 };
 
-pub fn spend(work: ?*u64, count: usize) error{RelationLimit}!void {
+pub fn spend(work: ?*u64, count: u64) error{RelationLimit}!void {
     const left = work orelse return;
     if (count > left.*) return error.RelationLimit;
-    left.* -= @intCast(count);
+    left.* -= count;
 }
 
 pub fn schemaWork(work: ?*u64, schema: p.Schema) Error!void {
