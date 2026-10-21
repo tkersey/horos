@@ -36,10 +36,22 @@ origins. A relocation may supply `Maps.constructors` to transport those indices;
 it must preserve each supplied operand's capture association and evaluation
 order. A rewrite that silently rebinds a raw constructor is rejected.
 
+Raw `.constant` instructions and primitive failure values refer to the emitted
+constant catalog. Relocation materializes compiler-generated literals from
+ordinary admission, transporting their schemas and references alongside source
+constants. Their contents come from the source compiler's observed output;
+relocation does not reconstruct lowering decisions. `Maps.constants` still maps
+only the original source constants. Reference traversal uses emitted constant
+IDs and source schema IDs; `visitReferences` can follow generated constants into
+their schemas. Internal bounded traversals reuse the admitted constant catalog
+in their module projection rather than repeating admission for each reference.
+
 `Policy.work` is shared across record traversal, source analysis and emission,
 mandatory target admission, and relation checking. Expanded structures reserve
-work before materialization. Exhaustion returns `RelationLimit`. Optional
-compiler optimization is outside this admission operation; ordinary compilation
+work before materialization. `relocateWithWork` also reserves the complete nested
+records of generated functions, values and terms before copying them. Exhaustion
+returns `RelationLimit`. Optional compiler optimization is outside this admission
+operation; ordinary compilation
 continues to run its existing optimizations. `decodeRecordStep` separately
 charges all owned rule and successor allocations against its caller's byte
 allowance. Exhaustion returns `Capacity`; underlying allocation failure remains
@@ -58,7 +70,10 @@ selected entry's transitive dependencies, relocates retained declarations and
 admits the result. `require_pure` requires an empty entry effect row and no
 retained external effects. Malformed declarations cannot be hidden by pruning.
 The returned owner contains the exact selected entry signature, schemas,
-constants and mappings; call `deinit` when finished.
+constants and mappings; call `deinit` when finished. `Output.emitted_constants`
+maps the complete originally emitted constant catalog into the retained source,
+including literals whose generating declarations were pruned.
+`Output.maps.constants` remains the mapping for original source constants.
 
 A raw closure can depend on a constructor whose original registration function
 also contains an unreachable bridge. Extraction replaces that registration with

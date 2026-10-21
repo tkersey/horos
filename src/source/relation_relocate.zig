@@ -138,11 +138,49 @@ pub fn relocateWithWork(
     generated: Generated,
     work: ?*u64,
 ) Error!ast.Module {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var unlimited: u64 = std.math.maxInt(u64);
+    const catalog = try bindings.admitCatalog(a, arena.allocator(), module, work orelse &unlimited);
+    return relocateCatalogWithWork(a, module, catalog.constants, maps, generated, work);
+}
+
+pub fn relocateCatalogWithWork(
+    a: std.mem.Allocator,
+    module: ast.Module,
+    constants: []const p.Literal,
+    maps: Maps,
+    generated: Generated,
+    work: ?*u64,
+) Error!ast.Module {
     try validateMapsWithWork(a, module, maps, false, generated.functions.len, work);
+    if (constants.len < module.constants.len) return error.InvalidRelation;
+    try data.admission.spend(work, constants.len);
+    const constant_map = try a.alloc(?u64, constants.len);
+    @memcpy(constant_map[0..maps.constants.len], maps.constants);
+    const start = mappedCount(maps.constants);
+    for (constant_map[maps.constants.len..], 0..) |*entry, index|
+        entry.* = std.math.add(u64, start, index) catch return error.Capacity;
+    var emitted = module;
+    emitted.constants = constants;
+    var emitted_maps = maps;
+    emitted_maps.constants = constant_map;
+    return relocateCatalogs(a, emitted, emitted_maps, generated, module.constants.len, work);
+}
+
+fn relocateCatalogs(
+    a: std.mem.Allocator,
+    module: ast.Module,
+    maps: Maps,
+    generated: Generated,
+    source_constants: usize,
+    work: ?*u64,
+) Error!ast.Module {
     const mapper: Mapper = .{
         .a = a,
         .maps = maps,
         .region_original_count = module.region_count,
+        .source_constants = source_constants,
         .work = work,
     };
     var result = module;
@@ -166,8 +204,11 @@ pub fn relocateWithWork(
             output[@intCast(new)] = try @field(Mapper, name)(mapper, value_);
         };
         const start = if (comptime std.mem.eql(u8, name, "functions")) 0 else count - added.len;
-        for (added, output[start..][0..added.len]) |item, *out|
+        for (added, output[start..][0..added.len]) |item, *out| {
+            var measure: data.wire.Writer = .{ .remaining = work };
+            try data.record.write(T, item, &measure);
             out.* = try @import("../source.zig").own(T, a, item);
+        }
         @field(result, name) = output;
     }
     return result;
@@ -183,12 +224,25 @@ pub fn visitReferences(
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     var work: u64 = std.math.maxInt(u64);
-    const constructors = if (kind == .value and index < module.values.len and
-        bindings.raw(module.values[@intCast(index)]) != null)
-        try bindings.admit(a, arena.allocator(), module, &work)
+    const catalog: bindings.Catalog = if (needsCatalog(module, kind, index))
+        try bindings.admitCatalog(a, arena.allocator(), module, &work)
     else
-        &.{};
-    return visitReferencesWithWork(a, module, constructors, kind, index, sink, null);
+        .{ .constructors = &.{}, .constants = module.constants };
+    var emitted = module;
+    emitted.constants = catalog.constants;
+    return visitReferencesWithWork(a, emitted, catalog.constructors, kind, index, sink, null);
+}
+
+fn needsCatalog(module: ast.Module, kind: Kind, index: u64) bool {
+    if (kind == .constant) return index >= module.constants.len;
+    if (kind != .value or index >= module.values.len) return false;
+    const value = module.values[@intCast(index)];
+    if (value.expression != .primitive) return false;
+    const primitive = value.expression.primitive;
+    if (primitive.opcode == .computation) return true;
+    if (primitive.opcode == .constant and primitive.immediate >= module.constants.len) return true;
+    for (primitive.failures) |failure| if (failure.value >= module.constants.len) return true;
+    return false;
 }
 
 pub fn visitReferencesWithWork(
@@ -205,6 +259,7 @@ pub fn visitReferencesWithWork(
     const mapper: Mapper = .{
         .a = arena.allocator(),
         .constructors = constructors,
+        .source_constants = module.constants.len,
         .work = work,
         .references = .{ .allocator = a, .sink = sink },
     };
@@ -224,6 +279,7 @@ const Mapper = struct {
     a: std.mem.Allocator,
     maps: Maps = .{},
     region_original_count: u64 = 0,
+    source_constants: usize = 0,
     constructors: []const bindings.Binding = &.{},
     work: ?*u64 = null,
     references: ?struct { allocator: std.mem.Allocator, sink: *std.ArrayList(Reference) } = null,
@@ -368,7 +424,10 @@ const Mapper = struct {
         result.schema = try self.id(.schema, v.schema);
         switch (v.expression) {
             .variable => |old| result.expression = .{ .variable = try self.id(.variable, old) },
-            .literal => |old| result.expression = .{ .literal = try self.id(.constant, old) },
+            .literal => |old| {
+                if (old >= self.source_constants) return error.InvalidRelation;
+                result.expression = .{ .literal = try self.id(.constant, old) };
+            },
             .lambda => |old| result.expression = .{ .lambda = try self.id(.function, old) },
             .primitive => |old| {
                 var op = old;

@@ -16,6 +16,222 @@ fn known(value: u64, storage: *[8]u8, schema: p.Id) pe.Knowledge {
     return .{ .known = .{ .schema = schema, .bytes = storage } };
 }
 
+fn retainedKnowledge(a: std.mem.Allocator) !void {
+    var bytes: [8]u8 = undefined;
+    var output = blk: {
+        var b = source.Builder.init(a);
+        defer b.deinit();
+        const word = try b.scalar(u64);
+        const f = try b.declare(&.{word}, word, &.{}, &.{});
+        try b.define(f, try b.pure(try b.reference(b.parameter(f, 0))));
+        break :blk try pe.specialize(a, b.module(f, try b.scalar(void)), .{
+            .context = context,
+            .function = f,
+            .arguments = &.{known(17, &bytes, word)},
+        });
+    };
+    defer output.deinit();
+    @memset(&bytes, 0);
+    const fact = output.functions.items[0].arguments[0].known;
+    try std.testing.expect(fact.bytes.ptr != &bytes);
+    try std.testing.expect(fact.bytes.ptr == output.request.arguments[0].known.bytes.ptr);
+    try std.testing.expectEqual(@as(u64, 17), std.mem.readInt(u64, fact.bytes[0..8], .little));
+    try pe.validate(a, output.original, output.request, &output);
+}
+
+test "specialization shares owned static facts after caller storage is released" {
+    var allocations = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .resize_fail_index = 0 },
+    );
+    try std.testing.checkAllAllocationFailures(allocations.allocator(), retainedKnowledge, .{});
+}
+
+test "specialization checks raw callee facts before reusing verified arguments" {
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const word = try b.scalar(u64);
+    const callee = try b.declare(&.{word}, word, &.{}, &.{});
+    try b.define(callee, try b.pure(try b.reference(b.parameter(callee, 0))));
+    const caller = try b.declare(&.{word}, word, &.{}, &.{});
+    const call = try b.term(.{ .call = .{
+        .function = callee,
+        .arguments = &.{try b.reference(b.parameter(caller, 0))},
+    } });
+    try b.define(caller, try b.bind(try b.variable(word), call, call));
+    var bytes: [8]u8 = undefined;
+    var output = try pe.specialize(a, b.module(caller, try b.scalar(void)), .{
+        .context = context,
+        .function = caller,
+        .arguments = &.{known(17, &bytes, word)},
+    });
+    defer output.deinit();
+    for (output.functions.items) |*proof| proof.arguments = try pe.values.ownMany(
+        output.builder.allocator(),
+        proof.arguments,
+    );
+    try pe.validate(a, output.original, output.request, &output);
+    try std.testing.expectEqual(@as(usize, 2), output.functions.items.len);
+    output.functions.items[1].arguments = try pe.values.ownMany(
+        output.builder.allocator(),
+        &.{known(18, &bytes, word)},
+    );
+    try std.testing.expectError(
+        error.InvalidSpecialization,
+        pe.validate(a, output.original, output.request, &output),
+    );
+}
+
+test "specialization reconstructs verified argument sharing after proof copies" {
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const word = try b.scalar(u64);
+    const sequence = try b.schema(.{ .seq = try b.scalar(u8) });
+    const pair = try b.schema(.{ .product = &.{ sequence, word } });
+    var functions: [8]source.Id = undefined;
+    for (&functions) |*function| function.* = try b.declare(&.{pair}, word, &.{}, &.{});
+    for (functions, 0..) |function, index| {
+        const parameter = try b.reference(b.parameter(function, 0));
+        const field = try b.primitive(word, .field, &.{parameter}, 1);
+        const body = if (index + 1 == functions.len) try b.pure(field) else try b.bind(
+            try b.variable(word),
+            try b.pure(field),
+            try b.term(.{ .call = .{
+                .function = functions[index + 1],
+                .arguments = &.{parameter},
+            } }),
+        );
+        try b.define(function, body);
+    }
+    var bytes: [4106]u8 = @splat(7);
+    var writer: @import("horos_data").wire.Writer = .{ .output = &bytes };
+    try writer.natural(4096);
+    std.mem.writeInt(u64, bytes[4098..][0..8], 17, .little);
+    var output = try pe.specialize(a, b.module(functions[0], try b.scalar(void)), .{
+        .context = context,
+        .function = functions[0],
+        .arguments = &.{.{ .known = .{ .schema = pair, .bytes = &bytes } }},
+        .policy = .{ .work = 10_000 },
+    });
+    defer output.deinit();
+    try std.testing.expectEqual(functions.len, output.functions.items.len);
+    for (output.functions.items) |*proof| proof.arguments = try pe.values.ownMany(
+        output.builder.allocator(),
+        proof.arguments,
+    );
+    try pe.validate(a, output.original, output.request, &output);
+    try std.testing.expect(try literalProofWork(&output) >= functions.len * bytes.len);
+}
+
+fn literalProof(a: std.mem.Allocator, bytes: []const u8, selected: bool) !pe.Output {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const unit = try b.scalar(void);
+    const sequence = try b.schema(.{ .seq = try b.scalar(u8) });
+    var length: @import("horos_data").wire.Writer = .{};
+    try @import("horos_data").record.write([]const u8, bytes, &length);
+    const encoded_value = try b.allocator().alloc(u8, length.position);
+    var writer: @import("horos_data").wire.Writer = .{ .output = encoded_value };
+    try @import("horos_data").record.write([]const u8, bytes, &writer);
+    const value = try b.literal(.{ .schema = sequence, .bytes = encoded_value });
+    const f = try b.declare(&.{}, if (selected) unit else sequence, &.{}, &.{});
+    var scrutinee = value;
+    if (selected) {
+        const sum = try b.schema(.{ .sum = &.{sequence} });
+        const literal_id = b.values.items[@intCast(value)].expression.literal;
+        const literal = b.constants.items[@intCast(literal_id)];
+        const encoded = try std.mem.concat(b.allocator(), u8, &.{ &.{0}, literal.bytes });
+        scrutinee = try b.literal(.{ .schema = sum, .bytes = encoded });
+        try b.define(f, try b.term(.{ .match_sum = .{
+            .value = scrutinee,
+            .cases = &.{.{
+                .variable = try b.variable(sequence),
+                .body = try b.pure(try b.constant(void, {})),
+            }},
+        } }));
+    } else try b.define(f, try b.pure(value));
+    var output = try pe.specialize(a, b.module(f, unit), .{
+        .context = context,
+        .function = f,
+        .arguments = &.{},
+    });
+    errdefer output.deinit();
+    for (output.value_proofs.items) |*proof| if (proof.before == scrutinee) {
+        proof.after = proof.before;
+        proof.folded = !selected;
+    };
+    if (!selected) {
+        const body = b.functions.items[@intCast(f)].body.?;
+        output.builder.functions.items[@intCast(output.entry)].body = body;
+        output.term_proofs.items[output.functions.items[0].body.?].after = body;
+    }
+    return output;
+}
+
+fn duplicateLiteralProof(output: *pe.Output, count: usize) !void {
+    const proof = output.functions.items[0];
+    const function = output.module().functions[@intCast(proof.after)];
+    for (1..count) |_| {
+        const after = try output.builder.declare(&.{}, function.result, &.{}, &.{});
+        try output.builder.define(after, function.body.?);
+        var copy = proof;
+        copy.after = after;
+        try output.functions.append(output.builder.allocator(), copy);
+    }
+}
+
+fn literalProofWork(output: *const pe.Output) !u64 {
+    var remaining: u64 = 1_000_000_000;
+    try @import("specialize_validate.zig").validateWithWork(
+        std.testing.allocator,
+        output.original,
+        output.request,
+        output,
+        &remaining,
+    );
+    return 1_000_000_000 - remaining;
+}
+
+fn rejectLiteralProofWork(output: *const pe.Output, budget: u64) !void {
+    var remaining = budget;
+    try std.testing.expectError(
+        error.RelationLimit,
+        @import("specialize_validate.zig").validateWithWork(
+            std.testing.allocator,
+            output.original,
+            output.request,
+            output,
+            &remaining,
+        ),
+    );
+}
+
+test "shared folded literal proofs charge every content comparison" {
+    const bytes: [4096]u8 = @splat(7);
+    var output = try literalProof(std.testing.allocator, &bytes, false);
+    defer output.deinit();
+    try duplicateLiteralProof(&output, 8);
+    const folded = try literalProofWork(&output);
+    for (output.value_proofs.items) |*proof| proof.folded = false;
+    const unfolded = try literalProofWork(&output);
+    try std.testing.expect(folded - unfolded >= 8 * bytes.len);
+    for (output.value_proofs.items) |*proof| proof.folded = true;
+    try rejectLiteralProofWork(&output, unfolded + 8 * bytes.len - 1);
+}
+
+test "shared selected match proofs charge every payload comparison" {
+    const bytes: [4096]u8 = @splat(7);
+    var output = try literalProof(std.testing.allocator, &bytes, true);
+    defer output.deinit();
+    const single = try literalProofWork(&output);
+    try duplicateLiteralProof(&output, 8);
+    const shared = try literalProofWork(&output);
+    try std.testing.expect(shared - single >= 7 * bytes.len);
+    try rejectLiteralProofWork(&output, single + 7 * bytes.len - 1);
+}
+
 fn resourceAuthorityCaller(b: *source.Builder, resource: p.Resource) !source.Id {
     // Exercise the authorized effectful helpers through an ordinary
     // first-order caller, independently of the example's protection.

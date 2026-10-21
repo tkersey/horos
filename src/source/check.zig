@@ -402,17 +402,32 @@ fn checkValues(source: ast.Module, diagnostic: ?*@import("diagnostic.zig").Diagn
     }
 }
 
+pub fn selectUnit(
+    schemas: []const p.Schema,
+    constants: []const p.Literal,
+    work: ?*u64,
+) Error!?struct { schema: p.Id, constant: ?p.Id } {
+    for (constants, 0..) |literal, id| {
+        try data.admission.spend(work, 1);
+        if (literal.schema >= schemas.len) return error.InvalidSchema;
+        if (schemas[@intCast(literal.schema)] == .unit)
+            return .{ .schema = literal.schema, .constant = id };
+    }
+    for (schemas, 0..) |schema, id| {
+        try data.admission.spend(work, 1);
+        if (schema == .unit) return .{ .schema = id, .constant = null };
+    }
+    return null;
+}
+
 fn checkTerms(
     allocator: std.mem.Allocator,
     source: ast.Module,
     facts: Facts,
     diagnostic: ?*@import("diagnostic.zig").Diagnostic,
 ) Error![]References {
-    var unit: ?p.Id = null;
-    for (source.schemas, 0..) |schema, id| if (schema == .unit) {
-        unit = id;
-        break;
-    };
+    const selected = try selectUnit(source.schemas, source.constants, facts.work);
+    const unit = if (selected) |literal| literal.schema else null;
     const term_references = try allocator.alloc(References, source.terms.len);
     for (source.terms, 0..) |term, id| {
         if (diagnostic) |d| d.term = id;

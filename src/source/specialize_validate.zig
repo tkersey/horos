@@ -82,7 +82,7 @@ fn validateBody(
     defer arena.deinit();
     const storage = arena.allocator();
     const residual = out.module();
-    try validateEnvelope(storage, original, request, out, work);
+    const root_arguments = try validateEnvelope(storage, original, request, out, work);
     // Source admission precedes primitive evaluation; malformed operand shapes
     // cannot reach constant rules through a forged derivation.
     try admit(a, original, work);
@@ -101,6 +101,10 @@ fn validateBody(
     );
     // Source type/scope checking is additional to the semantic derivation.
     _ = try @import("check.zig").analyzeWithWork(storage, residual, work);
+    try data.admission.spend(work, out.functions.items.len);
+    const arguments = try storage.alloc(?[]const pe.Knowledge, out.functions.items.len);
+    @memset(arguments, null);
+    arguments[0] = root_arguments;
     var checker: Checker = .{
         .a = storage,
         .before = original,
@@ -112,6 +116,7 @@ fn validateBody(
         .captures = original_facts.functions,
         .max_depth = request.policy.depth,
         .reads = .{ .module = original, .facts = schema_facts },
+        .arguments = arguments,
     };
     defer checker.reads.deinit(storage);
     for (out.functions.items, 0..) |f, i| try checker.function(f, i);
@@ -128,7 +133,7 @@ fn validateEnvelope(
     request: pe.Request,
     out: *const pe.Output,
     work: ?*u64,
-) Error!void {
+) Error![]const pe.Knowledge {
     const residual = out.module();
     const identity = try pe.identityWithWork(storage, original, request, work);
     try require(std.mem.eql(u8, &out.key, &identity));
@@ -159,23 +164,26 @@ fn validateEnvelope(
             out.entry == out.functions.items[0].after,
     );
     try require(request.arguments.len == out.functions.items[0].arguments.len);
-    try validateCanonicalArguments(storage, request, out, work);
+    return validateCanonicalArguments(storage, request, out, work);
 }
 fn validateCanonicalArguments(
     storage: std.mem.Allocator,
     request: pe.Request,
     out: *const pe.Output,
     work: ?*u64,
-) Error!void {
+) Error![]const pe.Knowledge {
     var left = request.policy.work;
-    for (request.arguments, out.functions.items[0].arguments) |raw, canonical| try require(
-        try k.equalWithWork(
-            storage,
-            try normalize(storage, raw, &left, work),
-            canonical,
-            work,
-        ),
-    );
+    try data.admission.spend(work, request.arguments.len);
+    const arguments = try storage.alloc(pe.Knowledge, request.arguments.len);
+    for (
+        request.arguments,
+        out.functions.items[0].arguments,
+        arguments,
+    ) |raw, canonical, *argument| {
+        argument.* = try normalize(storage, raw, &left, work);
+        try require(try k.equalWithWork(storage, argument.*, canonical, work));
+    }
+    return arguments;
 }
 const EvaluationWork = struct {
     local: *u64,
@@ -241,6 +249,7 @@ const Checker = struct {
     work: ?*u64,
     max_depth: usize,
     reads: k.ReadCache,
+    arguments: []?[]const pe.Knowledge,
 
     fn spend(self: *Checker, depth: usize) Error!void {
         if (self.left == 0 or depth > self.max_depth) return error.SpecializationLimit;
@@ -260,7 +269,7 @@ const Checker = struct {
             std.mem.eql(p.Id, b.regions, r.regions));
         var env: Env = &.{};
         var cursor: usize = 0;
-        for (b.parameters, f.arguments) |v, fact| {
+        for (b.parameters, self.arguments[i] orelse f.arguments) |v, fact| {
             try k.validateWithWork(
                 self.a,
                 self.before,
@@ -360,10 +369,10 @@ const Checker = struct {
         }
         if (self.out.value_proofs.items[visit.proof_id].folded) {
             try require(frame.total and frame.knowledge == .known and r.expression == .literal);
-            try require(data.record.equal(
-                p.Literal,
+            try require(try k.literalEqualWithWork(
                 frame.knowledge.known,
                 self.after.constants[@intCast(r.expression.literal)],
+                self.work,
             ));
         } else try require(data.record.equal(ast.Value, frame.expected, r));
         return .{ .knowledge = frame.knowledge, .total = frame.total };
@@ -542,6 +551,10 @@ const Checker = struct {
             break :blk self.out.functions.items[i];
         } else null;
         if (target) |f| try require(f.before == v.function and f.arguments.len == v.arguments.len);
+        const arguments = if (target != null and self.arguments[proof.callee.?] == null) blk: {
+            try data.admission.spend(self.work, v.arguments.len);
+            break :blk try self.a.alloc(pe.Knowledge, v.arguments.len);
+        } else null;
         for (v.arguments, 0..) |arg, i| {
             const x = try self.checkedValue(frame, i, arg);
             if (target) |f| {
@@ -549,16 +562,14 @@ const Checker = struct {
                     .dynamic
                 else
                     x.fact.knowledge;
-                try require(try k.equalWithWork(
-                    self.a,
-                    try normalize(self.a, justified, &self.left, self.work),
-                    f.arguments[i],
-                    self.work,
-                ));
+                const normalized = try normalize(self.a, justified, &self.left, self.work);
+                try require(try k.equalWithWork(self.a, normalized, f.arguments[i], self.work));
+                if (arguments) |retained| retained[i] = normalized;
                 if (f.arguments[i] == .known) continue;
             }
             try args.append(self.a, x.id);
         }
+        if (arguments) |retained| self.arguments[proof.callee.?] = retained;
         frame.expected = .{ .call = .{
             .function = if (target) |f| f.after else v.function,
             .arguments = args.items,
@@ -637,10 +648,10 @@ const Checker = struct {
         try require(first == .value);
         const literal = self.after.values[@intCast(first.value)];
         try require(literal.schema == schema and literal.expression == .literal and
-            data.record.equal(
-                p.Literal,
+            try k.literalEqualWithWork(
                 payload_fact.value.known,
                 self.after.constants[@intCast(literal.expression.literal)],
+                self.work,
             ));
         const next_env = try extend(self.a, visit.env, self.work, .{
             .before = branch.variable,

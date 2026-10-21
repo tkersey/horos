@@ -99,9 +99,11 @@ pub fn coverage(
     successor: ast.Module,
     proof: relation.Specialization,
 ) Error!void {
+    var emitted = successor;
+    emitted.constants = ctx.successor_constants;
     var state: Coverage = .{
         .ctx = ctx,
-        .successor = successor,
+        .successor = emitted,
         .proof = proof,
         .covered = undefined,
         .terms = try flags(ctx, proof.terms.len, 0),
@@ -111,10 +113,13 @@ pub fn coverage(
         const name = comptime @tagName(kind) ++ "s";
         state.covered[@backingInt(kind)] = if (comptime kind == .region) &.{} else try flags(
             ctx,
-            @field(successor, name).len,
+            @field(emitted, name).len,
             @field(ctx.before, name).len,
         );
     }
+    const constants = state.covered[@backingInt(relocation.Kind.constant)];
+    try relation.Context.require(successor.constants.len <= constants.len);
+    @memset(constants[successor.constants.len..], true);
     try state.proofs();
     try state.sources();
     try state.complete();

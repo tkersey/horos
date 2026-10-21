@@ -44,6 +44,7 @@ pub const Context = struct {
     left: *u64,
     constructors: []const bindings.Binding = &.{},
     successor_constructors: []const bindings.Binding = &.{},
+    successor_constants: []const data.program.Literal = &.{},
     pub fn spend(self: *Context, count: usize) Error!void {
         if (count > self.left.*) return error.RelationLimit;
         self.left.* -= @intCast(count);
@@ -66,7 +67,7 @@ pub fn validate(
     var before = approved;
     var current_policy = policy;
     try chargeModule(approved, &left);
-    var before_constructors = try bindings.admit(a, storage, approved, &left);
+    var before_catalog = try bindings.admitCatalog(a, storage, approved, &left);
     for (steps) |step| {
         try chargeModule(step.successor, &left);
         try chargeModule(before, &left);
@@ -76,7 +77,7 @@ pub fn validate(
             .expected = try source.own(ast.Module, storage, before),
             .policy = current_policy,
             .left = &left,
-            .constructors = before_constructors,
+            .constructors = before_catalog.constructors,
         };
         try ctx.spend(before.values.len);
         try ctx.spend(before.terms.len);
@@ -86,7 +87,14 @@ pub fn validate(
             .relocation => |maps| {
                 try chargeRecord(Relocation.Maps, maps, &left);
                 try Relocation.validateMapsWithWork(storage, before, maps, true, 0, &left);
-                ctx.expected = try Relocation.relocateWithWork(storage, before, maps, .{}, &left);
+                ctx.expected = try Relocation.relocateCatalogWithWork(
+                    storage,
+                    before,
+                    before_catalog.constants,
+                    maps,
+                    .{},
+                    &left,
+                );
                 try fixedSchemas(&ctx, maps);
                 current_policy = try relocatePolicy(storage, current_policy, maps, &left);
             },
@@ -98,16 +106,18 @@ pub fn validate(
                 current_policy = try specializedPolicy(&ctx, proof);
             },
         }
-        before_constructors = try finishStep(a, &ctx, step);
+        before_catalog = try finishStep(a, &ctx, step);
         before = step.successor;
     }
     try Context.require(data.record.equal(ast.Module, before, candidate));
 }
 
-fn finishStep(a: std.mem.Allocator, ctx: *Context, step: Step) Error![]const bindings.Binding {
+fn finishStep(a: std.mem.Allocator, ctx: *Context, step: Step) Error!bindings.Catalog {
     try Context.require(data.record.equal(ast.Module, ctx.expected, step.successor));
-    const constructors = try bindings.admit(a, ctx.a, step.successor, ctx.left);
+    const catalog = try bindings.admitCatalog(a, ctx.a, step.successor, ctx.left);
+    const constructors = catalog.constructors;
     ctx.successor_constructors = constructors;
+    ctx.successor_constants = catalog.constants;
     if (step.rule == .specialization) try @import("relation_specialization.zig").coverage(
         ctx,
         step.successor,
@@ -118,7 +128,7 @@ fn finishStep(a: std.mem.Allocator, ctx: *Context, step: Step) Error![]const bin
     else
         bindings.Transport{};
     try bindings.validate(ctx.before, ctx.constructors, constructors, transport, ctx.left);
-    return constructors;
+    return catalog;
 }
 
 fn specialization(ctx: *Context, successor: ast.Module, proof: Specialization) Error!void {

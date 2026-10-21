@@ -5,6 +5,10 @@ const ast = @import("ast.zig");
 const check = @import("check.zig");
 const Error = source.Error || error{ InvalidRelation, UnsupportedRelation };
 
+pub const Catalog = struct {
+    constructors: []const Binding,
+    constants: []const data.program.Literal,
+};
 pub const Binding = struct { function: u64, schema: u64, captures: []const u64 };
 pub const Transport = struct {
     functions: ?[]const ?u64 = null,
@@ -24,6 +28,7 @@ const Capture = struct {
     allocator: std.mem.Allocator,
     work: *u64,
     bindings: []const Binding = &.{},
+    constants: ?[]const data.program.Literal = null,
 
     fn receive(
         pointer: *anyopaque,
@@ -43,6 +48,15 @@ const Capture = struct {
             };
         }
         self.bindings = result;
+        if (self.constants != null) {
+            var measure: data.wire.Writer = .{ .remaining = self.work };
+            try data.record.write([]const data.program.Literal, program.constants, &measure);
+            self.constants = try source.own(
+                []const data.program.Literal,
+                self.allocator,
+                program.constants,
+            );
+        }
     }
 };
 
@@ -58,6 +72,20 @@ pub fn admit(
         .receive = Capture.receive,
     });
     return capture.bindings;
+}
+
+pub fn admitCatalog(
+    allocator: std.mem.Allocator,
+    storage: std.mem.Allocator,
+    module: ast.Module,
+    work: *u64,
+) Error!Catalog {
+    var capture: Capture = .{ .allocator = storage, .work = work, .constants = &.{} };
+    try source.admitObservedWithWork(allocator, module, work, .{
+        .context = &capture,
+        .receive = Capture.receive,
+    });
+    return .{ .constructors = capture.bindings, .constants = capture.constants.? };
 }
 
 pub fn validate(

@@ -524,18 +524,15 @@ const Compiler = struct {
     }
 
     fn unit(self: *Compiler) Error!p.Id {
-        for (self.constants.items, 0..) |literal, id| {
-            try data.admission.spend(self.work, 1);
-            if (self.source.schemas[@intCast(literal.schema)] == .unit) return id;
-        }
-        for (self.source.schemas, 0..) |shape, schema| {
-            try data.admission.spend(self.work, 1);
-            if (shape != .unit) continue;
-            const id = self.constants.items.len;
-            try self.constants.append(self.allocator, .{ .schema = schema, .bytes = &.{} });
-            return id;
-        }
-        return error.TypeMismatch;
+        const selected = try check.selectUnit(
+            self.source.schemas,
+            self.constants.items,
+            self.work,
+        ) orelse return error.TypeMismatch;
+        if (selected.constant) |id| return id;
+        const id = self.constants.items.len;
+        try self.constants.append(self.allocator, .{ .schema = selected.schema, .bytes = &.{} });
+        return id;
     }
 };
 

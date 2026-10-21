@@ -63,6 +63,69 @@ test "closed pure inlining charges empty authority catalogs" {
     }
 }
 
+fn referenceExpansionModule(b: *@import("../source.zig").Builder, sum: bool) Error!ast.Module {
+    const unit = try b.scalar(void);
+    const members: [8]Id = @splat(unit);
+    const aggregate = try b.schema(if (sum) .{ .sum = &members } else .{ .product = &members });
+    const entry = try b.declare(&.{aggregate}, unit, &.{}, &.{});
+    const input = try b.reference(b.parameter(entry, 0));
+    const returned = try b.pure(try b.constant(void, {}));
+    var variables: [members.len]Id = undefined;
+    for (&variables) |*variable| variable.* = try b.variable(unit);
+    const Case = std.meta.Elem(@FieldType(@FieldType(ast.Term, "match_sum"), "cases"));
+    var cases: [members.len]Case = undefined;
+    for (&cases, variables) |*case, variable| case.* = .{ .variable = variable, .body = returned };
+    const body = try b.term(if (sum) .{ .match_sum = .{
+        .value = input,
+        .cases = &cases,
+    } } else .{ .unpack_product = .{
+        .value = input,
+        .variables = &variables,
+        .body = returned,
+    } });
+    try b.define(entry, body);
+    return b.module(entry, unit);
+}
+
+test "closed pure inlining reserves reference expansion before allocation" {
+    const source = @import("../source.zig");
+    for ([_]bool{ false, true }) |sum| {
+        var b = source.Builder.init(std.testing.allocator);
+        defer b.deinit();
+        const module = try referenceExpansionModule(&b, sum);
+        var left: u64 = 1_000_000;
+        try source.admitWithWork(std.testing.allocator, module, &left);
+        var ctx: relation.Context = .{
+            .a = b.allocator(),
+            .before = module,
+            .expected = module,
+            .policy = .{},
+            .left = &left,
+        };
+        var pure: Pure = .{
+            .ctx = &ctx,
+            .facts = try check.analyze(ctx.a, module),
+            .seen = .{
+                try flags(&ctx, module.functions.len), try flags(&ctx, module.terms.len),
+                try flags(&ctx, module.values.len),    try flags(&ctx, module.schemas.len),
+            },
+        };
+        var clone = try Clone.init(&ctx);
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+        ctx.a = failing.allocator();
+        const root = module.functions[@intCast(module.entry)].body.?;
+        left = 0;
+        try std.testing.expectError(error.RelationLimit, pure.checkTerm(root));
+        left = 1;
+        try std.testing.expectError(error.RelationLimit, clone.select(root));
+        try std.testing.expect(!failing.has_induced_failure);
+        ctx.a = b.allocator();
+        left = 1_000;
+        try pure.checkTerm(root);
+        try clone.select(root);
+    }
+}
+
 const Pure = struct {
     ctx: *relation.Context,
     facts: check.Facts,
@@ -130,7 +193,7 @@ const Pure = struct {
             .call => |call| try self.push(.function, call.function),
             else => return error.UnsupportedRelation,
         }
-        var refs: check.References = .{ .allocator = self.ctx.a };
+        var refs: check.References = .{ .allocator = self.ctx.a, .work = self.ctx.left };
         try refs.collect(term);
         for (refs.terms.items) |child| try self.push(.term, child);
         for (refs.values.items) |child| try self.push(.value, child);
@@ -215,7 +278,7 @@ const Clone = struct {
             at -= 1;
             try self.ctx.spend(1);
             if (!self.selected_terms[at]) continue;
-            var refs: check.References = .{ .allocator = self.ctx.a };
+            var refs: check.References = .{ .allocator = self.ctx.a, .work = self.ctx.left };
             try refs.collect(self.ctx.before.terms[at]);
             try self.ctx.spend(refs.terms.items.len + refs.values.items.len + refs.bound.items.len);
             for (refs.terms.items) |child| self.selected_terms[@intCast(child)] = true;

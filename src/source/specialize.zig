@@ -189,7 +189,7 @@ pub fn specialize(a: std.mem.Allocator, original: ast.Module, requested: Request
     defer engine.reads.deinit(storage);
     const root = try engine.request(
         requested.function,
-        requested.arguments,
+        out.request.arguments,
     ) orelse return error.UnsupportedSpecialization;
     out.entry = out.functions.items[root].after;
     var cursor: usize = 0;
@@ -304,7 +304,7 @@ const Engine = struct {
             .{
                 .before = id,
                 .after = residual,
-                .arguments = try source.own([]const Knowledge, self.a(), arguments),
+                .arguments = arguments,
             },
         );
         return index;

@@ -95,6 +95,11 @@ pub fn ownMany(a: std.mem.Allocator, values: []const Knowledge) Error![]const Kn
 pub fn equal(a: std.mem.Allocator, lhs: Knowledge, rhs: Knowledge) Error!bool {
     return data.record.equalAlloc(Knowledge, a, lhs, rhs);
 }
+pub fn literalEqualWithWork(lhs: p.Literal, rhs: p.Literal, work: ?*u64) Error!bool {
+    if (lhs.schema != rhs.schema or lhs.bytes.len != rhs.bytes.len) return false;
+    try data.admission.spend(work, lhs.bytes.len);
+    return std.mem.eql(u8, lhs.bytes, rhs.bytes);
+}
 pub fn equalWithWork(
     a: std.mem.Allocator,
     lhs: Knowledge,
@@ -112,10 +117,7 @@ pub fn equalWithWork(
         switch (pair.lhs) {
             .dynamic => {},
             .known => |left| {
-                const right = pair.rhs.known;
-                if (left.schema != right.schema or left.bytes.len != right.bytes.len) return false;
-                try data.admission.spend(work, left.bytes.len);
-                if (!std.mem.eql(u8, left.bytes, right.bytes)) return false;
+                if (!try literalEqualWithWork(left, pair.rhs.known, work)) return false;
             },
             .product => |left| {
                 const right = pair.rhs.product;

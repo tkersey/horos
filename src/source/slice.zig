@@ -14,6 +14,7 @@ pub const Output = struct {
     selected_entry: source.Id,
     maps: relocation.Maps,
     generated_functions: usize = 0,
+    emitted_constants: []const ?u64 = &.{},
     retained: ast.Module,
 
     pub fn deinit(self: *Output) void {
@@ -41,20 +42,32 @@ pub fn extract(
     errdefer output.deinit();
     const a = output.arena.allocator();
     var work: u64 = std.math.maxInt(u64);
-    const constructors = try bindings.admit(allocator, a, original, &work);
+    const catalog = try bindings.admitCatalog(allocator, a, original, &work);
+    const constructors = catalog.constructors;
+    var emitted = original;
+    emitted.constants = catalog.constants;
     if (request.entry >= original.functions.len) return error.InvalidReference;
     output.maps = try dependencyMaps(
         a,
         allocator,
-        original,
+        emitted,
         request.entry,
         constructors,
     );
     const generated = try constructorHelpers(a, original, &output.maps, constructors);
     output.generated_functions = generated.functions.len;
-    var selected = original;
+    var selected = emitted;
     selected.entry = request.entry;
-    output.retained = try relocation.relocateWithWork(a, selected, output.maps, generated, null);
+    output.retained = try relocation.relocateCatalogWithWork(
+        a,
+        selected,
+        selected.constants,
+        output.maps,
+        generated,
+        null,
+    );
+    output.emitted_constants = output.maps.constants;
+    output.maps.constants = output.maps.constants[0..original.constants.len];
     const retained = try bindings.admit(allocator, a, output.retained, &work);
     try bindings.validate(
         original,

@@ -696,3 +696,313 @@ fn rejectCapturePermutation(allocator: std.mem.Allocator, module: source.Module)
         source.relation.validate(a, module, changed, &steps, .{}),
     );
 }
+
+fn emittedConstantModule(b: *source.Builder, failure: bool) !source.Module {
+    const unit = try b.scalar(void);
+    const word = try b.scalar(u64);
+    const effect = try b.effect(.{
+        .identity = "emitted-constant/dispose",
+        .payload = unit,
+        .result = unit,
+        .external = false,
+    });
+    const resumption = try b.schema(.{ .internal = .{ .resumption = .{
+        .effect = effect,
+        .input = unit,
+        .answer = unit,
+        .handled = &.{effect},
+        .mode = .deep,
+        .use = .linear,
+    } } });
+    const dispose = try b.declare(&.{resumption}, unit, &.{}, &.{});
+    try b.define(dispose, try b.term(.{ .dispose = try b.reference(b.parameter(dispose, 0)) }));
+    const entry = try b.declare(
+        if (failure) &.{ word, word } else &.{},
+        if (failure) word else unit,
+        &.{},
+        &.{},
+    );
+    const value = if (failure) try b.value(.{
+        .schema = word,
+        .expression = .{ .primitive = .{
+            .opcode = .integer_div,
+            .operands = &.{
+                try b.reference(b.parameter(entry, 0)),
+                try b.reference(b.parameter(entry, 1)),
+            },
+            .failures = &.{
+                .{ .kind = .arithmetic_overflow, .value = 0 },
+                .{ .kind = .division_by_zero, .value = 0 },
+            },
+        } },
+    }) else try b.primitive(unit, .constant, &.{}, 0);
+    try b.define(entry, try b.pure(value));
+    return b.module(entry, unit);
+}
+
+fn identityRelocation(
+    allocator: std.mem.Allocator,
+    module: source.Module,
+) !source.relation.Relocation.Maps {
+    var maps: source.relation.Relocation.Maps = .{ .region_count = module.region_count };
+    inline for (.{
+        "schemas",   "constants", "effects", "handlers",  "resources",
+        "variables", "values",    "terms",   "functions",
+    }) |name| {
+        const entries = try allocator.alloc(?u64, @field(module, name).len);
+        for (entries, 0..) |*entry, index| entry.* = index;
+        @field(maps, name) = entries;
+    }
+    return maps;
+}
+
+test "source relocation and pure slices retain emitted constants and failure literals" {
+    for ([_]bool{ false, true }) |failure| {
+        var b = source.Builder.init(a);
+        defer b.deinit();
+        const module = try emittedConstantModule(&b, failure);
+        try std.testing.expectEqual(@as(usize, 0), module.constants.len);
+        var work: u64 = 1_000_000;
+        try source.admitWithWork(a, module, &work);
+        const maps = try identityRelocation(b.allocator(), module);
+        const relocated = try source.relation.Relocation.relocate(b.allocator(), module, maps);
+        try std.testing.expectEqual(@as(usize, 1), relocated.constants.len);
+        try source.relation.validate(a, module, relocated, &.{.{
+            .successor = relocated,
+            .rule = .{ .relocation = maps },
+        }}, .{});
+        var selected = try slicing.extract(a, module, .{
+            .entry = module.entry,
+            .require_pure = true,
+        });
+        defer selected.deinit();
+        try std.testing.expectEqual(@as(usize, 0), selected.maps.constants.len);
+        try std.testing.expectEqualSlices(?u64, &.{0}, selected.emitted_constants);
+        try std.testing.expectEqual(@as(usize, 1), selected.module().constants.len);
+        try std.testing.expectEqual(@as(usize, 1), selected.module().functions.len);
+        try std.testing.expectEqual(@as(usize, 0), selected.module().effects.len);
+        var compiled = try source.lower(a, selected.module());
+        defer compiled.deinit();
+        try std.testing.expectEqual(@as(usize, 1), compiled.program.constants.len);
+    }
+}
+
+test "source relocation preserves emitted constants through schema permutation" {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    _ = try emittedConstantModule(&b, false);
+    try b.schemas.append(b.allocator(), .unit);
+    const module = b.module(1, 0);
+    var work: u64 = 1_000_000;
+    try source.admitWithWork(a, module, &work);
+    const maps = try identityRelocation(b.allocator(), module);
+    const last = maps.schemas.len - 1;
+    std.mem.swap(?u64, &@constCast(maps.schemas)[0], &@constCast(maps.schemas)[last]);
+    const relocated = try source.relation.Relocation.relocate(b.allocator(), module, maps);
+    try std.testing.expectEqual(@as(u64, last), relocated.constants[0].schema);
+    try source.relation.validate(a, module, relocated, &.{.{
+        .successor = relocated,
+        .rule = .{ .relocation = maps },
+    }}, .{});
+}
+
+test "source relocation transports source constants beside emitted failure literals" {
+    for ([_]bool{ false, true }) |failure| {
+        var b = source.Builder.init(a);
+        defer b.deinit();
+        const original = try emittedConstantModule(&b, failure);
+        _ = try b.constant(u64, 11);
+        _ = try b.constant(u64, 22);
+        for (b.values.items) |*value| {
+            if (value.expression != .primitive) continue;
+            const primitive = &value.expression.primitive;
+            if (primitive.opcode == .constant) primitive.immediate = 2;
+            for (@constCast(primitive.failures)) |*item| item.value = 2;
+        }
+        const module = b.module(original.entry, original.failure);
+        const maps = try identityRelocation(b.allocator(), module);
+        std.mem.swap(?u64, &@constCast(maps.constants)[0], &@constCast(maps.constants)[1]);
+        const relocated = try source.relation.Relocation.relocate(b.allocator(), module, maps);
+        try std.testing.expectEqual(@as(usize, 3), relocated.constants.len);
+        try std.testing.expectEqual(@as(u8, 22), relocated.constants[0].bytes[0]);
+        try std.testing.expectEqual(@as(u8, 11), relocated.constants[1].bytes[0]);
+        try source.relation.validate(a, module, relocated, &.{.{
+            .successor = relocated,
+            .rule = .{ .relocation = maps },
+        }}, .{});
+        var selected = try slicing.extract(a, module, .{
+            .entry = module.entry,
+            .require_pure = true,
+        });
+        defer selected.deinit();
+        try std.testing.expectEqualSlices(?u64, &.{ null, null }, selected.maps.constants);
+        try std.testing.expectEqualSlices(?u64, &.{ null, null, 0 }, selected.emitted_constants);
+        try std.testing.expectEqual(@as(usize, 1), selected.module().constants.len);
+    }
+}
+
+test "source relocation reserves generated nested records before owning their copies" {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const unit = try b.scalar(void);
+    const parameter_schemas: [64]u64 = @splat(unit);
+    const entry = try b.declare(&parameter_schemas, unit, &.{}, &.{});
+    try b.define(entry, try b.pure(try b.constant(void, {})));
+    const module = b.module(entry, unit);
+    const maps = try identityRelocation(b.allocator(), module);
+    const generated: [16]source.ast.Function = @splat(module.functions[0]);
+    @constCast(maps.functions)[0] = generated.len;
+    const relocation = source.relation.Relocation;
+    var work: u64 = 1_000;
+    try std.testing.expectError(error.RelationLimit, relocation.relocateCatalogWithWork(
+        b.allocator(),
+        module,
+        module.constants,
+        maps,
+        .{ .functions = &generated },
+        &work,
+    ));
+    work = 0;
+    try std.testing.expectError(error.RelationLimit, relocation.relocateWithWork(
+        b.allocator(),
+        module,
+        maps,
+        .{ .functions = &generated },
+        &work,
+    ));
+    work = 1_000_000;
+    const relocated = try relocation.relocateWithWork(
+        b.allocator(),
+        module,
+        maps,
+        .{ .functions = &generated },
+        &work,
+    );
+    try std.testing.expect(1_000_000 - work >= generated.len * parameter_schemas.len);
+    try std.testing.expect(relocated.functions[0].parameters.ptr != generated[0].parameters.ptr);
+    try source.admitWithWork(a, relocated, &work);
+}
+
+fn checkEmittedRelocationAllocation(allocator: std.mem.Allocator, module: source.Module) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const maps = try identityRelocation(arena.allocator(), module);
+    _ = try source.relation.Relocation.relocate(arena.allocator(), module, maps);
+}
+
+test "source emitted catalog copies release partial owners and respect zero work" {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const module = try emittedConstantModule(&b, false);
+    try failingSliceAllocations(module);
+    try std.testing.checkAllAllocationFailures(a, checkEmittedRelocationAllocation, .{module});
+    const maps = try identityRelocation(b.allocator(), module);
+    var work: u64 = 0;
+    try std.testing.expectError(error.RelationLimit, source.relation.Relocation.relocateWithWork(
+        b.allocator(),
+        module,
+        maps,
+        .{},
+        &work,
+    ));
+}
+
+test "source emitted catalog transport rejects malformed raw constant references" {
+    for ([_]bool{ false, true }) |failure| {
+        var b = source.Builder.init(a);
+        defer b.deinit();
+        const module = try emittedConstantModule(&b, failure);
+        for (b.values.items) |*value| {
+            if (value.expression != .primitive) continue;
+            const primitive = &value.expression.primitive;
+            if (primitive.opcode == .constant) primitive.immediate = 99;
+            for (@constCast(primitive.failures)) |*item| item.value = 99;
+        }
+        const maps = try identityRelocation(b.allocator(), module);
+        const expected = if (failure) error.InvalidProgram else error.InvalidReference;
+        try std.testing.expectError(expected, source.relation.Relocation.relocate(
+            b.allocator(),
+            module,
+            maps,
+        ));
+        try std.testing.expectError(expected, slicing.extract(a, module, .{
+            .entry = module.entry,
+            .require_pure = true,
+        }));
+    }
+}
+
+test "source specialization relation covers retained emitted constant references" {
+    for ([_]bool{ false, true }) |failure| {
+        var b = source.Builder.init(a);
+        defer b.deinit();
+        const module = try emittedConstantModule(&b, failure);
+        const pe = source.specialize;
+        const request: pe.Request = .{
+            .context = .{
+                .core = @splat(0),
+                .guest = @splat(0),
+                .observation = @splat(0),
+                .base_profile = @splat(0),
+                .admission_profile = @splat(0),
+                .compiler_policy = @splat(0),
+            },
+            .function = module.entry,
+            .arguments = if (failure) &.{ .dynamic, .dynamic } else &.{},
+        };
+        var result = try pe.specialize(a, module, request);
+        defer result.deinit();
+        var work: u64 = 1_000_000;
+        try source.admitWithWork(a, result.module(), &work);
+        try pe.validate(a, module, request, &result);
+        var step: source.relation.Step = .{
+            .successor = result.module(),
+            .rule = .{ .specialization = .{
+                .request = request,
+                .entry = result.entry,
+                .functions = result.functions.items,
+                .values = result.value_proofs.items,
+                .terms = result.term_proofs.items,
+            } },
+        };
+        try source.relation.validate(a, module, result.module(), &.{step}, .{});
+        try result.builder.constants.append(result.builder.allocator(), .{
+            .schema = module.failure,
+            .bytes = &.{},
+        });
+        try result.builder.constants.append(result.builder.allocator(), .{
+            .schema = 1,
+            .bytes = &.{ 0, 0, 0, 0, 0, 0, 0, 0 },
+        });
+        step.successor = result.module();
+        try source.admitWithWork(a, step.successor, &work);
+        try pe.validate(a, module, request, &result);
+        try std.testing.expectError(error.InvalidRelation, source.relation.validate(
+            a,
+            module,
+            step.successor,
+            &.{step},
+            .{},
+        ));
+    }
+}
+
+test "source reference traversal follows compiler emitted constants into their schemas" {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const module = try emittedConstantModule(&b, false);
+    const body = module.terms[@intCast(module.functions[@intCast(module.entry)].body.?)].value;
+    const relocation = source.relation.Relocation;
+    var references: std.ArrayList(relocation.Reference) = .empty;
+    defer references.deinit(a);
+    try relocation.visitReferences(a, module, .value, body, &references);
+    try std.testing.expectEqualSlices(relocation.Reference, &.{
+        .{ .kind = .schema, .id = module.failure },
+        .{ .kind = .constant, .id = 0 },
+    }, references.items);
+    references.clearRetainingCapacity();
+    try relocation.visitReferences(a, module, .constant, 0, &references);
+    try std.testing.expectEqualSlices(relocation.Reference, &.{
+        .{ .kind = .schema, .id = module.failure },
+    }, references.items);
+}
