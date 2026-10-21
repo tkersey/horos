@@ -1,8 +1,9 @@
 # Qualification
 
 Source syntax/formatting, the tracked Zig source inventory and the
-[TigerStyle gate](../docs/tiger-style.md) are checked before
-compilation. The source job checks out the actual proposed head with its history,
+[TigerStyle gate](../docs/tiger-style.md) run alongside compilation; the final
+gate requires both to pass. The source job checks out the actual proposed head
+with its history,
 tests the pinned native auditor and audits every tracked Zig file.
 The source preflight retains its five-minute timeout. The existing installation
 and contracts jobs remain independent and each has a ten-minute timeout:
@@ -28,6 +29,10 @@ regular-file/directory tree containing compiler objects and within four GiB is
 saved. Over-budget or unsupported caches are left in place and not uploaded;
 local data is never deleted to meet the upload bound. Package qualification owns
 fresh caches; a cache hit never establishes source or execution qualification.
+Cache upload starts only in the workflow's first eight minutes and has a
+one-minute step limit, reserving time for cleanup and the final gate.
+Linux x86-64 build-host programs use a reproducible baseline target, retaining
+native execution while avoiding runner-specific CPU and OS target cache inputs.
 
 Rerun only the affected check after a change. Results apply to their actual
 candidate and selected inputs; prior release qualification is not new-head proof.
