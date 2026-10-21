@@ -40,11 +40,11 @@ fn retainedKnowledge(a: std.mem.Allocator) !void {
 }
 
 test "specialization shares owned static facts after caller storage is released" {
-    var allocations = std.testing.FailingAllocator.init(
+    try @import("../allocation_testing.zig").check(
         std.testing.allocator,
-        .{ .resize_fail_index = 0 },
+        retainedKnowledge,
+        .{},
     );
-    try std.testing.checkAllAllocationFailures(allocations.allocator(), retainedKnowledge, .{});
 }
 
 test "specialization checks raw callee facts before reusing verified arguments" {

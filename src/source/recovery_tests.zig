@@ -895,7 +895,7 @@ test "source emitted catalog copies release partial owners and respect zero work
     defer b.deinit();
     const module = try emittedConstantModule(&b, false);
     try failingSliceAllocations(module);
-    try std.testing.checkAllAllocationFailures(a, checkEmittedRelocationAllocation, .{module});
+    try @import("../allocation_testing.zig").check(a, checkEmittedRelocationAllocation, .{module});
     const maps = try identityRelocation(b.allocator(), module);
     var work: u64 = 0;
     try std.testing.expectError(error.RelationLimit, source.relation.Relocation.relocateWithWork(
