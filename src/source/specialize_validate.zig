@@ -11,11 +11,16 @@ const k = pe.values;
 const Error = pe.Error;
 const Binding = struct { before: p.Id, after: p.Id, knowledge: pe.Knowledge };
 const Env = []const Binding;
-const V = struct { knowledge: pe.Knowledge, total: bool };
+const V = struct { knowledge: pe.Knowledge, total: bool, height: usize = 0 };
 const CheckedValue = struct { id: p.Id, fact: V };
-const CheckedTerm = struct { id: p.Id, knowledge: pe.Knowledge };
+const TermFact = struct { knowledge: pe.Knowledge, height: usize };
+const CheckedTerm = struct { id: p.Id, fact: TermFact };
 const Case = @FieldType(@FieldType(ast.Term, "match_sum"), "cases");
 const CaseItem = @typeInfo(Case).pointer.child;
+
+fn nextDepth(depth: usize) Error!usize {
+    return std.math.add(usize, depth, 1) catch return error.SpecializationLimit;
+}
 
 fn require(ok: bool) Error!void {
     if (!ok) return error.InvalidSpecialization;
@@ -219,9 +224,24 @@ const Visit = struct {
     depth: usize,
     parent: usize,
 };
+const FactKey = struct {
+    proof_id: usize,
+    env_address: usize,
+    env_length: usize,
+
+    fn of(visit: Visit) FactKey {
+        return .{
+            .proof_id = visit.proof_id,
+            .env_address = @intFromPtr(visit.env.ptr),
+            .env_length = visit.env.len,
+        };
+    }
+};
 const ValueFrame = struct {
     visit: Visit,
     expected: ast.Value,
+    checked: ?V = null,
+    height: usize = 0,
     knowledge: pe.Knowledge = .dynamic,
     total: bool = true,
     cursor: usize = 0,
@@ -231,6 +251,8 @@ const ValueFrame = struct {
 const TermFrame = struct {
     visit: Visit,
     expected: ast.Term,
+    height: usize = 0,
+    cached: bool = false,
     knowledge: pe.Knowledge = .dynamic,
     cursor: usize = 0,
     first: CheckedTerm = undefined,
@@ -250,11 +272,18 @@ const Checker = struct {
     max_depth: usize,
     reads: k.ReadCache,
     arguments: []?[]const pe.Knowledge,
+    value_facts: std.AutoHashMapUnmanaged(FactKey, V) = .empty,
+    term_facts: std.AutoHashMapUnmanaged(FactKey, TermFact) = .empty,
 
     fn spend(self: *Checker, depth: usize) Error!void {
         if (self.left == 0 or depth > self.max_depth) return error.SpecializationLimit;
         try data.admission.spend(self.work, 1);
         self.left -= 1;
+    }
+    fn checkHeight(self: *Checker, visit: Visit, height: usize) Error!void {
+        const deepest = std.math.add(usize, visit.depth, height) catch
+            return error.SpecializationLimit;
+        if (deepest > self.max_depth) return error.SpecializationLimit;
     }
     fn function(self: *Checker, f: pe.FunctionProof, i: usize) Error!void {
         try data.admission.spend(self.work, 1);
@@ -333,6 +362,11 @@ const Checker = struct {
         const b = self.before.values[@intCast(visit.before)];
         try require(b.schema == self.after.values[@intCast(visit.after)].schema);
         var frame: ValueFrame = .{ .visit = visit, .expected = b };
+        if (self.value_facts.get(FactKey.of(visit))) |fact| {
+            try self.checkHeight(visit, fact.height);
+            frame.checked = fact;
+            return frame;
+        }
         switch (b.expression) {
             .literal => |v| {
                 try require(proof.children.len == 0);
@@ -359,6 +393,7 @@ const Checker = struct {
         return frame;
     }
     fn finishValue(self: *Checker, frame: *ValueFrame) Error!V {
+        if (frame.checked) |fact| return fact;
         const visit = frame.visit;
         const b = self.before.values[@intCast(visit.before)];
         const r = self.after.values[@intCast(visit.after)];
@@ -375,7 +410,13 @@ const Checker = struct {
                 self.work,
             ));
         } else try require(data.record.equal(ast.Value, frame.expected, r));
-        return .{ .knowledge = frame.knowledge, .total = frame.total };
+        const fact: V = .{
+            .knowledge = frame.knowledge,
+            .total = frame.total,
+            .height = frame.height,
+        };
+        try self.value_facts.put(self.a, FactKey.of(visit), fact);
+        return fact;
     }
     fn value(self: *Checker, root: Visit) Error!V {
         var stack: std.ArrayList(ValueFrame) = .empty;
@@ -386,7 +427,9 @@ const Checker = struct {
             const frame = &stack.items[stack.items.len - 1];
             const visit = frame.visit;
             const b = self.before.values[@intCast(visit.before)];
-            if (b.expression == .primitive and frame.cursor < frame.args.len) {
+            if (frame.checked == null and b.expression == .primitive and
+                frame.cursor < frame.args.len)
+            {
                 const index = frame.cursor;
                 const child_id = self.out.value_proofs.items[visit.proof_id].children[index];
                 try require(child_id < visit.proof_id);
@@ -396,7 +439,7 @@ const Checker = struct {
                     .before = b.expression.primitive.operands[index],
                     .after = frame.args[index],
                     .env = visit.env,
-                    .depth = visit.depth + 1,
+                    .depth = try nextDepth(visit.depth),
                     .parent = visit.proof_id,
                 };
                 try stack.append(self.a, try self.valueFrame(child_visit));
@@ -408,6 +451,7 @@ const Checker = struct {
                 const parent = &stack.items[stack.items.len - 1];
                 parent.known[parent.cursor] = result.knowledge;
                 parent.total = parent.total and result.total;
+                parent.height = @max(parent.height, try nextDepth(result.height));
                 parent.cursor += 1;
             }
         }
@@ -415,7 +459,7 @@ const Checker = struct {
     }
     fn checkedValue(
         self: *Checker,
-        frame: *const TermFrame,
+        frame: *TermFrame,
         index: usize,
         before: p.Id,
     ) Error!CheckedValue {
@@ -423,14 +467,16 @@ const Checker = struct {
         const proofs = self.out.term_proofs.items[visit.proof_id].values;
         try require(index < proofs.len and proofs[index] < self.out.value_proofs.items.len);
         const id = self.out.value_proofs.items[proofs[index]].after;
-        return .{ .id = id, .fact = try self.value(.{
+        const fact = try self.value(.{
             .proof_id = proofs[index],
             .before = before,
             .after = id,
             .env = visit.env,
-            .depth = visit.depth + 1,
+            .depth = try nextDepth(visit.depth),
             .parent = self.out.value_proofs.items.len,
-        }) };
+        });
+        frame.height = @max(frame.height, try nextDepth(fact.height));
+        return .{ .id = id, .fact = fact };
     }
     fn child(
         self: *Checker,
@@ -447,7 +493,7 @@ const Checker = struct {
             .before = before,
             .after = self.out.term_proofs.items[proofs[index]].after,
             .env = env,
-            .depth = visit.depth + 1,
+            .depth = try nextDepth(visit.depth),
             .parent = visit.proof_id,
         } };
     }
@@ -469,12 +515,15 @@ const Checker = struct {
                     .expected = undefined,
                 }),
                 .done => |knowledge| {
-                    result = .{ .id = frame.visit.after, .knowledge = knowledge };
+                    const fact: TermFact = .{ .knowledge = knowledge, .height = frame.height };
+                    if (!frame.cached)
+                        try self.term_facts.put(self.a, FactKey.of(frame.visit), fact);
+                    result = .{ .id = frame.visit.after, .fact = fact };
                     _ = stack.pop();
                 },
             }
         }
-        return result.?.knowledge;
+        return result.?.fact.knowledge;
     }
     fn finish(self: *Checker, frame: *const TermFrame) Error!Action {
         try require(data.record.equal(
@@ -492,6 +541,12 @@ const Checker = struct {
             visit.before < self.before.terms.len and visit.after < self.after.terms.len);
         const proof = self.out.term_proofs.items[visit.proof_id];
         try require(proof.before == visit.before and proof.after == visit.after);
+        if (self.term_facts.get(FactKey.of(visit))) |fact| {
+            try self.checkHeight(visit, fact.height);
+            frame.height = fact.height;
+            frame.cached = true;
+            return .{ .done = fact.knowledge };
+        }
         const b = self.before.terms[@intCast(visit.before)];
         const r = self.after.terms[@intCast(visit.after)];
         frame.expected = b;
@@ -679,6 +734,7 @@ const Checker = struct {
         return self.child(frame, frame.cursor, left.body, next_env);
     }
     fn resumeTerm(self: *Checker, frame: *TermFrame, result: CheckedTerm) Error!Action {
+        frame.height = @max(frame.height, try nextDepth(result.fact.height));
         const visit = frame.visit;
         const b = self.before.terms[@intCast(visit.before)];
         const r = self.after.terms[@intCast(visit.after)];
@@ -687,7 +743,7 @@ const Checker = struct {
             .conditional => return self.resumeConditional(frame, result),
             .yield_then => {
                 frame.expected = .{ .yield_then = result.id };
-                frame.knowledge = result.knowledge;
+                frame.knowledge = result.fact.knowledge;
             },
             .unpack_product => {
                 frame.expected = .{ .unpack_product = .{
@@ -695,7 +751,7 @@ const Checker = struct {
                     .variables = r.unpack_product.variables,
                     .body = result.id,
                 } };
-                frame.knowledge = result.knowledge;
+                frame.knowledge = result.fact.knowledge;
             },
             .match_sum => {
                 if (self.out.term_proofs.items[visit.proof_id].selected != null) {
@@ -704,7 +760,7 @@ const Checker = struct {
                         .value = r.bind.value,
                         .next = result.id,
                     } };
-                    frame.knowledge = result.knowledge;
+                    frame.knowledge = result.fact.knowledge;
                 } else {
                     frame.cases[frame.cursor] = .{
                         .variable = r.match_sum.cases[frame.cursor].variable,
@@ -729,7 +785,7 @@ const Checker = struct {
             const next_env = try extend(self.a, visit.env, self.work, .{
                 .before = b.variable,
                 .after = r.variable,
-                .knowledge = result.knowledge,
+                .knowledge = result.fact.knowledge,
             });
             return self.child(frame, 1, b.next, next_env);
         }
@@ -738,7 +794,7 @@ const Checker = struct {
             .value = frame.first.id,
             .next = result.id,
         } };
-        frame.knowledge = result.knowledge;
+        frame.knowledge = result.fact.knowledge;
         return self.finish(frame);
     }
     fn resumeConditional(self: *Checker, frame: *TermFrame, result: CheckedTerm) Error!Action {
@@ -747,7 +803,7 @@ const Checker = struct {
         const b = self.before.terms[@intCast(visit.before)].conditional;
         if (proof.selected != null) {
             try require(visit.after == result.id);
-            return .{ .done = result.knowledge };
+            return .{ .done = result.fact.knowledge };
         }
         if (frame.cursor == 0) {
             frame.first = result;
@@ -759,8 +815,9 @@ const Checker = struct {
             .when_true = frame.first.id,
             .when_false = result.id,
         } };
-        if (try k.equalWithWork(self.a, frame.first.knowledge, result.knowledge, self.work))
-            frame.knowledge = frame.first.knowledge;
+        const first = frame.first.fact.knowledge;
+        if (try k.equalWithWork(self.a, first, result.fact.knowledge, self.work))
+            frame.knowledge = first;
         return self.finish(frame);
     }
 };

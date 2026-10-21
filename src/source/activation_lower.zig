@@ -787,8 +787,8 @@ const Function = struct {
             block.environment = current.environment;
             // Staging remains eager. A repeated cell read after a write must
             // execute again, even when source expressions share an ID.
-            block.computed.clearRetainingCapacity();
-            block.products.clearRetainingCapacity();
+            block.computed.clearAndFree(self.compiler.allocator);
+            block.products.clearAndFree(self.compiler.allocator);
         }
         return self.termAfterValues(block, current);
     }

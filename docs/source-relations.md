@@ -21,6 +21,9 @@ nominal resource roles, internal state and protected recovery functions.
 Specialization uses owner-approved immutable static scopes. A private product
 change transports affected schemas, literals, constructors, projections and
 unpack bindings, while fixed interfaces and authority identities remain fixed.
+Stateful operand occurrences retain their order even when they name the same
+source expression. Interchangeable projections require an independently derived
+shared, cacheable origin.
 Unsupported transport is an error, not evidence of equivalence.
 
 The caller supplies private schemas, fixed schemas and protected function roots
@@ -62,6 +65,12 @@ derivation checking. Standalone specialization performs ordinary admission
 outside that local allowance. Inside a relation, admission and envelope analysis
 consume the relation allowance; normalization and derivation checking consume
 both allowances. Neither allowance replenishes the other.
+Enumeration folding reserves the normative scalar membership scans before
+evaluation. Completed value and term subproofs share checked facts only within
+their exact immutable environment; reuse still checks the incoming edge and
+the remaining depth allowance. Lowering retires expression-sharing maps at
+eager binding boundaries, so clearing work cannot repeatedly scan capacity
+retained from an earlier large expression.
 
 ## Executable source slices
 

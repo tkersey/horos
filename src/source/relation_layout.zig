@@ -345,7 +345,11 @@ pub fn totalValues(
     return stable;
 }
 
-const OrderFacts = struct { stable: []const bool, cores: []const u64 };
+const OrderFacts = struct {
+    stable: []const bool,
+    cacheable: []const bool,
+    cores: []const u64,
+};
 fn orderFacts(ctx: *relation.Context, facts: data.admission.SchemaFacts) Error!OrderFacts {
     const stable = try totalValues(ctx, facts, false);
     const traits = try data.traits.deriveWithWork(ctx.a, ctx.before.schemas, ctx.left);
@@ -365,7 +369,7 @@ fn orderFacts(ctx: *relation.Context, facts: data.admission.SchemaFacts) Error!O
         if (op.opcode == .field or op.opcode == .move)
             cores[i] = cores[@intCast(op.operands[0])];
     }
-    return .{ .stable = stable, .cores = cores };
+    return .{ .stable = stable, .cacheable = cacheable, .cores = cores };
 }
 fn preserveOrder(
     ctx: *relation.Context,
@@ -381,8 +385,85 @@ fn preserveOrder(
         while (cursor < operands.len and facts.stable[@intCast(operands[cursor])])
             cursor += 1;
         try require(cursor < operands.len);
-        if (facts.cores[@intCast(next)] != facts.cores[@intCast(operands[cursor])])
+        const previous = operands[cursor];
+        if (coordinate != cursor and (!facts.cacheable[@intCast(next)] or
+            !facts.cacheable[@intCast(previous)] or
+            facts.cores[@intCast(next)] != facts.cores[@intCast(previous)]))
             return error.UnsupportedRelation;
         cursor += 1;
     }
+}
+
+const OccurrenceFixture = struct {
+    module: @import("ast.zig").Module,
+    product: u64,
+    projection: u64,
+};
+
+fn occurrenceFixture(b: *@import("../source.zig").Builder) !OccurrenceFixture {
+    const unit = try b.scalar(void);
+    const boolean = try b.scalar(bool);
+    const product = try b.schema(.{ .product = &.{ boolean, boolean } });
+    const staged = try b.schema(.{ .product = &.{ unit, boolean } });
+    const owner = b.region();
+    const region = try b.schema(.{ .internal = .{ .region = owner } });
+    const cell = try b.schema(.{ .internal = .{ .cell = .{
+        .element = boolean,
+        .region = owner,
+    } } });
+    const inside = try b.declare(&.{region}, boolean, &.{}, &.{owner});
+    const variable = try b.variable(cell);
+    const target = try b.reference(variable);
+    const read = try b.primitive(boolean, .cell_get, &.{target}, 0);
+    const flipped = try b.primitive(boolean, .boolean_not, &.{read}, 0);
+    const write = try b.primitive(unit, .cell_set, &.{ target, flipped }, 0);
+    const ordered = try b.primitive(staged, .product, &.{ write, read }, 0);
+    const toggled = try b.primitive(boolean, .field, &.{ordered}, 1);
+    const pair = try b.primitive(product, .product, &.{ toggled, toggled }, 0);
+    const projection = try b.primitive(boolean, .field, &.{pair}, 0);
+    const initial = try b.primitive(cell, .cell_new, &.{
+        try b.reference(b.parameter(inside, 0)), try b.constant(bool, false),
+    }, 0);
+    try b.define(inside, try b.bind(variable, try b.pure(initial), try b.pure(projection)));
+    const main = try b.declare(&.{}, boolean, &.{}, &.{});
+    const signature = try b.schema(.{ .internal = .{ .computation = .{
+        .parameters = &.{region},
+        .result = boolean,
+        .regions = &.{owner},
+    } } });
+    try b.define(main, try b.term(.{ .with_region = .{
+        .region = owner,
+        .body = try b.lambda(inside, signature),
+    } }));
+    return .{ .module = b.module(main, unit), .product = product, .projection = projection };
+}
+
+test "private layout retains distinct occurrences of one stateful expression" {
+    const source = @import("../source.zig");
+    const allocator = std.testing.allocator;
+    var b = source.Builder.init(allocator);
+    defer b.deinit();
+    const fixture = try occurrenceFixture(&b);
+    const before = fixture.module;
+    const after = try source.own(source.ast.Module, b.allocator(), before);
+    const projection = &@constCast(after.values)[@intCast(fixture.projection)].expression.primitive;
+    projection.immediate = 1;
+    var work: u64 = 1_000_000;
+    try source.admitWithWork(allocator, before, &work);
+    try source.admitWithWork(allocator, after, &work);
+    const policy: relation.Policy = .{ .private_schemas = &.{fixture.product} };
+    var step: relation.Step = .{ .successor = after, .rule = .{ .product_layout = &.{.{
+        .schema = fixture.product,
+        .coordinates = &.{ 1, 0 },
+    }} } };
+    try std.testing.expectError(error.UnsupportedRelation, relation.validate(
+        allocator,
+        before,
+        after,
+        &.{step},
+        policy,
+    ));
+    projection.immediate = 0;
+    step.rule.product_layout = &.{.{ .schema = fixture.product, .coordinates = &.{ 0, 1 } }};
+    try relation.validate(allocator, before, after, &.{step}, policy);
 }

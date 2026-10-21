@@ -323,9 +323,9 @@ fn primitiveWithCache(
         .integer_bit_xor,
         .equal,
         .less,
-        => return binaryPrimitive(a, m, value, operands),
+        => return binaryPrimitive(a, m, value, operands, left),
         .integer_convert, .integer_bit_not, .enum_tag => {
-            return unaryPrimitive(a, m, value, operands);
+            return unaryPrimitive(a, m, value, operands, left);
         },
         .variant_tag, .variant_payload => return variantPrimitive(a, m, value, operands),
         .sequence_length, .sequence_get => {
@@ -342,15 +342,19 @@ fn binaryPrimitive(
     m: ast.Module,
     value: ast.Value,
     operands: []const Knowledge,
+    left: *u64,
 ) Error!Knowledge {
     const op = value.expression.primitive;
     const schema = value.schema;
     const shape = m.schemas[@intCast(operands[0].known.schema)];
+    try scalarValidationWork(shape, 1, left);
     const lhs = data.scalar.fromBytes(shape, operands[0].known.bytes) catch return .dynamic;
+    try scalarValidationWork(shape, 1, left);
     const right = data.scalar.fromBytes(
         shape,
         operands[1].known.bytes,
     ) catch return .dynamic;
+    try scalarValidationWork(shape, 1, left);
     const result = data.scalar.binary(op.opcode, shape, lhs, right) catch return .dynamic;
     return if (result == .value) scalar(a, m, schema, result.value) else .dynamic;
 }
@@ -359,14 +363,17 @@ fn unaryPrimitive(
     m: ast.Module,
     value: ast.Value,
     operands: []const Knowledge,
+    left: *u64,
 ) Error!Knowledge {
     const op = value.expression.primitive;
     const schema = value.schema;
     const shape = m.schemas[@intCast(operands[0].known.schema)];
+    try scalarValidationWork(shape, 1, left);
     const input = data.scalar.fromBytes(
         shape,
         operands[0].known.bytes,
     ) catch return .dynamic;
+    try scalarValidationWork(shape, if (op.opcode == .enum_tag) 1 else 2, left);
     const result = data.scalar.unary(
         op.opcode,
         shape,
@@ -374,6 +381,12 @@ fn unaryPrimitive(
         input,
     ) catch return .dynamic;
     return if (result == .value) scalar(a, m, schema, result.value) else .dynamic;
+}
+fn scalarValidationWork(shape: p.Schema, passes: u64, left: *u64) Error!void {
+    if (shape != .enumeration) return;
+    const count = std.math.mul(u64, shape.enumeration.len, passes) catch
+        return error.SpecializationLimit;
+    try spend(left, count);
 }
 fn variantPrimitive(
     a: std.mem.Allocator,
@@ -755,4 +768,131 @@ test "static read cache preserves sequence projections and residual partial valu
     )));
     try std.testing.expect(try cache.field(failing.allocator(), .dynamic, 0, &left) == .dynamic);
     try std.testing.expect(!failing.has_induced_failure);
+}
+
+fn scalarEnumModule(schemas: []const p.Schema) ast.Module {
+    var module = read_cache_module;
+    module.schemas = schemas;
+    return module;
+}
+
+const scalar_enum_facts: data.admission.SchemaFacts = .{
+    .minimum = &.{ 4, 4 },
+    .exportable = &.{ true, true },
+};
+const scalar_enum_tag: ast.Value = .{ .schema = 1, .expression = .{ .primitive = .{
+    .opcode = .enum_tag,
+    .operands = &.{0},
+} } };
+
+test "static enum scalar scans consume shared work before allocation through both paths" {
+    const a = std.testing.allocator;
+    var tags: [4096]u32 = undefined;
+    for (&tags, 0..) |*tag, index| tag.* = @intCast(index);
+    const schemas = [_]p.Schema{ .{ .enumeration = &tags }, .u32 };
+    const module = scalarEnumModule(&schemas);
+    const operands = [_]Knowledge{.{ .known = .{ .schema = 0, .bytes = &.{ 255, 15, 0, 0 } } }};
+    const cost = 1 + 2 * tags.len;
+    for ([_]bool{ false, true }) |cached| {
+        var cache: ReadCache = .{ .module = module, .facts = scalar_enum_facts };
+        defer cache.deinit(a);
+        var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+        for ([_]u64{ 1, tags.len, cost - 1 }) |budget| {
+            var left = budget;
+            try std.testing.expectError(error.SpecializationLimit, if (cached)
+                cache.primitive(failing.allocator(), scalar_enum_tag, &operands, &left)
+            else
+                primitive(
+                    failing.allocator(),
+                    module,
+                    scalar_enum_facts,
+                    scalar_enum_tag,
+                    &operands,
+                    &left,
+                ));
+            try std.testing.expect(!failing.has_induced_failure);
+        }
+        var left: u64 = 2 * cost;
+        for (0..2) |index| {
+            const actual = if (cached)
+                try cache.primitive(a, scalar_enum_tag, &operands, &left)
+            else
+                try primitive(a, module, scalar_enum_facts, scalar_enum_tag, &operands, &left);
+            defer a.free(actual.known.bytes);
+            try std.testing.expectEqual(@as(p.Id, 1), actual.known.schema);
+            try std.testing.expectEqualSlices(u8, operands[0].known.bytes, actual.known.bytes);
+            try std.testing.expectEqual(@as(u64, (1 - index) * cost), left);
+        }
+        try std.testing.expectError(error.SpecializationLimit, if (cached)
+            cache.primitive(failing.allocator(), scalar_enum_tag, &operands, &left)
+        else
+            primitive(
+                failing.allocator(),
+                module,
+                scalar_enum_facts,
+                scalar_enum_tag,
+                &operands,
+                &left,
+            ));
+        try std.testing.expect(!failing.has_induced_failure);
+    }
+}
+
+test "static enum scalar membership failure remains residual with sufficient work" {
+    const a = std.testing.allocator;
+    const schemas = [_]p.Schema{ .{ .enumeration = &.{ 0, 7, 42 } }, .u32 };
+    const module = scalarEnumModule(&schemas);
+    const operands = [_]Knowledge{.{ .known = .{ .schema = 0, .bytes = &.{ 99, 0, 0, 0 } } }};
+    var cache: ReadCache = .{ .module = module, .facts = scalar_enum_facts };
+    defer cache.deinit(a);
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    var left: u64 = 100;
+    try std.testing.expect(try primitive(
+        failing.allocator(),
+        module,
+        scalar_enum_facts,
+        scalar_enum_tag,
+        &operands,
+        &left,
+    ) == .dynamic);
+    try std.testing.expectEqual(@as(u64, 96), left);
+    try std.testing.expect(try cache.primitive(
+        failing.allocator(),
+        scalar_enum_tag,
+        &operands,
+        &left,
+    ) == .dynamic);
+    try std.testing.expectEqual(@as(u64, 92), left);
+    try std.testing.expect(!failing.has_induced_failure);
+}
+
+test "static integer and boolean scalar semantics retain constant work and faults" {
+    const a = std.testing.allocator;
+    const cases = .{
+        .{ p.Opcode.integer_add, @as(p.Id, 1), 1, &[_]u8{ 2, 3 }, &[_]u8{5} },
+        .{ p.Opcode.integer_add, @as(p.Id, 1), 1, &[_]u8{ 255, 1 }, null },
+        .{ p.Opcode.integer_div, @as(p.Id, 1), 1, &[_]u8{ 3, 0 }, null },
+        .{ p.Opcode.integer_convert, @as(p.Id, 1), 2, &[_]u8{3}, &[_]u8{ 3, 0 } },
+        .{ p.Opcode.integer_bit_not, @as(p.Id, 1), 1, &[_]u8{3}, &[_]u8{252} },
+        .{ p.Opcode.equal, @as(p.Id, 7), 7, &[_]u8{ 1, 0 }, &[_]u8{0} },
+        .{ p.Opcode.boolean_not, @as(p.Id, 7), 7, &[_]u8{1}, &[_]u8{0} },
+    };
+    inline for (cases) |case| {
+        var operands: [case[3].len]Knowledge = undefined;
+        for (&operands, 0..) |*operand, index| operand.* = .{ .known = .{
+            .schema = case[1],
+            .bytes = case[3][index .. index + 1],
+        } };
+        const op: ast.Value = .{ .schema = case[2], .expression = .{ .primitive = .{
+            .opcode = case[0],
+            .operands = &.{},
+        } } };
+        var left: u64 = operands.len;
+        const actual = try primitive(a, read_cache_module, read_cache_facts, op, &operands, &left);
+        if (@TypeOf(case[4]) != @TypeOf(null)) {
+            defer a.free(actual.known.bytes);
+            try std.testing.expectEqualSlices(u8, case[4], actual.known.bytes);
+        } else try std.testing.expect(actual == .dynamic);
+        try std.testing.expectEqual(@as(u64, 0), left);
+    }
 }

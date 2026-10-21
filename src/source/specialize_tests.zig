@@ -173,12 +173,35 @@ fn literalProof(a: std.mem.Allocator, bytes: []const u8, selected: bool) !pe.Out
 fn duplicateLiteralProof(output: *pe.Output, count: usize) !void {
     const proof = output.functions.items[0];
     const function = output.module().functions[@intCast(proof.after)];
+    const value_count = output.value_proofs.items.len;
+    const term_count = output.term_proofs.items.len;
     for (1..count) |_| {
         const after = try output.builder.declare(&.{}, function.result, &.{}, &.{});
         try output.builder.define(after, function.body.?);
         var copy = proof;
         copy.after = after;
-        try output.functions.append(output.builder.allocator(), copy);
+        const storage = output.builder.allocator();
+        const value_offset = output.value_proofs.items.len;
+        const term_offset = output.term_proofs.items.len;
+        for (0..value_count) |index| {
+            var value = output.value_proofs.items[index];
+            const children = try storage.dupe(usize, value.children);
+            for (children) |*child| child.* += value_offset;
+            value.children = children;
+            try output.value_proofs.append(storage, value);
+        }
+        for (0..term_count) |index| {
+            var term = output.term_proofs.items[index];
+            const children = try storage.dupe(usize, term.children);
+            for (children) |*child| child.* += term_offset;
+            term.children = children;
+            const values = try storage.dupe(usize, term.values);
+            for (values) |*value| value.* += value_offset;
+            term.values = values;
+            try output.term_proofs.append(storage, term);
+        }
+        copy.body = proof.body.? + term_offset;
+        try output.functions.append(storage, copy);
     }
 }
 
@@ -208,7 +231,7 @@ fn rejectLiteralProofWork(output: *const pe.Output, budget: u64) !void {
     );
 }
 
-test "shared folded literal proofs charge every content comparison" {
+test "distinct folded literal proofs charge every content comparison" {
     const bytes: [4096]u8 = @splat(7);
     var output = try literalProof(std.testing.allocator, &bytes, false);
     defer output.deinit();
@@ -221,7 +244,7 @@ test "shared folded literal proofs charge every content comparison" {
     try rejectLiteralProofWork(&output, unfolded + 8 * bytes.len - 1);
 }
 
-test "shared selected match proofs charge every payload comparison" {
+test "distinct selected match proofs charge every payload comparison" {
     const bytes: [4096]u8 = @splat(7);
     var output = try literalProof(std.testing.allocator, &bytes, true);
     defer output.deinit();
@@ -2041,4 +2064,271 @@ test "bounded source literal reader charges enum and text scans without changing
         try std.testing.expectEqualSlices(u8, original, bounded);
         try std.testing.expectEqual(@as(u64, 0), enough);
     }
+}
+
+fn sharedDerivation(a: std.mem.Allocator, value_depth: usize, term_depth: usize) !pe.Output {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const word = try b.scalar(u64);
+    const boolean = try b.scalar(bool);
+    const unit = try b.scalar(void);
+    const function = try b.declare(&.{ word, boolean }, word, &.{}, &.{});
+    const condition = try b.reference(b.parameter(function, 1));
+    var value = try b.reference(b.parameter(function, 0));
+    for (0..value_depth) |_| value = try b.primitive(word, .integer_bit_xor, &.{ value, value }, 0);
+    var body = try b.pure(value);
+    for (0..term_depth) |_| body = try b.term(.{ .conditional = .{
+        .condition = condition,
+        .when_true = body,
+        .when_false = body,
+    } });
+    try b.define(function, body);
+    var out: pe.Output = .{
+        .builder = source.Builder.init(a),
+        .original = undefined,
+        .request = .{
+            .context = context,
+            .function = function,
+            .arguments = &.{ .dynamic, .dynamic },
+            .policy = .{ .work = 1000 },
+        },
+        .entry = undefined,
+        .key = undefined,
+    };
+    errdefer out.deinit();
+    const storage = out.builder.allocator();
+    out.original = try source.own(source.ast.Module, storage, b.module(function, unit));
+    inline for (.{ "schemas", "constants", "variables", "values", "terms", "functions" }) |name|
+        try @field(out.builder, name).appendSlice(storage, @field(out.original, name));
+    out.entry = try out.builder.declare(&.{ word, boolean }, word, &.{}, &.{});
+    try sharedValueProofs(&out);
+    try sharedTermProofs(&out);
+    const root = out.term_proofs.items.len - 1;
+    try out.builder.define(out.entry, out.term_proofs.items[root].after);
+    try out.functions.append(storage, .{
+        .before = function,
+        .after = out.entry,
+        .arguments = out.request.arguments,
+        .body = root,
+    });
+    out.key = try pe.identity(a, out.original, out.request);
+    return out;
+}
+
+fn sharedValueProofs(out: *pe.Output) !void {
+    const storage = out.builder.allocator();
+    for (out.original.values, 0..) |original, index| {
+        var value = original;
+        var children: []const usize = &.{};
+        switch (value.expression) {
+            .variable => |variable| value.expression = .{
+                .variable = out.builder.parameter(out.entry, @intCast(variable)),
+            },
+            .primitive => |op| {
+                const operands = try storage.alloc(p.Id, op.operands.len);
+                const proofs = try storage.alloc(usize, op.operands.len);
+                for (op.operands, operands, proofs) |operand, *next, *proof| {
+                    next.* = out.value_proofs.items[@intCast(operand)].after;
+                    proof.* = @intCast(operand);
+                }
+                value.expression.primitive.operands = operands;
+                children = proofs;
+            },
+            else => unreachable,
+        }
+        try out.value_proofs.append(storage, .{
+            .before = @intCast(index),
+            .after = try out.builder.value(value),
+            .children = children,
+        });
+    }
+}
+
+fn sharedTermProofs(out: *pe.Output) !void {
+    const storage = out.builder.allocator();
+    for (out.original.terms, 0..) |original, index| {
+        var term = original;
+        var values: []const usize = undefined;
+        var children: []const usize = &.{};
+        switch (term) {
+            .value => |value| {
+                term = .{ .value = out.value_proofs.items[@intCast(value)].after };
+                values = try storage.dupe(usize, &.{@intCast(value)});
+            },
+            .conditional => |branch| {
+                term = .{ .conditional = .{
+                    .condition = out.value_proofs.items[@intCast(branch.condition)].after,
+                    .when_true = out.term_proofs.items[@intCast(branch.when_true)].after,
+                    .when_false = out.term_proofs.items[@intCast(branch.when_false)].after,
+                } };
+                values = try storage.dupe(usize, &.{@intCast(branch.condition)});
+                children = try storage.dupe(usize, &.{
+                    @intCast(branch.when_true), @intCast(branch.when_false),
+                });
+            },
+            else => unreachable,
+        }
+        try out.term_proofs.append(storage, .{
+            .before = @intCast(index),
+            .after = try out.builder.term(term),
+            .values = values,
+            .children = children,
+        });
+    }
+}
+
+fn validateSharedDerivation(a: std.mem.Allocator) !void {
+    var out = try sharedDerivation(a, 4, 4);
+    defer out.deinit();
+    try pe.validate(a, out.original, out.request, &out);
+}
+
+test "specialization checks shared value and term DAGs within finite allowances" {
+    const a = std.testing.allocator;
+    var out = try sharedDerivation(a, 24, 24);
+    defer out.deinit();
+    const key = out.key;
+    const value_count = out.value_proofs.items.len;
+    const term_count = out.term_proofs.items.len;
+    const expected = try source.own(source.ast.Module, out.builder.allocator(), out.module());
+    try pe.validate(a, out.original, out.request, &out);
+    try std.testing.expectEqual(key, out.key);
+    try std.testing.expectEqual(value_count, out.value_proofs.items.len);
+    try std.testing.expectEqual(term_count, out.term_proofs.items.len);
+    try std.testing.expect(@import("horos_data").record.equal(
+        source.ast.Module,
+        expected,
+        out.module(),
+    ));
+    var remaining: u64 = 1_000_000;
+    try @import("specialize_validate.zig").validateWithWork(
+        a,
+        out.original,
+        out.request,
+        &out,
+        &remaining,
+    );
+    try rejectLiteralProofWork(&out, 1_000_000 - remaining - 1);
+    try @import("../allocation_testing.zig").check(a, validateSharedDerivation, .{});
+}
+
+fn rejectSharedDerivation(out: *pe.Output) !void {
+    out.key = try pe.identity(std.testing.allocator, out.original, out.request);
+    try std.testing.expectError(
+        error.InvalidSpecialization,
+        pe.validate(std.testing.allocator, out.original, out.request, out),
+    );
+}
+
+test "specialization shared facts preserve every source and parent edge" {
+    var out = try sharedDerivation(std.testing.allocator, 2, 2);
+    defer out.deinit();
+    const values = out.value_proofs.items;
+    const terms = out.term_proofs.items;
+    const operands = @constCast(out.original.values[3].expression.primitive.operands);
+    operands[1] = 1;
+    try rejectSharedDerivation(&out);
+    operands[1] = 2;
+    const value_children = @constCast(values[3].children);
+    value_children[1] = 3;
+    try rejectSharedDerivation(&out);
+    value_children[1] = 2;
+    @constCast(out.original.terms)[2].conditional.when_false = 0;
+    out.builder.terms.items[2].conditional.when_false = 0;
+    try rejectSharedDerivation(&out);
+    @constCast(out.original.terms)[2].conditional.when_false = 1;
+    out.builder.terms.items[2].conditional.when_false = 1;
+    @constCast(terms[2].children)[1] = 2;
+    try rejectSharedDerivation(&out);
+    @constCast(terms[2].children)[1] = 1;
+    try pe.validate(std.testing.allocator, out.original, out.request, &out);
+}
+
+test "specialization shared facts retain residual root identities" {
+    const a = std.testing.allocator;
+    var out = try literalProof(a, &.{ 1, 2, 3 }, false);
+    defer out.deinit();
+    const proof = out.functions.items[0];
+    const original = out.builder.functions.items[@intCast(out.entry)];
+    const next = try out.builder.declare(&.{}, original.result, &.{}, &.{});
+    try out.builder.define(next, original.body.?);
+    var copy = proof;
+    copy.after = next;
+    try out.functions.append(out.builder.allocator(), copy);
+    try pe.validate(a, out.original, out.request, &out);
+    const body = out.builder.terms.items[@intCast(original.body.?)];
+    const alternate = try out.builder.term(body);
+    out.builder.functions.items[@intCast(next)].body = alternate;
+    try rejectSharedDerivation(&out);
+}
+
+fn sharedDepth(out: *pe.Output, values: bool) !void {
+    const storage = out.builder.allocator();
+    const original = @constCast(out.original.terms);
+    const proofs = out.term_proofs.items;
+    original[2].conditional.when_true = 0;
+    out.builder.terms.items[2] = original[2];
+    @constCast(proofs[2].children)[0] = 0;
+    out.builder.terms.items[@intCast(proofs[2].after)].conditional.when_true = proofs[0].after;
+    if (values) {
+        for (0..2) |index| {
+            original[index] = .{ .value = @intCast(index + 2) };
+            out.builder.terms.items[index] = original[index];
+            proofs[index].values = try storage.dupe(usize, &.{index + 2});
+            proofs[index].children = &.{};
+            out.builder.terms.items[@intCast(proofs[index].after)] = .{
+                .value = out.value_proofs.items[index + 2].after,
+            };
+        }
+    }
+}
+
+test "specialization cached value and term heights preserve deeper depth failures" {
+    const a = std.testing.allocator;
+    for ([_]bool{ false, true }) |values| {
+        var out = try sharedDerivation(a, if (values) 2 else 0, 2);
+        defer out.deinit();
+        try sharedDepth(&out, values);
+        out.request.policy.depth = if (values) 4 else 3;
+        out.key = try pe.identity(a, out.original, out.request);
+        try pe.validate(a, out.original, out.request, &out);
+        out.request.policy.depth -= 1;
+        out.key = try pe.identity(a, out.original, out.request);
+        try std.testing.expectError(
+            error.SpecializationLimit,
+            pe.validate(a, out.original, out.request, &out),
+        );
+    }
+}
+
+test "specialization completed facts do not conflate changed binding knowledge" {
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const word = try b.scalar(u64);
+    const x = try b.variable(word);
+    const y = try b.variable(word);
+    const first = try b.pure(try b.constant(u64, 17));
+    const second = try b.pure(try b.constant(u64, 18));
+    const read = try b.pure(try b.reference(x));
+    const changed = try b.bind(x, second, read);
+    const function = try b.declare(&.{}, word, &.{}, &.{});
+    try b.define(function, try b.bind(x, first, try b.bind(y, read, changed)));
+    var out = try pe.specialize(a, b.module(function, try b.scalar(void)), .{
+        .context = context,
+        .function = function,
+        .arguments = &.{},
+    });
+    defer out.deinit();
+    var prior: ?usize = null;
+    for (out.term_proofs.items, 0..) |proof, index| {
+        if (proof.before == read and prior == null) prior = index;
+        if (proof.before != changed) continue;
+        const shared = prior.?;
+        @constCast(proof.children)[1] = shared;
+        out.builder.terms.items[@intCast(proof.after)].bind.next =
+            out.term_proofs.items[shared].after;
+    }
+    try std.testing.expect(prior != null);
+    try rejectSharedDerivation(&out);
 }
