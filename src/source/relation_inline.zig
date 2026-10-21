@@ -111,7 +111,10 @@ test "closed pure inlining reserves reference expansion before allocation" {
             },
         };
         var clone = try Clone.init(&ctx);
-        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+        var failing = std.testing.FailingAllocator.init(
+            std.testing.allocator,
+            .{ .fail_index = 0 },
+        );
         ctx.a = failing.allocator();
         const root = module.functions[@intCast(module.entry)].body.?;
         left = 0;
