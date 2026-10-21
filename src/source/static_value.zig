@@ -437,7 +437,7 @@ fn deepStaticKnowledge(
     var left: u64 = 100_000;
     const normalized = try normalize(arena.allocator(), root, &left);
     try std.testing.expect(try equal(a, root, normalized));
-    try std.testing.expectEqual(@as(u64, 100_000 - 8193), left);
+    try std.testing.expectEqual(@as(u64, 100_000 - 16_385), left);
 }
 
 test "static knowledge traverses deep partial products and allocation failures" {
@@ -483,6 +483,11 @@ test "static knowledge traverses deep partial products and allocation failures" 
     defer arena.deinit();
     var left: u64 = 100_000;
     const normalized = try normalize(arena.allocator(), root, &left);
+    left = 16_384;
+    try std.testing.expectError(
+        error.SpecializationLimit,
+        normalize(arena.allocator(), root, &left),
+    );
     fields[0][0] = .dynamic;
     try std.testing.expect(!try equal(a, root, normalized));
 }
