@@ -553,8 +553,8 @@ fn semanticsChecks(
     semantics.dependOn(&oracle.step);
     semantics.dependOn(&interaction_traces.step);
     semantics.dependOn(portable_baseline);
-    semantics.dependOn(&oracleScopeChecks(b, horos, optimize, authoring_cases).step);
-    semantics.dependOn(&borrowReturnChecks(b, horos, optimize).step);
+    semantics.dependOn(&oracleScopeChecks(b, source_emitter, authoring_cases).step);
+    semantics.dependOn(&borrowReturnChecks(b, source_emitter).step);
     semantics.dependOn(&run_authoring_tests.step);
     const exact_json = b.addSystemCommand(&.{ "node", "--test" });
     exact_json.addFileArg2(b.path("test/v2/exact_json.test.mjs"), .{});
@@ -689,22 +689,14 @@ fn publicExamples(
 
 fn oracleScopeChecks(
     b: *std.Build,
-    horos: *std.Build.Module,
-    optimize: std.lang.Optimize,
+    source_emitter: *std.Build.Step.Compile,
     authoring_cases: *std.Build.Step.Compile,
 ) *std.Build.Step.Run {
-    const emitter = b.addExecutable(.{
-        .name = "oracle-scopes",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("test/v2/oracle_scopes.zig"),
-            .target = b.graph.host,
-            .optimize = optimize,
-            .imports = &.{.{ .name = "horos", .module = horos }},
-        }),
-    });
+    const emit = b.addRunArtifact(source_emitter);
+    emit.addArg("--oracle-scopes");
     const check = b.addSystemCommand(&.{"node"});
     check.addFileArg2(b.path("test/v2/oracle_scopes.mjs"), .{});
-    check.addFileArg2(b.addRunArtifact(emitter).captureStdOut(.{}), .{});
+    check.addFileArg2(emit.captureStdOut(.{}), .{});
     check.addFileArg2(authoring_cases.getEmittedBin(), .{});
     check.has_side_effects = true;
     return check;
@@ -712,17 +704,10 @@ fn oracleScopeChecks(
 
 fn borrowReturnChecks(
     b: *std.Build,
-    horos: *std.Build.Module,
-    optimize: std.lang.Optimize,
+    source_emitter: *std.Build.Step.Compile,
 ) *std.Build.Step.Run {
-    const tests = b.addExecutable(.{
-        .name = "borrow-returns",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("test/v2/borrow_returns.zig"),
-            .target = b.graph.host,
-            .optimize = optimize,
-            .imports = &.{.{ .name = "horos", .module = horos }},
-        }),
-    });
-    return b.addRunArtifact(tests);
+    const check = b.addRunArtifact(source_emitter);
+    check.addArg("--borrow-returns");
+    check.has_side_effects = true;
+    return check;
 }

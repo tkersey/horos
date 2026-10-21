@@ -5,7 +5,16 @@ const horos = @import("horos");
 pub fn main(init: std.process.Init) !void {
     var args = std.process.Args.Iterator.init(init.minimal.args);
     _ = args.next();
-    const example = try std.fmt.parseInt(usize, args.next() orelse return error.MissingExample, 10);
+    const selected = args.next() orelse return error.MissingExample;
+    if (std.mem.eql(u8, selected, "--borrow-returns")) {
+        if (args.next() != null) return error.InvalidArguments;
+        return @import("borrow_returns.zig").main(init);
+    }
+    if (std.mem.eql(u8, selected, "--oracle-scopes")) {
+        if (args.next() != null) return error.InvalidArguments;
+        return @import("oracle_scopes.zig").main(init);
+    }
+    const example = try std.fmt.parseInt(usize, selected, 10);
     const format = args.next() orelse return error.MissingFormat;
     const emit_source = std.mem.eql(u8, format, "json");
     const emit_analysis = std.mem.eql(u8, format, "analysis");
