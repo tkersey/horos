@@ -66,6 +66,7 @@ jobs:
           key: horos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ hashFiles('build.zig.zon') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             horos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ hashFiles('build.zig.zon') }}-
+            horos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-
       - name: Select working cache
         if: matrix.lane == 'contracts'
         run: |
