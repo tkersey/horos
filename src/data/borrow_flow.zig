@@ -55,6 +55,67 @@ const Requirements = struct {
     position: ?usize = null,
     constraints: std.ArrayList(Constraint) = .empty,
 };
+const RequirementKey = struct { start: p.Id, position: ?usize };
+const BlockIndex = struct {
+    const Range = struct { start: usize = 0, end: usize = 0 };
+    ranges: []const Range = &.{},
+    blocks: []const p.Id = &.{},
+    ordinals: []const usize = &.{},
+
+    fn init(
+        allocator: std.mem.Allocator,
+        program: activation.Program,
+        work: ?*u64,
+    ) a.Error!BlockIndex {
+        try a.spend(work, program.functions.len);
+        const ranges = try allocator.alloc(Range, program.functions.len);
+        errdefer allocator.free(ranges);
+        @memset(ranges, .{});
+        for (program.blocks) |block| {
+            try a.spend(work, 1);
+            if (block.function >= ranges.len) return error.InvalidReference;
+            ranges[@intCast(block.function)].end += 1;
+        }
+        var total: usize = 0;
+        for (ranges) |*range| {
+            try a.spend(work, 1);
+            const count = range.end;
+            range.* = .{ .start = total, .end = total };
+            total = std.math.add(usize, total, count) catch return error.RelationLimit;
+        }
+        try a.spend(work, program.blocks.len);
+        const blocks = try allocator.alloc(p.Id, program.blocks.len);
+        errdefer allocator.free(blocks);
+        try a.spend(work, program.blocks.len);
+        const ordinals = try allocator.alloc(usize, program.blocks.len);
+        errdefer allocator.free(ordinals);
+        for (program.blocks, 0..) |block, id| {
+            try a.spend(work, 1);
+            const range = &ranges[@intCast(block.function)];
+            blocks[range.end] = @intCast(id);
+            ordinals[id] = range.end - range.start;
+            range.end += 1;
+        }
+        return .{ .ranges = ranges, .blocks = blocks, .ordinals = ordinals };
+    }
+
+    fn function(self: BlockIndex, owner: p.Id) []const p.Id {
+        const range = self.ranges[@intCast(owner)];
+        return self.blocks[range.start..range.end];
+    }
+};
+const Membership = struct {
+    ordinals: []const usize,
+    catalog: []const p.Id,
+    present: []const bool,
+
+    fn contains(self: Membership, block: p.Id) bool {
+        if (block >= self.ordinals.len) return false;
+        const ordinal = self.ordinals[@intCast(block)];
+        return ordinal < self.catalog.len and self.catalog[ordinal] == block and
+            self.present[ordinal];
+    }
+};
 const Mapped = struct {
     fresh: ?Ambient = null,
     items: [2]Trace = undefined,
@@ -105,9 +166,11 @@ fn FlowFor(comptime open: bool) type {
         exportable: []const bool,
         incoming: []std.ArrayList(Incoming),
         outgoing: []std.ArrayList(p.Id),
+        block_index: BlockIndex = .{},
         paths: std.ArrayList(Path) = .empty,
         queries: std.ArrayList(Query) = .empty,
         requirements: std.ArrayList(Requirements) = .empty,
+        requirement_index: std.AutoArrayHashMapUnmanaged(RequirementKey, void) = .empty,
         changed: bool = false,
         diagnostic: ?*a.Diagnostic = null,
         import_summaries: if (open) []const @import(
@@ -210,6 +273,7 @@ fn FlowFor(comptime open: bool) type {
                 .program = program,
                 .control = control,
                 .exportable = exportable,
+                .block_index = try BlockIndex.init(allocator, program, work),
                 .incoming = try allocator.alloc(std.ArrayList(Incoming), program.blocks.len),
                 .outgoing = try allocator.alloc(std.ArrayList(p.Id), program.blocks.len),
             };
@@ -560,16 +624,23 @@ fn FlowFor(comptime open: bool) type {
         fn requirementsQueryFrom(self: *Self, start: p.Id, position: ?usize) a.Error!usize {
             try a.spend(self.work, 1);
             try self.checkStart(start, position);
-            for (
-                self.requirements.items,
-                0..,
-            ) |item, index| {
-                try a.spend(self.work, 1);
-                if (item.start == start and item.position == position) return index;
-            }
-            try self.requirements.append(self.allocator, .{ .start = start, .position = position });
+            const key: RequirementKey = .{ .start = start, .position = position };
+            if (self.requirement_index.getIndex(key)) |index| return index;
+            const index = self.requirements.items.len;
+            const count = std.math.add(usize, index, 1) catch return error.RelationLimit;
+            const growth = std.math.mul(
+                usize,
+                count,
+                @as(usize, @intFromBool(count > self.requirements.capacity)) +
+                    @intFromBool(count > self.requirement_index.capacity()),
+            ) catch return error.RelationLimit;
+            try a.spend(self.work, growth);
+            try self.requirement_index.ensureTotalCapacity(self.allocator, count);
+            try self.requirements.ensureTotalCapacity(self.allocator, count);
+            self.requirements.appendAssumeCapacity(.{ .start = start, .position = position });
+            self.requirement_index.putAssumeCapacityNoClobber(key, {});
             self.changed = true;
-            return self.requirements.items.len - 1;
+            return index;
         }
         pub fn required(self: *Self, start: p.Id) a.Error![]const Constraint {
             try a.spend(self.work, 1);
@@ -594,13 +665,11 @@ fn FlowFor(comptime open: bool) type {
             try self.settle();
             return self.queries.items[index].sources.items;
         }
-        fn reenters(self: Self, start: p.Id, live: []const bool) a.Error!bool {
+        fn reenters(self: Self, start: p.Id, live: Membership) a.Error!bool {
             try a.spend(self.work, self.incoming[@intCast(start)].items.len);
             for (self.incoming[
                 @intCast(start)
-            ].items) |incoming| if (live[
-                @intCast(incoming.block)
-            ]) return true;
+            ].items) |incoming| if (live.contains(incoming.block)) return true;
             return false;
         }
         fn futureInstruction(
@@ -609,7 +678,7 @@ fn FlowFor(comptime open: bool) type {
             position: ?usize,
             block: p.Id,
             ordinal: usize,
-            live: []const bool,
+            live: Membership,
         ) a.Error!bool {
             return position == null or block != start or ordinal >= position.? or try self.reenters(
                 start,
@@ -1312,13 +1381,15 @@ fn FlowFor(comptime open: bool) type {
                 }
             }
         }
-        const Reachable = struct { membership: []const bool, blocks: []const p.Id };
+        const Reachable = struct { membership: Membership, blocks: []const p.Id };
         fn reachable(self: Self, start: p.Id, allocator: std.mem.Allocator) a.Error!Reachable {
             try a.spend(self.work, 1);
-            try a.spend(self.work, self.program.blocks.len);
-            const visited = try allocator.alloc(bool, self.program.blocks.len);
+            const owner = self.program.blocks[@intCast(start)].function;
+            const catalog = self.block_index.function(owner);
+            try a.spend(self.work, catalog.len);
+            const visited = try allocator.alloc(bool, catalog.len);
             @memset(visited, false);
-            visited[@intCast(start)] = true;
+            visited[self.block_index.ordinals[@intCast(start)]] = true;
             var pending: std.ArrayList(p.Id) = .empty;
             defer pending.deinit(allocator);
             try pending.append(allocator, start);
@@ -1328,22 +1399,29 @@ fn FlowFor(comptime open: bool) type {
                 const from = pending.items[next];
                 for (self.outgoing[@intCast(from)].items) |target| {
                     try a.spend(self.work, 1);
-                    if (visited[@intCast(target)]) continue;
-                    visited[@intCast(target)] = true;
+                    if (self.program.blocks[@intCast(target)].function != owner)
+                        return error.InvalidReference;
+                    const ordinal = self.block_index.ordinals[@intCast(target)];
+                    if (visited[ordinal]) continue;
+                    visited[ordinal] = true;
                     try pending.append(allocator, target);
                 }
             }
             try a.spend(self.work, pending.items.len);
             const blocks = try allocator.alloc(p.Id, pending.items.len);
             var count: usize = 0;
-            for (visited, 0..) |present, id| {
+            for (visited, catalog) |present, id| {
                 try a.spend(self.work, 1);
                 if (present) {
                     blocks[count] = id;
                     count += 1;
                 }
             }
-            return .{ .membership = visited, .blocks = blocks };
+            return .{ .membership = .{
+                .ordinals = self.block_index.ordinals,
+                .catalog = catalog,
+                .present = visited,
+            }, .blocks = blocks };
         }
         fn seedQuery(
             self: *Self,
@@ -1358,7 +1436,7 @@ fn FlowFor(comptime open: bool) type {
             const query_writes = self.queries.items[query_index].writes;
             const live = reach.membership;
             if (query_target) |target| {
-                if (live[@intCast(target.block)]) try self.pushTrace(pending, target);
+                if (live.contains(target.block)) try self.pushTrace(pending, target);
             } else if (query_writes) |schema| {
                 for (reach.blocks) |id| {
                     try a.spend(self.work, 1);
@@ -1459,7 +1537,7 @@ fn FlowFor(comptime open: bool) type {
             trace: Trace,
             query_index: usize,
             query_start: p.Id,
-            live: []const bool,
+            live: Membership,
             allocator: std.mem.Allocator,
         ) a.Error!void {
             try a.spend(self.work, 1);
@@ -1522,12 +1600,12 @@ fn FlowFor(comptime open: bool) type {
             self: *Self,
             pending: *std.ArrayList(Trace),
             trace: Trace,
-            live: []const bool,
+            live: Membership,
         ) a.Error!void {
             try a.spend(self.work, 1);
             for (self.incoming[@intCast(trace.block)].items) |incoming| {
                 try a.spend(self.work, 1);
-                if (!live[@intCast(incoming.block)]) continue;
+                if (!live.contains(incoming.block)) continue;
                 const edge = incoming.edge.?;
                 var changed = false;
                 for (edge.assignments) |assignment| {
@@ -2465,12 +2543,10 @@ fn sparseReachabilityAttempt(allocator: std.mem.Allocator) !void {
         .schemas = &.{.unit},
         .constants = &.{},
         .effects = &.{},
-        .functions = &.{.{
-            .entry = 0,
-            .inputs = &.{},
-            .layout = .{ .slots = &.{0} },
-            .result = 0,
-        }},
+        .functions = &.{
+            .{ .entry = 0, .inputs = &.{}, .layout = .{ .slots = &.{0} }, .result = 0 },
+            .{ .entry = 1, .inputs = &.{}, .layout = .{ .slots = &.{0} }, .result = 0 },
+        },
         .blocks = &.{
             .{
                 .function = 0,
@@ -2481,9 +2557,9 @@ fn sparseReachabilityAttempt(allocator: std.mem.Allocator) !void {
                     .when_false = .{ .block = 2 },
                 } },
             },
-            .{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 0 } },
+            .{ .function = 1, .instructions = &.{}, .terminator = .{ .return_value = 0 } },
             .{ .function = 0, .instructions = &.{}, .terminator = .{ .jump = .{ .block = 4 } } },
-            .{ .function = 0, .instructions = &.{}, .terminator = .{ .jump = .{ .block = 1 } } },
+            .{ .function = 1, .instructions = &.{}, .terminator = .{ .jump = .{ .block = 1 } } },
             .{ .function = 0, .instructions = &.{}, .terminator = .{ .jump = .{ .block = 0 } } },
         },
     };
@@ -2494,14 +2570,20 @@ fn sparseReachabilityAttempt(allocator: std.mem.Allocator) !void {
     ) |start, expected| {
         const reach = try flow.reachable(start, memory);
         try std.testing.expectEqualSlices(p.Id, expected, reach.blocks);
-        for (
-            reach.membership,
-            0..,
-        ) |member, id| try std.testing.expectEqual(
+        for (0..program.blocks.len) |id| try std.testing.expectEqual(
             std.mem.indexOfScalar(p.Id, expected, id) != null,
-            member,
+            reach.membership.contains(@intCast(id)),
         );
     }
+    const first = try flow.reachable(0, memory);
+    var remaining: u64 = 8;
+    flow.work = &remaining;
+    const second = try flow.reachable(1, memory);
+    try std.testing.expectEqualSlices(p.Id, &.{ 0, 2, 4 }, first.blocks);
+    try std.testing.expect(first.membership.contains(2));
+    try std.testing.expect(!first.membership.contains(1));
+    try std.testing.expectEqualSlices(p.Id, &.{1}, second.blocks);
+    try std.testing.expectEqual(@as(usize, 2), second.membership.present.len);
 }
 
 test "borrow reachability lists exact members in block order with cycles and allocation failures" {
@@ -2596,16 +2678,78 @@ test "bounded borrow return inputs charge cached owners when values are empty" {
         .owner = .{ .ambient = .region },
         .bound = .capture,
     }};
-    var requirements = [_]Requirements{.{
-        .start = 0,
-        .constraints = .fromOwnedSlice(&constraints),
-    }};
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 3 });
-    var flow = cachedReturnFlow(failing.allocator(), &queries);
-    flow.requirements = .fromOwnedSlice(&requirements);
+    var flow = cachedReturnFlow(std.testing.allocator, &queries);
+    defer flow.requirements.deinit(std.testing.allocator);
+    defer flow.requirement_index.deinit(std.testing.allocator);
+    const row = try flow.requirementsQuery(0);
+    flow.requirements.items[row].constraints = .fromOwnedSlice(&constraints);
+    flow.allocator = failing.allocator();
     var work: u64 = 21;
     flow.work = &work;
     try std.testing.expectError(error.RelationLimit, flow.returnRequirements(0, 0));
     try std.testing.expect(!failing.has_induced_failure);
     try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+}
+
+fn requirementIndexAttempt(allocator: std.mem.Allocator) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var flow = cachedReturnFlow(arena.allocator(), &.{});
+    const entry = try flow.requirementsQueryFrom(0, null);
+    const position = try flow.requirementsQueryFrom(0, 0);
+    try std.testing.expect(entry != position);
+    flow.changed = false;
+    try std.testing.expectEqual(entry, try flow.requirementsQueryFrom(0, null));
+    try std.testing.expectEqual(position, try flow.requirementsQueryFrom(0, 0));
+    try std.testing.expect(!flow.changed);
+    try std.testing.expectEqual(@as(usize, 2), flow.requirements.items.len);
+    try std.testing.expectError(error.InvalidReference, flow.requirementsQueryFrom(0, 1));
+    var declaration = flow.program.functions[0];
+    declaration.entry = @import("relocation.zig").missing;
+    var program = flow.program;
+    program.functions = &.{declaration};
+    program.blocks = &.{};
+    var imported: ComponentFlow = .{
+        .allocator = arena.allocator(),
+        .program = program,
+        .control = undefined,
+        .exportable = flow.exportable,
+        .incoming = &.{},
+        .outgoing = &.{},
+        .import_summaries = &.{.{ .function = 0 }},
+    };
+    const foreign = imported.program.blocks.len;
+    const selected = try imported.requirementsQueryFrom(foreign, null);
+    try std.testing.expectEqual(selected, try imported.requirementsQueryFrom(foreign, null));
+    try std.testing.expectError(error.InvalidReference, imported.requirementsQueryFrom(foreign, 0));
+}
+
+test "borrow requirement index retains exact entry position and import keys on allocation failure" {
+    try @import("allocation_testing.zig").check(
+        std.testing.allocator,
+        requirementIndexAttempt,
+        .{},
+    );
+}
+
+test "borrow requirement index reserves growth and retries an unpublished row" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var flow = cachedReturnFlow(failing.allocator(), &.{});
+    defer flow.requirement_index.deinit(std.testing.allocator);
+    defer flow.requirements.deinit(std.testing.allocator);
+    var remaining: u64 = 3;
+    flow.work = &remaining;
+    try std.testing.expectError(error.RelationLimit, flow.requirementsQueryFrom(0, null));
+    try std.testing.expect(!failing.has_induced_failure);
+    flow.work = null;
+    try std.testing.expectError(error.OutOfMemory, flow.requirementsQueryFrom(0, null));
+    try std.testing.expectEqual(@as(usize, 0), flow.requirement_index.count());
+    try std.testing.expectEqual(@as(usize, 0), flow.requirements.items.len);
+    failing.fail_index = std.math.maxInt(usize);
+    const row = try flow.requirementsQueryFrom(0, null);
+    failing.has_induced_failure = false;
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectEqual(row, try flow.requirementsQueryFrom(0, null));
+    try std.testing.expect(!failing.has_induced_failure);
 }
