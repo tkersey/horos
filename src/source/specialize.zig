@@ -182,10 +182,11 @@ pub fn specialize(a: std.mem.Allocator, original: ast.Module, requested: Request
     ) |k, param| try values.validate(storage, m, schema_facts, m.variables[@intCast(param)], k);
     var engine: Engine = .{
         .out = &out,
-        .facts = schema_facts,
         .captures = checked.functions,
         .left = requested.policy.work,
+        .reads = .{ .module = m, .facts = schema_facts },
     };
+    defer engine.reads.deinit(storage);
     const root = try engine.request(
         requested.function,
         requested.arguments,
@@ -199,9 +200,9 @@ pub fn specialize(a: std.mem.Allocator, original: ast.Module, requested: Request
 }
 const Engine = struct {
     out: *Output,
-    facts: data.admission.SchemaFacts,
     captures: []const @import("check.zig").Set,
     left: u64,
+    reads: values.ReadCache,
     fn a(self: *Engine) std.mem.Allocator {
         return self.out.builder.allocator();
     }
@@ -363,10 +364,8 @@ const Engine = struct {
         if (frame.expression.expression == .primitive) {
             const before = frame.expression;
             frame.expression.expression.primitive.operands = frame.args;
-            frame.knowledge = try values.normalize(self.a(), try values.primitive(
+            frame.knowledge = try values.normalize(self.a(), try self.reads.primitive(
                 self.a(),
-                self.out.original,
-                self.facts,
                 before,
                 frame.known,
                 &self.left,
@@ -614,10 +613,8 @@ const Engine = struct {
                 env = try extend(self.a(), env, .{
                     .before = before,
                     .after = after.*,
-                    .knowledge = try values.field(
+                    .knowledge = try self.reads.field(
                         self.a(),
-                        self.out.original,
-                        self.facts,
                         x.knowledge,
                         i,
                         &self.left,

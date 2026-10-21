@@ -26,6 +26,66 @@ pub const Knowledge = union(enum) {
     known: p.Literal,
     product: struct { schema: p.Id, fields: []const Knowledge },
 };
+pub const ReadCache = struct {
+    const Key = struct { schema: p.Id, pointer: usize, length: usize, start: usize };
+    module: ast.Module,
+    facts: data.admission.SchemaFacts,
+    entries: std.AutoArrayHashMapUnmanaged(Key, usize) = .empty,
+
+    pub fn deinit(self: *ReadCache, a: std.mem.Allocator) void {
+        self.entries.deinit(a);
+        self.* = undefined;
+    }
+    fn read(
+        self: *ReadCache,
+        a: std.mem.Allocator,
+        schema: p.Id,
+        reader: *data.wire.Reader,
+        left: *u64,
+    ) Error![]const u8 {
+        try spend(left, 1);
+        const key: Key = .{
+            .schema = schema,
+            .pointer = @intFromPtr(reader.input.ptr),
+            .length = reader.input.len,
+            .start = reader.position,
+        };
+        if (self.entries.get(key)) |end| {
+            reader.position = end;
+            return reader.input[key.start..end];
+        }
+        try spend(left, 1);
+        var measured = reader.*;
+        const bytes = try readValue(a, self.module.schemas, self.facts, schema, &measured, left);
+        const count = std.math.add(usize, self.entries.count(), 1) catch
+            return error.SpecializationLimit;
+        if (count > self.entries.capacity()) {
+            try spend(left, count);
+            try self.entries.ensureTotalCapacity(a, count);
+        }
+        self.entries.putAssumeCapacityNoClobber(key, measured.position);
+        reader.* = measured;
+        return bytes;
+    }
+    pub fn field(
+        self: *ReadCache,
+        a: std.mem.Allocator,
+        value: Knowledge,
+        index: p.Id,
+        left: *u64,
+    ) Error!Knowledge {
+        return fieldWithCache(a, self.module, self.facts, value, index, left, self);
+    }
+    pub fn primitive(
+        self: *ReadCache,
+        a: std.mem.Allocator,
+        value: ast.Value,
+        operands: []const Knowledge,
+        left: *u64,
+    ) Error!Knowledge {
+        return primitiveWithCache(a, self.module, self.facts, value, operands, left, self);
+    }
+};
 pub fn own(a: std.mem.Allocator, value: Knowledge) Error!Knowledge {
     return source.own(Knowledge, a, value);
 }
@@ -136,6 +196,17 @@ pub fn field(
     index: p.Id,
     left: *u64,
 ) Error!Knowledge {
+    return fieldWithCache(a, m, facts, value, index, left, null);
+}
+fn fieldWithCache(
+    a: std.mem.Allocator,
+    m: ast.Module,
+    facts: data.admission.SchemaFacts,
+    value: Knowledge,
+    index: p.Id,
+    left: *u64,
+    cache: ?*ReadCache,
+) Error!Knowledge {
     return switch (value) {
         .dynamic => .dynamic,
         .product => |v| if (index < v.fields.len) v.fields[@intCast(index)] else .dynamic,
@@ -145,7 +216,10 @@ pub fn field(
             var reader: data.wire.Reader = .{ .input = v.bytes };
             for (shape.product, 0..) |schema, i| {
                 try spend(left, 1);
-                const bytes = try readValue(a, m.schemas, facts, schema, &reader, left);
+                const bytes = if (cache) |memo|
+                    try memo.read(a, schema, &reader, left)
+                else
+                    try readValue(a, m.schemas, facts, schema, &reader, left);
                 if (i == index) break :blk .{ .known = .{ .schema = schema, .bytes = bytes } };
             }
             unreachable;
@@ -195,6 +269,17 @@ pub fn primitive(
     operands: []const Knowledge,
     left: *u64,
 ) Error!Knowledge {
+    return primitiveWithCache(a, m, facts, value, operands, left, null);
+}
+fn primitiveWithCache(
+    a: std.mem.Allocator,
+    m: ast.Module,
+    facts: data.admission.SchemaFacts,
+    value: ast.Value,
+    operands: []const Knowledge,
+    left: *u64,
+    cache: ?*ReadCache,
+) Error!Knowledge {
     const op = value.expression.primitive;
     const schema = value.schema;
     // Knowledge reifies into ordinary source literals. Keep its entire
@@ -206,7 +291,8 @@ pub fn primitive(
         if (full == .known) return full;
         return .{ .product = .{ .schema = schema, .fields = try a.dupe(Knowledge, operands) } };
     }
-    if (op.opcode == .field) return field(a, m, facts, operands[0], op.immediate, left);
+    if (op.opcode == .field)
+        return fieldWithCache(a, m, facts, operands[0], op.immediate, left, cache);
     if (op.opcode == .move) return operands[0];
     try spend(left, operands.len);
     for (operands) |v| if (v != .known) return .dynamic;
@@ -241,7 +327,7 @@ pub fn primitive(
         },
         .variant_tag, .variant_payload => return variantPrimitive(a, m, value, operands),
         .sequence_length, .sequence_get => {
-            return sequencePrimitive(a, m, facts, value, operands, left);
+            return sequencePrimitive(a, m, facts, value, operands, left, cache);
         },
         .select => return if (operands[0].known.bytes[0] == 1) operands[1] else operands[2],
         // Unknown primitive rules, allocation with observable identity, and
@@ -308,6 +394,7 @@ fn sequencePrimitive(
     value: ast.Value,
     operands: []const Knowledge,
     left: *u64,
+    cache: ?*ReadCache,
 ) Error!Knowledge {
     const op = value.expression.primitive;
     const schema = value.schema;
@@ -335,7 +422,10 @@ fn sequencePrimitive(
     var i: u64 = 0;
     while (i <= index) : (i += 1) {
         try spend(left, 1);
-        const bytes = try readValue(a, m.schemas, facts, element, &reader, left);
+        const bytes = if (cache) |memo|
+            try memo.read(a, element, &reader, left)
+        else
+            try readValue(a, m.schemas, facts, element, &reader, left);
         if (i == index) return encoded(
             a,
             schema,
@@ -490,4 +580,177 @@ test "static knowledge traverses deep partial products and allocation failures" 
     );
     fields[0][0] = .dynamic;
     try std.testing.expect(!try equal(a, root, normalized));
+}
+
+const read_cache_module: ast.Module = .{
+    .entry = 0,
+    .failure = 0,
+    .schemas = &.{
+        .unit,
+        .u8,
+        .u16,
+        .{ .seq = 1 },
+        .{ .product = &.{ 1, 0, 3 } },
+        .{ .product = &.{} },
+        .{ .sum = &.{ 0, 1 } },
+        .boolean,
+        .u64,
+        .{ .product = &.{ 4, 5, 1 } },
+    },
+    .constants = &.{},
+    .effects = &.{},
+    .handlers = &.{},
+    .region_count = 0,
+    .variables = &.{},
+    .values = &.{},
+    .terms = &.{},
+    .functions = &.{},
+};
+const read_cache_facts: data.admission.SchemaFacts = .{
+    .minimum = &.{ 0, 1, 2, 1, 2, 0, 1, 1, 8, 3 },
+    .exportable = &.{ true, true, true, true, true, true, true, true, true, true },
+};
+
+fn readCacheDifferential(a: std.mem.Allocator) !void {
+    var cache: ReadCache = .{ .module = read_cache_module, .facts = read_cache_facts };
+    defer cache.deinit(a);
+    const cases = [_]Knowledge{
+        .{ .known = .{ .schema = 9, .bytes = &.{ 7, 2, 8, 9, 10 } } },
+        .{ .known = .{ .schema = 5, .bytes = &.{} } },
+        .dynamic,
+        .{ .product = .{ .schema = 9, .fields = &.{
+            .{ .known = .{ .schema = 4, .bytes = &.{ 7, 2, 8, 9 } } },
+            .{ .known = .{ .schema = 5, .bytes = &.{} } },
+            .dynamic,
+        } } },
+    };
+    var left: u64 = 100_000;
+    for (0..2) |_| for (cases) |value| for (0..4) |index| {
+        const expected = try field(a, cache.module, cache.facts, value, index, &left);
+        const actual = try cache.field(a, value, index, &left);
+        try std.testing.expect(try equal(a, expected, actual));
+        if (actual == .known) try std.testing.expect(
+            actual.known.bytes.ptr == expected.known.bytes.ptr,
+        );
+    };
+    const bytes: [32]u8 = @splat(1);
+    for (0..bytes.len) |start| {
+        var reader: data.wire.Reader = .{ .input = &bytes, .position = start };
+        const actual = try cache.read(a, 1, &reader, &left);
+        try std.testing.expectEqualSlices(u8, bytes[start .. start + 1], actual);
+    }
+}
+
+test "static read cache matches uncached fields and releases partial growth" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, readCacheDifferential, .{});
+}
+
+test "static read cache distinguishes exact keys and fresh validation ownership" {
+    const a = std.testing.allocator;
+    var cache: ReadCache = .{ .module = read_cache_module, .facts = read_cache_facts };
+    defer cache.deinit(a);
+    var first = [_]u8{ 1, 2, 3, 4 };
+    var second = first;
+    var left: u64 = 1000;
+    const readers = [_]data.wire.Reader{
+        .{ .input = &first },                .{ .input = &first },  .{ .input = first[0..2] },
+        .{ .input = &first, .position = 1 }, .{ .input = &second }, .{ .input = &first },
+    };
+    for (readers, [_]p.Id{ 1, 2, 1, 1, 1, 0 }, 0..) |input, schema, index| {
+        var reader = input;
+        _ = try cache.read(a, schema, &reader, &left);
+        try std.testing.expectEqual(index + 1, cache.entries.count());
+    }
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    for (readers, [_]p.Id{ 1, 2, 1, 1, 1, 0 }) |input, schema| {
+        var reader = input;
+        left = 1;
+        const result = try cache.read(failing.allocator(), schema, &reader, &left);
+        try std.testing.expect(result.ptr == input.input[input.position..].ptr);
+        try std.testing.expectEqual(input.position + result.len, reader.position);
+        try std.testing.expectEqual(@as(u64, 0), left);
+    }
+    try std.testing.expect(!failing.has_induced_failure);
+    var checked: ReadCache = .{ .module = cache.module, .facts = cache.facts };
+    defer checked.deinit(a);
+    var reader = readers[0];
+    left = 1;
+    try std.testing.expectError(error.SpecializationLimit, checked.read(a, 1, &reader, &left));
+    try std.testing.expectEqual(@as(usize, 0), checked.entries.count());
+}
+
+test "static read cache does not publish failed decoding growth or allocation" {
+    const a = std.testing.allocator;
+    var cache: ReadCache = .{ .module = read_cache_module, .facts = read_cache_facts };
+    defer cache.deinit(a);
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 1 });
+    var reader: data.wire.Reader = .{ .input = &.{} };
+    var left: u64 = 4;
+    try std.testing.expectError(
+        error.SpecializationLimit,
+        cache.read(failing.allocator(), 0, &reader, &left),
+    );
+    try std.testing.expect(!failing.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 0), cache.entries.count());
+    failing.fail_index = failing.alloc_index + 1;
+    left = 100;
+    try std.testing.expectError(
+        error.OutOfMemory,
+        cache.read(failing.allocator(), 0, &reader, &left),
+    );
+    try std.testing.expectEqual(@as(usize, 0), cache.entries.count());
+    try std.testing.expectEqual(@as(usize, 0), reader.position);
+    failing.fail_index = std.math.maxInt(usize);
+    _ = try cache.read(failing.allocator(), 0, &reader, &left);
+    try std.testing.expectEqual(@as(usize, 1), cache.entries.count());
+    const invalid: data.wire.Reader = .{ .input = &.{2} };
+    for (0..2) |_| {
+        var actual = invalid;
+        left = 100;
+        try std.testing.expectError(error.InvalidValue, cache.read(a, 7, &actual, &left));
+        try std.testing.expectEqual(@as(usize, 1), cache.entries.count());
+        try std.testing.expectEqual(@as(usize, 0), actual.position);
+        actual = invalid;
+        try std.testing.expectError(
+            error.InvalidValue,
+            readValue(a, cache.module.schemas, cache.facts, 7, &actual, &left),
+        );
+    }
+}
+
+test "static read cache preserves sequence projections and residual partial values" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cache: ReadCache = .{ .module = read_cache_module, .facts = read_cache_facts };
+    defer cache.deinit(a);
+    const op: ast.Value = .{ .schema = 6, .expression = .{ .primitive = .{
+        .opcode = .sequence_get,
+        .operands = &.{ 0, 1 },
+    } } };
+    const operands = [_]Knowledge{
+        .{ .known = .{ .schema = 3, .bytes = &.{ 2, 8, 9 } } },
+        .{ .known = .{ .schema = 8, .bytes = &.{ 1, 0, 0, 0, 0, 0, 0, 0 } } },
+    };
+    var left: u64 = 1000;
+    const expected = try primitive(a, cache.module, cache.facts, op, &operands, &left);
+    for (0..2) |_| try std.testing.expect(try equal(
+        a,
+        expected,
+        try cache.primitive(a, op, &operands, &left),
+    ));
+    try std.testing.expectEqual(@as(usize, 2), cache.entries.count());
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    left = 0;
+    const partial: Knowledge = .{ .product = .{ .schema = 4, .fields = &.{
+        .dynamic, .{ .known = .{ .schema = 0, .bytes = &.{} } }, .dynamic,
+    } } };
+    try std.testing.expect(try equal(a, partial.product.fields[1], try cache.field(
+        failing.allocator(),
+        partial,
+        1,
+        &left,
+    )));
+    try std.testing.expect(try cache.field(failing.allocator(), .dynamic, 0, &left) == .dynamic);
+    try std.testing.expect(!failing.has_induced_failure);
 }

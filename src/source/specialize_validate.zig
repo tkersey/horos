@@ -20,7 +20,7 @@ const CaseItem = @typeInfo(Case).pointer.child;
 fn require(ok: bool) Error!void {
     if (!ok) return error.InvalidSpecialization;
 }
-fn extend(a: std.mem.Allocator, env: Env, left: *u64, item: Binding) Error!Env {
+fn extend(a: std.mem.Allocator, env: Env, left: ?*u64, item: Binding) Error!Env {
     // An environment is a capture-avoiding renaming of the current source
     // scope. Shadowing retires the old source binding; every other binding
     // must keep a distinct target variable. All binder forms extend here.
@@ -42,7 +42,7 @@ fn extend(a: std.mem.Allocator, env: Env, left: *u64, item: Binding) Error!Env {
     result[retained] = item;
     return result;
 }
-fn lookup(env: Env, id: p.Id, left: *u64) Error!Binding {
+fn lookup(env: Env, id: p.Id, left: ?*u64) Error!Binding {
     var i = env.len;
     while (i != 0) {
         try data.admission.spend(left, 1);
@@ -78,12 +78,11 @@ fn validateBody(
     out: *const pe.Output,
     work: ?*u64,
 ) Error!void {
-    var left = request.policy.work;
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const storage = arena.allocator();
     const residual = out.module();
-    try validateEnvelope(storage, original, request, out, &left, work);
+    try validateEnvelope(storage, original, request, out, work);
     // Source admission precedes primitive evaluation; malformed operand shapes
     // cannot reach constant rules through a forged derivation.
     try admit(a, original, work);
@@ -108,11 +107,14 @@ fn validateBody(
         .after = residual,
         .out = out,
         .facts = schema_facts,
-        .left = left,
+        .left = request.policy.work,
+        .work = work,
         .captures = original_facts.functions,
         .max_depth = request.policy.depth,
+        .reads = .{ .module = original, .facts = schema_facts },
     };
-    try checker.validate(work);
+    defer checker.reads.deinit(storage);
+    for (out.functions.items, 0..) |f, i| try checker.function(f, i);
     try admit(a, residual, work);
 }
 fn admit(a: std.mem.Allocator, module: ast.Module, work: ?*u64) Error!void {
@@ -125,7 +127,6 @@ fn validateEnvelope(
     original: ast.Module,
     request: pe.Request,
     out: *const pe.Output,
-    local: *u64,
     work: ?*u64,
 ) Error!void {
     const residual = out.module();
@@ -158,29 +159,49 @@ fn validateEnvelope(
             out.entry == out.functions.items[0].after,
     );
     try require(request.arguments.len == out.functions.items[0].arguments.len);
-    try validateCanonicalArguments(storage, request, out, local, work);
+    try validateCanonicalArguments(storage, request, out, work);
 }
 fn validateCanonicalArguments(
     storage: std.mem.Allocator,
     request: pe.Request,
     out: *const pe.Output,
-    local: *u64,
     work: ?*u64,
 ) Error!void {
-    const available = if (work) |remaining| @min(local.*, remaining.*) else local.*;
-    var left = available;
-    defer local.* -= available - left;
-    defer if (work) |remaining| {
-        remaining.* -= available - left;
-    };
+    var left = request.policy.work;
     for (request.arguments, out.functions.items[0].arguments) |raw, canonical| try require(
         try k.equalWithWork(
             storage,
-            try k.normalize(storage, raw, &left),
+            try normalize(storage, raw, &left, work),
             canonical,
-            &left,
+            work,
         ),
     );
+}
+const EvaluationWork = struct {
+    local: *u64,
+    global: ?*u64,
+    available: u64,
+    left: u64,
+
+    fn init(local: *u64, global: ?*u64) EvaluationWork {
+        const available = if (global) |remaining| @min(local.*, remaining.*) else local.*;
+        return .{ .local = local, .global = global, .available = available, .left = available };
+    }
+    fn finish(self: *EvaluationWork) void {
+        const spent = self.available - self.left;
+        self.local.* -= spent;
+        if (self.global) |remaining| remaining.* -= spent;
+    }
+};
+fn normalize(
+    a: std.mem.Allocator,
+    value: pe.Knowledge,
+    local: *u64,
+    global: ?*u64,
+) Error!pe.Knowledge {
+    var evaluation = EvaluationWork.init(local, global);
+    defer evaluation.finish();
+    return k.normalize(a, value, &evaluation.left);
 }
 const Visit = struct {
     proof_id: usize,
@@ -217,25 +238,17 @@ const Checker = struct {
     captures: []const @import("check.zig").Set,
     facts: data.admission.SchemaFacts,
     left: u64,
+    work: ?*u64,
     max_depth: usize,
+    reads: k.ReadCache,
 
-    fn validate(self: *Checker, work: ?*u64) Error!void {
-        const local = self.left;
-        const available = if (work) |remaining| @min(local, remaining.*) else local;
-        self.left = available;
-        defer {
-            const spent = available - self.left;
-            self.left = local - spent;
-            if (work) |remaining| remaining.* -= spent;
-        }
-        for (self.out.functions.items, 0..) |f, i| try self.function(f, i);
-    }
     fn spend(self: *Checker, depth: usize) Error!void {
         if (self.left == 0 or depth > self.max_depth) return error.SpecializationLimit;
+        try data.admission.spend(self.work, 1);
         self.left -= 1;
     }
     fn function(self: *Checker, f: pe.FunctionProof, i: usize) Error!void {
-        try data.admission.spend(&self.left, 1);
+        try data.admission.spend(self.work, 1);
         try require(f.before < self.before.functions.len and
             f.after == self.before.functions.len + i);
         try require(self.captures[@intCast(f.before)].items.len == 0);
@@ -254,7 +267,7 @@ const Checker = struct {
                 self.facts,
                 self.before.variables[@intCast(v)],
                 fact,
-                &self.left,
+                self.work,
             );
             var target = v;
             if (fact != .known) {
@@ -263,7 +276,7 @@ const Checker = struct {
                 cursor += 1;
                 try self.variable(v, target);
             }
-            env = try extend(self.a, env, &self.left, .{
+            env = try extend(self.a, env, self.work, .{
                 .before = v,
                 .after = target,
                 .knowledge = fact,
@@ -278,6 +291,24 @@ const Checker = struct {
             .depth = 0,
             .parent = self.out.term_proofs.items.len,
         });
+    }
+    fn primitive(
+        self: *Checker,
+        expression: ast.Value,
+        args: []const pe.Knowledge,
+    ) Error!pe.Knowledge {
+        var evaluation = EvaluationWork.init(&self.left, self.work);
+        defer evaluation.finish();
+        return k.normalize(
+            self.a,
+            try self.reads.primitive(self.a, expression, args, &evaluation.left),
+            &evaluation.left,
+        );
+    }
+    fn field(self: *Checker, knowledge: pe.Knowledge, index: usize) Error!pe.Knowledge {
+        var evaluation = EvaluationWork.init(&self.left, self.work);
+        defer evaluation.finish();
+        return self.reads.field(self.a, knowledge, index, &evaluation.left);
     }
     fn variable(self: *Checker, before: p.Id, after: p.Id) Error!void {
         try require(after >= self.before.variables.len and
@@ -300,7 +331,7 @@ const Checker = struct {
             },
             .variable => |v| {
                 try require(proof.children.len == 0);
-                const bound = try lookup(visit.env, v, &self.left);
+                const bound = try lookup(visit.env, v, self.work);
                 frame.knowledge = bound.knowledge;
                 frame.expected.expression = .{ .variable = bound.after };
             },
@@ -311,7 +342,7 @@ const Checker = struct {
             },
             .primitive => |op| {
                 try require(proof.children.len == op.operands.len);
-                try data.admission.spend(&self.left, op.operands.len);
+                try data.admission.spend(self.work, op.operands.len);
                 frame.args = try self.a.alloc(p.Id, op.operands.len);
                 frame.known = try self.a.alloc(pe.Knowledge, op.operands.len);
             },
@@ -324,11 +355,7 @@ const Checker = struct {
         const r = self.after.values[@intCast(visit.after)];
         if (b.expression == .primitive) {
             frame.expected.expression.primitive.operands = frame.args;
-            frame.knowledge = try k.normalize(
-                self.a,
-                try k.primitive(self.a, self.before, self.facts, b, frame.known, &self.left),
-                &self.left,
-            );
+            frame.knowledge = try self.primitive(b, frame.known);
             frame.total = frame.total and frame.knowledge == .known;
         }
         if (self.out.value_proofs.items[visit.proof_id].folded) {
@@ -524,9 +551,9 @@ const Checker = struct {
                     x.fact.knowledge;
                 try require(try k.equalWithWork(
                     self.a,
-                    try k.normalize(self.a, justified, &self.left),
+                    try normalize(self.a, justified, &self.left, self.work),
                     f.arguments[i],
-                    &self.left,
+                    self.work,
                 ));
                 if (f.arguments[i] == .known) continue;
             }
@@ -550,7 +577,7 @@ const Checker = struct {
             i += 1;
         }
         inline for (.{ "bodies", "use_site_capabilities" }) |name| {
-            try data.admission.spend(&self.left, @field(v, name).len);
+            try data.admission.spend(self.work, @field(v, name).len);
             const args = try self.a.alloc(p.Id, @field(v, name).len);
             for (@field(v, name), args) |arg, *to| {
                 to.* = (try self.checkedValue(frame, i, arg)).id;
@@ -571,17 +598,10 @@ const Checker = struct {
         var next_env = visit.env;
         for (v.variables, r.unpack_product.variables, 0..) |v1, v2, i| {
             try self.variable(v1, v2);
-            next_env = try extend(self.a, next_env, &self.left, .{
+            next_env = try extend(self.a, next_env, self.work, .{
                 .before = v1,
                 .after = v2,
-                .knowledge = try k.field(
-                    self.a,
-                    self.before,
-                    self.facts,
-                    frame.value.fact.knowledge,
-                    i,
-                    &self.left,
-                ),
+                .knowledge = try self.field(frame.value.fact.knowledge, i),
             });
         }
         return self.child(frame, 0, v.body, next_env);
@@ -596,7 +616,7 @@ const Checker = struct {
         if (proof.selected) |tag| return self.selectedMatch(frame, tag);
         try require(r == .match_sum and proof.children.len == v.cases.len and
             r.match_sum.cases.len == v.cases.len);
-        try data.admission.spend(&self.left, v.cases.len);
+        try data.admission.spend(self.work, v.cases.len);
         frame.cases = try self.a.alloc(CaseItem, v.cases.len);
         return self.matchCase(frame);
     }
@@ -622,7 +642,7 @@ const Checker = struct {
                 payload_fact.value.known,
                 self.after.constants[@intCast(literal.expression.literal)],
             ));
-        const next_env = try extend(self.a, visit.env, &self.left, .{
+        const next_env = try extend(self.a, visit.env, self.work, .{
             .before = branch.variable,
             .after = r.bind.variable,
             .knowledge = payload_fact.value,
@@ -640,7 +660,7 @@ const Checker = struct {
         const left = v.cases[frame.cursor];
         const right = r.cases[frame.cursor];
         try self.variable(left.variable, right.variable);
-        const next_env = try extend(self.a, visit.env, &self.left, .{
+        const next_env = try extend(self.a, visit.env, self.work, .{
             .before = left.variable,
             .after = right.variable,
             .knowledge = .dynamic,
@@ -695,7 +715,7 @@ const Checker = struct {
             frame.first = result;
             frame.cursor = 1;
             try self.variable(b.variable, r.variable);
-            const next_env = try extend(self.a, visit.env, &self.left, .{
+            const next_env = try extend(self.a, visit.env, self.work, .{
                 .before = b.variable,
                 .after = r.variable,
                 .knowledge = result.knowledge,
@@ -728,8 +748,33 @@ const Checker = struct {
             .when_true = frame.first.id,
             .when_false = result.id,
         } };
-        if (try k.equalWithWork(self.a, frame.first.knowledge, result.knowledge, &self.left))
+        if (try k.equalWithWork(self.a, frame.first.knowledge, result.knowledge, self.work))
             frame.knowledge = frame.first.knowledge;
         return self.finish(frame);
     }
 };
+
+test "specialization evaluator intersection stops before unpaid allocation" {
+    const value: pe.Knowledge = .{ .product = .{ .schema = 0, .fields = &.{
+        .dynamic, .dynamic,
+    } } };
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var local: u64 = 10;
+    var global: u64 = 2;
+    try std.testing.expectError(
+        error.SpecializationLimit,
+        normalize(failing.allocator(), value, &local, &global),
+    );
+    try std.testing.expectEqual(@as(u64, 9), local);
+    try std.testing.expectEqual(@as(u64, 1), global);
+    try std.testing.expect(!failing.has_induced_failure);
+    local = 2;
+    global = 10;
+    try std.testing.expectError(
+        error.SpecializationLimit,
+        normalize(failing.allocator(), value, &local, &global),
+    );
+    try std.testing.expectEqual(@as(u64, 1), local);
+    try std.testing.expectEqual(@as(u64, 9), global);
+    try std.testing.expect(!failing.has_induced_failure);
+}

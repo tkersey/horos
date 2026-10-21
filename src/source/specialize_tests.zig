@@ -1102,6 +1102,53 @@ test "specialization local allowance excludes admission while relation allowance
     );
 }
 
+test "specialization literal validation retains independent semantic allowances" {
+    const checker = @import("specialize_validate.zig");
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const unit = try b.scalar(void);
+    const sequence = try b.schema(.{ .seq = try b.scalar(u8) });
+    const f = try b.declare(&.{sequence}, sequence, &.{}, &.{});
+    try b.define(f, try b.pure(try b.reference(b.parameter(f, 0))));
+    var bytes: [4098]u8 = @splat(7);
+    var writer: @import("horos_data").wire.Writer = .{ .output = &bytes };
+    try writer.natural(4096);
+    const before = b.module(f, unit);
+    const request: pe.Request = .{
+        .context = context,
+        .function = f,
+        .arguments = &.{.{ .known = .{ .schema = sequence, .bytes = &bytes } }},
+        .policy = .{ .work = 32 },
+    };
+    var output = try pe.specialize(a, before, request);
+    defer output.deinit();
+    output.request.policy.work = 2;
+    output.key = try pe.identity(a, before, output.request);
+    try pe.validate(a, before, output.request, &output);
+    var remaining: u64 = 64;
+    try std.testing.expectError(
+        error.RelationLimit,
+        checker.validateWithWork(a, before, output.request, &output, &remaining),
+    );
+    remaining = 1_000_000;
+    try checker.validateWithWork(a, before, output.request, &output, &remaining);
+    try std.testing.expect(1_000_000 - remaining > bytes.len);
+    output.request.policy.work = 1;
+    output.key = try pe.identity(a, before, output.request);
+    try std.testing.expectError(
+        error.SpecializationLimit,
+        pe.validate(a, before, output.request, &output),
+    );
+    output.request.policy.work = 2;
+    output.request.policy.depth = 0;
+    output.key = try pe.identity(a, before, output.request);
+    try std.testing.expectError(
+        error.SpecializationLimit,
+        pe.validate(a, before, output.request, &output),
+    );
+}
+
 test "specialization verification exhaustion remains distinct from an invalid derivation" {
     const a = std.testing.allocator;
     var b = source.Builder.init(a);
