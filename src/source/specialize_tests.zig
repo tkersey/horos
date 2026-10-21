@@ -1064,6 +1064,44 @@ test "source relocation preserves fixed schema endpoints and exact function corr
     ));
 }
 
+test "specialization local allowance excludes admission while relation allowance includes it" {
+    const relation = @import("relation.zig");
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const unit = try b.scalar(void);
+    const f = try b.declare(&.{}, unit, &.{}, &.{});
+    try b.define(f, try b.pure(try b.constant(void, {})));
+    const before = b.module(f, unit);
+    const request: pe.Request = .{
+        .context = context,
+        .function = f,
+        .arguments = &.{},
+        .policy = .{ .work = 32 },
+    };
+    var output = try pe.specialize(a, before, request);
+    defer output.deinit();
+    try pe.validate(a, before, request, &output);
+    const after = output.module();
+    const step: relation.Step = .{ .successor = after, .rule = .{ .specialization = .{
+        .request = request,
+        .entry = output.entry,
+        .functions = output.functions.items,
+        .values = output.value_proofs.items,
+        .terms = output.term_proofs.items,
+    } } };
+    var policy: relation.Policy = .{ .static_scopes = &.{.{
+        .predecessor = try relation.identity(before),
+        .request = request,
+    }} };
+    try relation.validate(a, before, after, &.{step}, policy);
+    policy.work = request.policy.work;
+    try std.testing.expectError(
+        error.RelationLimit,
+        relation.validate(a, before, after, &.{step}, policy),
+    );
+}
+
 test "specialization verification exhaustion remains distinct from an invalid derivation" {
     const a = std.testing.allocator;
     var b = source.Builder.init(a);

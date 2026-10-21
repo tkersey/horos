@@ -57,8 +57,7 @@ pub fn validate(
     request: pe.Request,
     out: *const pe.Output,
 ) Error!void {
-    var remaining = request.policy.work;
-    return validateWithWork(a, original, request, out, &remaining) catch |err|
+    return validateBody(a, original, request, out, null) catch |err|
         return if (err == error.RelationLimit) error.SpecializationLimit else err;
 }
 
@@ -69,19 +68,27 @@ pub fn validateWithWork(
     out: *const pe.Output,
     remaining: *u64,
 ) Error!void {
-    const available = @min(request.policy.work, remaining.*);
-    var left = available;
-    defer remaining.* -= available - left;
+    return validateBody(a, original, request, out, remaining);
+}
+
+fn validateBody(
+    a: std.mem.Allocator,
+    original: ast.Module,
+    request: pe.Request,
+    out: *const pe.Output,
+    work: ?*u64,
+) Error!void {
+    var left = request.policy.work;
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const storage = arena.allocator();
     const residual = out.module();
-    try validateEnvelope(storage, original, request, out, &left);
+    try validateEnvelope(storage, original, request, out, &left, work);
     // Source admission precedes primitive evaluation; malformed operand shapes
     // cannot reach constant rules through a forged derivation.
-    try source.admitWithWork(a, original, &left);
-    const original_facts = try @import("check.zig").analyzeWithWork(storage, original, &left);
-    const schema_facts = try data.admission.schemasWithWork(storage, original.schemas, &left);
+    try admit(a, original, work);
+    const original_facts = try @import("check.zig").analyzeWithWork(storage, original, work);
+    const schema_facts = try data.admission.schemasWithWork(storage, original.schemas, work);
     try require(request.function < original.functions.len);
     const requested_function = original.functions[@intCast(request.function)];
     try require(request.arguments.len == requested_function.parameters.len);
@@ -91,10 +98,10 @@ pub fn validateWithWork(
         schema_facts,
         original.variables[@intCast(parameter)],
         fact,
-        &left,
+        work,
     );
     // Source type/scope checking is additional to the semantic derivation.
-    _ = try @import("check.zig").analyzeWithWork(storage, residual, &left);
+    _ = try @import("check.zig").analyzeWithWork(storage, residual, work);
     var checker: Checker = .{
         .a = storage,
         .before = original,
@@ -105,21 +112,26 @@ pub fn validateWithWork(
         .captures = original_facts.functions,
         .max_depth = request.policy.depth,
     };
-    defer left = checker.left;
-    for (out.functions.items, 0..) |f, i| try checker.function(f, i);
-    try source.admitWithWork(a, residual, &checker.left);
+    try checker.validate(work);
+    try admit(a, residual, work);
+}
+fn admit(a: std.mem.Allocator, module: ast.Module, work: ?*u64) Error!void {
+    if (work) |remaining| return source.admitWithWork(a, module, remaining);
+    var admitted = try source.lower(a, module);
+    admitted.deinit();
 }
 fn validateEnvelope(
     storage: std.mem.Allocator,
     original: ast.Module,
     request: pe.Request,
     out: *const pe.Output,
-    remaining: *u64,
+    local: *u64,
+    work: ?*u64,
 ) Error!void {
     const residual = out.module();
-    const identity = try pe.identityWithWork(storage, original, request, remaining);
+    const identity = try pe.identityWithWork(storage, original, request, work);
     try require(std.mem.eql(u8, &out.key, &identity));
-    try require(try pe.requestEqualWithWork(storage, request, out.request, remaining));
+    try require(try pe.requestEqualWithWork(storage, request, out.request, work));
     try require(data.record.equal(ast.Module, original, out.original));
     try require(
         original.failure == residual.failure and original.region_count == residual.region_count,
@@ -146,12 +158,27 @@ fn validateEnvelope(
             out.entry == out.functions.items[0].after,
     );
     try require(request.arguments.len == out.functions.items[0].arguments.len);
+    try validateCanonicalArguments(storage, request, out, local, work);
+}
+fn validateCanonicalArguments(
+    storage: std.mem.Allocator,
+    request: pe.Request,
+    out: *const pe.Output,
+    local: *u64,
+    work: ?*u64,
+) Error!void {
+    const available = if (work) |remaining| @min(local.*, remaining.*) else local.*;
+    var left = available;
+    defer local.* -= available - left;
+    defer if (work) |remaining| {
+        remaining.* -= available - left;
+    };
     for (request.arguments, out.functions.items[0].arguments) |raw, canonical| try require(
         try k.equalWithWork(
             storage,
-            try k.normalize(storage, raw, remaining),
+            try k.normalize(storage, raw, &left),
             canonical,
-            remaining,
+            &left,
         ),
     );
 }
@@ -192,6 +219,17 @@ const Checker = struct {
     left: u64,
     max_depth: usize,
 
+    fn validate(self: *Checker, work: ?*u64) Error!void {
+        const local = self.left;
+        const available = if (work) |remaining| @min(local, remaining.*) else local;
+        self.left = available;
+        defer {
+            const spent = available - self.left;
+            self.left = local - spent;
+            if (work) |remaining| remaining.* -= spent;
+        }
+        for (self.out.functions.items, 0..) |f, i| try self.function(f, i);
+    }
     fn spend(self: *Checker, depth: usize) Error!void {
         if (self.left == 0 or depth > self.max_depth) return error.SpecializationLimit;
         self.left -= 1;

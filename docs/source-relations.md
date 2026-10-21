@@ -45,6 +45,12 @@ charges all owned rule and successor allocations against its caller's byte
 allowance. Exhaustion returns `Capacity`; underlying allocation failure remains
 `OutOfMemory`. Decoded records must be retained in caller-owned storage.
 
+Specialization's request policy separately limits argument normalization and
+derivation checking. Standalone specialization performs ordinary admission
+outside that local allowance. Inside a relation, admission and envelope analysis
+consume the relation allowance; normalization and derivation checking consume
+both allowances. Neither allowance replenishes the other.
+
 ## Executable source slices
 
 `source.slice.extract` first admits the complete original module, computes the
