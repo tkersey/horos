@@ -6,79 +6,124 @@ const Error = relation.Error;
 const require = relation.Context.require;
 const Layout = relation.Layout;
 
-pub fn permutation(layouts: []const Layout, schema: u64) ?[]const u64 {
-    for (layouts) |layout| if (layout.schema == schema) return layout.coordinates;
-    return null;
+const Permutation = struct { forward: []const u64, inverse: []const u64 };
+const SchemaMap = struct { allowed: bool = false, permutation: ?Permutation = null };
+
+fn checkedMaps(ctx: *relation.Context, layouts: []const Layout) Error![]const SchemaMap {
+    try ctx.spend(ctx.before.schemas.len);
+    const maps = try ctx.a.alloc(SchemaMap, ctx.before.schemas.len);
+    @memset(maps, .{});
+    try ctx.spend(ctx.policy.private_schemas.len);
+    for (ctx.policy.private_schemas) |schema| {
+        if (schema < maps.len) maps[@intCast(schema)].allowed = true;
+    }
+    for (layouts) |layout| {
+        try ctx.spend(1);
+        try require(layout.schema < maps.len);
+        const map = &maps[@intCast(layout.schema)];
+        try require(map.allowed and map.permutation == null);
+        const shape = ctx.before.schemas[@intCast(layout.schema)];
+        try require(shape == .product and layout.coordinates.len == shape.product.len);
+        try ctx.spend(layout.coordinates.len);
+        const inverse = try ctx.a.alloc(u64, layout.coordinates.len);
+        @memset(inverse, layout.coordinates.len);
+        for (layout.coordinates, 0..) |coordinate, index| {
+            try ctx.spend(1);
+            try require(coordinate < inverse.len);
+            try require(inverse[@intCast(coordinate)] == inverse.len);
+            inverse[@intCast(coordinate)] = @intCast(index);
+        }
+        map.permutation = .{ .forward = layout.coordinates, .inverse = inverse };
+    }
+    return maps;
 }
+
 pub fn apply(ctx: *relation.Context, layouts: []const Layout) Error!void {
+    const maps = try checkedMaps(ctx, layouts);
     const facts = try data.admission.schemas(ctx.a, ctx.before.schemas);
     const order_facts = try orderFacts(ctx, facts);
+    try ctx.spend(ctx.before.schemas.len);
     const changed = try ctx.a.alloc(bool, ctx.before.schemas.len);
     @memset(changed, false);
-    for (layouts, 0..) |layout, index| {
-        try require(layout.schema < ctx.before.schemas.len);
-        try require(permutation(layouts[0..index], layout.schema) == null);
-        try require(std.mem.indexOfScalar(u64, ctx.policy.private_schemas, layout.schema) != null);
-        const shape = ctx.before.schemas[@intCast(layout.schema)];
-        try require(shape == .product and facts.exportable[@intCast(layout.schema)]);
-        try require(layout.coordinates.len == shape.product.len);
-        const fields = try ctx.a.alloc(u64, shape.product.len);
-        for (layout.coordinates, 0..) |coordinate, i| {
-            try require(coordinate < fields.len);
-            try require(std.mem.indexOfScalar(u64, layout.coordinates[0..i], coordinate) == null);
-            fields[i] = shape.product[@intCast(coordinate)];
-        }
-        @constCast(ctx.expected.schemas)[@intCast(layout.schema)] = .{ .product = fields };
-        changed[@intCast(layout.schema)] = true;
-    }
+    try rewriteSchemas(ctx, maps, facts, changed);
     try closure(ctx, changed);
+    try ctx.spend(ctx.policy.fixed_schemas.len);
     for (ctx.policy.fixed_schemas) |id| {
         try require(id < changed.len and !changed[@intCast(id)]);
     }
     for (ctx.before.effects) |effect| {
+        try ctx.spend(1);
         try require(!changed[@intCast(effect.payload)] and !changed[@intCast(effect.result)]);
+        try ctx.spend(effect.bodies.len);
         for (effect.bodies) |id| try require(!changed[@intCast(id)]);
     }
+    try ctx.spend(ctx.before.resources.len);
     for (ctx.before.resources) |resource|
         try require(!changed[@intCast(resource.representation)]);
     for (ctx.before.constants, 0..) |literal, i| {
+        try ctx.spend(1);
         if (!changed[@intCast(literal.schema)]) continue;
-        @constCast(ctx.expected.constants)[i].bytes = try transport(ctx, facts, layouts, literal);
+        @constCast(ctx.expected.constants)[i].bytes = try transport(ctx, facts, maps, literal);
     }
     for (ctx.before.values, 0..) |value, i| {
-        if (value.expression == .primitive) try primitive(ctx, layouts, changed, order_facts, i);
+        try ctx.spend(1);
+        if (value.expression == .primitive) try primitive(ctx, maps, changed, order_facts, i);
     }
     for (ctx.before.terms, 0..) |term, i| {
+        try ctx.spend(1);
         if (term != .unpack_product) continue;
         const unpack = term.unpack_product;
         const schema = ctx.before.values[@intCast(unpack.value)].schema;
-        const order = permutation(layouts, schema) orelse continue;
+        const map = maps[@intCast(schema)].permutation orelse continue;
+        try ctx.spend(unpack.variables.len);
         const variables = try ctx.a.alloc(u64, unpack.variables.len);
-        for (order, variables) |old, *variable| variable.* = unpack.variables[@intCast(old)];
+        for (map.forward, variables) |old, *variable| variable.* = unpack.variables[@intCast(old)];
         @constCast(ctx.expected.terms)[i].unpack_product.variables = variables;
     }
 }
-fn child(changed: []const bool, id: u64) bool {
+
+fn rewriteSchemas(
+    ctx: *relation.Context,
+    maps: []const SchemaMap,
+    facts: data.admission.SchemaFacts,
+    changed: []bool,
+) Error!void {
+    for (maps, 0..) |map, schema| {
+        try ctx.spend(1);
+        const order = (map.permutation orelse continue).forward;
+        try require(facts.exportable[schema]);
+        try ctx.spend(order.len);
+        const fields = try ctx.a.alloc(u64, order.len);
+        const shape = ctx.before.schemas[schema].product;
+        for (order, fields) |old, *field| field.* = shape[@intCast(old)];
+        @constCast(ctx.expected.schemas)[schema] = .{ .product = fields };
+        changed[schema] = true;
+    }
+}
+
+fn child(ctx: *relation.Context, changed: []const bool, id: u64) Error!bool {
+    try ctx.spend(1);
     return changed[@intCast(id)];
 }
-fn children(changed: []const bool, ids: []const u64) bool {
-    for (ids) |id| if (child(changed, id)) return true;
+fn children(ctx: *relation.Context, changed: []const bool, ids: []const u64) Error!bool {
+    for (ids) |id| if (try child(ctx, changed, id)) return true;
     return false;
 }
-fn affected(shape: p.Schema, changed: []const bool) bool {
+fn affected(ctx: *relation.Context, shape: p.Schema, changed: []const bool) Error!bool {
     return switch (shape) {
-        .product, .sum => |ids| children(changed, ids),
-        .seq => |id| child(changed, id),
-        .vector => |v| child(changed, v.element),
-        .array => |v| child(changed, v.element),
+        .product, .sum => |ids| children(ctx, changed, ids),
+        .seq => |id| child(ctx, changed, id),
+        .vector => |v| child(ctx, changed, v.element),
+        .array => |v| child(ctx, changed, v.element),
         .internal => |inner| switch (inner) {
-            .computation => |v| child(changed, v.result) or children(changed, v.parameters) or
-                children(changed, v.capture_bound),
-            .resumption => |v| child(changed, v.input) or child(changed, v.answer) or
-                children(changed, v.capture_bound),
-            .cell => |v| child(changed, v.element),
-            .borrowed => |v| child(changed, v.value),
-            .suspension_package => |v| child(changed, v),
+            .computation => |v| try child(ctx, changed, v.result) or
+                try children(ctx, changed, v.parameters) or
+                try children(ctx, changed, v.capture_bound),
+            .resumption => |v| try child(ctx, changed, v.input) or
+                try child(ctx, changed, v.answer) or try children(ctx, changed, v.capture_bound),
+            .cell => |v| child(ctx, changed, v.element),
+            .borrowed => |v| child(ctx, changed, v.value),
+            .suspension_package => |v| child(ctx, changed, v),
             .capability, .region, .abstract_resource => false,
         },
         else => false,
@@ -89,7 +134,7 @@ fn closure(ctx: *relation.Context, changed: []bool) Error!void {
         var progress = false;
         for (ctx.before.schemas, 0..) |shape, i| {
             try ctx.spend(1);
-            if (changed[i] or !affected(shape, changed)) continue;
+            if (changed[i] or !try affected(ctx, shape, changed)) continue;
             if (shape == .internal and shape.internal != .computation and
                 shape.internal != .resumption) return error.UnsupportedRelation;
             changed[i] = true;
@@ -101,7 +146,7 @@ fn closure(ctx: *relation.Context, changed: []bool) Error!void {
 }
 fn primitive(
     ctx: *relation.Context,
-    layouts: []const Layout,
+    maps: []const SchemaMap,
     changed: []const bool,
     order_facts: OrderFacts,
     index: usize,
@@ -110,31 +155,31 @@ fn primitive(
     const op = value.expression.primitive;
     const target = &@constCast(ctx.expected.values)[index].expression.primitive;
     if (op.opcode == .product) {
-        if (permutation(layouts, value.schema)) |order| {
-            try preserveOrder(ctx, order_facts, op.operands, order);
+        if (maps[@intCast(value.schema)].permutation) |map| {
+            try preserveOrder(ctx, order_facts, op.operands, map.forward);
+            try ctx.spend(op.operands.len);
             const operands = try ctx.a.alloc(u64, op.operands.len);
-            for (order, operands) |old, *operand| operand.* = op.operands[@intCast(old)];
+            for (map.forward, operands) |old, *operand| operand.* = op.operands[@intCast(old)];
             target.operands = operands;
         }
         return;
     }
     if (op.opcode == .field) {
         const schema = ctx.before.values[@intCast(op.operands[0])].schema;
-        if (permutation(layouts, schema)) |order| {
-            target.immediate = std.mem.indexOfScalar(u64, order, op.immediate) orelse
-                return error.InvalidRelation;
-        }
+        if (maps[@intCast(schema)].permutation) |map|
+            target.immediate = map.inverse[@intCast(op.immediate)];
         return;
     }
     var touches = changed[@intCast(value.schema)];
+    try ctx.spend(op.operands.len);
     for (op.operands) |id| touches = touches or
         changed[@intCast(ctx.before.values[@intCast(id)].schema)];
     if (!touches) return;
-    if (op.opcode == .sequence_pop_last and permutation(layouts, value.schema) != null)
+    if (op.opcode == .sequence_pop_last and maps[@intCast(value.schema)].permutation != null)
         return error.UnsupportedRelation;
     if (op.opcode == .sequence_pop) {
         const pair = ctx.before.schemas[@intCast(value.schema)].sum[1];
-        if (permutation(layouts, pair) != null) return error.UnsupportedRelation;
+        if (maps[@intCast(pair)].permutation != null) return error.UnsupportedRelation;
     }
     switch (op.opcode) {
         .constant,
@@ -169,7 +214,7 @@ const Frame = struct {
 fn frame(
     ctx: *relation.Context,
     facts: data.admission.SchemaFacts,
-    layouts: []const Layout,
+    maps: []const SchemaMap,
     literal: p.Literal,
 ) Error!Frame {
     try ctx.spend(1);
@@ -195,32 +240,45 @@ fn frame(
         else => return result,
     }
     result.prefix = literal.bytes[0..reader.position];
+    try ctx.spend(schemas.len);
     const pieces = try ctx.a.alloc(Piece, schemas.len);
     for (schemas, pieces) |schema, *piece| piece.* = .{
         .schema = schema,
-        .bytes = try data.admission.readValue(ctx.a, ctx.before.schemas, facts, schema, &reader),
+        .bytes = data.admission.readValueWithWork(
+            ctx.a,
+            ctx.before.schemas,
+            facts,
+            schema,
+            &reader,
+            ctx.left,
+        ) catch |err| switch (err) {
+            error.ValueWorkLimit => return error.RelationLimit,
+            else => return err,
+        },
     };
-    if (permutation(layouts, literal.schema)) |order| {
+    if (maps[@intCast(literal.schema)].permutation) |map| {
+        try ctx.spend(pieces.len);
         const ordered = try ctx.a.alloc(Piece, pieces.len);
-        for (order, ordered) |old, *piece| piece.* = pieces[@intCast(old)];
+        for (map.forward, ordered) |old, *piece| piece.* = pieces[@intCast(old)];
         result.children = ordered;
     } else result.children = pieces;
+    try ctx.spend(pieces.len);
     result.outputs = try ctx.a.alloc([]const u8, pieces.len);
     return result;
 }
 fn transport(
     ctx: *relation.Context,
     facts: data.admission.SchemaFacts,
-    layouts: []const Layout,
+    maps: []const SchemaMap,
     literal: p.Literal,
 ) Error![]const u8 {
     var pending: std.ArrayList(Frame) = .empty;
-    try pending.append(ctx.a, try frame(ctx, facts, layouts, literal));
+    try pending.append(ctx.a, try frame(ctx, facts, maps, literal));
     while (pending.items.len != 0) {
         const current = &pending.items[pending.items.len - 1];
         if (current.cursor < current.children.len) {
             const next = current.children[current.cursor];
-            try pending.append(ctx.a, try frame(ctx, facts, layouts, .{
+            try pending.append(ctx.a, try frame(ctx, facts, maps, .{
                 .schema = next.schema,
                 .bytes = next.bytes,
             }));
@@ -249,6 +307,7 @@ pub fn totalValues(
     facts: data.admission.SchemaFacts,
     product_construction: bool,
 ) Error![]const bool {
+    try ctx.spend(ctx.before.values.len);
     const stable = try ctx.a.alloc(bool, ctx.before.values.len);
     @memset(stable, false);
     for (ctx.before.values, 0..) |value, i| {
@@ -291,6 +350,7 @@ fn orderFacts(ctx: *relation.Context, facts: data.admission.SchemaFacts) Error!O
     const stable = try totalValues(ctx, facts, false);
     const traits = try data.traits.derive(ctx.a, ctx.before.schemas);
     const cacheable = try @import("value_cache.zig").derive(ctx.a, ctx.before, traits);
+    try ctx.spend(ctx.before.values.len);
     const cores = try ctx.a.alloc(u64, ctx.before.values.len);
     for (ctx.before.values, 0..) |value, i| {
         try ctx.spend(1);

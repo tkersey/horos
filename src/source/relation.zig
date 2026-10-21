@@ -89,7 +89,7 @@ pub fn validate(
             .product_layout => |layouts| try @import("relation_layout.zig").apply(&ctx, layouts),
             .specialization => |proof| {
                 try specialization(&ctx, step.successor, proof);
-                current_policy = try specializedPolicy(storage, current_policy, proof);
+                current_policy = try specializedPolicy(&ctx, proof);
             },
         }
         try Context.require(data.record.equal(ast.Module, ctx.expected, step.successor));
@@ -214,14 +214,28 @@ fn fixedSchemas(ctx: *Context, maps: Relocation.Maps) Error!void {
     }
 }
 
-fn specializedPolicy(a: std.mem.Allocator, policy: Policy, proof: Specialization) Error!Policy {
-    var protected: std.ArrayList(u64) = .empty;
-    try protected.appendSlice(a, policy.protected_functions);
+fn specializedPolicy(ctx: *Context, proof: Specialization) Error!Policy {
+    const policy = ctx.policy;
+    try ctx.spend(ctx.before.functions.len);
+    const selected = try ctx.a.alloc(bool, ctx.before.functions.len);
+    @memset(selected, false);
+    try ctx.spend(policy.protected_functions.len);
+    for (policy.protected_functions) |function| {
+        if (function < selected.len) selected[@intCast(function)] = true;
+    }
+    const capacity = std.math.add(usize, policy.protected_functions.len, proof.functions.len) catch
+        return error.RelationLimit;
+    try ctx.spend(capacity);
+    const protected = try ctx.a.alloc(u64, capacity);
+    @memcpy(protected[0..policy.protected_functions.len], policy.protected_functions);
+    var count = policy.protected_functions.len;
     for (proof.functions) |function| {
-        if (std.mem.indexOfScalar(u64, policy.protected_functions, function.before) != null)
-            try protected.append(a, function.after);
+        try ctx.spend(1);
+        if (!selected[@intCast(function.before)]) continue;
+        protected[count] = function.after;
+        count += 1;
     }
     var result = policy;
-    result.protected_functions = protected.items;
+    result.protected_functions = protected[0..count];
     return result;
 }

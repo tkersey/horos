@@ -957,10 +957,13 @@ test "source relation specialization binds owner selected immutable static input
         &steps,
         .{},
     ));
-    const policy: relation.Policy = .{ .static_scopes = &.{.{
-        .predecessor = try relation.identity(before),
-        .request = request,
-    }} };
+    const policy: relation.Policy = .{
+        .static_scopes = &.{.{
+            .predecessor = try relation.identity(before),
+            .request = request,
+        }},
+        .protected_functions = &.{ f, f, std.math.maxInt(u64) },
+    };
     try relation.validate(a, before, after, &steps, policy);
     const decoded = try roundTripRelationStep(b.allocator(), steps[0]);
     try relation.validate(a, before, after, &.{decoded}, policy);
@@ -1374,4 +1377,181 @@ test "projection discards total nested products but preserves potentially failin
     b.values.items[@intCast(projection)].expression.primitive.immediate = 1;
     @constCast(after.values)[@intCast(projection)] = before.values[@intCast(failing)];
     try relation.validate(a, before, after, &steps, .{});
+}
+
+test "private layouts check wide inverses and reject invalid coordinate maps" {
+    const relation = source.relation;
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const unit = try b.scalar(void);
+    const byte = try b.scalar(u8);
+    const fields: [1024]u64 = @splat(byte);
+    const product = try b.schema(.{ .product = &fields });
+    const f = try b.declare(&.{ byte, byte }, byte, &.{}, &.{});
+    const x = try b.reference(b.parameter(f, 0));
+    const y = try b.reference(b.parameter(f, 1));
+    const operands = try b.allocator().alloc(u64, fields.len);
+    @memset(operands, x);
+    operands[operands.len - 1] = y;
+    const tuple = try b.primitive(product, .product, operands, 0);
+    const field = try b.primitive(byte, .field, &.{tuple}, 0);
+    try b.define(f, try b.pure(field));
+    const before = b.module(f, unit);
+    const after = try source.own(source.ast.Module, b.allocator(), before);
+    const reversed = try b.allocator().dupe(u64, operands);
+    std.mem.reverse(u64, reversed);
+    @constCast(after.values)[@intCast(tuple)].expression.primitive.operands = reversed;
+    @constCast(after.values)[@intCast(field)].expression.primitive.immediate = fields.len - 1;
+    const coordinates = try b.allocator().alloc(u64, fields.len);
+    for (coordinates, 0..) |*coordinate, i| coordinate.* = fields.len - i - 1;
+    const layout: relation.Layout = .{ .schema = product, .coordinates = coordinates };
+    var step: relation.Step = .{ .successor = after, .rule = .{ .product_layout = &.{layout} } };
+    const policy: relation.Policy = .{
+        .private_schemas = &.{ product, product, std.math.maxInt(u64) },
+        .work = try relationModuleCharges(before, after) + 20_000,
+    };
+    try relation.validate(a, before, after, &.{step}, policy);
+    var limited = policy;
+    limited.work = try relationModuleCharges(before, after) + 100;
+    try std.testing.expectError(
+        error.RelationLimit,
+        relation.validate(a, before, after, &.{step}, limited),
+    );
+    coordinates[0] = coordinates[1];
+    try std.testing.expectError(
+        error.InvalidRelation,
+        relation.validate(a, before, after, &.{step}, policy),
+    );
+    coordinates[0] = coordinates.len;
+    try std.testing.expectError(
+        error.InvalidRelation,
+        relation.validate(a, before, after, &.{step}, policy),
+    );
+    coordinates[0] = coordinates.len - 1;
+    step.rule.product_layout = &.{ layout, layout };
+    try std.testing.expectError(
+        error.InvalidRelation,
+        relation.validate(a, before, after, &.{step}, policy),
+    );
+    step.rule.product_layout = &.{.{ .schema = product, .coordinates = coordinates[1..] }};
+    try std.testing.expectError(
+        error.InvalidRelation,
+        relation.validate(a, before, after, &.{step}, policy),
+    );
+}
+
+fn relationModuleCharges(before: source.ast.Module, after: source.ast.Module) !u64 {
+    const data = @import("horos_data");
+    var measure: data.wire.Writer = .{};
+    try data.record.write(source.ast.Module, before, &measure);
+    try data.record.write(source.ast.Module, after, &measure);
+    return measure.position + before.values.len + before.terms.len + before.schemas.len;
+}
+
+test "private layout empty permutations remain present and closure edges spend work" {
+    const relation = source.relation;
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const unit = try b.scalar(void);
+    const empty = try b.schema(.{ .product = &.{} });
+    const fields: [1024]u64 = @splat(unit);
+    _ = try b.schema(.{ .product = &fields });
+    const f = try b.declare(&.{}, unit, &.{}, &.{});
+    try b.define(f, try b.pure(try b.constant(void, {})));
+    const before = b.module(f, unit);
+    const layout: relation.Layout = .{ .schema = empty, .coordinates = &.{} };
+    const policy: relation.Policy = .{ .private_schemas = &.{empty} };
+    var step: relation.Step = .{ .successor = before, .rule = .{ .product_layout = &.{layout} } };
+    try relation.validate(a, before, before, &.{step}, policy);
+    step.rule.product_layout = &.{ layout, layout };
+    try std.testing.expectError(
+        error.InvalidRelation,
+        relation.validate(a, before, before, &.{step}, policy),
+    );
+    step.rule.product_layout = &.{};
+    var limited = policy;
+    limited.work = try relationModuleCharges(before, before) + 100;
+    try std.testing.expectError(
+        error.RelationLimit,
+        relation.validate(a, before, before, &.{step}, limited),
+    );
+}
+
+test "private layout charges repeated nested literal traversal through zero width fields" {
+    const relation = source.relation;
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const unit = try b.scalar(void);
+    const byte = try b.scalar(u8);
+    var fields: [32]u64 = @splat(unit);
+    fields[fields.len - 1] = byte;
+    const inner = try b.schema(.{ .product = &fields });
+    var outer = inner;
+    for (0..15) |_| {
+        fields[fields.len - 1] = outer;
+        outer = try b.schema(.{ .product = &fields });
+    }
+    const f = try b.declare(&.{}, outer, &.{}, &.{});
+    try b.define(f, try b.pure(try b.literal(.{ .schema = outer, .bytes = &.{7} })));
+    const before = b.module(f, unit);
+    const after = try source.own(source.ast.Module, b.allocator(), before);
+    fields[0] = byte;
+    fields[fields.len - 1] = unit;
+    @constCast(after.schemas)[@intCast(inner)].product = &fields;
+    var coordinates: [32]u64 = undefined;
+    for (&coordinates, 0..) |*coordinate, i| coordinate.* = i;
+    coordinates[0] = coordinates.len - 1;
+    coordinates[coordinates.len - 1] = 0;
+    const step: relation.Step = .{ .successor = after, .rule = .{ .product_layout = &.{.{
+        .schema = inner,
+        .coordinates = &coordinates,
+    }} } };
+    var policy: relation.Policy = .{ .private_schemas = &.{inner} };
+    try relation.validate(a, before, after, &.{step}, policy);
+    policy.work = try relationModuleCharges(before, after) + 5_000;
+    try std.testing.expectError(
+        error.RelationLimit,
+        relation.validate(a, before, after, &.{step}, policy),
+    );
+}
+
+test "bounded source literal reader charges enum and text scans without changing bytes" {
+    const data = @import("horos_data");
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+    const schemas = [_]data.program.Schema{ .text, .{ .enumeration = &.{ 1, 2, 3, 4 } } };
+    const facts = try data.admission.schemas(scratch, &schemas);
+    for ([_][]const u8{ &.{ 4, 't', 'e', 's', 't' }, &.{ 4, 0, 0, 0 } }, 0..) |bytes, schema| {
+        var reader: data.wire.Reader = .{ .input = bytes };
+        const original = try data.admission.readValue(scratch, &schemas, facts, schema, &reader);
+        try reader.finish();
+        reader.position = 0;
+        var low: u64 = 5;
+        try std.testing.expectError(error.ValueWorkLimit, data.admission.readValueWithWork(
+            scratch,
+            &schemas,
+            facts,
+            schema,
+            &reader,
+            &low,
+        ));
+        reader.position = 0;
+        var enough: u64 = 6;
+        const bounded = try data.admission.readValueWithWork(
+            scratch,
+            &schemas,
+            facts,
+            schema,
+            &reader,
+            &enough,
+        );
+        try reader.finish();
+        try std.testing.expectEqualSlices(u8, original, bounded);
+        try std.testing.expectEqual(@as(u64, 0), enough);
+    }
 }
