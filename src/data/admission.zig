@@ -2,6 +2,7 @@
 const std = @import("std");
 const p = @import("program.zig");
 const wire = @import("wire.zig");
+const resource_admission = @import("resource_admission.zig");
 pub const Diagnostic = @import("diagnostic.zig").Diagnostic;
 pub const Origins = @import("diagnostic.zig").Origins;
 
@@ -303,7 +304,7 @@ pub fn validateInstruction(
     switch (instruction.opcode) {
         .resource_pack, .resource_unpack => {
             try instructionFailures(image, instruction, slots);
-            try @import("resource_admission.zig").instruction(image, function, instruction, slots);
+            try resource_admission.instruction(image, function, instruction, slots);
         },
         else => try validateInstructionShape(image, instruction, slots, uses),
     }
@@ -370,7 +371,7 @@ pub fn validateInstructionShape(
             slots,
             uses,
         ),
-        .resource_pack, .resource_unpack => _ = try @import("resource_admission.zig").instructionShape(
+        .resource_pack, .resource_unpack => _ = try resource_admission.instructionShape(
             image,
             instruction,
             slots,

@@ -5,7 +5,7 @@ Source syntax/formatting, the tracked Zig source inventory and the
 compilation. The source job checks out the actual proposed head with its history,
 tests the pinned native auditor and audits every tracked Zig file.
 The source preflight retains its five-minute timeout. The existing installation
-and contracts jobs remain independent:
+and contracts jobs remain independent and each has a ten-minute timeout:
 
 ```sh
 zig build check-package -Doptimize=safe --summary all
