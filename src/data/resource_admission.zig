@@ -29,6 +29,15 @@ pub fn validate(allocator: std.mem.Allocator, image: anytype) a.Error!void {
 }
 
 pub fn instruction(image: anytype, function: p.Id, op: anytype, slots: []const p.Id) a.Error!void {
+    const resource = try instructionShape(image, op, slots);
+    const authorities = if (op.opcode == .resource_pack)
+        resource.introducers
+    else
+        resource.eliminators;
+    if (std.mem.indexOfScalar(p.Id, authorities, function) == null) return error.InvalidOwnership;
+}
+
+pub fn instructionShape(image: anytype, op: anytype, slots: []const p.Id) a.Error!p.Resource {
     if (op.operands.len != 1 or op.immediate != 0) return error.InvalidProgram;
     const input = slots[@intCast(op.operands[0])];
     const shape = image.schemas[@intCast(input)];
@@ -44,9 +53,5 @@ pub fn instruction(image: anytype, function: p.Id, op: anytype, slots: []const p
     );
     const representation = if (op.opcode == .resource_pack) input else op.result_type;
     if (representation != resource.representation) return error.TypeMismatch;
-    const authorities = if (op.opcode == .resource_pack)
-        resource.introducers
-    else
-        resource.eliminators;
-    if (std.mem.indexOfScalar(p.Id, authorities, function) == null) return error.InvalidOwnership;
+    return resource;
 }

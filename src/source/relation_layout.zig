@@ -137,6 +137,7 @@ fn primitive(
         if (permutation(layouts, pair) != null) return error.UnsupportedRelation;
     }
     switch (op.opcode) {
+        .constant,
         .move,
         .variant,
         .variant_tag,

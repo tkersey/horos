@@ -21,7 +21,10 @@ pub fn decode(
 ) Error!relation.Step {
     const rule: relation.Rule = switch (record.rule) {
         .specialization => |bytes| blk: {
-            var reader: data.wire.Reader = .{ .input = bytes };
+            if (bytes.len > remaining.*) return error.Capacity;
+            remaining.* -= bytes.len;
+            const owned = try a.dupe(u8, bytes);
+            var reader: data.wire.Reader = .{ .input = owned };
             const proof = try data.record.readBounded(
                 relation.Specialization,
                 &reader,

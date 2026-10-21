@@ -300,6 +300,21 @@ pub fn validateInstruction(
     slots: []const p.Id,
     uses: @import("traits.zig").Facts,
 ) Error!void {
+    switch (instruction.opcode) {
+        .resource_pack, .resource_unpack => {
+            try instructionFailures(image, instruction, slots);
+            try @import("resource_admission.zig").instruction(image, function, instruction, slots);
+        },
+        else => try validateInstructionShape(image, instruction, slots, uses),
+    }
+}
+
+pub fn validateInstructionShape(
+    image: anytype,
+    instruction: anytype,
+    slots: []const p.Id,
+    uses: @import("traits.zig").Facts,
+) Error!void {
     try instructionFailures(image, instruction, slots);
     switch (instruction.opcode) {
         .constant,
@@ -355,9 +370,8 @@ pub fn validateInstruction(
             slots,
             uses,
         ),
-        .resource_pack, .resource_unpack => try @import("resource_admission.zig").instruction(
+        .resource_pack, .resource_unpack => _ = try @import("resource_admission.zig").instructionShape(
             image,
-            function,
             instruction,
             slots,
         ),

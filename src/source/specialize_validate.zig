@@ -52,11 +52,25 @@ pub fn validate(
     request: pe.Request,
     out: *const pe.Output,
 ) Error!void {
+    var remaining = request.policy.work;
+    return validateWithWork(a, original, request, out, &remaining);
+}
+
+pub fn validateWithWork(
+    a: std.mem.Allocator,
+    original: ast.Module,
+    request: pe.Request,
+    out: *const pe.Output,
+    remaining: *u64,
+) Error!void {
+    const available = @min(request.policy.work, remaining.*);
+    var left = available;
+    defer remaining.* -= available - left;
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const storage = arena.allocator();
     const residual = out.module();
-    try validateEnvelope(storage, original, request, out);
+    try validateEnvelope(storage, original, request, out, &left);
     // Source admission precedes primitive evaluation; malformed operand shapes
     // cannot reach constant rules through a forged derivation.
     var admitted_original = try source.lower(a, original);
@@ -81,10 +95,11 @@ pub fn validate(
         .after = residual,
         .out = out,
         .facts = schema_facts,
-        .left = request.policy.work,
+        .left = left,
         .captures = original_facts.functions,
         .max_depth = request.policy.depth,
     };
+    defer left = checker.left;
     for (out.functions.items, 0..) |f, i| try checker.function(f, i);
     var admitted_residual = try source.lower(a, residual);
     admitted_residual.deinit();
@@ -94,6 +109,7 @@ fn validateEnvelope(
     original: ast.Module,
     request: pe.Request,
     out: *const pe.Output,
+    remaining: *u64,
 ) Error!void {
     const residual = out.module();
     try require(std.mem.eql(u8, &out.key, &try pe.identity(storage, original, request)));
@@ -124,9 +140,8 @@ fn validateEnvelope(
             out.entry == out.functions.items[0].after,
     );
     try require(request.arguments.len == out.functions.items[0].arguments.len);
-    var normalization_work = request.policy.work;
     for (request.arguments, out.functions.items[0].arguments) |raw, canonical| try require(
-        try k.equal(storage, try k.normalize(storage, raw, &normalization_work), canonical),
+        try k.equal(storage, try k.normalize(storage, raw, remaining), canonical),
     );
 }
 const Visit = struct {

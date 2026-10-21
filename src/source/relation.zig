@@ -78,6 +78,7 @@ pub fn validate(
         switch (step.rule) {
             .identity => {},
             .relocation => |maps| {
+                try chargeRecord(Relocation.Maps, maps, &left);
                 try Relocation.validateMaps(storage, before, maps, true);
                 ctx.expected = try Relocation.relocate(storage, before, maps);
                 try fixedSchemas(&ctx, maps);
@@ -102,9 +103,6 @@ fn specialization(ctx: *Context, successor: ast.Module, proof: Specialization) E
     try Context.require(successor.entry == proof.entry);
     try Context.require(proof.request.function == ctx.before.entry);
     try validateStaticScope(ctx, proof.request);
-    const budget = std.math.cast(usize, proof.request.policy.work) orelse
-        return error.RelationLimit;
-    try ctx.spend(budget);
     var out: pe.Output = .{
         .builder = source.Builder.init(ctx.a),
         .original = ctx.before,
@@ -123,7 +121,13 @@ fn specialization(ctx: *Context, successor: ast.Module, proof: Specialization) E
         try @field(out.builder, name).appendSlice(out.builder.allocator(), @field(successor, name));
     out.builder.region_count = successor.region_count;
     try Context.require(successor.failure == ctx.before.failure);
-    try pe.validate(ctx.a, ctx.before, proof.request, &out);
+    try @import("specialize_validate.zig").validateWithWork(
+        ctx.a,
+        ctx.before,
+        proof.request,
+        &out,
+        ctx.left,
+    );
     try @import("relation_specialization.zig").coverage(ctx, successor, proof);
     ctx.expected = successor;
 }
@@ -168,8 +172,11 @@ pub fn identity(module: ast.Module) Error![32]u8 {
     return digest.finalResult();
 }
 fn chargeModule(module: ast.Module, left: *u64) Error!void {
+    return chargeRecord(ast.Module, module, left);
+}
+fn chargeRecord(comptime T: type, value: T, left: *u64) Error!void {
     var measure: data.wire.Writer = .{};
-    try data.record.write(ast.Module, module, &measure);
+    try data.record.write(T, value, &measure);
     if (measure.position > left.*) return error.RelationLimit;
     left.* -= @intCast(measure.position);
 }

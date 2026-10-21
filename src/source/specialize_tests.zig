@@ -939,7 +939,6 @@ test "source relation specialization binds owner selected immutable static input
         .context = context,
         .function = f,
         .arguments = &.{known(5, &bytes, word)},
-        .policy = .{ .work = 1000 },
     };
     var output = try pe.specialize(a, before, request);
     defer output.deinit();
@@ -1163,6 +1162,7 @@ fn roundTripRelationStep(
     try data.record.write(relation.RecordStep, record, &measure);
     var remaining: usize = 100_000;
     const decoded = try relation.decodeRecordStep(a, record, &remaining);
+    const original_bytes = record.rule.specialization;
     record.rule.specialization = try std.mem.concat(a, u8, &.{
         record.rule.specialization, &.{0},
     });
@@ -1170,7 +1170,166 @@ fn roundTripRelationStep(
         error.NonCanonical,
         relation.decodeRecordStep(a, record, &remaining),
     );
+    @memset(@constCast(original_bytes), 0);
     return decoded;
+}
+
+test "source relation rejects malformed unused primitives through catalog admission" {
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const unit = try b.scalar(void);
+    const word = try b.scalar(u8);
+    const pair = try b.schema(.{ .product = &.{ unit, unit } });
+    const sequence = try b.schema(.{ .seq = word });
+    const empty = try b.primitive(sequence, .sequence, &.{}, 0);
+    const literal = try b.constant(u8, 7);
+    const f = try b.declare(&.{}, unit, &.{}, &.{});
+    try b.define(f, try b.pure(try b.constant(void, {})));
+    const unused = try b.primitive(word, .move, &.{literal}, 0);
+    const module = b.module(f, unit);
+    const cases = [_]struct {
+        opcode: p.Opcode,
+        operands: []const u64,
+        schema: u64,
+        expected: anyerror,
+    }{
+        .{ .opcode = .move, .operands = &.{}, .schema = word, .expected = error.InvalidProgram },
+        .{ .opcode = .field, .operands = &.{}, .schema = unit, .expected = error.TypeMismatch },
+        .{ .opcode = .product, .operands = &.{}, .schema = pair, .expected = error.TypeMismatch },
+        .{
+            .opcode = .sequence_pop,
+            .operands = &.{empty},
+            .schema = unit,
+            .expected = error.TypeMismatch,
+        },
+        .{
+            .opcode = .integer_add,
+            .operands = &.{ literal, literal },
+            .schema = word,
+            .expected = error.InvalidProgram,
+        },
+    };
+    for (cases) |case| {
+        b.values.items[@intCast(unused)] = .{ .schema = case.schema, .expression = .{
+            .primitive = .{ .opcode = case.opcode, .operands = case.operands },
+        } };
+        try std.testing.expectError(case.expected, source.relation.validate(
+            a,
+            module,
+            module,
+            &.{.{ .successor = module, .rule = .{ .product_layout = &.{} } }},
+            .{},
+        ));
+    }
+}
+
+test "source relation admits unused computations against actual generated constructors" {
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const unit = try b.scalar(void);
+    const computation = try b.schema(.{ .internal = .{ .computation = .{
+        .parameters = &.{},
+        .result = unit,
+        .effects = &.{},
+        .regions = &.{},
+    } } });
+    const inner = try b.declare(&.{}, unit, &.{}, &.{});
+    try b.define(inner, try b.pure(try b.constant(void, {})));
+    const entry = try b.declare(&.{}, unit, &.{}, &.{});
+    try b.define(entry, try b.term(.{ .apply = .{
+        .computation = try b.lambda(inner, computation),
+        .arguments = &.{},
+    } }));
+    const unused = try b.primitive(computation, .computation, &.{}, 0);
+    const module = b.module(entry, unit);
+    try source.relation.validate(a, module, module, &.{}, .{});
+    b.values.items[@intCast(unused)].expression.primitive.immediate = 1;
+    try std.testing.expectError(
+        error.InvalidReference,
+        source.relation.validate(a, module, module, &.{}, .{}),
+    );
+}
+
+test "source reference traversal releases temporary ownership on success and allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, referenceTraversal, .{});
+}
+
+fn referenceTraversal(a: std.mem.Allocator) !void {
+    const relocation = source.relation.Relocation;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const unit = try b.scalar(void);
+    const pair = try b.schema(.{ .product = &.{ unit, unit } });
+    var references: std.ArrayList(relocation.Reference) = .empty;
+    defer references.deinit(a);
+    try relocation.visitReferences(a, b.module(0, unit), .schema, pair, &references);
+    try std.testing.expectEqualSlices(relocation.Reference, &.{
+        .{ .kind = .schema, .id = unit },
+        .{ .kind = .schema, .id = unit },
+    }, references.items);
+}
+
+test "source relation charges explicit nominal mappings before expanding them" {
+    const relation = source.relation;
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const unit = try b.scalar(void);
+    const f = try b.declare(&.{}, unit, &.{}, &.{});
+    try b.define(f, try b.pure(try b.constant(void, {})));
+    var before = b.module(f, unit);
+    before.region_count = 100_000;
+    const regions = try b.allocator().alloc(relation.Relocation.Region, 100_000);
+    for (regions, 0..) |*region, index| region.* = .{ .old = index, .new = index };
+    var maps: relation.Relocation.Maps = .{
+        .schemas = &.{0},
+        .constants = &.{0},
+        .values = &.{0},
+        .terms = &.{0},
+        .functions = &.{0},
+        .region_count = before.region_count,
+    };
+    try relation.validate(a, before, before, &.{.{
+        .successor = before,
+        .rule = .{ .relocation = maps },
+    }}, .{});
+    maps.regions = regions;
+    try std.testing.expectError(error.RelationLimit, relation.validate(a, before, before, &.{.{
+        .successor = before,
+        .rule = .{ .relocation = maps },
+    }}, .{ .work = 500 }));
+}
+
+test "private product relation transports primitive constant loads" {
+    const relation = source.relation;
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const unit = try b.scalar(void);
+    const word = try b.scalar(u8);
+    const boolean = try b.scalar(bool);
+    const pair = try b.schema(.{ .product = &.{ word, boolean } });
+    const literal = try b.literal(.{ .schema = pair, .bytes = &.{ 7, 1 } });
+    const loaded = try b.primitive(
+        pair,
+        .constant,
+        &.{},
+        b.values.items[@intCast(literal)].expression.literal,
+    );
+    const projected = try b.primitive(word, .field, &.{loaded}, 0);
+    const f = try b.declare(&.{}, word, &.{}, &.{});
+    try b.define(f, try b.pure(projected));
+    const before = b.module(f, unit);
+    const after = try source.own(source.ast.Module, b.allocator(), before);
+    @constCast(after.schemas)[@intCast(pair)].product = &.{ boolean, word };
+    @constCast(after.constants)[0].bytes = &.{ 1, 7 };
+    @constCast(after.values)[@intCast(projected)].expression.primitive.immediate = 1;
+    try relation.validate(a, before, after, &.{.{
+        .successor = after,
+        .rule = .{ .product_layout = &.{.{ .schema = pair, .coordinates = &.{ 1, 0 } }} },
+    }}, .{ .private_schemas = &.{pair} });
 }
 
 test "projection discards total nested products but preserves potentially failing operands" {

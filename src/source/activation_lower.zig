@@ -165,6 +165,7 @@ fn lowerBody(
     };
     const program = try lowerProgram(&compiler, options);
     if (options.diagnostic) |diagnostic| diagnostic.function = null;
+    try checkPrimitiveCatalog(&compiler, program, options);
     options.stage(.target_check);
     var original_facts = try checkTarget(
         allocator,
@@ -180,6 +181,28 @@ fn lowerBody(
     const ordered = try optimizeDirect(&compiler, program, options);
     if (!component and !recovery_input) return coalesce(allocator, ordered, &compiler, options);
     return ownConstruction(allocator, ordered, &compiler, imports, component, borrows, options);
+}
+
+fn checkPrimitiveCatalog(
+    compiler: *Compiler,
+    program: ir.Program,
+    options: source.CompileOptions,
+) Error!void {
+    const slots = try compiler.allocator.alloc(p.Id, compiler.source.values.len);
+    for (compiler.source.values, slots) |value, *slot| slot.* = value.schema;
+    for (compiler.source.values, 0..) |value, index| {
+        if (value.expression != .primitive) continue;
+        if (options.diagnostic) |diagnostic| diagnostic.value = index;
+        const op = value.expression.primitive;
+        try data.admission.validateInstructionShape(program, .{
+            .opcode = op.opcode,
+            .result_type = value.schema,
+            .operands = op.operands,
+            .immediate = op.immediate,
+            .failures = op.failures,
+        }, slots, compiler.uses);
+    }
+    if (options.diagnostic) |diagnostic| diagnostic.value = null;
 }
 
 const CompilationObserver = struct {

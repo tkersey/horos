@@ -118,7 +118,12 @@ pub fn visitReferences(
     index: u64,
     sink: *std.ArrayList(Reference),
 ) Error!void {
-    const mapper: Mapper = .{ .a = a, .references = sink };
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const mapper: Mapper = .{ .a = arena.allocator(), .references = .{
+        .allocator = a,
+        .sink = sink,
+    } };
     switch (kind) {
         .region => try sink.append(a, .{ .kind = .region, .id = index }),
         inline else => |tag| {
@@ -134,10 +139,10 @@ const Mapper = struct {
     a: std.mem.Allocator,
     maps: Maps = .{},
     region_original_count: u64 = 0,
-    references: ?*std.ArrayList(Reference) = null,
+    references: ?struct { allocator: std.mem.Allocator, sink: *std.ArrayList(Reference) } = null,
     fn id(self: Mapper, kind: Kind, old: u64) Error!u64 {
-        if (self.references) |sink| {
-            try sink.append(self.a, .{ .kind = kind, .id = old });
+        if (self.references) |references| {
+            try references.sink.append(references.allocator, .{ .kind = kind, .id = old });
             return old;
         }
         if (kind == .region) {
