@@ -1177,6 +1177,71 @@ fn roundTripRelationStep(
     return decoded;
 }
 
+test "source relation record budgets include every rule and successor ownership" {
+    const relation = @import("relation.zig");
+    var b = source.Builder.init(std.testing.allocator);
+    defer b.deinit();
+    const unit = try b.scalar(void);
+    const word = try b.scalar(u8);
+    const function = try b.declare(&.{}, word, &.{}, &.{});
+    try b.define(function, try b.pure(try b.constant(u8, 7)));
+    const rules = [_]relation.Rule{
+        .identity,
+        .{ .scalar = .{ .value = 0, .rule = .identity } },
+        .{ .inline_call = 0 },
+        .{ .relocation = .{ .schemas = &.{ 1, 0 }, .values = &.{0} } },
+        .{ .product_layout = &.{.{ .schema = 0, .coordinates = &.{ 1, 0 } }} },
+        .{ .specialization = .{
+            .request = .{ .context = context, .function = function, .arguments = &.{.dynamic} },
+            .entry = function,
+            .functions = &.{},
+            .values = &.{.{ .before = 0, .after = 0, .children = &.{0} }},
+            .terms = &.{},
+        } },
+    };
+    for (rules) |rule| try checkRelationRecordBudget(b.allocator(), .{
+        .successor = b.module(function, unit),
+        .rule = rule,
+    });
+}
+
+fn checkRelationRecordBudget(a: std.mem.Allocator, step: @import("relation.zig").Step) !void {
+    const relation = @import("relation.zig");
+    const data = @import("horos_data");
+    const record = try relation.encodeRecordStep(a, step);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var meter = std.testing.FailingAllocator.init(arena.allocator(), .{});
+    var remaining: usize = 100_000;
+    const decoded = try relation.decodeRecordStep(meter.allocator(), record, &remaining);
+    try std.testing.expect(try data.record.equalAlloc(relation.Step, a, step, decoded));
+    try std.testing.expectEqual(meter.allocated_bytes, 100_000 - remaining);
+    try std.testing.expect(meter.allocated_bytes > 0);
+    remaining = 0;
+    const prior = meter.allocated_bytes;
+    try std.testing.expectError(
+        error.Capacity,
+        relation.decodeRecordStep(meter.allocator(), record, &remaining),
+    );
+    try std.testing.expectEqual(prior, meter.allocated_bytes);
+    var failing = std.testing.FailingAllocator.init(arena.allocator(), .{ .fail_index = 0 });
+    remaining = 100_000;
+    try std.testing.expectError(
+        error.OutOfMemory,
+        relation.decodeRecordStep(failing.allocator(), record, &remaining),
+    );
+    try std.testing.expectEqual(@as(usize, 100_000), remaining);
+    var small = std.testing.FailingAllocator.init(arena.allocator(), .{});
+    const budget = prior / 2;
+    remaining = budget;
+    try std.testing.expectError(
+        error.Capacity,
+        relation.decodeRecordStep(small.allocator(), record, &remaining),
+    );
+    try std.testing.expectEqual(small.allocated_bytes, budget - remaining);
+    try std.testing.expect(small.allocated_bytes <= budget);
+}
+
 test "source relation rejects malformed unused primitives through catalog admission" {
     const a = std.testing.allocator;
     var b = source.Builder.init(a);
@@ -1248,10 +1313,132 @@ test "source relation admits unused computations against actual generated constr
     const unused = try b.primitive(computation, .computation, &.{}, 0);
     const module = b.module(entry, unit);
     try source.relation.validate(a, module, module, &.{}, .{});
+    const maps = try identitySourceMaps(b.allocator(), module);
+    const relocated = try source.relation.Relocation.relocate(b.allocator(), module, maps);
+    const steps = [_]source.relation.Step{.{
+        .successor = relocated,
+        .rule = .{ .relocation = maps },
+    }};
+    try source.relation.validate(a, module, relocated, &steps, .{});
     b.values.items[@intCast(unused)].expression.primitive.immediate = 1;
     try std.testing.expectError(
         error.InvalidReference,
         source.relation.validate(a, module, module, &.{}, .{}),
+    );
+}
+
+fn identitySourceMaps(
+    allocator: std.mem.Allocator,
+    module: source.Module,
+) !source.relation.Relocation.Maps {
+    var maps: source.relation.Relocation.Maps = .{ .region_count = module.region_count };
+    inline for (.{
+        "schemas",   "constants", "effects", "handlers",  "resources",
+        "variables", "values",    "terms",   "functions",
+    }) |name| {
+        const entries = try allocator.alloc(?u64, @field(module, name).len);
+        for (entries, 0..) |*entry, index| entry.* = index;
+        @field(maps, name) = entries;
+    }
+    return maps;
+}
+
+test "source relocation transports raw constructor indices across registration order" {
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const unit = try b.scalar(void);
+    const word = try b.scalar(u8);
+    const computation = try b.schema(.{ .internal = .{ .computation = .{
+        .parameters = &.{},
+        .result = word,
+    } } });
+    const generator_a = try b.declare(&.{}, computation, &.{}, &.{});
+    const generator_b = try b.declare(&.{}, computation, &.{}, &.{});
+    const target_a = try b.declare(&.{}, word, &.{}, &.{});
+    const target_b = try b.declare(&.{}, word, &.{}, &.{});
+    try b.define(target_a, try b.pure(try b.constant(u8, 11)));
+    try b.define(target_b, try b.pure(try b.constant(u8, 22)));
+    try b.define(generator_a, try b.pure(try b.lambda(target_a, computation)));
+    try b.define(generator_b, try b.pure(try b.lambda(target_b, computation)));
+    const entry = try b.declare(&.{}, word, &.{}, &.{});
+    const raw = try b.primitive(computation, .computation, &.{}, 0);
+    try b.define(entry, try b.term(.{ .apply = .{ .computation = raw, .arguments = &.{} } }));
+    const before = b.module(entry, unit);
+    var maps = try identitySourceMaps(b.allocator(), before);
+    std.mem.swap(?u64, &@constCast(maps.functions)[0], &@constCast(maps.functions)[1]);
+    const untransported = try source.relation.Relocation.relocate(b.allocator(), before, maps);
+    try std.testing.expectError(error.InvalidRelation, source.relation.validate(
+        a,
+        before,
+        untransported,
+        &.{.{ .successor = untransported, .rule = .{ .relocation = maps } }},
+        .{},
+    ));
+    maps.constructors = &.{ 1, 0 };
+    const after = try source.relation.Relocation.relocate(b.allocator(), before, maps);
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        after.values[@intCast(raw)].expression.primitive.immediate,
+    );
+    try source.relation.validate(a, before, after, &.{.{
+        .successor = after,
+        .rule = .{ .relocation = maps },
+    }}, .{});
+}
+
+test "source relation rejects constructor rebinding through scalar handler simplification" {
+    const bindings = @import("constructor_bindings.zig");
+    var b = source.Builder.init(std.testing.allocator);
+    defer b.deinit();
+    const unit = try b.scalar(void);
+    const word = try b.scalar(u8);
+    const computation = try b.schema(.{ .internal = .{ .computation = .{
+        .parameters = &.{},
+        .result = word,
+    } } });
+    const generator = try b.declare(&.{}, word, &.{}, &.{});
+    const first = try b.declare(&.{}, word, &.{}, &.{});
+    const second = try b.declare(&.{}, word, &.{}, &.{});
+    try b.define(first, try b.pure(try b.constant(u8, 7)));
+    try b.define(second, try b.pure(try b.constant(u8, 9)));
+    const returned = try b.declare(&.{ computation, word }, word, &.{}, &.{});
+    try b.define(returned, try b.pure(try b.reference(b.parameter(returned, 1))));
+    const handler = try b.handler(.{
+        .mode = .deep,
+        .input = word,
+        .answer = word,
+        .return_function = returned,
+        .clauses = &.{},
+        .state = &.{computation},
+    });
+    const lambda = try b.lambda(first, computation);
+    const moved = try b.primitive(computation, .move, &.{lambda}, 0);
+    try b.define(generator, try b.term(.{ .handle = .{
+        .handler = handler,
+        .body = moved,
+        .state = &.{try b.lambda(second, computation)},
+    } }));
+    const entry = try b.declare(&.{}, word, &.{}, &.{});
+    try b.define(entry, try b.term(.{ .apply = .{
+        .computation = try b.primitive(computation, .computation, &.{}, 0),
+        .arguments = &.{},
+    } }));
+    const before = b.module(entry, unit);
+    const after = try source.own(source.Module, b.allocator(), before);
+    @constCast(after.values)[@intCast(moved)] = before.values[@intCast(lambda)];
+    var work: u64 = 1_000_000;
+    const original = try bindings.admit(std.testing.allocator, b.allocator(), before, &work);
+    const changed = try bindings.admit(std.testing.allocator, b.allocator(), after, &work);
+    try std.testing.expectEqual(first, original[0].function);
+    try std.testing.expectEqual(second, changed[0].function);
+    const steps = [_]source.relation.Step{.{ .successor = after, .rule = .{ .scalar = .{
+        .value = moved,
+        .rule = .identity,
+    } } }};
+    try std.testing.expectError(
+        error.InvalidRelation,
+        source.relation.validate(std.testing.allocator, before, after, &steps, .{}),
     );
 }
 
@@ -1409,7 +1596,6 @@ test "private layouts check wide inverses and reject invalid coordinate maps" {
     var step: relation.Step = .{ .successor = after, .rule = .{ .product_layout = &.{layout} } };
     const policy: relation.Policy = .{
         .private_schemas = &.{ product, product, std.math.maxInt(u64) },
-        .work = try relationModuleCharges(before, after) + 20_000,
     };
     try relation.validate(a, before, after, &.{step}, policy);
     var limited = policy;

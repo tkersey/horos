@@ -14,7 +14,11 @@ pub const RecoveryBinding = @import("source/activation_lower.zig").RecoveryBindi
 pub const recovery = @import("source/recovery.zig");
 pub const relation = @import("source/relation.zig");
 pub const slice = @import("source/slice.zig");
+pub const constructor_bindings = @import("source/constructor_bindings.zig");
 pub const examples = @import("source/examples.zig");
+pub const AdmissionObserver = @import("source/activation_lower.zig").AdmissionObserver;
+pub const admitObservedWithWork = @import("source/activation_lower.zig").admitObservedWithWork;
+pub const admitWithWork = @import("source/activation_lower.zig").admitWithWork;
 pub const lower = @import("source/activation_lower.zig").lower;
 /// Direct stable-slot construction with BPI3 encoding and pure admission.
 pub const lowerObserved = @import("source/activation_lower.zig").lowerObserved;

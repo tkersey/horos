@@ -88,8 +88,16 @@ fn extend(a: std.mem.Allocator, env: Env, item: Binding) !Env {
     return result;
 }
 pub fn identity(a: std.mem.Allocator, m: ast.Module, request: Request) Error![32]u8 {
+    return identityWithWork(a, m, request, null);
+}
+pub fn identityWithWork(
+    a: std.mem.Allocator,
+    m: ast.Module,
+    request: Request,
+    work: ?*u64,
+) Error![32]u8 {
     var digest = std.crypto.hash.sha2.Sha256.init(.{});
-    var writer: data.wire.Writer = .{ .hasher = &digest };
+    var writer: data.wire.Writer = .{ .hasher = &digest, .remaining = work };
     try writer.put("horos.source-specialization/1\x00");
     try data.record.write(ast.Module, m, &writer);
     try data.record.writeAlloc(Request, a, request, &writer);
@@ -680,6 +688,22 @@ pub const validate = @import("specialize_validate.zig").validate;
 
 pub fn requestEqual(a: std.mem.Allocator, lhs: Request, rhs: Request) Error!bool {
     return data.record.equalAlloc(Request, a, lhs, rhs);
+}
+
+pub fn requestEqualWithWork(
+    a: std.mem.Allocator,
+    lhs: Request,
+    rhs: Request,
+    work: ?*u64,
+) Error!bool {
+    try data.admission.spend(work, 1);
+    if (lhs.function != rhs.function or lhs.arguments.len != rhs.arguments.len or
+        !data.record.equal(Context, lhs.context, rhs.context) or
+        !data.record.equal(Policy, lhs.policy, rhs.policy)) return false;
+    for (lhs.arguments, rhs.arguments) |left, right| {
+        if (!try values.equalWithWork(a, left, right, work)) return false;
+    }
+    return true;
 }
 
 test "specialization traverses deep value and term derivations" {

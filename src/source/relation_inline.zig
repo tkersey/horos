@@ -15,6 +15,54 @@ fn flags(ctx: *relation.Context, n: usize) Error![]bool {
     return result;
 }
 
+test "closed pure inlining charges empty authority catalogs" {
+    const source = @import("../source.zig");
+    for ([_]bool{ false, true }) |handlers| {
+        var b = source.Builder.init(std.testing.allocator);
+        defer b.deinit();
+        const unit = try b.scalar(void);
+        const entry = try b.declare(&.{}, unit, &.{}, &.{});
+        try b.define(entry, try b.pure(try b.constant(void, {})));
+        const returned = try b.declare(&.{unit}, unit, &.{}, &.{});
+        try b.define(returned, try b.pure(try b.reference(b.parameter(returned, 0))));
+        for (0..64) |_| {
+            if (handlers) {
+                _ = try b.handler(.{
+                    .mode = .deep,
+                    .input = unit,
+                    .answer = unit,
+                    .return_function = returned,
+                    .clauses = &.{},
+                });
+            } else {
+                _ = try b.resource(unit);
+            }
+        }
+        const module = b.module(entry, unit);
+        var left: u64 = 1_000_000;
+        try source.admitWithWork(std.testing.allocator, module, &left);
+        var ctx: relation.Context = .{
+            .a = b.allocator(),
+            .before = module,
+            .expected = module,
+            .policy = .{},
+            .left = &left,
+        };
+        var pure: Pure = .{
+            .ctx = &ctx,
+            .facts = try check.analyze(ctx.a, module),
+            .seen = .{
+                try flags(&ctx, module.functions.len), try flags(&ctx, module.terms.len),
+                try flags(&ctx, module.values.len),    try flags(&ctx, module.schemas.len),
+            },
+        };
+        left = 63;
+        try std.testing.expectError(error.RelationLimit, pure.checkFunction(entry));
+        left = 128;
+        try pure.checkFunction(entry);
+    }
+}
+
 const Pure = struct {
     ctx: *relation.Context,
     facts: check.Facts,
@@ -51,6 +99,7 @@ const Pure = struct {
             if (root == id) return error.UnsupportedRelation;
         }
         for (ctx.before.resources) |resource| {
+            try ctx.spend(1);
             for ([_][]const Id{ resource.introducers, resource.eliminators }) |owners| {
                 for (owners) |owner| {
                     try ctx.spend(1);
@@ -59,6 +108,7 @@ const Pure = struct {
             }
         }
         for (ctx.before.handlers) |handler| {
+            try ctx.spend(1);
             if (handler.return_function == id) return error.UnsupportedRelation;
             for (handler.clauses) |clause| {
                 try ctx.spend(1);
@@ -283,7 +333,7 @@ pub fn apply(ctx: *relation.Context, call_term: u64) Error!void {
     const call = term.call;
     var pure: Pure = .{
         .ctx = ctx,
-        .facts = try check.analyze(ctx.a, ctx.before),
+        .facts = try check.analyzeWithWork(ctx.a, ctx.before, ctx.left),
         .seen = .{
             try flags(ctx, ctx.before.functions.len), try flags(ctx, ctx.before.terms.len),
             try flags(ctx, ctx.before.values.len),    try flags(ctx, ctx.before.schemas.len),

@@ -62,12 +62,14 @@ const Coverage = struct {
         defer references.deinit(self.ctx.a);
         while (self.source_pending.pop()) |reference| {
             references.clearRetainingCapacity();
-            try relocation.visitReferences(
+            try relocation.visitReferencesWithWork(
                 self.ctx.a,
                 self.successor,
+                self.ctx.successor_constructors,
                 reference.kind,
                 reference.id,
                 &references,
+                self.ctx.left,
             );
             for (references.items) |child| try self.source(child);
         }

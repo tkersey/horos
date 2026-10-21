@@ -2,6 +2,7 @@
 const std = @import("std");
 const p = @import("program.zig");
 const wire = @import("wire.zig");
+const region_admission = @import("region_admission.zig");
 const resource_admission = @import("resource_admission.zig");
 pub const Diagnostic = @import("diagnostic.zig").Diagnostic;
 pub const Origins = @import("diagnostic.zig").Origins;
@@ -17,7 +18,31 @@ pub const Error = wire.Error || std.mem.Allocator.Error || error{
     UnsupportedInstruction,
     InvalidOwnership,
     ValueWorkLimit,
+    RelationLimit,
 };
+
+pub fn spend(work: ?*u64, count: usize) error{RelationLimit}!void {
+    const left = work orelse return;
+    if (count > left.*) return error.RelationLimit;
+    left.* -= @intCast(count);
+}
+
+pub fn schemaWork(work: ?*u64, schema: p.Schema) Error!void {
+    try spend(work, 1);
+    switch (schema) {
+        .enumeration => |items| try spend(work, items.len),
+        .product, .sum => |items| try spend(work, items.len),
+        .internal => |internal| switch (internal) {
+            .computation => |v| {
+                try spend(work, v.parameters.len);
+                try spend(work, v.capture_bound.len);
+            },
+            .resumption => |v| try spend(work, v.capture_bound.len),
+            else => {},
+        },
+        else => {},
+    }
+}
 
 pub const SchemaFacts = struct { minimum: []const u64, exportable: []const bool };
 
@@ -28,17 +53,30 @@ pub fn schemaAt(catalog: []const p.Schema, id: p.Id) Error!p.Schema {
 
 /// Least fixed points admit productive recursive data, never unguarded cycles.
 pub fn schemas(allocator: std.mem.Allocator, catalog: []const p.Schema) Error!SchemaFacts {
+    return schemasWithWork(allocator, catalog, null);
+}
+
+pub fn schemasWithWork(
+    allocator: std.mem.Allocator,
+    catalog: []const p.Schema,
+    work: ?*u64,
+) Error!SchemaFacts {
+    try spend(work, catalog.len);
     const minimum = try allocator.alloc(u64, catalog.len);
     errdefer allocator.free(minimum);
     const exportable = try allocator.alloc(bool, catalog.len);
     errdefer allocator.free(exportable);
     @memset(minimum, std.math.maxInt(u64));
     @memset(exportable, true);
-    for (catalog) |schema| try references(catalog, schema);
+    for (catalog) |schema| {
+        try schemaWork(work, schema);
+        try references(catalog, schema);
+    }
     var changed = true;
     while (changed) {
         changed = false;
         for (catalog, 0..) |schema, index| {
+            try schemaWork(work, schema);
             const width = minimumWidth(schema, minimum);
             const public = exportableSchema(schema, exportable);
             if (width < minimum[index]) {
@@ -154,8 +192,19 @@ pub fn value(
     facts: SchemaFacts,
     literal: p.Literal,
 ) Error!void {
+    return valueWithWork(allocator, catalog, facts, literal, null);
+}
+
+pub fn valueWithWork(
+    allocator: std.mem.Allocator,
+    catalog: []const p.Schema,
+    facts: SchemaFacts,
+    literal: p.Literal,
+    work: ?*u64,
+) Error!void {
     var reader: wire.Reader = .{ .input = literal.bytes };
-    _ = try readValue(allocator, catalog, facts, literal.schema, &reader);
+    _ = readValueMetered(allocator, catalog, facts, literal.schema, &reader, work) catch |err|
+        return if (err == error.ValueWorkLimit) error.RelationLimit else err;
     try reader.finish();
 }
 
@@ -311,6 +360,16 @@ pub fn slotType(slots: []const p.Id, id: p.Id) Error!p.Id {
 }
 
 pub fn arguments(slots: []const p.Id, supplied: []const p.Id, expected: []const p.Id) Error!void {
+    return argumentsWithWork(slots, supplied, expected, null);
+}
+
+pub fn argumentsWithWork(
+    slots: []const p.Id,
+    supplied: []const p.Id,
+    expected: []const p.Id,
+    work: ?*u64,
+) Error!void {
+    try spend(work, supplied.len);
     if (supplied.len != expected.len) return error.TypeMismatch;
     for (
         supplied,
@@ -325,6 +384,18 @@ pub fn edge(
     next: @import("activation.zig").Edge,
     returned: ?p.Id,
 ) Error!void {
+    return edgeWithWork(image, owner, slots, next, returned, null);
+}
+
+pub fn edgeWithWork(
+    image: @import("activation.zig").Program,
+    owner: p.Id,
+    slots: []const p.Id,
+    next: @import("activation.zig").Edge,
+    returned: ?p.Id,
+    work: ?*u64,
+) Error!void {
+    try spend(work, next.assignments.len);
     if (next.block >= image.blocks.len) return error.InvalidReference;
     if (image.blocks[@intCast(next.block)].function != owner) return error.TypeMismatch;
     for (next.assignments) |assignment| {
@@ -344,12 +415,24 @@ pub fn validateInstruction(
     slots: []const p.Id,
     uses: @import("traits.zig").Facts,
 ) Error!void {
+    return validateInstructionWithWork(image, function, instruction, slots, uses, null);
+}
+
+pub fn validateInstructionWithWork(
+    image: anytype,
+    function: p.Id,
+    instruction: anytype,
+    slots: []const p.Id,
+    uses: @import("traits.zig").Facts,
+    work: ?*u64,
+) Error!void {
     switch (instruction.opcode) {
         .resource_pack, .resource_unpack => {
+            try spend(work, instruction.failures.len);
             try instructionFailures(image, instruction, slots);
-            try resource_admission.instruction(image, function, instruction, slots);
+            try resource_admission.instructionWithWork(image, function, instruction, slots, work);
         },
-        else => try validateInstructionShape(image, instruction, slots, uses),
+        else => try validateInstructionShapeWithWork(image, instruction, slots, uses, work),
     }
 }
 
@@ -359,7 +442,29 @@ pub fn validateInstructionShape(
     slots: []const p.Id,
     uses: @import("traits.zig").Facts,
 ) Error!void {
+    return validateInstructionShapeWithWork(image, instruction, slots, uses, null);
+}
+
+pub fn validateInstructionShapeWithWork(
+    image: anytype,
+    instruction: anytype,
+    slots: []const p.Id,
+    uses: @import("traits.zig").Facts,
+    work: ?*u64,
+) Error!void {
+    try spend(work, instruction.operands.len);
+    try spend(work, instruction.failures.len);
     try instructionFailures(image, instruction, slots);
+    return validateShape(image, instruction, slots, uses, work);
+}
+
+fn validateShape(
+    image: anytype,
+    instruction: anytype,
+    slots: []const p.Id,
+    uses: @import("traits.zig").Facts,
+    work: ?*u64,
+) Error!void {
     switch (instruction.opcode) {
         .constant,
         .move,
@@ -382,6 +487,7 @@ pub fn validateInstructionShape(
             image,
             instruction,
             slots,
+            work,
         ),
         .product,
         .field,
@@ -408,11 +514,12 @@ pub fn validateInstructionShape(
         .text_integer,
         .blob_from_byte,
         => try @import("blob_admission.zig").instruction(image, instruction, slots),
-        .cell_new, .cell_get, .cell_set => try @import("region_admission.zig").instruction(
+        .cell_new, .cell_get, .cell_set => try region_admission.instructionWithWork(
             image,
             instruction,
             slots,
             uses,
+            work,
         ),
         .resource_pack, .resource_unpack => _ = try resource_admission.instructionShape(
             image,
@@ -422,7 +529,12 @@ pub fn validateInstructionShape(
     }
 }
 
-fn internalInstruction(image: anytype, instruction: anytype, slots: []const p.Id) Error!void {
+fn internalInstruction(
+    image: anytype,
+    instruction: anytype,
+    slots: []const p.Id,
+    work: ?*u64,
+) Error!void {
     const operands = instruction.operands;
     const result = instruction.result_type;
     switch (instruction.opcode) {
@@ -452,10 +564,11 @@ fn internalInstruction(image: anytype, instruction: anytype, slots: []const p.Id
         },
         .clone_resumption => {
             if (operands.len != 1 or instruction.immediate != 0) return error.InvalidProgram;
-            if (!try @import("contracts.zig").cloneCompatible(
+            if (!try @import("contracts.zig").cloneCompatibleWithWork(
                 image,
                 slots[@intCast(operands[0])],
                 result,
+                work,
             )) return error.InvalidOwnership;
         },
         else => return error.UnsupportedInstruction,

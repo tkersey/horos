@@ -10,6 +10,17 @@ fn spend(left: *u64, count: u64) Error!void {
     if (left.* < count) return error.SpecializationLimit;
     left.* -= count;
 }
+fn readValue(
+    a: std.mem.Allocator,
+    schemas: []const p.Schema,
+    facts: data.admission.SchemaFacts,
+    schema: p.Id,
+    reader: *data.wire.Reader,
+    left: *u64,
+) Error![]const u8 {
+    return data.admission.readValueWithWork(a, schemas, facts, schema, reader, left) catch |err|
+        return if (err == error.ValueWorkLimit) error.SpecializationLimit else err;
+}
 pub const Knowledge = union(enum) {
     dynamic,
     known: p.Literal,
@@ -24,6 +35,42 @@ pub fn ownMany(a: std.mem.Allocator, values: []const Knowledge) Error![]const Kn
 pub fn equal(a: std.mem.Allocator, lhs: Knowledge, rhs: Knowledge) Error!bool {
     return data.record.equalAlloc(Knowledge, a, lhs, rhs);
 }
+pub fn equalWithWork(
+    a: std.mem.Allocator,
+    lhs: Knowledge,
+    rhs: Knowledge,
+    work: ?*u64,
+) Error!bool {
+    const Pair = struct { lhs: Knowledge, rhs: Knowledge };
+    var pending: std.ArrayList(Pair) = .empty;
+    defer pending.deinit(a);
+    try data.admission.spend(work, 1);
+    try pending.append(a, .{ .lhs = lhs, .rhs = rhs });
+    while (pending.pop()) |pair| {
+        try data.admission.spend(work, 1);
+        if (std.meta.activeTag(pair.lhs) != std.meta.activeTag(pair.rhs)) return false;
+        switch (pair.lhs) {
+            .dynamic => {},
+            .known => |left| {
+                const right = pair.rhs.known;
+                if (left.schema != right.schema or left.bytes.len != right.bytes.len) return false;
+                try data.admission.spend(work, left.bytes.len);
+                if (!std.mem.eql(u8, left.bytes, right.bytes)) return false;
+            },
+            .product => |left| {
+                const right = pair.rhs.product;
+                if (left.schema != right.schema or
+                    left.fields.len != right.fields.len) return false;
+                try data.admission.spend(work, left.fields.len);
+                for (left.fields, right.fields) |x, y| try pending.append(
+                    a,
+                    .{ .lhs = x, .rhs = y },
+                );
+            },
+        }
+    }
+    return true;
+}
 const Validation = struct { schema: p.Id, value: Knowledge };
 pub fn validate(
     a: std.mem.Allocator,
@@ -32,16 +79,37 @@ pub fn validate(
     schema: p.Id,
     k: Knowledge,
 ) Error!void {
+    return validateWithWork(a, m, facts, schema, k, null);
+}
+pub fn validateWithWork(
+    a: std.mem.Allocator,
+    m: ast.Module,
+    facts: data.admission.SchemaFacts,
+    schema: p.Id,
+    k: Knowledge,
+    work: ?*u64,
+) Error!void {
     var pending: std.ArrayList(Validation) = .empty;
     defer pending.deinit(a);
     var current: Validation = .{ .schema = schema, .value = k };
     var remaining = true;
     while (remaining) {
+        try data.admission.spend(work, 1);
         switch (current.value) {
             .dynamic => {},
             .known => |literal| {
                 if (literal.schema != current.schema) return error.TypeMismatch;
-                try data.admission.value(a, m.schemas, facts, literal);
+                var reader: data.wire.Reader = .{ .input = literal.bytes };
+                if (work) |left| {
+                    _ = try readValue(a, m.schemas, facts, literal.schema, &reader, left);
+                } else _ = try data.admission.readValue(
+                    a,
+                    m.schemas,
+                    facts,
+                    literal.schema,
+                    &reader,
+                );
+                try reader.finish();
             },
             .product => |v| {
                 if (v.schema != current.schema or current.schema >= m.schemas.len or
@@ -49,6 +117,7 @@ pub fn validate(
                 if (!facts.exportable[@intCast(current.schema)]) return error.InvalidValue;
                 const fields = m.schemas[@intCast(current.schema)].product;
                 if (v.fields.len != fields.len) return error.TypeMismatch;
+                try data.admission.spend(work, fields.len);
                 var index = fields.len;
                 while (index > 0) {
                     index -= 1;
@@ -76,7 +145,7 @@ pub fn field(
             var reader: data.wire.Reader = .{ .input = v.bytes };
             for (shape.product, 0..) |schema, i| {
                 try spend(left, 1);
-                const bytes = try data.admission.readValue(a, m.schemas, facts, schema, &reader);
+                const bytes = try readValue(a, m.schemas, facts, schema, &reader, left);
                 if (i == index) break :blk .{ .known = .{ .schema = schema, .bytes = bytes } };
             }
             unreachable;
@@ -102,6 +171,7 @@ fn encoded(
     fields: []const Knowledge,
     left: *u64,
 ) Error!Knowledge {
+    try spend(left, fields.len);
     var measure: data.wire.Writer = .{};
     if (prefix) |v| try measure.natural(v);
     for (fields) |f| {
@@ -138,6 +208,7 @@ pub fn primitive(
     }
     if (op.opcode == .field) return field(a, m, facts, operands[0], op.immediate, left);
     if (op.opcode == .move) return operands[0];
+    try spend(left, operands.len);
     for (operands) |v| if (v != .known) return .dynamic;
     switch (op.opcode) {
         .product, .field, .move => unreachable,
@@ -264,7 +335,7 @@ fn sequencePrimitive(
     var i: u64 = 0;
     while (i <= index) : (i += 1) {
         try spend(left, 1);
-        const bytes = try data.admission.readValue(a, m.schemas, facts, element, &reader);
+        const bytes = try readValue(a, m.schemas, facts, element, &reader, left);
         if (i == index) return encoded(
             a,
             schema,
@@ -294,6 +365,7 @@ pub fn normalize(a: std.mem.Allocator, value: Knowledge, left: *u64) Error!Knowl
         if (entering) {
             try spend(left, 1);
             if (current == .product) {
+                try spend(left, current.product.fields.len);
                 const fields = try a.alloc(Knowledge, current.product.fields.len);
                 if (fields.len == 0) {
                     current = try encoded(a, current.product.schema, null, fields, left);

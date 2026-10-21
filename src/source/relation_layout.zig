@@ -40,7 +40,7 @@ fn checkedMaps(ctx: *relation.Context, layouts: []const Layout) Error![]const Sc
 
 pub fn apply(ctx: *relation.Context, layouts: []const Layout) Error!void {
     const maps = try checkedMaps(ctx, layouts);
-    const facts = try data.admission.schemas(ctx.a, ctx.before.schemas);
+    const facts = try data.admission.schemasWithWork(ctx.a, ctx.before.schemas, ctx.left);
     const order_facts = try orderFacts(ctx, facts);
     try ctx.spend(ctx.before.schemas.len);
     const changed = try ctx.a.alloc(bool, ctx.before.schemas.len);
@@ -348,8 +348,13 @@ pub fn totalValues(
 const OrderFacts = struct { stable: []const bool, cores: []const u64 };
 fn orderFacts(ctx: *relation.Context, facts: data.admission.SchemaFacts) Error!OrderFacts {
     const stable = try totalValues(ctx, facts, false);
-    const traits = try data.traits.derive(ctx.a, ctx.before.schemas);
-    const cacheable = try @import("value_cache.zig").derive(ctx.a, ctx.before, traits);
+    const traits = try data.traits.deriveWithWork(ctx.a, ctx.before.schemas, ctx.left);
+    const cacheable = try @import("value_cache.zig").deriveWithWork(
+        ctx.a,
+        ctx.before,
+        traits,
+        ctx.left,
+    );
     try ctx.spend(ctx.before.values.len);
     const cores = try ctx.a.alloc(u64, ctx.before.values.len);
     for (ctx.before.values, 0..) |value, i| {

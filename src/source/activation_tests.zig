@@ -956,3 +956,100 @@ test "changed service code cannot retain prior interaction or wait conclusions" 
         try testing.expect(observer.received and observer.unresolved);
     }
 }
+
+test "bounded source admission charges repeated forward schema scans" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const schemas = try a.alloc(p.Schema, 64);
+    const children = try a.alloc(p.Id, schemas.len - 1);
+    for (children, 0..) |*child, index| {
+        child.* = index + 1;
+        schemas[index] = .{ .product = children[index .. index + 1] };
+    }
+    schemas[schemas.len - 1] = .u64;
+    var small: u64 = 256;
+    try testing.expectError(
+        error.RelationLimit,
+        data.admission.schemasWithWork(a, schemas, &small),
+    );
+    var enough: u64 = 20_000;
+    const facts = try data.admission.schemasWithWork(a, schemas, &enough);
+    try testing.expectEqual(8, facts.minimum[0]);
+    schemas[schemas.len - 1] = .{ .internal = .{ .abstract_resource = 0 } };
+    small = 256;
+    try testing.expectError(error.RelationLimit, data.traits.deriveWithWork(a, schemas, &small));
+    enough = 20_000;
+    const traits = try data.traits.deriveWithWork(a, schemas, &enough);
+    try testing.expect(!traits.copy[0]);
+}
+
+test "bounded source admission preserves empty schema catalogs" {
+    var work: u64 = 0;
+    const facts = try data.admission.schemasWithWork(testing.allocator, &.{}, &work);
+    defer testing.allocator.free(facts.minimum);
+    defer testing.allocator.free(facts.exportable);
+    const traits = try data.traits.deriveWithWork(testing.allocator, &.{}, &work);
+    defer testing.allocator.free(traits.copy);
+    defer testing.allocator.free(traits.drop);
+    defer testing.allocator.free(traits.clone);
+    try testing.expectEqual(0, work);
+}
+
+fn expandedReadModule(b: *source.Builder, depth: usize) !source.Module {
+    const original = try repeatedCellReadModule(b);
+    var read: p.Id = undefined;
+    for (original.values, 0..) |value, index| {
+        if (value.expression == .primitive and value.expression.primitive.opcode == .cell_get) {
+            read = index;
+            break;
+        }
+    }
+    const schema = original.values[@intCast(read)].schema;
+    const failure = try b.failureLiteral(try b.constant(void, {}));
+    var expression = read;
+    for (0..depth) |_| expression = try b.value(.{
+        .schema = schema,
+        .expression = .{ .primitive = .{
+            .opcode = .integer_add,
+            .operands = &.{ expression, expression },
+            .failures = &.{.{ .kind = .arithmetic_overflow, .value = failure }},
+        } },
+    });
+    for (b.terms.items) |*term| {
+        if (term.* == .value and term.value == read) term.value = expression;
+    }
+    return b.module(original.entry, original.failure);
+}
+
+test "bounded source admission stops noncacheable DAG emission before expansion" {
+    var b = source.Builder.init(testing.allocator);
+    defer b.deinit();
+    const module = try expandedReadModule(&b, 20);
+    var work: u64 = 20_000;
+    try testing.expectError(
+        error.RelationLimit,
+        source.admitWithWork(testing.allocator, module, &work),
+    );
+}
+
+test "bounded source admission accepts sufficient work and exposes admitted constructors" {
+    var b = source.Builder.init(testing.allocator);
+    defer b.deinit();
+    const module = try expandedReadModule(&b, 2);
+    const Observer = struct {
+        called: bool = false,
+        fn receive(context: *anyopaque, program: ir.Program, facts: check.Facts) source.Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.called = program.constructors.len > 0 and facts.functions.len > 0;
+        }
+    };
+    var observer: Observer = .{};
+    var work: u64 = 1_000_000;
+    try source.admitObservedWithWork(testing.allocator, module, &work, .{
+        .context = &observer,
+        .receive = Observer.receive,
+    });
+    try testing.expect(observer.called);
+    try testing.expect(work < 1_000_000);
+}

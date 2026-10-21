@@ -98,6 +98,7 @@ fn FlowFor(comptime open: bool) type {
     };
     return struct {
         const Self = @This();
+        work: ?*u64 = null,
         allocator: std.mem.Allocator,
         program: Program,
         control: *const provenance.Analysis,
@@ -118,10 +119,11 @@ fn FlowFor(comptime open: bool) type {
                 self.import_summaries.len != 0) return self.program.blocks.len + function;
             return start;
         }
-        fn imported(self: Self, start: p.Id) ?@import("borrow_contract.zig").Summary {
+        fn imported(self: Self, start: p.Id) a.Error!?@import("borrow_contract.zig").Summary {
             if (!open) return null;
             if (start < self.program.blocks.len) return null;
             const function = start - self.program.blocks.len;
+            try a.spend(self.work, self.import_summaries.len);
             for (self.import_summaries) |summary| if (summary.function == function) return summary;
             return null;
         }
@@ -130,6 +132,7 @@ fn FlowFor(comptime open: bool) type {
             function: p.Id,
             source: @import("borrow_contract.zig").Projection,
         ) a.Error!Source {
+            try a.spend(self.work, 1);
             if (source.source == .ambient) {
                 if (source.path.len != 0) return error.InvalidReference;
                 return .{ .ambient = source.source.ambient };
@@ -138,6 +141,7 @@ fn FlowFor(comptime open: bool) type {
             if (source.source.input >= parameters.len) return error.InvalidReference;
             var schema = parameters.at(@intCast(source.source.input));
             for (source.path) |step| {
+                try a.spend(self.work, 1);
                 switch (step) {
                     .environment => |v| if (v.constructor >= self.program.constructors.len)
                         return error.InvalidReference,
@@ -154,6 +158,7 @@ fn FlowFor(comptime open: bool) type {
             var path: usize = 0;
             var i = source.path.len;
             while (i != 0) {
+                try a.spend(self.work, 1);
                 i -= 1;
                 path = try self.prepend(source.path[i], path);
             }
@@ -187,7 +192,20 @@ fn FlowFor(comptime open: bool) type {
             exportable: []const bool,
             control: *const provenance.Analysis,
         ) a.Error!Self {
+            return initWithControlAndWork(allocator, program, exportable, control, null);
+        }
+
+        pub fn initWithControlAndWork(
+            allocator: std.mem.Allocator,
+            program: Program,
+            exportable: []const bool,
+            control: *const provenance.Analysis,
+            work: ?*u64,
+        ) a.Error!Self {
+            try a.spend(work, 1);
+            try a.spend(work, program.blocks.len);
             var self: Self = .{
+                .work = work,
                 .allocator = allocator,
                 .program = program,
                 .control = control,
@@ -197,39 +215,46 @@ fn FlowFor(comptime open: bool) type {
             };
             @memset(self.incoming, .empty);
             @memset(self.outgoing, .empty);
-            for (program.blocks, 0..) |block, id| switch (block.terminator) {
-                .jump, .yield_value => |edge| try self.link(id, edge, null),
-                .branch => |branch| {
-                    try self.link(id, branch.when_true, null);
-                    try self.link(id, branch.when_false, null);
-                },
-                .switch_variant => |selected| for (
-                    selected.cases,
-                    0..,
-                ) |edge, variant| try self.link(id, edge, variant),
-                .unpack_product => |unpack| {
-                    const target = unpack.next.block;
-                    try self.outgoing[id].append(allocator, target);
-                    try self.incoming[@intCast(target)].append(allocator, .{
-                        .block = id,
-                        .edge = unpack.next,
-                    });
-                },
-                .call => |v| try self.link(id, v.next, null),
-                .perform => |v| try self.link(id, v.next, null),
-                .apply => |v| try self.link(id, v.next, null),
-                .handle => |v| try self.link(id, v.next, null),
-                .resume_value => |v| try self.link(id, v.next, null),
-                .resume_with => |v| try self.link(id, v.next, null),
-                .resume_computation => |v| try self.link(id, v.next, null),
-                .dispose => |v| try self.link(id, v.next, null),
-                .protect => |v| try self.link(id, v.next, null),
-                .with_region => |v| try self.link(id, v.next, null),
-                .return_value, .fail => {},
-            };
+            for (program.blocks, 0..) |block, id| {
+                try a.spend(work, 1);
+                switch (block.terminator) {
+                    .jump, .yield_value => |edge| try self.link(id, edge, null),
+                    .branch => |branch| {
+                        try self.link(id, branch.when_true, null);
+                        try self.link(id, branch.when_false, null);
+                    },
+                    .switch_variant => |selected| for (
+                        selected.cases,
+                        0..,
+                    ) |edge, variant| {
+                        try a.spend(work, 1);
+                        try self.link(id, edge, variant);
+                    },
+                    .unpack_product => |unpack| {
+                        const target = unpack.next.block;
+                        try self.outgoing[id].append(allocator, target);
+                        try self.incoming[@intCast(target)].append(allocator, .{
+                            .block = id,
+                            .edge = unpack.next,
+                        });
+                    },
+                    .call => |v| try self.link(id, v.next, null),
+                    .perform => |v| try self.link(id, v.next, null),
+                    .apply => |v| try self.link(id, v.next, null),
+                    .handle => |v| try self.link(id, v.next, null),
+                    .resume_value => |v| try self.link(id, v.next, null),
+                    .resume_with => |v| try self.link(id, v.next, null),
+                    .resume_computation => |v| try self.link(id, v.next, null),
+                    .dispose => |v| try self.link(id, v.next, null),
+                    .protect => |v| try self.link(id, v.next, null),
+                    .with_region => |v| try self.link(id, v.next, null),
+                    .return_value, .fail => {},
+                }
+            }
             return self;
         }
         fn link(self: *Self, from: p.Id, edge: Edge, variant: ?usize) a.Error!void {
+            try a.spend(self.work, 1);
             try self.incoming[@intCast(edge.block)].append(
                 self.allocator,
                 .{ .block = from, .edge = edge, .variant = variant },
@@ -237,6 +262,7 @@ fn FlowFor(comptime open: bool) type {
             try self.outgoing[@intCast(from)].append(self.allocator, edge.block);
         }
         fn prepend(self: *Self, step: Step, tail: usize) a.Error!usize {
+            try a.spend(self.work, 1);
             if (step == .outer and tail != 0 and std.meta.eql(
                 self.paths.items[tail - 1].step,
                 step,
@@ -244,10 +270,13 @@ fn FlowFor(comptime open: bool) type {
             for (
                 self.paths.items,
                 0..,
-            ) |path, index| if (path.tail == tail and std.meta.eql(
-                path.step,
-                step,
-            )) return index + 1;
+            ) |path, index| {
+                try a.spend(self.work, 1);
+                if (path.tail == tail and std.meta.eql(
+                    path.step,
+                    step,
+                )) return index + 1;
+            }
             try self.paths.append(self.allocator, .{ .step = step, .tail = tail });
             return self.paths.items.len;
         }
@@ -346,6 +375,7 @@ fn FlowFor(comptime open: bool) type {
         // Widening to the whole subtree terminates recursive selector growth without
         // dropping any dependency. Products before the cycle remain field-sensitive.
         fn normalizePath(self: *Self, schema: p.Id, path: usize) a.Error!usize {
+            try a.spend(self.work, 1);
             var steps: std.ArrayList(Step) = .empty;
             defer steps.deinit(self.allocator);
             var seen: std.ArrayList(p.Id) = .empty;
@@ -353,8 +383,10 @@ fn FlowFor(comptime open: bool) type {
             var current = schema;
             var cursor = path;
             while (cursor != 0) {
+                try a.spend(self.work, 1);
                 const item = self.paths.items[cursor - 1];
                 if (item.step != .outer) {
+                    try a.spend(self.work, seen.items.len);
                     if (std.mem.indexOfScalar(p.Id, seen.items, current) != null) break;
                     try seen.append(self.allocator, current);
                 }
@@ -366,13 +398,15 @@ fn FlowFor(comptime open: bool) type {
             var result: usize = 0;
             var index = steps.items.len;
             while (index != 0) {
+                try a.spend(self.work, 1);
                 index -= 1;
                 result = try self.prepend(steps.items[index], result);
             }
             return result;
         }
         fn checkStart(self: *Self, start: p.Id, position: ?usize) a.Error!void {
-            if (self.imported(start) != null) {
+            try a.spend(self.work, 1);
+            if (try self.imported(start) != null) {
                 if (position != null) return error.InvalidReference;
                 return;
             }
@@ -388,11 +422,13 @@ fn FlowFor(comptime open: bool) type {
             }
         }
         fn query(self: *Self, start: p.Id, path: usize) a.Error!usize {
+            try a.spend(self.work, 1);
             return self.queryFrom(start, path, null);
         }
         fn queryFrom(self: *Self, start: p.Id, path: usize, position: ?usize) a.Error!usize {
+            try a.spend(self.work, 1);
             try self.checkStart(start, position);
-            const owner = if (self.imported(
+            const owner = if (try self.imported(
                 start,
             )) |summary| summary.function else self.program.blocks[
                 @intCast(start)
@@ -402,13 +438,15 @@ fn FlowFor(comptime open: bool) type {
             for (
                 self.queries.items,
                 0..,
-            ) |item, index|
+            ) |item, index| {
+                try a.spend(self.work, 1);
                 if (item.start == start and
                     item.position == position and
                     item.path == selected and
                     item.target == null and
                     item.writes == null)
                     return index;
+            }
             try self.queries.append(
                 self.allocator,
                 .{ .start = start, .position = position, .path = selected },
@@ -417,23 +455,28 @@ fn FlowFor(comptime open: bool) type {
             return self.queries.items.len - 1;
         }
         pub fn returned(self: *Self, start: p.Id) a.Error![]const Source {
+            try a.spend(self.work, 1);
             return self.returnedAt(start, 0);
         }
         pub fn returnedAt(self: *Self, start: p.Id, path: usize) a.Error![]const Source {
+            try a.spend(self.work, 1);
             const index = try self.query(start, path);
             try self.settle();
             return self.queries.items[index].sources.items;
         }
         fn origin(self: *Self, start: p.Id, target: Trace, position: ?usize) a.Error!usize {
+            try a.spend(self.work, 1);
             for (
                 self.queries.items,
                 0..,
-            ) |item, index|
+            ) |item, index| {
+                try a.spend(self.work, 1);
                 if (item.start == start and
                     item.position == position and
                     item.target != null and
                     std.meta.eql(item.target.?, target))
                     return index;
+            }
             try self.queries.append(
                 self.allocator,
                 .{ .start = start, .position = position, .path = 0, .target = target },
@@ -442,9 +485,11 @@ fn FlowFor(comptime open: bool) type {
             return self.queries.items.len - 1;
         }
         fn writeQuery(self: *Self, start: p.Id, schema: p.Id, path: usize) a.Error!usize {
+            try a.spend(self.work, 1);
             return self.writeQueryFrom(start, schema, path, null);
         }
         pub fn written(self: *Self, start: p.Id, schema: p.Id) a.Error![]const Source {
+            try a.spend(self.work, 1);
             const index = try self.writeQuery(start, schema, 0);
             try self.settle();
             return self.queries.items[index].sources.items;
@@ -456,16 +501,19 @@ fn FlowFor(comptime open: bool) type {
             path: usize,
             position: ?usize,
         ) a.Error!usize {
+            try a.spend(self.work, 1);
             try self.checkStart(start, position);
             for (
                 self.queries.items,
                 0..,
-            ) |item, index|
+            ) |item, index| {
+                try a.spend(self.work, 1);
                 if (item.start == start and
                     item.position == position and
                     item.writes == schema and
                     item.path == path)
                     return index;
+            }
             try self.queries.append(
                 self.allocator,
                 .{ .start = start, .position = position, .path = path, .writes = schema },
@@ -474,45 +522,63 @@ fn FlowFor(comptime open: bool) type {
             return self.queries.items.len - 1;
         }
         fn settle(self: *Self) a.Error!void {
+            try a.spend(self.work, 1);
             // Every new query or fact marks the analysis dirty. A failed pass must
             // remain dirty so a retry cannot publish a partially settled result.
             errdefer self.changed = true;
             while (self.changed) {
+                try a.spend(self.work, 1);
                 self.changed = false;
                 var current: usize = 0;
-                while (current < self.queries.items.len) : (current += 1) try self.solve(current);
+                while (current < self.queries.items.len) : (current += 1) {
+                    try a.spend(self.work, 1);
+                    try self.solve(current);
+                }
                 current = 0;
-                while (current < self.requirements.items.len) : (current += 1)
+                while (current < self.requirements.items.len) : (current += 1) {
+                    try a.spend(self.work, 1);
                     try self.solveRequirements(current);
+                }
             }
         }
         fn addSource(self: *Self, query_index: usize, source: Source) a.Error!void {
-            for (self.queries.items[query_index].sources.items) |existing| if (std.meta.eql(
-                existing,
-                source,
-            )) return;
+            try a.spend(self.work, 1);
+            for (self.queries.items[query_index].sources.items) |existing| {
+                try a.spend(self.work, 1);
+                if (std.meta.eql(
+                    existing,
+                    source,
+                )) return;
+            }
             try self.queries.items[query_index].sources.append(self.allocator, source);
             self.changed = true;
         }
         fn requirementsQuery(self: *Self, start: p.Id) a.Error!usize {
+            try a.spend(self.work, 1);
             return self.requirementsQueryFrom(start, null);
         }
         fn requirementsQueryFrom(self: *Self, start: p.Id, position: ?usize) a.Error!usize {
+            try a.spend(self.work, 1);
             try self.checkStart(start, position);
             for (
                 self.requirements.items,
                 0..,
-            ) |item, index| if (item.start == start and item.position == position) return index;
+            ) |item, index| {
+                try a.spend(self.work, 1);
+                if (item.start == start and item.position == position) return index;
+            }
             try self.requirements.append(self.allocator, .{ .start = start, .position = position });
             self.changed = true;
             return self.requirements.items.len - 1;
         }
         pub fn required(self: *Self, start: p.Id) a.Error![]const Constraint {
+            try a.spend(self.work, 1);
             const index = try self.requirementsQuery(start);
             try self.settle();
             return self.requirements.items[index].constraints.items;
         }
         pub fn requiredFrom(self: *Self, start: p.Id, position: usize) a.Error![]const Constraint {
+            try a.spend(self.work, 1);
             const index = try self.requirementsQueryFrom(start, position);
             try self.settle();
             return self.requirements.items[index].constraints.items;
@@ -523,11 +589,13 @@ fn FlowFor(comptime open: bool) type {
             position: usize,
             path: usize,
         ) a.Error![]const Source {
+            try a.spend(self.work, 1);
             const index = try self.queryFrom(start, path, position);
             try self.settle();
             return self.queries.items[index].sources.items;
         }
-        fn reenters(self: Self, start: p.Id, live: []const bool) bool {
+        fn reenters(self: Self, start: p.Id, live: []const bool) a.Error!bool {
+            try a.spend(self.work, self.incoming[@intCast(start)].items.len);
             for (self.incoming[
                 @intCast(start)
             ].items) |incoming| if (live[
@@ -542,8 +610,8 @@ fn FlowFor(comptime open: bool) type {
             block: p.Id,
             ordinal: usize,
             live: []const bool,
-        ) bool {
-            return position == null or block != start or ordinal >= position.? or self.reenters(
+        ) a.Error!bool {
+            return position == null or block != start or ordinal >= position.? or try self.reenters(
                 start,
                 live,
             );
@@ -555,11 +623,15 @@ fn FlowFor(comptime open: bool) type {
             owner: Source,
             bound: Bound,
         ) a.Error!void {
+            try a.spend(self.work, 1);
             const constraint: Constraint = .{ .value = value, .owner = owner, .bound = bound };
-            for (self.requirements.items[index].constraints.items) |item| if (std.meta.eql(
-                item,
-                constraint,
-            )) return;
+            for (self.requirements.items[index].constraints.items) |item| {
+                try a.spend(self.work, 1);
+                if (std.meta.eql(
+                    item,
+                    constraint,
+                )) return;
+            }
             try self.requirements.items[index].constraints.append(self.allocator, constraint);
             self.changed = true;
         }
@@ -571,6 +643,7 @@ fn FlowFor(comptime open: bool) type {
             owner: p.Id,
             bound: Bound,
         ) a.Error!void {
+            try a.spend(self.work, 1);
             return self.relationAt(index, block, value, owner, bound, null);
         }
         fn relationAt(
@@ -582,6 +655,7 @@ fn FlowFor(comptime open: bool) type {
             bound: Bound,
             position: ?usize,
         ) a.Error!void {
+            try a.spend(self.work, 1);
             if (self.exportable[@intCast(self.slotType(block, value))]) return;
             const start = self.requirements.items[index].start;
             const values = try self.origin(
@@ -594,11 +668,16 @@ fn FlowFor(comptime open: bool) type {
                 .{ .block = block, .slot = owner, .path = 0, .position = position },
                 self.requirements.items[index].position,
             );
-            for (self.queries.items[values].sources.items) |source|
-                for (self.queries.items[owners].sources.items) |destination|
+            for (self.queries.items[values].sources.items) |source| {
+                try a.spend(self.work, 1);
+                for (self.queries.items[owners].sources.items) |destination| {
+                    try a.spend(self.work, 1);
                     try self.addConstraint(index, source, destination, bound);
+                }
+            }
         }
         fn mapInput(self: *Self, binding: Binding, source: Source) a.Error!Mapped {
+            try a.spend(self.work, 1);
             if (source.ambient) |ambient| return self.mapAmbientInput(binding, ambient);
             if (binding.operation) |op| return self.mapOperationInput(binding, source, op);
             const captures = if (binding.constructor) |id| self.program.scopes.captures[
@@ -652,6 +731,7 @@ fn FlowFor(comptime open: bool) type {
             source: Source,
             op: Perform,
         ) a.Error!Mapped {
+            try a.spend(self.work, 1);
             const handler = self.program.handlers[@intCast(binding.handler.?)];
             if (source.parameter < handler.state.len) return Mapped.one(.{
                 .block = binding.block,
@@ -701,6 +781,7 @@ fn FlowFor(comptime open: bool) type {
             });
         }
         fn mapSuppliedInput(self: *Self, binding: Binding, source: Source) a.Error!Mapped {
+            try a.spend(self.work, 1);
             if (source.path != 0) {
                 const path = self.paths.items[source.path - 1];
                 if (path.step == .outer) return Mapped.ambient(binding.block, path.step.outer);
@@ -736,6 +817,7 @@ fn FlowFor(comptime open: bool) type {
             return .{ .fresh = binding.fresh orelse return self.rejected(binding) };
         }
         fn mapAmbientInput(self: *Self, binding: Binding, ambient: Ambient) a.Error!Mapped {
+            try a.spend(self.work, 1);
             if (binding.resumed) |token| return Mapped.one(.{
                 .block = binding.block,
                 .slot = token,
@@ -750,7 +832,9 @@ fn FlowFor(comptime open: bool) type {
             return Mapped.one(.{ .block = binding.block, .ambient = ambient });
         }
         fn transferRequirements(self: *Self, index: usize, binding: Binding) a.Error!void {
+            try a.spend(self.work, 1);
             const called = try self.requirementsQuery(self.entry(binding.function));
+            try a.spend(self.work, self.requirements.items[called].constraints.items.len);
             const pairs = try self.allocator.dupe(
                 Constraint,
                 self.requirements.items[called].constraints.items,
@@ -758,6 +842,7 @@ fn FlowFor(comptime open: bool) type {
             defer self.allocator.free(pairs);
             const start = self.requirements.items[index].start;
             for (pairs) |pair| {
+                try a.spend(self.work, 1);
                 const values = try self.mapInput(binding, pair.value);
                 const owners = try self.mapOwner(binding, pair.owner, pair.bound);
                 if (values.fresh) |component| {
@@ -765,14 +850,17 @@ fn FlowFor(comptime open: bool) type {
                     // region ancestry. A constraint on the other component cannot
                     // make a fresh value escape its owner.
                     for (owners.items[0..owners.len]) |owner| {
-                        if (self.selectedComponent(
+                        try a.spend(self.work, 1);
+                        if (try self.selectedComponent(
                             owner,
                         )) |selected| if (selected != component) continue;
                         return self.rejected(binding);
                     }
                 }
-                for (values.items[0..values.len]) |value_trace|
+                for (values.items[0..values.len]) |value_trace| {
+                    try a.spend(self.work, 1);
                     for (owners.items[0..owners.len]) |owner_trace| {
+                        try a.spend(self.work, 1);
                         const v = try self.origin(
                             start,
                             value_trace,
@@ -783,13 +871,19 @@ fn FlowFor(comptime open: bool) type {
                             owner_trace,
                             self.requirements.items[index].position,
                         );
-                        for (self.queries.items[v].sources.items) |value|
-                            for (self.queries.items[o].sources.items) |owner|
+                        for (self.queries.items[v].sources.items) |value| {
+                            try a.spend(self.work, 1);
+                            for (self.queries.items[o].sources.items) |owner| {
+                                try a.spend(self.work, 1);
                                 try self.addConstraint(index, value, owner, pair.bound);
-                    };
+                            }
+                        }
+                    }
+                }
             }
         }
         fn mapOwner(self: *Self, binding: Binding, source: Source, bound: Bound) a.Error!Mapped {
+            try a.spend(self.work, 1);
             const mapped = try self.mapInput(binding, source);
             // A clause executes outside the capability's delimiter. Explicit
             // ambient/resumed projections already denote a context; a newly bound
@@ -801,10 +895,11 @@ fn FlowFor(comptime open: bool) type {
                 return Mapped.ambient(binding.block, null);
             return mapped;
         }
-        fn selectedComponent(self: Self, trace: Trace) ?Ambient {
+        fn selectedComponent(self: Self, trace: Trace) a.Error!?Ambient {
             if (trace.ambient) |selected| return selected;
             var cursor = trace.path;
             while (cursor != 0) {
+                try a.spend(self.work, 1);
                 const path = self.paths.items[cursor - 1];
                 switch (path.step) {
                     .outer, .resumed => |selected| return selected,
@@ -857,14 +952,18 @@ fn FlowFor(comptime open: bool) type {
             arguments: []const p.Id,
             supplied: usize,
         ) a.Error!void {
+            try a.spend(self.work, 1);
             const schema = self.slotType(block, computation_slot);
             for (
                 self.program.constructors,
                 0..,
-            ) |constructor, id| if (constructor.schema == schema) try self.transferRequirements(
-                index,
-                self.bodyBinding(block, computation_slot, arguments, supplied, id),
-            );
+            ) |constructor, id| {
+                try a.spend(self.work, 1);
+                if (constructor.schema == schema) try self.transferRequirements(
+                    index,
+                    self.bodyBinding(block, computation_slot, arguments, supplied, id),
+                );
+            }
         }
         fn returnInput(
             self: *Self,
@@ -872,6 +971,7 @@ fn FlowFor(comptime open: bool) type {
             block: p.Id,
             source: Source,
         ) a.Error!void {
+            try a.spend(self.work, 1);
             const term = self.program.blocks[@intCast(block)].terminator;
             const state = switch (term) {
                 inline .handle, .resume_with => |v| v.state,
@@ -909,29 +1009,37 @@ fn FlowFor(comptime open: bool) type {
             source: Source,
             position: ?usize,
         ) a.Error!std.ArrayList(Source) {
+            try a.spend(self.work, 1);
             var pending: std.ArrayList(Trace) = .empty;
             defer pending.deinit(self.allocator);
             try self.returnInput(&pending, block, source);
             var result: std.ArrayList(Source) = .empty;
+            errdefer result.deinit(self.allocator);
             for (pending.items) |trace| {
+                try a.spend(self.work, 1);
                 const query_id = try self.origin(start, trace, position);
-                try result.appendSlice(self.allocator, self.queries.items[query_id].sources.items);
+                const row = self.queries.items[query_id].sources.items;
+                try a.spend(self.work, row.len);
+                try result.appendSlice(self.allocator, row);
             }
             return result;
         }
         fn returnRequirements(self: *Self, index: usize, block: p.Id) a.Error!void {
+            try a.spend(self.work, 1);
             const handler_id = switch (self.program.blocks[@intCast(block)].terminator) {
                 inline .handle, .resume_with => |v| v.handler,
                 else => return error.InvalidProgram,
             };
             const handler = self.program.handlers[@intCast(handler_id)];
             const query_id = try self.requirementsQuery(self.entry(handler.return_function));
+            try a.spend(self.work, self.requirements.items[query_id].constraints.items.len);
             const constraints = try self.allocator.dupe(
                 Constraint,
                 self.requirements.items[query_id].constraints.items,
             );
             defer self.allocator.free(constraints);
             for (constraints) |constraint| {
+                try a.spend(self.work, 1);
                 var values = try self.returnInputs(
                     self.requirements.items[index].start,
                     block,
@@ -946,22 +1054,32 @@ fn FlowFor(comptime open: bool) type {
                     self.requirements.items[index].position,
                 );
                 defer owners.deinit(self.allocator);
-                for (values.items) |value| for (owners.items) |owner| try self.addConstraint(
-                    index,
-                    value,
-                    owner,
-                    constraint.bound,
-                );
+                for (values.items) |value| {
+                    try a.spend(self.work, 1);
+                    for (owners.items) |owner| {
+                        try a.spend(self.work, 1);
+                        try self.addConstraint(
+                            index,
+                            value,
+                            owner,
+                            constraint.bound,
+                        );
+                    }
+                }
             }
         }
         fn solveRequirements(self: *Self, index: usize) a.Error!void {
-            if (self.imported(self.requirements.items[index].start)) |summary| {
-                for (summary.requirements) |pair| try self.addConstraint(
-                    index,
-                    try self.contractSource(summary.function, pair.value),
-                    try self.contractSource(summary.function, pair.owner),
-                    pair.bound,
-                );
+            try a.spend(self.work, 1);
+            if (try self.imported(self.requirements.items[index].start)) |summary| {
+                for (summary.requirements) |pair| {
+                    try a.spend(self.work, 1);
+                    try self.addConstraint(
+                        index,
+                        try self.contractSource(summary.function, pair.value),
+                        try self.contractSource(summary.function, pair.owner),
+                        pair.bound,
+                    );
+                }
                 return;
             }
             var arena = std.heap.ArenaAllocator.init(self.allocator);
@@ -972,31 +1090,38 @@ fn FlowFor(comptime open: bool) type {
             );
             const live = reach.membership;
             for (reach.blocks) |id| {
+                try a.spend(self.work, 1);
                 const block = self.program.blocks[@intCast(id)];
                 for (
                     block.instructions,
                     0..,
-                ) |op, position| if (self.futureInstruction(
-                    self.requirements.items[index].start,
-                    self.requirements.items[index].position,
-                    id,
-                    position,
-                    live,
-                )) switch (op.opcode) {
-                    .cell_new, .cell_set => try self.relationAt(
-                        index,
+                ) |op, position| {
+                    try a.spend(self.work, 1);
+                    if (try self.futureInstruction(
+                        self.requirements.items[index].start,
+                        self.requirements.items[index].position,
                         id,
-                        op.operands[1],
-                        op.operands[0],
-                        .region,
                         position,
-                    ),
-                    else => {},
-                };
+                        live,
+                    )) {
+                        switch (op.opcode) {
+                            .cell_new, .cell_set => try self.relationAt(
+                                index,
+                                id,
+                                op.operands[1],
+                                op.operands[0],
+                                .region,
+                                position,
+                            ),
+                            else => {},
+                        }
+                    }
+                }
                 try self.terminatorRequirements(index, id, block.terminator);
             }
         }
         fn scopedRequirements(self: *Self, index: usize, id: p.Id, term: anytype) a.Error!void {
+            try a.spend(self.work, 1);
             switch (term) {
                 .protect => |v| {
                     try self.bodyRequirements(
@@ -1030,39 +1155,50 @@ fn FlowFor(comptime open: bool) type {
             }
         }
         fn operationRequirements(self: *Self, index: usize, id: p.Id, term: anytype) a.Error!void {
+            try a.spend(self.work, 1);
             switch (term) {
                 .perform => |v| if (v.capability) |capability| {
                     var captures = false;
-                    const targets = self.control.targets(
+                    const targets = try self.control.targetsWithWork(
                         .{ .block = id, .role = .operation },
                         v.effect,
                     );
-                    for (targets) |target| captures = captures or target.retains;
+                    for (targets) |target| {
+                        try a.spend(self.work, 1);
+                        captures = captures or target.retains;
+                    }
                     if (captures) {
                         try self.relation(index, id, v.payload, capability, .clause);
-                        for (v.bodies) |slot| try self.relation(
+                        for (v.bodies) |slot| {
+                            try a.spend(self.work, 1);
+                            try self.relation(
+                                index,
+                                id,
+                                slot,
+                                capability,
+                                .clause,
+                            );
+                        }
+                    }
+                    for (targets) |target| {
+                        try a.spend(self.work, 1);
+                        try self.transferRequirements(
                             index,
-                            id,
-                            slot,
-                            capability,
-                            .clause,
+                            .{
+                                .block = id,
+                                .function = target.function,
+                                .arguments = &.{},
+                                .handler = target.handler,
+                                .operation = v,
+                            },
                         );
                     }
-                    for (targets) |target| try self.transferRequirements(
-                        index,
-                        .{
-                            .block = id,
-                            .function = target.function,
-                            .arguments = &.{},
-                            .handler = target.handler,
-                            .operation = v,
-                        },
-                    );
                 },
                 else => unreachable,
             }
         }
         fn terminatorRequirements(self: *Self, index: usize, id: p.Id, term: anytype) a.Error!void {
+            try a.spend(self.work, 1);
             switch (term) {
                 .call => |v| try self.transferRequirements(
                     index,
@@ -1093,13 +1229,16 @@ fn FlowFor(comptime open: bool) type {
                 ),
                 .resume_with => |v| {
                     try self.relation(index, id, v.argument, v.resumption, .capture);
-                    for (v.state) |slot| try self.relation(
-                        index,
-                        id,
-                        slot,
-                        v.resumption,
-                        .capture,
-                    );
+                    for (v.state) |slot| {
+                        try a.spend(self.work, 1);
+                        try self.relation(
+                            index,
+                            id,
+                            slot,
+                            v.resumption,
+                            .capture,
+                        );
+                    }
                     try self.returnRequirements(index, id);
                 },
                 .resume_computation => |v| {
@@ -1116,6 +1255,7 @@ fn FlowFor(comptime open: bool) type {
             slot: p.Id,
             path: usize,
         ) a.Error!void {
+            try a.spend(self.work, 1);
             return self.pushAt(pending, block, slot, path, null);
         }
         fn pushAt(
@@ -1126,11 +1266,13 @@ fn FlowFor(comptime open: bool) type {
             path: usize,
             position: ?usize,
         ) a.Error!void {
+            try a.spend(self.work, 1);
             const schema = self.slotType(block, slot);
             const selected = try self.normalizePath(schema, path);
             var current = schema;
             var cursor = selected;
             while (cursor != 0) {
+                try a.spend(self.work, 1);
                 const item = self.paths.items[cursor - 1];
                 current = self.selectedSchema(current, item.step) orelse return;
                 cursor = item.tail;
@@ -1142,6 +1284,7 @@ fn FlowFor(comptime open: bool) type {
             );
         }
         fn pushTrace(self: *Self, pending: *std.ArrayList(Trace), trace: Trace) a.Error!void {
+            try a.spend(self.work, 1);
             if (trace.ambient != null or trace.body_result)
                 return pending.append(self.allocator, trace);
             try self.pushAt(pending, trace.block, trace.slot, trace.path, trace.position);
@@ -1152,19 +1295,27 @@ fn FlowFor(comptime open: bool) type {
             binding: Binding,
             index: usize,
         ) a.Error!void {
+            try a.spend(self.work, 1);
+            try a.spend(self.work, self.queries.items[index].sources.items.len);
             const sources = try self.allocator.dupe(
                 Source,
                 self.queries.items[index].sources.items,
             );
             defer self.allocator.free(sources);
             for (sources) |source| {
+                try a.spend(self.work, 1);
                 const mapped = try self.mapInput(binding, source);
                 if (mapped.fresh != null) return self.rejected(binding);
-                for (mapped.items[0..mapped.len]) |trace| try self.pushTrace(pending, trace);
+                for (mapped.items[0..mapped.len]) |trace| {
+                    try a.spend(self.work, 1);
+                    try self.pushTrace(pending, trace);
+                }
             }
         }
         const Reachable = struct { membership: []const bool, blocks: []const p.Id };
         fn reachable(self: Self, start: p.Id, allocator: std.mem.Allocator) a.Error!Reachable {
+            try a.spend(self.work, 1);
+            try a.spend(self.work, self.program.blocks.len);
             const visited = try allocator.alloc(bool, self.program.blocks.len);
             @memset(visited, false);
             visited[@intCast(start)] = true;
@@ -1173,15 +1324,25 @@ fn FlowFor(comptime open: bool) type {
             try pending.append(allocator, start);
             var next: usize = 0;
             while (next < pending.items.len) : (next += 1) {
+                try a.spend(self.work, 1);
                 const from = pending.items[next];
                 for (self.outgoing[@intCast(from)].items) |target| {
+                    try a.spend(self.work, 1);
                     if (visited[@intCast(target)]) continue;
                     visited[@intCast(target)] = true;
                     try pending.append(allocator, target);
                 }
             }
-            const blocks = try pending.toOwnedSlice(allocator);
-            std.mem.sort(p.Id, blocks, {}, std.sort.asc(p.Id));
+            try a.spend(self.work, pending.items.len);
+            const blocks = try allocator.alloc(p.Id, pending.items.len);
+            var count: usize = 0;
+            for (visited, 0..) |present, id| {
+                try a.spend(self.work, 1);
+                if (present) {
+                    blocks[count] = id;
+                    count += 1;
+                }
+            }
             return .{ .membership = visited, .blocks = blocks };
         }
         fn seedQuery(
@@ -1190,6 +1351,7 @@ fn FlowFor(comptime open: bool) type {
             query_index: usize,
             reach: Reachable,
         ) a.Error!void {
+            try a.spend(self.work, 1);
             const query_start = self.queries.items[query_index].start;
             const query_path = self.queries.items[query_index].path;
             const query_target = self.queries.items[query_index].target;
@@ -1199,9 +1361,11 @@ fn FlowFor(comptime open: bool) type {
                 if (live[@intCast(target.block)]) try self.pushTrace(pending, target);
             } else if (query_writes) |schema| {
                 for (reach.blocks) |id| {
+                    try a.spend(self.work, 1);
                     const block = self.program.blocks[@intCast(id)];
-                    for (block.instructions, 0..) |op, position|
-                        if (self.futureInstruction(
+                    for (block.instructions, 0..) |op, position| {
+                        try a.spend(self.work, 1);
+                        if (try self.futureInstruction(
                             query_start,
                             self.queries.items[query_index].position,
                             id,
@@ -1212,9 +1376,11 @@ fn FlowFor(comptime open: bool) type {
                             op.operands[0],
                         ) == schema)
                             try self.pushAt(pending, id, op.operands[1], query_path, position);
+                    }
                     try self.calledWrites(pending, id, schema, query_path);
                 }
             } else for (reach.blocks) |id| {
+                try a.spend(self.work, 1);
                 const block = self.program.blocks[@intCast(id)];
                 if (block.terminator == .return_value) try self.push(
                     pending,
@@ -1225,23 +1391,33 @@ fn FlowFor(comptime open: bool) type {
             }
         }
         fn solve(self: *Self, query_index: usize) a.Error!void {
+            try a.spend(self.work, 1);
             const query_start = self.queries.items[query_index].start;
             const query_target = self.queries.items[query_index].target;
             const query_writes = self.queries.items[query_index].writes;
-            if (self.imported(query_start)) |summary| {
+            if (try self.imported(query_start)) |summary| {
                 if (query_target != null) return error.InvalidReference;
                 // A whole-result bound also bounds every result projection.
                 if (query_writes) |schema| {
-                    for (summary.writes) |write| if (write.schema == schema) {
-                        for (write.sources) |source| try self.addSource(
-                            query_index,
-                            try self.contractSource(summary.function, source),
-                        );
-                    };
-                } else for (summary.returned) |source| try self.addSource(
-                    query_index,
-                    try self.contractSource(summary.function, source),
-                );
+                    for (summary.writes) |write| {
+                        try a.spend(self.work, 1);
+                        if (write.schema == schema) {
+                            for (write.sources) |source| {
+                                try a.spend(self.work, 1);
+                                try self.addSource(
+                                    query_index,
+                                    try self.contractSource(summary.function, source),
+                                );
+                            }
+                        }
+                    }
+                } else for (summary.returned) |source| {
+                    try a.spend(self.work, 1);
+                    try self.addSource(
+                        query_index,
+                        try self.contractSource(summary.function, source),
+                    );
+                }
                 return;
             }
             var arena = std.heap.ArenaAllocator.init(self.allocator);
@@ -1254,6 +1430,7 @@ fn FlowFor(comptime open: bool) type {
             var visited: std.AutoHashMapUnmanaged(Trace, void) = .empty;
             try self.seedQuery(&pending, query_index, reach);
             while (pending.pop()) |trace| {
+                try a.spend(self.work, 1);
                 if ((try visited.getOrPut(allocator, trace)).found_existing) continue;
                 if (trace.body_result) {
                     const term = self.program.blocks[@intCast(trace.block)].terminator;
@@ -1285,16 +1462,18 @@ fn FlowFor(comptime open: bool) type {
             live: []const bool,
             allocator: std.mem.Allocator,
         ) a.Error!void {
+            try a.spend(self.work, 1);
             const code = self.program.blocks[@intCast(trace.block)];
             var position = trace.position orelse code.instructions.len;
             const cut = self.queries.items[query_index].position;
             while (position != 0) {
+                try a.spend(self.work, 1);
                 if (trace.block == query_start and cut != null and position == cut.?) {
                     try self.addSource(
                         query_index,
                         .{ .stable_slot = true, .parameter = trace.slot, .path = trace.path },
                     );
-                    if (!self.reenters(query_start, live)) return;
+                    if (!try self.reenters(query_start, live)) return;
                 }
                 position -= 1;
                 const op = code.instructions[position];
@@ -1309,11 +1488,15 @@ fn FlowFor(comptime open: bool) type {
                         trace.path,
                         self.queries.items[query_index].position,
                     );
+                    try a.spend(self.work, self.queries.items[writes].sources.items.len);
                     const sources = try allocator.dupe(
                         Source,
                         self.queries.items[writes].sources.items,
                     );
-                    for (sources) |source| try self.addSource(query_index, source);
+                    for (sources) |source| {
+                        try a.spend(self.work, 1);
+                        try self.addSource(query_index, source);
+                    }
                 }
                 return;
             }
@@ -1322,10 +1505,11 @@ fn FlowFor(comptime open: bool) type {
                     query_index,
                     .{ .stable_slot = true, .parameter = trace.slot, .path = trace.path },
                 );
-                if (!self.reenters(query_start, live)) return;
+                if (!try self.reenters(query_start, live)) return;
             }
             if (trace.block == query_start and cut == null) {
                 const function = self.program.functions[@intCast(code.function)];
+                try a.spend(self.work, function.inputs.len);
                 if (std.mem.indexOfScalar(p.Id, function.inputs, trace.slot)) |parameter|
                     try self.addSource(
                         query_index,
@@ -1340,11 +1524,14 @@ fn FlowFor(comptime open: bool) type {
             trace: Trace,
             live: []const bool,
         ) a.Error!void {
+            try a.spend(self.work, 1);
             for (self.incoming[@intCast(trace.block)].items) |incoming| {
+                try a.spend(self.work, 1);
                 if (!live[@intCast(incoming.block)]) continue;
                 const edge = incoming.edge.?;
                 var changed = false;
                 for (edge.assignments) |assignment| {
+                    try a.spend(self.work, 1);
                     if (assignment.destination != trace.slot) continue;
                     changed = true;
                     switch (assignment.source) {
@@ -1383,8 +1570,10 @@ fn FlowFor(comptime open: bool) type {
             slot: p.Id,
             path: usize,
         ) a.Error!void {
+            try a.spend(self.work, 1);
             const term = self.program.blocks[@intCast(block)].terminator;
             if (term == .unpack_product) {
+                try a.spend(self.work, term.unpack_product.destinations.len);
                 if (std.mem.indexOfScalar(p.Id, term.unpack_product.destinations, slot)) |field| {
                     try self.push(
                         pending,
@@ -1408,6 +1597,7 @@ fn FlowFor(comptime open: bool) type {
             trace: Trace,
             op: anytype,
         ) a.Error!void {
+            try a.spend(self.work, 1);
             const sequence = op.operands[0];
             switch (op.opcode) {
                 .sequence_concat, .sequence_take => {
@@ -1471,6 +1661,7 @@ fn FlowFor(comptime open: bool) type {
             trace: Trace,
             op: anytype,
         ) a.Error!void {
+            try a.spend(self.work, 1);
             const path = if (trace.path == 0) null else self.paths.items[trace.path - 1];
             switch (op.opcode) {
                 .variant => {
@@ -1484,13 +1675,16 @@ fn FlowFor(comptime open: bool) type {
                                 selected.tail,
                                 trace.position,
                             );
-                    } else for (op.operands) |slot| try self.pushAt(
-                        pending,
-                        trace.block,
-                        slot,
-                        0,
-                        trace.position,
-                    );
+                    } else for (op.operands) |slot| {
+                        try a.spend(self.work, 1);
+                        try self.pushAt(
+                            pending,
+                            trace.block,
+                            slot,
+                            0,
+                            trace.position,
+                        );
+                    }
                 },
                 .computation => {
                     if (path) |selected| {
@@ -1503,13 +1697,16 @@ fn FlowFor(comptime open: bool) type {
                                 selected.tail,
                                 trace.position,
                             );
-                    } else for (op.operands) |slot| try self.pushAt(
-                        pending,
-                        trace.block,
-                        slot,
-                        0,
-                        trace.position,
-                    );
+                    } else for (op.operands) |slot| {
+                        try a.spend(self.work, 1);
+                        try self.pushAt(
+                            pending,
+                            trace.block,
+                            slot,
+                            0,
+                            trace.position,
+                        );
+                    }
                 },
                 else => unreachable,
             }
@@ -1520,6 +1717,7 @@ fn FlowFor(comptime open: bool) type {
             trace: Trace,
             op: anytype,
         ) a.Error!void {
+            try a.spend(self.work, 1);
             const path = if (trace.path == 0) null else self.paths.items[trace.path - 1];
             switch (op.opcode) {
                 .product => {
@@ -1533,13 +1731,16 @@ fn FlowFor(comptime open: bool) type {
                                 selected.tail,
                                 trace.position,
                             );
-                    } else for (op.operands) |slot| try self.pushAt(
-                        pending,
-                        trace.block,
-                        slot,
-                        0,
-                        trace.position,
-                    );
+                    } else for (op.operands) |slot| {
+                        try a.spend(self.work, 1);
+                        try self.pushAt(
+                            pending,
+                            trace.block,
+                            slot,
+                            0,
+                            trace.position,
+                        );
+                    }
                 },
                 .field, .variant_payload => try self.pushAt(
                     pending,
@@ -1558,6 +1759,7 @@ fn FlowFor(comptime open: bool) type {
             trace: Trace,
             op: anytype,
         ) a.Error!void {
+            try a.spend(self.work, 1);
             const path = if (trace.path == 0) null else self.paths.items[trace.path - 1];
             switch (op.opcode) {
                 .cell_new => if (path) |selected| {
@@ -1585,15 +1787,19 @@ fn FlowFor(comptime open: bool) type {
             trace: Trace,
             op: anytype,
         ) a.Error!void {
+            try a.spend(self.work, 1);
             const path = if (trace.path == 0) null else self.paths.items[trace.path - 1];
             switch (op.opcode) {
-                .sequence => for (op.operands) |slot| try self.pushAt(
-                    pending,
-                    trace.block,
-                    slot,
-                    if (path) |selected| selected.tail else 0,
-                    trace.position,
-                ),
+                .sequence => for (op.operands) |slot| {
+                    try a.spend(self.work, 1);
+                    try self.pushAt(
+                        pending,
+                        trace.block,
+                        slot,
+                        if (path) |selected| selected.tail else 0,
+                        trace.position,
+                    );
+                },
                 .sequence_get => if (path) |selected| {
                     // Lookup returns Optional<Element>; only Some carries a borrow.
                     if (selected.step == .field and selected.step.field == 1) try self.pushAt(
@@ -1619,6 +1825,7 @@ fn FlowFor(comptime open: bool) type {
             trace: Trace,
             op: anytype,
         ) a.Error!void {
+            try a.spend(self.work, 1);
             const path = if (trace.path == 0) null else self.paths.items[trace.path - 1];
             switch (op.opcode) {
                 .clone_resumption => try self.pushAt(
@@ -1653,16 +1860,16 @@ fn FlowFor(comptime open: bool) type {
             trace: Trace,
             op: anytype,
         ) a.Error!void {
+            try a.spend(self.work, 1);
             switch (op.opcode) {
-                .move => try self.pushAt(
-                    pending,
-                    trace.block,
-                    op.operands[0],
-                    trace.path,
-                    trace.position,
-                ),
-                .select => for (op.operands[1..]) |slot|
-                    try self.pushAt(pending, trace.block, slot, trace.path, trace.position),
+                .move => {
+                    const slot = op.operands[0];
+                    try self.pushAt(pending, trace.block, slot, trace.path, trace.position);
+                },
+                .select => for (op.operands[1..]) |slot| {
+                    try a.spend(self.work, 1);
+                    try self.pushAt(pending, trace.block, slot, trace.path, trace.position);
+                },
                 .product,
                 .field,
                 .variant_payload,
@@ -1723,6 +1930,7 @@ fn FlowFor(comptime open: bool) type {
             arguments: []const p.Id,
             path: usize,
         ) a.Error!void {
+            try a.spend(self.work, 1);
             const index = try self.query(self.entry(function), path);
             try self.transferSources(
                 pending,
@@ -1739,8 +1947,10 @@ fn FlowFor(comptime open: bool) type {
             supplied: usize,
             path: usize,
         ) a.Error!void {
+            try a.spend(self.work, 1);
             const schema = self.slotType(block, computation_slot);
             for (self.program.constructors, 0..) |constructor, id| {
+                try a.spend(self.work, 1);
                 if (constructor.schema != schema) continue;
                 const index = try self.query(self.entry(constructor.function), path);
                 try self.transferSources(
@@ -1759,6 +1969,7 @@ fn FlowFor(comptime open: bool) type {
             schema: p.Id,
             path: usize,
         ) a.Error!void {
+            try a.spend(self.work, 1);
             const index = try self.writeQuery(self.entry(function), schema, path);
             try self.transferSources(
                 pending,
@@ -1776,8 +1987,10 @@ fn FlowFor(comptime open: bool) type {
             schema: p.Id,
             path: usize,
         ) a.Error!void {
+            try a.spend(self.work, 1);
             const computation_schema = self.slotType(block, computation_slot);
             for (self.program.constructors, 0..) |constructor, id| {
+                try a.spend(self.work, 1);
                 if (constructor.schema != computation_schema) continue;
                 const index = try self.writeQuery(self.entry(constructor.function), schema, path);
                 try self.transferSources(
@@ -1795,6 +2008,7 @@ fn FlowFor(comptime open: bool) type {
             path: usize,
             term: anytype,
         ) a.Error!void {
+            try a.spend(self.work, 1);
             switch (term) {
                 .protect => |v| {
                     try self.bodyWrites(
@@ -1832,12 +2046,16 @@ fn FlowFor(comptime open: bool) type {
                         schema,
                         path,
                     );
+                    try a.spend(self.work, self.queries.items[index].sources.items.len);
                     const sources = try self.allocator.dupe(
                         Source,
                         self.queries.items[index].sources.items,
                     );
                     defer self.allocator.free(sources);
-                    for (sources) |source| try self.returnInput(pending, block, source);
+                    for (sources) |source| {
+                        try a.spend(self.work, 1);
+                        try self.returnInput(pending, block, source);
+                    }
                 },
                 else => unreachable,
             }
@@ -1850,12 +2068,14 @@ fn FlowFor(comptime open: bool) type {
             path: usize,
             term: anytype,
         ) a.Error!void {
+            try a.spend(self.work, 1);
             switch (term) {
                 .perform => |v| if (v.capability != null) {
-                    for (self.control.targets(
+                    for (try self.control.targetsWithWork(
                         .{ .block = block, .role = .operation },
                         v.effect,
                     )) |target| {
+                        try a.spend(self.work, 1);
                         const index = try self.writeQuery(
                             self.entry(target.function),
                             schema,
@@ -1884,6 +2104,7 @@ fn FlowFor(comptime open: bool) type {
             schema: p.Id,
             path: usize,
         ) a.Error!void {
+            try a.spend(self.work, 1);
             const term = self.program.blocks[@intCast(block)].terminator;
             switch (term) {
                 .call => |v| try self.callWrites(
@@ -1921,7 +2142,10 @@ fn FlowFor(comptime open: bool) type {
                 .resume_with => |v| {
                     try self.push(pending, block, v.resumption, 0);
                     try self.push(pending, block, v.argument, 0);
-                    for (v.state) |slot| try self.push(pending, block, slot, 0);
+                    for (v.state) |slot| {
+                        try a.spend(self.work, 1);
+                        try self.push(pending, block, slot, 0);
+                    }
                 },
                 .resume_computation => |v| {
                     try self.push(pending, block, v.resumption, 0);
@@ -1946,22 +2170,29 @@ fn FlowFor(comptime open: bool) type {
             path: usize,
             term: anytype,
         ) a.Error!void {
+            try a.spend(self.work, 1);
             switch (term) {
                 .handle => |v| {
                     const handler = self.program.handlers[@intCast(v.handler)];
                     const returns = try self.query(self.entry(handler.return_function), path);
+                    try a.spend(self.work, self.queries.items[returns].sources.items.len);
                     const sources = try self.allocator.dupe(
                         Source,
                         self.queries.items[returns].sources.items,
                     );
                     defer self.allocator.free(sources);
-                    for (sources) |source| try self.returnInput(pending, block, source);
+                    for (sources) |source| {
+                        try a.spend(self.work, 1);
+                        try self.returnInput(pending, block, source);
+                    }
                     // A clause can return state or a borrow arriving from the body's
                     // older inputs. Fresh body capabilities are checked separately.
                     for (handler.clauses) |clause| {
+                        try a.spend(self.work, 1);
                         if (!@import("contracts.zig").retainsResumption(clause)) continue;
                         const index = try self.query(self.entry(clause.function), path);
                         for (self.queries.items[index].sources.items) |source| {
+                            try a.spend(self.work, 1);
                             if (source.ambient) |ambient| {
                                 try self.pushTrace(
                                     pending,
@@ -1976,7 +2207,10 @@ fn FlowFor(comptime open: bool) type {
                                 );
                             } else {
                                 try self.push(pending, block, v.body, 0);
-                                for (v.arguments) |slot| try self.push(pending, block, slot, 0);
+                                for (v.arguments) |slot| {
+                                    try a.spend(self.work, 1);
+                                    try self.push(pending, block, slot, 0);
+                                }
                                 if (source.parameter == inputs.of(
                                     self.program.functions[
                                         @intCast(clause.function)
@@ -2004,6 +2238,7 @@ fn FlowFor(comptime open: bool) type {
             block: p.Id,
             path: usize,
         ) a.Error!void {
+            try a.spend(self.work, 1);
             const term = self.program.blocks[@intCast(block)].terminator;
             switch (term) {
                 .call => |v| try self.call(pending, block, v.function, v.arguments, path),
@@ -2025,7 +2260,10 @@ fn FlowFor(comptime open: bool) type {
                 .resume_with => |v| {
                     try self.push(pending, block, v.resumption, 0);
                     try self.push(pending, block, v.argument, 0);
-                    for (v.state) |slot| try self.push(pending, block, slot, 0);
+                    for (v.state) |slot| {
+                        try a.spend(self.work, 1);
+                        try self.push(pending, block, slot, 0);
+                    }
                 },
                 .resume_computation => |v| {
                     try self.push(pending, block, v.resumption, 0);
@@ -2041,8 +2279,14 @@ fn FlowFor(comptime open: bool) type {
                         try self.prepend(.{ .outer = null }, 0),
                     );
                     try self.push(pending, block, v.payload, 0);
-                    for (v.bodies) |slot| try self.push(pending, block, slot, 0);
-                    for (v.use_site_capabilities) |slot| try self.push(pending, block, slot, 0);
+                    for (v.bodies) |slot| {
+                        try a.spend(self.work, 1);
+                        try self.push(pending, block, slot, 0);
+                    }
+                    for (v.use_site_capabilities) |slot| {
+                        try a.spend(self.work, 1);
+                        try self.push(pending, block, slot, 0);
+                    }
                 },
                 else => {},
             }
@@ -2072,9 +2316,30 @@ pub fn validateWithControl(
     diagnostic: ?*a.Diagnostic,
     control: *const provenance.Analysis,
 ) a.Error!void {
-    var flow = try FlowFor(false).initWithControl(allocator, program, exportable, control);
+    return validateWithControlAndWork(allocator, program, exportable, diagnostic, control, null);
+}
+
+pub fn validateWithControlAndWork(
+    allocator: std.mem.Allocator,
+    program: activation.Program,
+    exportable: []const bool,
+    diagnostic: ?*a.Diagnostic,
+    control: *const provenance.Analysis,
+    work: ?*u64,
+) a.Error!void {
+    try a.spend(work, 1);
+    var flow = try FlowFor(false).initWithControlAndWork(
+        allocator,
+        program,
+        exportable,
+        control,
+        work,
+    );
     flow.diagnostic = diagnostic;
-    for (program.functions) |function| _ = try flow.requirementsQuery(function.entry);
+    for (program.functions) |function| {
+        try a.spend(work, 1);
+        _ = try flow.requirementsQuery(function.entry);
+    }
     try flow.settle();
     try validateScopes(&flow);
 }
@@ -2106,20 +2371,52 @@ pub fn contractedWithControl(
     summaries: []const @import("borrow_contract.zig").Summary,
     control: *const provenance.Analysis,
 ) a.Error!ComponentFlow {
-    var flow = try ComponentFlow.initWithControl(allocator, program, exportable, control);
+    return contractedWithControlAndWork(
+        allocator,
+        program,
+        imports,
+        exportable,
+        summaries,
+        control,
+        null,
+    );
+}
+
+pub fn contractedWithControlAndWork(
+    allocator: std.mem.Allocator,
+    program: activation.Program,
+    imports: []const p.Id,
+    exportable: []const bool,
+    summaries: []const @import("borrow_contract.zig").Summary,
+    control: *const provenance.Analysis,
+    work: ?*u64,
+) a.Error!ComponentFlow {
+    try a.spend(work, 1);
+    var flow = try ComponentFlow.initWithControlAndWork(
+        allocator,
+        program,
+        exportable,
+        control,
+        work,
+    );
     flow.import_summaries = summaries;
     var previous: ?p.Id = null;
     for (summaries) |summary| {
+        try a.spend(work, 1);
         if (previous) |prior| if (summary.function <= prior) return error.NonCanonical;
         previous = summary.function;
         try @import("borrow_contract.zig").validate(&flow, summary);
     }
     for (imports) |function| {
+        try a.spend(work, 1);
         for (summaries) |summary| {
+            try a.spend(work, 1);
             if (summary.function == function) break;
         } else return error.InvalidOwnership;
     }
     for (program.functions, 0..) |_, id| {
+        try a.spend(work, 1);
+        try a.spend(work, imports.len);
         if (std.mem.indexOfScalar(p.Id, imports, id) != null) continue;
         _ = try flow.requirementsQuery(flow.entry(id));
     }
@@ -2131,6 +2428,7 @@ pub fn contractedWithControl(
 fn validateScopes(flow: anytype) a.Error!void {
     const program = flow.program;
     for (program.blocks, 0..) |block, block_id| {
+        try a.spend(flow.work, 1);
         const body_slot, const arguments, const supplied = switch (block.terminator) {
             .handle => |v| .{
                 v.body,
@@ -2143,11 +2441,13 @@ fn validateScopes(flow: anytype) a.Error!void {
         };
         const body_schema = flow.slotType(block_id, body_slot);
         for (program.constructors, 0..) |constructor, id| {
+            try a.spend(flow.work, 1);
             if (constructor.schema != body_schema) continue;
             const start = flow.entry(constructor.function);
             const returned = try flow.returned(start);
             const binding = flow.bodyBinding(block_id, body_slot, arguments, supplied, id);
             for (returned) |source| {
+                try a.spend(flow.work, 1);
                 if ((try flow.mapInput(binding, source)).fresh != null) {
                     return flow.rejected(binding);
                 }
@@ -2210,4 +2510,102 @@ test "borrow reachability lists exact members in block order with cycles and all
         sparseReachabilityAttempt,
         .{},
     );
+}
+
+fn cachedReturnFlow(allocator: std.mem.Allocator, queries: []Query) StableFlow {
+    return .{
+        .allocator = allocator,
+        .control = undefined,
+        .exportable = &.{true},
+        .incoming = &.{},
+        .outgoing = &.{},
+        .queries = .fromOwnedSlice(queries),
+        .program = .{
+            .roots = .{ .entry = 0, .result = 0, .failure = 0 },
+            .schemas = &.{.unit},
+            .constants = &.{},
+            .effects = &.{},
+            .functions = &.{.{
+                .entry = 0,
+                .inputs = &.{},
+                .layout = .{ .slots = &.{0} },
+                .result = 0,
+            }},
+            .blocks = &.{.{
+                .function = 0,
+                .instructions = &.{},
+                .terminator = .{ .handle = .{
+                    .handler = 0,
+                    .body = 0,
+                    .arguments = &.{},
+                    .state = &.{},
+                    .next = .{ .block = 0 },
+                } },
+            }},
+            .handlers = &.{.{
+                .mode = .deep,
+                .input = 0,
+                .answer = 0,
+                .return_function = 0,
+                .clauses = &.{},
+            }},
+        },
+    };
+}
+
+test "bounded borrow return inputs charge cached sources before materialization" {
+    var sources: [32]Source = undefined;
+    for (&sources, 0..) |*source, index| source.* = .{ .parameter = index };
+    var queries = [_]Query{.{
+        .start = 0,
+        .path = 0,
+        .target = .{ .block = 0, .ambient = .evidence },
+        .sources = .fromOwnedSlice(&sources),
+    }};
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+    var flow = cachedReturnFlow(failing.allocator(), &queries);
+    var work: u64 = 7;
+    flow.work = &work;
+    try std.testing.expectError(
+        error.RelationLimit,
+        flow.returnInputs(0, 0, .{ .ambient = .evidence }, null),
+    );
+    try std.testing.expect(!failing.has_induced_failure);
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    flow.allocator = std.testing.allocator;
+    work = 100;
+    var result = try flow.returnInputs(0, 0, .{ .ambient = .evidence }, null);
+    defer result.deinit(flow.allocator);
+    try std.testing.expectEqualSlices(Source, &sources, result.items);
+}
+
+test "bounded borrow return inputs charge cached owners when values are empty" {
+    var sources: [32]Source = undefined;
+    for (&sources, 0..) |*source, index| source.* = .{ .parameter = index };
+    var queries = [_]Query{
+        .{ .start = 0, .path = 0, .target = .{ .block = 0, .ambient = .evidence } },
+        .{
+            .start = 0,
+            .path = 0,
+            .target = .{ .block = 0, .ambient = .region },
+            .sources = .fromOwnedSlice(&sources),
+        },
+    };
+    var constraints = [_]Constraint{.{
+        .value = .{ .ambient = .evidence },
+        .owner = .{ .ambient = .region },
+        .bound = .capture,
+    }};
+    var requirements = [_]Requirements{.{
+        .start = 0,
+        .constraints = .fromOwnedSlice(&constraints),
+    }};
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 3 });
+    var flow = cachedReturnFlow(failing.allocator(), &queries);
+    flow.requirements = .fromOwnedSlice(&requirements);
+    var work: u64 = 21;
+    flow.work = &work;
+    try std.testing.expectError(error.RelationLimit, flow.returnRequirements(0, 0));
+    try std.testing.expect(!failing.has_induced_failure);
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
 }

@@ -14,6 +14,7 @@ pub const Error = error{
     InvalidUtf8,
     Capacity,
     InvalidBuffers,
+    RelationLimit,
 };
 
 pub const header_length = 20;
@@ -79,12 +80,17 @@ pub const Reader = struct {
 
 /// A null output measures exact encoded length without allocation or writes.
 pub const Writer = struct {
+    remaining: ?*u64 = null,
     output: ?[]u8 = null,
     expected: ?[]const u8 = null,
     hasher: ?*std.crypto.hash.sha2.Sha256 = null,
     position: usize = 0,
 
     pub fn put(self: *Writer, input: []const u8) Error!void {
+        if (self.remaining) |left| {
+            if (input.len > left.*) return error.RelationLimit;
+            left.* -= @intCast(input.len);
+        }
         const end = std.math.add(usize, self.position, input.len) catch
             return error.InvalidLength;
         if (self.expected) |expected| {

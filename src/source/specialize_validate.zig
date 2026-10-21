@@ -20,16 +20,20 @@ const CaseItem = @typeInfo(Case).pointer.child;
 fn require(ok: bool) Error!void {
     if (!ok) return error.InvalidSpecialization;
 }
-fn extend(a: std.mem.Allocator, env: Env, item: Binding) Error!Env {
+fn extend(a: std.mem.Allocator, env: Env, left: *u64, item: Binding) Error!Env {
     // An environment is a capture-avoiding renaming of the current source
     // scope. Shadowing retires the old source binding; every other binding
     // must keep a distinct target variable. All binder forms extend here.
+    try data.admission.spend(left, env.len);
     var retained: usize = 0;
     for (env) |binding| if (binding.before != item.before) {
         try require(binding.after != item.after);
         retained += 1;
     };
-    const result = try a.alloc(Binding, retained + 1);
+    const count = std.math.add(usize, retained, 1) catch return error.RelationLimit;
+    try data.admission.spend(left, count);
+    try data.admission.spend(left, env.len);
+    const result = try a.alloc(Binding, count);
     var cursor: usize = 0;
     for (env) |binding| if (binding.before != item.before) {
         result[cursor] = binding;
@@ -38,9 +42,10 @@ fn extend(a: std.mem.Allocator, env: Env, item: Binding) Error!Env {
     result[retained] = item;
     return result;
 }
-fn lookup(env: Env, id: p.Id) Error!Binding {
+fn lookup(env: Env, id: p.Id, left: *u64) Error!Binding {
     var i = env.len;
     while (i != 0) {
+        try data.admission.spend(left, 1);
         i -= 1;
         if (env[i].before == id) return env[i];
     }
@@ -53,7 +58,8 @@ pub fn validate(
     out: *const pe.Output,
 ) Error!void {
     var remaining = request.policy.work;
-    return validateWithWork(a, original, request, out, &remaining);
+    return validateWithWork(a, original, request, out, &remaining) catch |err|
+        return if (err == error.RelationLimit) error.SpecializationLimit else err;
 }
 
 pub fn validateWithWork(
@@ -73,22 +79,22 @@ pub fn validateWithWork(
     try validateEnvelope(storage, original, request, out, &left);
     // Source admission precedes primitive evaluation; malformed operand shapes
     // cannot reach constant rules through a forged derivation.
-    var admitted_original = try source.lower(a, original);
-    admitted_original.deinit();
-    const original_facts = try @import("check.zig").analyze(storage, original);
-    const schema_facts = try data.admission.schemas(storage, original.schemas);
+    try source.admitWithWork(a, original, &left);
+    const original_facts = try @import("check.zig").analyzeWithWork(storage, original, &left);
+    const schema_facts = try data.admission.schemasWithWork(storage, original.schemas, &left);
     try require(request.function < original.functions.len);
     const requested_function = original.functions[@intCast(request.function)];
     try require(request.arguments.len == requested_function.parameters.len);
-    for (request.arguments, requested_function.parameters) |fact, parameter| try k.validate(
+    for (request.arguments, requested_function.parameters) |fact, parameter| try k.validateWithWork(
         storage,
         original,
         schema_facts,
         original.variables[@intCast(parameter)],
         fact,
+        &left,
     );
     // Source type/scope checking is additional to the semantic derivation.
-    _ = try @import("check.zig").analyze(storage, residual);
+    _ = try @import("check.zig").analyzeWithWork(storage, residual, &left);
     var checker: Checker = .{
         .a = storage,
         .before = original,
@@ -101,8 +107,7 @@ pub fn validateWithWork(
     };
     defer left = checker.left;
     for (out.functions.items, 0..) |f, i| try checker.function(f, i);
-    var admitted_residual = try source.lower(a, residual);
-    admitted_residual.deinit();
+    try source.admitWithWork(a, residual, &checker.left);
 }
 fn validateEnvelope(
     storage: std.mem.Allocator,
@@ -112,8 +117,9 @@ fn validateEnvelope(
     remaining: *u64,
 ) Error!void {
     const residual = out.module();
-    try require(std.mem.eql(u8, &out.key, &try pe.identity(storage, original, request)));
-    try require(try pe.requestEqual(storage, request, out.request));
+    const identity = try pe.identityWithWork(storage, original, request, remaining);
+    try require(std.mem.eql(u8, &out.key, &identity));
+    try require(try pe.requestEqualWithWork(storage, request, out.request, remaining));
     try require(data.record.equal(ast.Module, original, out.original));
     try require(
         original.failure == residual.failure and original.region_count == residual.region_count,
@@ -141,7 +147,12 @@ fn validateEnvelope(
     );
     try require(request.arguments.len == out.functions.items[0].arguments.len);
     for (request.arguments, out.functions.items[0].arguments) |raw, canonical| try require(
-        try k.equal(storage, try k.normalize(storage, raw, remaining), canonical),
+        try k.equalWithWork(
+            storage,
+            try k.normalize(storage, raw, remaining),
+            canonical,
+            remaining,
+        ),
     );
 }
 const Visit = struct {
@@ -186,6 +197,7 @@ const Checker = struct {
         self.left -= 1;
     }
     fn function(self: *Checker, f: pe.FunctionProof, i: usize) Error!void {
+        try data.admission.spend(&self.left, 1);
         try require(f.before < self.before.functions.len and
             f.after == self.before.functions.len + i);
         try require(self.captures[@intCast(f.before)].items.len == 0);
@@ -198,12 +210,13 @@ const Checker = struct {
         var env: Env = &.{};
         var cursor: usize = 0;
         for (b.parameters, f.arguments) |v, fact| {
-            try k.validate(
+            try k.validateWithWork(
                 self.a,
                 self.before,
                 self.facts,
                 self.before.variables[@intCast(v)],
                 fact,
+                &self.left,
             );
             var target = v;
             if (fact != .known) {
@@ -212,7 +225,11 @@ const Checker = struct {
                 cursor += 1;
                 try self.variable(v, target);
             }
-            env = try extend(self.a, env, .{ .before = v, .after = target, .knowledge = fact });
+            env = try extend(self.a, env, &self.left, .{
+                .before = v,
+                .after = target,
+                .knowledge = fact,
+            });
         }
         try require(cursor == r.parameters.len);
         _ = try self.term(.{
@@ -245,7 +262,7 @@ const Checker = struct {
             },
             .variable => |v| {
                 try require(proof.children.len == 0);
-                const bound = try lookup(visit.env, v);
+                const bound = try lookup(visit.env, v, &self.left);
                 frame.knowledge = bound.knowledge;
                 frame.expected.expression = .{ .variable = bound.after };
             },
@@ -256,6 +273,7 @@ const Checker = struct {
             },
             .primitive => |op| {
                 try require(proof.children.len == op.operands.len);
+                try data.admission.spend(&self.left, op.operands.len);
                 frame.args = try self.a.alloc(p.Id, op.operands.len);
                 frame.known = try self.a.alloc(pe.Knowledge, op.operands.len);
             },
@@ -466,10 +484,11 @@ const Checker = struct {
                     .dynamic
                 else
                     x.fact.knowledge;
-                try require(try k.equal(
+                try require(try k.equalWithWork(
                     self.a,
                     try k.normalize(self.a, justified, &self.left),
                     f.arguments[i],
+                    &self.left,
                 ));
                 if (f.arguments[i] == .known) continue;
             }
@@ -493,6 +512,7 @@ const Checker = struct {
             i += 1;
         }
         inline for (.{ "bodies", "use_site_capabilities" }) |name| {
+            try data.admission.spend(&self.left, @field(v, name).len);
             const args = try self.a.alloc(p.Id, @field(v, name).len);
             for (@field(v, name), args) |arg, *to| {
                 to.* = (try self.checkedValue(frame, i, arg)).id;
@@ -513,7 +533,7 @@ const Checker = struct {
         var next_env = visit.env;
         for (v.variables, r.unpack_product.variables, 0..) |v1, v2, i| {
             try self.variable(v1, v2);
-            next_env = try extend(self.a, next_env, .{
+            next_env = try extend(self.a, next_env, &self.left, .{
                 .before = v1,
                 .after = v2,
                 .knowledge = try k.field(
@@ -538,6 +558,7 @@ const Checker = struct {
         if (proof.selected) |tag| return self.selectedMatch(frame, tag);
         try require(r == .match_sum and proof.children.len == v.cases.len and
             r.match_sum.cases.len == v.cases.len);
+        try data.admission.spend(&self.left, v.cases.len);
         frame.cases = try self.a.alloc(CaseItem, v.cases.len);
         return self.matchCase(frame);
     }
@@ -563,7 +584,7 @@ const Checker = struct {
                 payload_fact.value.known,
                 self.after.constants[@intCast(literal.expression.literal)],
             ));
-        const next_env = try extend(self.a, visit.env, .{
+        const next_env = try extend(self.a, visit.env, &self.left, .{
             .before = branch.variable,
             .after = r.bind.variable,
             .knowledge = payload_fact.value,
@@ -581,7 +602,7 @@ const Checker = struct {
         const left = v.cases[frame.cursor];
         const right = r.cases[frame.cursor];
         try self.variable(left.variable, right.variable);
-        const next_env = try extend(self.a, visit.env, .{
+        const next_env = try extend(self.a, visit.env, &self.left, .{
             .before = left.variable,
             .after = right.variable,
             .knowledge = .dynamic,
@@ -636,7 +657,7 @@ const Checker = struct {
             frame.first = result;
             frame.cursor = 1;
             try self.variable(b.variable, r.variable);
-            const next_env = try extend(self.a, visit.env, .{
+            const next_env = try extend(self.a, visit.env, &self.left, .{
                 .before = b.variable,
                 .after = r.variable,
                 .knowledge = result.knowledge,
@@ -669,7 +690,7 @@ const Checker = struct {
             .when_true = frame.first.id,
             .when_false = result.id,
         } };
-        if (try k.equal(self.a, frame.first.knowledge, result.knowledge))
+        if (try k.equalWithWork(self.a, frame.first.knowledge, result.knowledge, &self.left))
             frame.knowledge = frame.first.knowledge;
         return self.finish(frame);
     }

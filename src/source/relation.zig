@@ -3,6 +3,7 @@ const data = @import("horos_data");
 const source = @import("../source.zig");
 const ast = source.ast;
 const pe = source.specialize;
+const bindings = @import("constructor_bindings.zig");
 pub const Error = pe.Error || error{ InvalidRelation, UnsupportedRelation, RelationLimit };
 pub const Layout = struct { schema: u64, coordinates: []const u64 };
 pub const Scalar = struct { value: u64, rule: enum { fold, identity, projection } };
@@ -41,6 +42,8 @@ pub const Context = struct {
     expected: ast.Module,
     policy: Policy,
     left: *u64,
+    constructors: []const bindings.Binding = &.{},
+    successor_constructors: []const bindings.Binding = &.{},
     pub fn spend(self: *Context, count: usize) Error!void {
         if (count > self.left.*) return error.RelationLimit;
         self.left.* -= @intCast(count);
@@ -63,26 +66,29 @@ pub fn validate(
     var before = approved;
     var current_policy = policy;
     try chargeModule(approved, &left);
-    var original = try source.lower(a, approved);
-    original.deinit();
+    var before_constructors = try bindings.admit(a, storage, approved, &left);
     for (steps) |step| {
         try chargeModule(step.successor, &left);
+        try chargeModule(before, &left);
         var ctx: Context = .{
             .a = storage,
             .before = before,
             .expected = try source.own(ast.Module, storage, before),
             .policy = current_policy,
             .left = &left,
+            .constructors = before_constructors,
         };
-        try ctx.spend(before.values.len + before.terms.len + before.schemas.len);
+        try ctx.spend(before.values.len);
+        try ctx.spend(before.terms.len);
+        try ctx.spend(before.schemas.len);
         switch (step.rule) {
             .identity => {},
             .relocation => |maps| {
                 try chargeRecord(Relocation.Maps, maps, &left);
-                try Relocation.validateMaps(storage, before, maps, true);
-                ctx.expected = try Relocation.relocate(storage, before, maps);
+                try Relocation.validateMapsWithWork(storage, before, maps, true, 0, &left);
+                ctx.expected = try Relocation.relocateWithWork(storage, before, maps, .{}, &left);
                 try fixedSchemas(&ctx, maps);
-                current_policy = try relocatePolicy(storage, current_policy, maps);
+                current_policy = try relocatePolicy(storage, current_policy, maps, &left);
             },
             .scalar => |rule| try @import("relation_scalar.zig").apply(&ctx, rule),
             .inline_call => |term| try @import("relation_inline.zig").apply(&ctx, term),
@@ -92,13 +98,29 @@ pub fn validate(
                 current_policy = try specializedPolicy(&ctx, proof);
             },
         }
-        try Context.require(data.record.equal(ast.Module, ctx.expected, step.successor));
-        var admitted = try source.lower(a, step.successor);
-        admitted.deinit();
+        before_constructors = try finishStep(a, &ctx, step);
         before = step.successor;
     }
     try Context.require(data.record.equal(ast.Module, before, candidate));
 }
+
+fn finishStep(a: std.mem.Allocator, ctx: *Context, step: Step) Error![]const bindings.Binding {
+    try Context.require(data.record.equal(ast.Module, ctx.expected, step.successor));
+    const constructors = try bindings.admit(a, ctx.a, step.successor, ctx.left);
+    ctx.successor_constructors = constructors;
+    if (step.rule == .specialization) try @import("relation_specialization.zig").coverage(
+        ctx,
+        step.successor,
+        step.rule.specialization,
+    );
+    const transport = if (step.rule == .relocation)
+        Relocation.transport(step.rule.relocation)
+    else
+        bindings.Transport{};
+    try bindings.validate(ctx.before, ctx.constructors, constructors, transport, ctx.left);
+    return constructors;
+}
+
 fn specialization(ctx: *Context, successor: ast.Module, proof: Specialization) Error!void {
     try Context.require(successor.entry == proof.entry);
     try Context.require(proof.request.function == ctx.before.entry);
@@ -108,7 +130,7 @@ fn specialization(ctx: *Context, successor: ast.Module, proof: Specialization) E
         .original = ctx.before,
         .request = proof.request,
         .entry = proof.entry,
-        .key = try pe.identity(ctx.a, ctx.before, proof.request),
+        .key = try pe.identityWithWork(ctx.a, ctx.before, proof.request, ctx.left),
         .functions = .fromOwnedSlice(@constCast(proof.functions)),
         .value_proofs = .fromOwnedSlice(@constCast(proof.values)),
         .term_proofs = .fromOwnedSlice(@constCast(proof.terms)),
@@ -121,18 +143,26 @@ fn specialization(ctx: *Context, successor: ast.Module, proof: Specialization) E
         try @field(out.builder, name).appendSlice(out.builder.allocator(), @field(successor, name));
     out.builder.region_count = successor.region_count;
     try Context.require(successor.failure == ctx.before.failure);
-    try @import("specialize_validate.zig").validateWithWork(
+    @import("specialize_validate.zig").validateWithWork(
         ctx.a,
         ctx.before,
         proof.request,
         &out,
         ctx.left,
-    );
-    try @import("relation_specialization.zig").coverage(ctx, successor, proof);
+    ) catch |err| return if (err == error.SpecializationLimit or err == error.ValueWorkLimit)
+        error.RelationLimit
+    else
+        err;
     ctx.expected = successor;
 }
 
-fn relocateIds(a: std.mem.Allocator, ids: []const u64, map: []const ?u64) Error![]const u64 {
+fn relocateIds(
+    a: std.mem.Allocator,
+    ids: []const u64,
+    map: []const ?u64,
+    work: *u64,
+) Error![]const u64 {
+    try data.admission.spend(work, ids.len);
     const result = try a.alloc(u64, ids.len);
     for (ids, result) |id, *next| {
         try Context.require(id < map.len);
@@ -140,11 +170,21 @@ fn relocateIds(a: std.mem.Allocator, ids: []const u64, map: []const ?u64) Error!
     }
     return result;
 }
-fn relocatePolicy(a: std.mem.Allocator, policy: Policy, maps: Relocation.Maps) Error!Policy {
+fn relocatePolicy(
+    a: std.mem.Allocator,
+    policy: Policy,
+    maps: Relocation.Maps,
+    work: *u64,
+) Error!Policy {
     var result = policy;
-    result.private_schemas = try relocateIds(a, policy.private_schemas, maps.schemas);
-    result.fixed_schemas = try relocateIds(a, policy.fixed_schemas, maps.schemas);
-    result.protected_functions = try relocateIds(a, policy.protected_functions, maps.functions);
+    result.private_schemas = try relocateIds(a, policy.private_schemas, maps.schemas, work);
+    result.fixed_schemas = try relocateIds(a, policy.fixed_schemas, maps.schemas, work);
+    result.protected_functions = try relocateIds(
+        a,
+        policy.protected_functions,
+        maps.functions,
+        work,
+    );
     return result;
 }
 pub fn transportFunctions(
@@ -165,8 +205,11 @@ pub fn transportFunctions(
 }
 
 pub fn identity(module: ast.Module) Error![32]u8 {
+    return identityWithWork(module, null);
+}
+fn identityWithWork(module: ast.Module, work: ?*u64) Error![32]u8 {
     var digest = std.crypto.hash.sha2.Sha256.init(.{});
-    var writer: data.wire.Writer = .{ .hasher = &digest };
+    var writer: data.wire.Writer = .{ .hasher = &digest, .remaining = work };
     try writer.put("horos.source-relation/1\x00");
     try data.record.write(ast.Module, module, &writer);
     return digest.finalResult();
@@ -175,27 +218,29 @@ fn chargeModule(module: ast.Module, left: *u64) Error!void {
     return chargeRecord(ast.Module, module, left);
 }
 fn chargeRecord(comptime T: type, value: T, left: *u64) Error!void {
-    var measure: data.wire.Writer = .{};
+    var measure: data.wire.Writer = .{ .remaining = left };
     try data.record.write(T, value, &measure);
-    if (measure.position > left.*) return error.RelationLimit;
-    left.* -= @intCast(measure.position);
 }
 fn validateStaticScope(ctx: *Context, request: pe.Request) Error!void {
+    try ctx.spend(request.arguments.len);
     var has_static = false;
     for (request.arguments) |argument| has_static = has_static or argument != .dynamic;
     if (!has_static) return;
-    const digest = try identity(ctx.before);
+    const digest = try identityWithWork(ctx.before, ctx.left);
     for (ctx.policy.static_scopes) |scope| {
+        try ctx.spend(1);
         if (std.mem.eql(u8, &digest, &scope.predecessor) and
-            try pe.requestEqual(ctx.a, request, scope.request)) return;
+            try pe.requestEqualWithWork(ctx.a, request, scope.request, ctx.left)) return;
     }
     return error.InvalidRelation;
 }
 
 fn fixedSchemas(ctx: *Context, maps: Relocation.Maps) Error!void {
+    try ctx.spend(ctx.before.schemas.len);
     const seen = try ctx.a.alloc(bool, ctx.before.schemas.len);
     @memset(seen, false);
     var pending: std.ArrayList(Relocation.Reference) = .empty;
+    try ctx.spend(ctx.policy.fixed_schemas.len);
     for (ctx.policy.fixed_schemas) |id|
         try pending.append(ctx.a, .{ .kind = .schema, .id = id });
     while (pending.pop()) |ref| {
@@ -210,7 +255,15 @@ fn fixedSchemas(ctx: *Context, maps: Relocation.Maps) Error!void {
             ctx.before.schemas[@intCast(ref.id)],
             ctx.expected.schemas[@intCast(ref.id)],
         ));
-        try Relocation.visitReferences(ctx.a, ctx.before, .schema, ref.id, &pending);
+        try Relocation.visitReferencesWithWork(
+            ctx.a,
+            ctx.before,
+            ctx.constructors,
+            .schema,
+            ref.id,
+            &pending,
+            ctx.left,
+        );
     }
 }
 

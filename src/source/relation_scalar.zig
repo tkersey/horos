@@ -22,16 +22,20 @@ pub fn apply(ctx: *relation.Context, rule: relation.Scalar) Error!void {
 }
 fn fold(ctx: *relation.Context, value: ast.Value) Error!ast.Value {
     const op = value.expression.primitive;
+    try ctx.spend(op.operands.len);
     const known = try ctx.a.alloc(k.Knowledge, op.operands.len);
     for (op.operands, known) |id, *item| {
         const operand = ctx.before.values[@intCast(id)];
         try require(operand.expression == .literal);
         item.* = .{ .known = ctx.before.constants[@intCast(operand.expression.literal)] };
     }
-    const facts = try data.admission.schemas(ctx.a, ctx.before.schemas);
-    const result = try k.primitive(ctx.a, ctx.before, facts, value, known, ctx.left);
+    const facts = try data.admission.schemasWithWork(ctx.a, ctx.before.schemas, ctx.left);
+    const result = k.primitive(ctx.a, ctx.before, facts, value, known, ctx.left) catch |err|
+        return if (err == error.SpecializationLimit) error.RelationLimit else err;
     try require(result == .known);
-    const constants = try ctx.a.alloc(p.Literal, ctx.before.constants.len + 1);
+    const count = std.math.add(usize, ctx.before.constants.len, 1) catch return error.RelationLimit;
+    try ctx.spend(count);
+    const constants = try ctx.a.alloc(p.Literal, count);
     @memcpy(constants[0..ctx.before.constants.len], ctx.before.constants);
     constants[ctx.before.constants.len] = result.known;
     ctx.expected.constants = constants;
@@ -63,9 +67,10 @@ fn projection(ctx: *relation.Context, value: ast.Value) Error!ast.Value {
     try require(product.expression == .primitive);
     const constructor = product.expression.primitive;
     try require(constructor.opcode == .product and op.immediate < constructor.operands.len);
-    const facts = try data.admission.schemas(ctx.a, ctx.before.schemas);
+    const facts = try data.admission.schemasWithWork(ctx.a, ctx.before.schemas, ctx.left);
     const total = try @import("relation_layout.zig").totalValues(ctx, facts, true);
     for (constructor.operands, 0..) |operand, index| {
+        try ctx.spend(1);
         if (index != op.immediate) try require(total[@intCast(operand)]);
     }
     try require(facts.exportable[@intCast(product.schema)]);

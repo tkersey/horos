@@ -10,6 +10,16 @@ pub fn derive(
     source: ast.Module,
     traits: data.traits.Facts,
 ) Error![]bool {
+    return deriveWithWork(allocator, source, traits, null);
+}
+
+pub fn deriveWithWork(
+    allocator: std.mem.Allocator,
+    source: ast.Module,
+    traits: data.traits.Facts,
+    work: ?*u64,
+) Error![]bool {
+    try data.admission.spend(work, source.values.len);
     const cacheable = try allocator.alloc(bool, source.values.len);
     for (source.values, 0..) |value, id|
         cacheable[id] = switch (value.expression) {
@@ -30,6 +40,7 @@ pub fn derive(
                     else => {},
                 }
                 for (primitive.operands) |operand| {
+                    try data.admission.spend(work, 1);
                     if (!cacheable[@intCast(operand)]) break :blk false;
                     // Even a borrow requires its owner to remain live at this occurrence.
                     if (!traits.copy[

@@ -562,6 +562,13 @@ test "source slicing releases partial owners on allocation failure" {
     const entry = try b.declare(&.{}, unit, &.{}, &.{});
     try b.define(entry, try b.pure(try b.constant(void, {})));
     const module = b.module(entry, unit);
+    try failingSliceAllocations(module);
+    var raw_builder = source.Builder.init(a);
+    defer raw_builder.deinit();
+    try failingSliceAllocations((try rawSlice(&raw_builder)).module);
+}
+
+fn failingSliceAllocations(module: source.Module) !void {
     var counting = std.testing.FailingAllocator.init(a, .{});
     try checkSliceAllocation(counting.allocator(), module);
     for (0..counting.alloc_index) |index| {
@@ -586,4 +593,106 @@ test "source slices retain sparse nominal region identities without count-sized 
     defer selected.deinit();
     try std.testing.expectEqual(module.region_count, selected.module().region_count);
     try std.testing.expectEqual(@as(usize, 0), selected.maps.regions.len);
+}
+
+const RawSlice = struct { module: source.Module, generator: u64, target: u64, raw: u64 };
+
+fn rawSlice(b: *source.Builder) !RawSlice {
+    const unit = try b.scalar(void);
+    const word = try b.scalar(u8);
+    const pair = try b.schema(.{ .product = &.{ word, word } });
+    const computation = try b.schema(.{ .internal = .{ .computation = .{
+        .parameters = &.{},
+        .result = pair,
+        .capture_bound = &.{word},
+    } } });
+    const bridge = try b.effect(.{
+        .identity = "source-slice/registration-bridge",
+        .payload = unit,
+        .result = unit,
+        .external = true,
+    });
+    _ = try b.variable(word);
+    const generator = try b.declare(&.{ word, word }, computation, &.{bridge}, &.{});
+    const target = try b.declare(&.{}, pair, &.{}, &.{});
+    const first = try b.reference(b.parameter(generator, 0));
+    const second = try b.reference(b.parameter(generator, 1));
+    try b.define(target, try b.pure(try b.primitive(pair, .product, &.{ first, second }, 0)));
+    const ignored = try b.variable(unit);
+    try b.define(generator, try b.bind(ignored, try b.term(.{ .perform = .{
+        .effect = bridge,
+        .payload = try b.constant(void, {}),
+    } }), try b.pure(try b.lambda(target, computation))));
+    const entry = try b.declare(&.{}, pair, &.{}, &.{});
+    const raw = try b.primitive(computation, .computation, &.{
+        try b.constant(u8, 11),
+        try b.constant(u8, 22),
+    }, 0);
+    try b.define(entry, try b.term(.{ .apply = .{ .computation = raw, .arguments = &.{} } }));
+    return .{
+        .module = b.module(entry, unit),
+        .generator = generator,
+        .target = target,
+        .raw = raw,
+    };
+}
+
+test "source slices retain supplied captures while replacing registration-only bridge functions" {
+    const bindings = @import("constructor_bindings.zig");
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const fixture = try rawSlice(&b);
+    var selected = try slicing.extract(a, fixture.module, .{
+        .entry = fixture.module.entry,
+        .require_pure = true,
+    });
+    defer selected.deinit();
+    try std.testing.expectEqual(@as(usize, 1), selected.generated_functions);
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        selected.maps.functions[@intCast(fixture.generator)],
+    );
+    try std.testing.expectEqual(@as(?u64, null), selected.maps.variables[0]);
+    const module = selected.module();
+    try std.testing.expectEqual(@as(usize, 0), module.effects.len);
+    var work: u64 = 1_000_000;
+    const constructors = try bindings.admit(a, b.allocator(), module, &work);
+    try std.testing.expectEqual(
+        selected.maps.functions[@intCast(fixture.target)].?,
+        constructors[0].function,
+    );
+    try std.testing.expectEqualSlices(u64, &.{ 0, 1 }, constructors[0].captures);
+    const value = module.values[@intCast(selected.maps.values[@intCast(fixture.raw)].?)];
+    try std.testing.expectEqual(@as(u64, 0), value.expression.primitive.immediate);
+    for (value.expression.primitive.operands, [_]u8{ 11, 22 }) |operand, expected| {
+        const literal = module.values[@intCast(operand)].expression.literal;
+        try std.testing.expectEqualSlices(
+            u8,
+            &.{expected},
+            module.constants[@intCast(literal)].bytes,
+        );
+    }
+    try rejectCapturePermutation(b.allocator(), fixture.module);
+}
+
+fn rejectCapturePermutation(allocator: std.mem.Allocator, module: source.Module) !void {
+    var maps: source.relation.Relocation.Maps = .{ .region_count = module.region_count };
+    inline for (.{
+        "schemas",   "constants", "effects", "handlers",  "resources",
+        "variables", "values",    "terms",   "functions",
+    }) |name| {
+        const entries = try allocator.alloc(?u64, @field(module, name).len);
+        for (entries, 0..) |*entry, index| entry.* = index;
+        @field(maps, name) = entries;
+    }
+    std.mem.swap(?u64, &@constCast(maps.variables)[1], &@constCast(maps.variables)[2]);
+    const changed = try source.relation.Relocation.relocate(allocator, module, maps);
+    const steps = [_]source.relation.Step{.{
+        .successor = changed,
+        .rule = .{ .relocation = maps },
+    }};
+    try std.testing.expectError(
+        error.UnsupportedRelation,
+        source.relation.validate(a, module, changed, &steps, .{}),
+    );
 }
