@@ -1006,3 +1006,136 @@ test "source reference traversal follows compiler emitted constants into their s
         .{ .kind = .schema, .id = module.failure },
     }, references.items);
 }
+
+const DisposalSlice = struct {
+    module: source.Module,
+    term: u64,
+    unit: u64,
+    literal: ?u64,
+};
+
+fn disposalSlice(b: *source.Builder, explicit: bool) !DisposalSlice {
+    const early = try b.scalar(void);
+    const later = try b.reserveSchema();
+    try b.defineSchema(later, .unit);
+    const unit = if (explicit) later else early;
+    var literal: ?u64 = null;
+    if (explicit) {
+        _ = try b.constant(u64, 9);
+        literal = try b.failureLiteral(try b.literal(.{ .schema = later, .bytes = &.{} }));
+        _ = try b.literal(.{ .schema = early, .bytes = &.{} });
+    }
+    const effect = try b.effect(.{
+        .identity = "slice/disposal-unit",
+        .payload = early,
+        .result = early,
+        .external = false,
+    });
+    const resumption = try b.schema(.{ .internal = .{ .resumption = .{
+        .effect = effect,
+        .input = early,
+        .answer = early,
+        .handled = &.{effect},
+        .mode = .deep,
+        .use = .linear,
+    } } });
+    const disposer = try b.declare(&.{resumption}, unit, &.{}, &.{});
+    const term = try b.term(.{ .dispose = try b.reference(b.parameter(disposer, 0)) });
+    try b.define(disposer, term);
+    const computation = try b.schema(.{ .internal = .{ .computation = .{
+        .parameters = &.{resumption},
+        .result = unit,
+    } } });
+    const entry = try b.declare(&.{early}, early, &.{}, &.{});
+    const closure = try b.variable(computation);
+    try b.define(entry, try b.bind(
+        closure,
+        try b.pure(try b.lambda(disposer, computation)),
+        try b.pure(try b.reference(b.parameter(entry, 0))),
+    ));
+    return .{ .module = b.module(entry, early), .term = term, .unit = unit, .literal = literal };
+}
+
+test "source slices retain disposal unit selection across ordered catalog pruning" {
+    for ([_]bool{ false, true }) |explicit| {
+        var b = source.Builder.init(a);
+        defer b.deinit();
+        const fixture = try disposalSlice(&b, explicit);
+        var selected = try slicing.extract(a, fixture.module, .{
+            .entry = fixture.module.entry,
+            .require_pure = true,
+        });
+        defer selected.deinit();
+        const module = selected.module();
+        try std.testing.expectEqual(@as(usize, 2), module.functions.len);
+        try std.testing.expectEqual(@as(usize, 1), module.constants.len);
+        try std.testing.expectEqual(
+            selected.maps.schemas[@intCast(fixture.unit)].?,
+            module.constants[0].schema,
+        );
+        const result = fixture.module.functions[@intCast(fixture.module.entry)].result;
+        try std.testing.expectEqual(
+            selected.maps.schemas[@intCast(result)].?,
+            module.functions[@intCast(module.entry)].result,
+        );
+        try std.testing.expect(selected.maps.schemas[0] != null);
+        try std.testing.expectEqualSlices(
+            ?u64,
+            if (explicit) &.{ null, 0, null } else &.{0},
+            selected.emitted_constants,
+        );
+        try std.testing.expectEqualSlices(
+            ?u64,
+            if (explicit) &.{ null, 0, null } else &.{},
+            selected.maps.constants,
+        );
+        var compiled = try source.lower(a, module);
+        defer compiled.deinit();
+    }
+}
+
+test "source disposal reference traversal retains source constant or fallback schema support" {
+    const relocation = source.relation.Relocation;
+    for ([_]bool{ false, true }) |explicit| {
+        var b = source.Builder.init(a);
+        defer b.deinit();
+        const fixture = try disposalSlice(&b, explicit);
+        var references: std.ArrayList(relocation.Reference) = .empty;
+        defer references.deinit(a);
+        try relocation.visitReferences(a, fixture.module, .term, fixture.term, &references);
+        const expected = [_]relocation.Reference{
+            .{ .kind = .value, .id = fixture.module.terms[@intCast(fixture.term)].dispose },
+            if (fixture.literal) |literal|
+                .{ .kind = .constant, .id = literal }
+            else
+                .{ .kind = .schema, .id = fixture.unit },
+        };
+        try std.testing.expectEqualSlices(relocation.Reference, &expected, references.items);
+        var work: u64 = 100;
+        references.clearRetainingCapacity();
+        try relocation.visitReferencesWithWork(
+            a,
+            fixture.module,
+            &.{},
+            .term,
+            fixture.term,
+            &references,
+            &work,
+        );
+        try std.testing.expectEqualSlices(relocation.Reference, &expected, references.items);
+        const needed = 100 - work;
+        for ([_]u64{ 0, 2, needed - 1 }) |limit| {
+            work = limit;
+            references.clearRetainingCapacity();
+            try std.testing.expectError(error.RelationLimit, relocation.visitReferencesWithWork(
+                a,
+                fixture.module,
+                &.{},
+                .term,
+                fixture.term,
+                &references,
+                &work,
+            ));
+        }
+    }
+}

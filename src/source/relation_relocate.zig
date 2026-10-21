@@ -266,6 +266,22 @@ pub fn visitReferencesWithWork(
     try data.admission.spend(work, 1);
     switch (kind) {
         .region => try sink.append(a, .{ .kind = .region, .id = index }),
+        .term => {
+            if (index >= module.terms.len) return error.InvalidRelation;
+            const term = module.terms[@intCast(index)];
+            _ = try mapper.terms(term);
+            if (term == .dispose) {
+                const selected = try @import("check.zig").selectUnit(
+                    module.schemas,
+                    module.constants,
+                    work,
+                ) orelse return error.TypeMismatch;
+                _ = if (selected.constant) |constant|
+                    try mapper.id(.constant, constant)
+                else
+                    try mapper.id(.schema, selected.schema);
+            }
+        },
         inline else => |tag| {
             const name = @tagName(tag) ++ "s";
             const values_ = @field(module, name);

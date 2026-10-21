@@ -74,6 +74,10 @@ constants and mappings; call `deinit` when finished. `Output.emitted_constants`
 maps the complete originally emitted constant catalog into the retained source,
 including literals whose generating declarations were pruned.
 `Output.maps.constants` remains the mapping for original source constants.
+Disposal also retains its implicitly selected unit literal, or the selected unit
+schema when traversing source without such a literal. The shared checker and
+lowering selector defines this dependency; preserving catalog order during
+pruning preserves the selection.
 
 A raw closure can depend on a constructor whose original registration function
 also contains an unreachable bridge. Extraction replaces that registration with
