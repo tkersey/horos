@@ -1,0 +1,28 @@
+pub const cases = .{
+    .{ "hyper_identity_endpoints", "Horos define result: incompatible schema shape" },
+    .{
+        "hyper_reciprocal",
+        "Horos refineValue.result.parameters.peer.result.result.result: incompatible schema shape",
+    },
+    .{ "hyper_strict_answer", "Horos define result: incompatible schema shape" },
+    .{ "hyper_wrong_answer", "Horos define result.result: incompatible schema shape" },
+    .{ "hyper_value_as_schema", "Horos library: expected a canonical schema handle" },
+    .{ "hyper_schema_as_value", "Horos authoring: wrong handle family; expected value" },
+    .{ "hyper_value_as_function", "Horos authoring: wrong handle family; expected function" },
+    .{ "hyper_counterfeit_pair", "Horos hyper: expected a canonical pair" },
+    .{ "hyper_pair_option", "Horos hyper.pair: unknown option capture" },
+    .{ "hyper_delayed_option", "Horos hyper.delayed: unknown option capture" },
+    .{ "hyper_task_completion", "Horos defineCallable.result: incompatible schema shape" },
+    .{ "hyper_group_option", "Horos hyper.group: unknown option capture" },
+    .{ "hyper_counterfeit_group", "Horos hyper: expected a canonical group" },
+    .{
+        "hyper_composition_middle",
+        "Horos refineValue.parameters.peer.result.result.result: incompatible schema shape",
+    },
+    .{ "hyper_transform_result", "Horos define result.result: incompatible schema shape" },
+    .{ "hyper_counterfeit_ana", "Horos hyper: expected a canonical ana definition" },
+    .{ "hyper_counterfeit_query", "Horos hyper: expected a canonical query" },
+    .{ "hyper_start_state", "Horos call.state: incompatible schema shape" },
+    .{ "hyper_strict_successor", "Horos hyper: expected a delayed shape" },
+    .{ "hyper_delayed_successor", "Horos call.state: incompatible schema shape" },
+};

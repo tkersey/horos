@@ -52,6 +52,7 @@ pub const cases = .{
         "Horos native schema: value.children.element: recursive native type requires an " ++
             "explicit runtime declaration",
     },
+    .{ "native_descriptor_recursive", "depends on itself here" },
     .{ "match_arm", "Horos match.no: case belongs to a different arm" },
     .{ "failure_category", "Horos authoring: wrong handle family; expected failure_literal" },
 };

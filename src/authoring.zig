@@ -1692,6 +1692,15 @@ pub fn Body(comptime Parameters: type) type {
         fn raw(self: *Self) *runtime.Body {
             return @ptrCast(self);
         }
+        pub fn context(self: *Self) Error!*Context {
+            return @ptrCast(try self.raw().context());
+        }
+        pub fn schemaOf(
+            self: *Self,
+            value: anytype,
+        ) Error!*const Schema(index(.value, @TypeOf(value))) {
+            return @ptrCast(try self.raw().schemaOf(erased(.value, value)));
+        }
         pub fn parameter(
             self: *Self,
             comptime name: []const u8,
@@ -2685,6 +2694,19 @@ pub fn Body(comptime Parameters: type) type {
 }
 
 pub const interop = struct {
+    pub fn componentModule(
+        c: *Context,
+        entry: anytype,
+        failure: anytype,
+        interface: source.component.Interface,
+    ) !source.Module {
+        return runtime.interop.componentModule(
+            rawContext(c),
+            erased(.function, entry),
+            erased(.schema, failure),
+            interface,
+        );
+    }
     pub fn NamedEntry(comptime family: Family) type {
         return struct { name: []const u8, handle: *const canonical(family, Dynamic) };
     }
@@ -2879,6 +2901,20 @@ pub const interop = struct {
     }
     pub fn declaredFunction(c: *Context, id: p.Id) Error!*const Function(Dynamic) {
         return @ptrCast(try runtime.interop.declaredFunction(rawContext(c), id));
+    }
+    pub fn importFunction(
+        c: *Context,
+        id: p.Id,
+        expected: anytype,
+    ) Error!*const Function(callableSignature(
+        index(.schema, @TypeOf(expected)),
+        "importFunction",
+    )) {
+        return @ptrCast(try runtime.interop.importFunction(
+            rawContext(c),
+            id,
+            erased(.schema, expected),
+        ));
     }
     pub fn externalOperation(
         c: *Context,

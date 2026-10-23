@@ -2,6 +2,72 @@ const std = @import("std");
 const a = @import("../authoring.zig");
 const source = @import("../source.zig");
 
+test "checked component imports retain actual signatures and publish only declared imports" {
+    var raw = source.Builder.init(std.testing.allocator);
+    defer raw.deinit();
+    const c = try a.Context.init(&raw);
+    const integer = try c.schema(u64);
+    const id = try a.interop.schemaId(c, integer);
+    const imported_id = try raw.declare(&.{id}, id, &.{}, &.{});
+    const expected = try c.callable(.{ .input = integer }, integer, .{}, .{ .use = .reusable });
+    const imported = try a.interop.importFunction(c, imported_id, expected);
+    try std.testing.expectEqual(imported, try a.interop.importFunction(c, imported_id, expected));
+    const entry = try c.function("entry", .{}, integer, .{});
+    const body = try c.body(entry);
+    try c.define(entry, try body.ret(try body.call(imported, .{
+        .input = try body.constant(u64, 42),
+    })));
+    const unit = try c.schema(void);
+    try std.testing.expectError(error.UndefinedBody, c.module(entry, unit));
+    const interface: source.component.Interface = .{
+        .imports = &.{.{ .name = "imported", .reference = .{
+            .kind = .function,
+            .id = imported_id,
+        } }},
+        .exports = &.{.{ .name = "entry", .reference = .{
+            .kind = .function,
+            .id = try a.interop.functionId(c, entry),
+        } }},
+        .borrows = &.{.{ .function = imported_id }},
+    };
+    _ = try a.interop.componentModule(c, entry, unit, interface);
+    _ = try c.declareSchema(.callable, a.Dynamic);
+    try std.testing.expectError(error.UndefinedSchema, a.interop.componentModule(
+        c,
+        entry,
+        unit,
+        interface,
+    ));
+}
+
+test "checked component function imports reject counterfeit effects and parameter contracts" {
+    var raw = source.Builder.init(std.testing.allocator);
+    defer raw.deinit();
+    const c = try a.Context.init(&raw);
+    const integer = try c.schema(u64);
+    const boolean = try c.schema(bool);
+    const effect = try c.external("imported effect", integer, integer);
+    const id = try a.interop.schemaId(c, integer);
+    const effect_id = try a.interop.operationId(c, effect);
+    const imported_id = try raw.declare(&.{id}, id, &.{effect_id}, &.{});
+    const pure = try c.callable(.{ .input = integer }, integer, .{}, .{ .use = .reusable });
+    try std.testing.expectError(error.SchemaMismatch, a.interop.importFunction(
+        c,
+        imported_id,
+        pure,
+    ));
+    const wrong = try c.callable(.{ .input = boolean }, integer, .{effect}, .{ .use = .reusable });
+    try std.testing.expectError(error.SchemaMismatch, a.interop.importFunction(
+        c,
+        imported_id,
+        wrong,
+    ));
+    const correct = try c.callable(.{ .input = integer }, integer, .{effect}, .{
+        .use = .reusable,
+    });
+    _ = try a.interop.importFunction(c, imported_id, correct);
+}
+
 test "checked environmental operation imports and sites retain validated contracts" {
     var raw = source.Builder.init(std.testing.allocator);
     defer raw.deinit();
