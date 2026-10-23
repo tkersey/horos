@@ -72,6 +72,14 @@ fn rejectRecursiveShapes(
     } else if (comptime selected("native_recursive")) {
         const Node = struct { children: []const @This() };
         _ = try c.schema(Node);
+    } else if (comptime selected("native_descriptor_recursive")) {
+        const Cycle = struct {
+            pub const contract: native.Info = .{ .product = native.Fields(
+                &.{"next"},
+                &.{@This()},
+            ) };
+        };
+        _ = try native.lower(Cycle.contract, a.interop.builder(c));
     } else if (comptime selected("match_arm")) {
         const sum = try c.alternatives(.{ .no = integer, .yes = integer });
         const input = try b.variant(sum, "no", value);

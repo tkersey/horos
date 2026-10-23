@@ -50,7 +50,20 @@ pub const Info = union(enum) {
 pub fn Contract(comptime description: Info) type {
     return struct {
         pub const contract = description;
+        pub const finite: void = requireFinite(description);
     };
+}
+
+fn requireFinite(comptime description: Info) void {
+    switch (description) {
+        .product, .sum => |Children| {
+            for (@typeInfo(Children).@"struct".field_types) |Child|
+                _ = Contract(Child.contract).finite;
+        },
+        .array => |array| _ = Contract(array.element.contract).finite,
+        .sequence => |sequence| _ = Contract(sequence.element.contract).finite,
+        else => {},
+    }
 }
 
 pub fn Shape(comptime T: type) type {
@@ -237,36 +250,49 @@ pub fn enumTags(comptime T: type) [@typeInfo(T).@"enum".field_values.len]u32 {
 /// Raw compiler integration folds the same contract as checked authoring.
 /// Value encoding, allocation ownership, and JSON projection remain codec work.
 pub inline fn lower(comptime description: Info, builder: anytype) @TypeOf(builder.schema(.unit)) {
-    const p = @import("program.zig");
-    return switch (description) {
-        .unit => builder.schema(.unit),
-        .boolean => builder.schema(.boolean),
-        .integer => |T| builder.schema(@unionInit(p.Schema, @typeName(T), {})),
-        .text => |maximum| builder.schema(if (maximum) |n| .{ .bounded_text = n } else .text),
-        .bytes => |maximum| builder.schema(if (maximum) |n| .{ .bounded_bytes = n } else .bytes),
-        .enumeration => |Tags| blk: {
-            const tags = comptime enumTags(Tags);
-            break :blk builder.schema(.{ .enumeration = &tags });
-        },
-        .product, .sum => |Children, kind| blk: {
-            const fields = @typeInfo(Children).@"struct";
-            var ids: [fields.field_types.len]p.Id = undefined;
-            inline for (
-                fields.field_types,
-                0..,
-            ) |Child, i| ids[i] = try lower(Child.contract, builder);
-            break :blk builder.schema(@unionInit(p.Schema, @tagName(kind), &ids));
-        },
-        .array => |array| builder.schema(.{ .array = .{
-            .element = try lower(array.element.contract, builder),
-            .length = array.length,
-        } }),
-        .sequence => |sequence| blk: {
-            const child = try lower(sequence.element.contract, builder);
-            break :blk builder.schema(if (sequence.maximum) |n|
-                .{ .vector = .{ .element = child, .maximum = n } }
-            else
-                .{ .seq = child });
-        },
+    comptime _ = Contract(description).finite;
+    return NativeLowering(description, @TypeOf(builder)).build(builder);
+}
+
+fn NativeLowering(comptime description: Info, comptime Builder: type) type {
+    return struct {
+        fn build(builder: Builder) @TypeOf(builder.schema(.unit)) {
+            const p = @import("program.zig");
+            return switch (description) {
+                .unit => builder.schema(.unit),
+                .boolean => builder.schema(.boolean),
+                .integer => |T| builder.schema(@unionInit(p.Schema, @typeName(T), {})),
+                .text => |maximum| builder.schema(
+                    if (maximum) |n| .{ .bounded_text = n } else .text,
+                ),
+                .bytes => |maximum| builder.schema(
+                    if (maximum) |n| .{ .bounded_bytes = n } else .bytes,
+                ),
+                .enumeration => |Tags| blk: {
+                    const tags = comptime enumTags(Tags);
+                    break :blk builder.schema(.{ .enumeration = &tags });
+                },
+                .product, .sum => |Children, kind| blk: {
+                    const fields = @typeInfo(Children).@"struct";
+                    var ids: [fields.field_types.len]p.Id = undefined;
+                    inline for (fields.field_types, 0..) |Child, i|
+                        ids[i] = try NativeLowering(Child.contract, Builder).build(builder);
+                    break :blk builder.schema(@unionInit(p.Schema, @tagName(kind), &ids));
+                },
+                .array => |array| builder.schema(.{ .array = .{
+                    .element = try NativeLowering(array.element.contract, Builder).build(builder),
+                    .length = array.length,
+                } }),
+                .sequence => |sequence| blk: {
+                    const child = try NativeLowering(sequence.element.contract, Builder).build(
+                        builder,
+                    );
+                    break :blk builder.schema(if (sequence.maximum) |n|
+                        .{ .vector = .{ .element = child, .maximum = n } }
+                    else
+                        .{ .seq = child });
+                },
+            };
+        }
     };
 }

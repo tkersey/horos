@@ -80,6 +80,10 @@ Enums normalize numeric tags, independently of native enum labels. Unsupported
 pointers and recursive native types fail with a field path; recursive authored
 schemas use explicit declarations.
 
+Schema lowering shares generated helpers for repeated normalized descriptors.
+A compile-time finiteness check rejects cyclic raw native descriptors before
+construction; recursive authored schemas still use the declaration lifecycle.
+
 `Schema(Shape)`, `Value(Shape)`, `Function(Signature)`, `Body(Parameters)`,
 `Computation(Result)` and `Operation(Signature)` are canonical opaque families.
 Callers normally infer those indices. Case payloads, destructured parts, schema

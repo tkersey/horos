@@ -3,6 +3,32 @@ const source = @import("source.zig");
 const a = @import("authoring.zig");
 const testing = std.testing;
 
+inline fn RepeatedNative(comptime depth: u8) type {
+    return if (depth == 0) struct { number: u64, flag: bool } else struct {
+        left: RepeatedNative(depth - 1),
+        right: RepeatedNative(depth - 1),
+    };
+}
+
+test "native repeated descriptors lower without caller evaluation budgets" {
+    const native = @import("horos_data").schema.native;
+    var raw = source.Builder.init(testing.allocator);
+    defer raw.deinit();
+    const integer = try raw.scalar(u64);
+    const boolean = try raw.scalar(bool);
+    var expected = try raw.schema(.{ .product = &.{ integer, boolean } });
+    for (0..8) |_| expected = try raw.schema(.{ .product = &.{ expected, expected } });
+    try testing.expectEqual(expected, try native.lower(native.info(RepeatedNative(8)), &raw));
+    const c = try a.Context.init(&raw);
+    const schema = try c.schema(RepeatedNative(8));
+    try testing.expectEqual(expected, try a.interop.schemaId(c, schema));
+    const fields = try a.interop.fields(c, schema);
+    try testing.expectEqualStrings("left", fields.at(0).?.name);
+    try testing.expectEqualStrings("right", fields.at(1).?.name);
+    try testing.expect(schema == try c.schema(RepeatedNative(8)));
+    try testing.expectEqual(@as(usize, 11), raw.schemas.items.len);
+}
+
 test "native shape lowering agrees with independently composed portable schemas" {
     const native = @import("horos_data").schema.native;
     var raw = source.Builder.init(testing.allocator);
