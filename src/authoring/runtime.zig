@@ -347,6 +347,74 @@ const ContextData = struct {
 fn contextData(c: *const Context) *ContextData {
     return @ptrCast(@alignCast(@constCast(c)));
 }
+fn NativeSchema(comptime description: @import("horos_data").schema.native.Info) type {
+    return struct {
+        fn build(self: *Context) Error!*const Schema {
+            try self.ready();
+            var returned_error: anyerror = undefined;
+            errdefer self.poison(returned_error);
+            const raw = contextData(self).raw;
+            switch (description) {
+                .product, .sum => |Children, kind| {
+                    const description_fields = @typeInfo(Children).@"struct";
+                    var names: [description_fields.field_types.len]Field = undefined;
+                    inline for (
+                        description_fields.field_names,
+                        description_fields.field_types,
+                        0..,
+                    ) |name, Child, index|
+                        names[index] = .{
+                            .name = name,
+                            .schema = try captureError(
+                                &returned_error,
+                                NativeSchema(Child.contract).build(self),
+                            ),
+                        };
+                    return captureError(
+                        &returned_error,
+                        if (kind == .product) self.record(&names) else self.alternatives(&names),
+                    );
+                },
+                .array => |array| {
+                    const element = try captureError(
+                        &returned_error,
+                        NativeSchema(array.element.contract).build(self),
+                    );
+                    const id = try captureError(&returned_error, raw.schema(.{ .array = .{
+                        .element = try captureError(&returned_error, self.schemaId(element)),
+                        .length = array.length,
+                    } }));
+                    return captureError(&returned_error, self.internResult(id, &.{}, element));
+                },
+                .sequence => |seq_description| {
+                    const element = try captureError(
+                        &returned_error,
+                        NativeSchema(seq_description.element.contract).build(self),
+                    );
+                    if (seq_description.maximum) |maximum| {
+                        const id = try captureError(&returned_error, raw.schema(.{ .vector = .{
+                            .element = try captureError(&returned_error, self.schemaId(element)),
+                            .maximum = maximum,
+                        } }));
+                        return captureError(&returned_error, self.internResult(id, &.{}, element));
+                    }
+                    return captureError(&returned_error, self.sequence(element));
+                },
+                else => return captureError(
+                    &returned_error,
+                    self.intern(
+                        try captureError(
+                            &returned_error,
+                            @import("horos_data").schema.native.lower(description, raw),
+                        ),
+                        &.{},
+                    ),
+                ),
+            }
+        }
+    };
+}
+
 pub const Context = opaque {
     pub fn lastDiagnostic(self: *const Context) Diagnostic {
         return contextData(self).diagnostic;
@@ -566,67 +634,8 @@ pub const Context = opaque {
         self: *Context,
         comptime description: @import("horos_data").schema.native.Info,
     ) Error!*const Schema {
-        try self.ready();
-        var returned_error: anyerror = undefined;
-        errdefer self.poison(returned_error);
-        const raw = contextData(self).raw;
-        switch (description) {
-            .product, .sum => |Children, kind| {
-                const description_fields = @typeInfo(Children).@"struct";
-                var names: [description_fields.field_types.len]Field = undefined;
-                inline for (
-                    description_fields.field_names,
-                    description_fields.field_types,
-                    0..,
-                ) |name, Child, index|
-                    names[index] = .{
-                        .name = name,
-                        .schema = try captureError(
-                            &returned_error,
-                            self.nativeSchema(Child.contract),
-                        ),
-                    };
-                return captureError(
-                    &returned_error,
-                    if (kind == .product) self.record(&names) else self.alternatives(&names),
-                );
-            },
-            .array => |array| {
-                const element = try captureError(
-                    &returned_error,
-                    self.nativeSchema(array.element.contract),
-                );
-                const id = try captureError(&returned_error, raw.schema(.{ .array = .{
-                    .element = try captureError(&returned_error, self.schemaId(element)),
-                    .length = array.length,
-                } }));
-                return captureError(&returned_error, self.internResult(id, &.{}, element));
-            },
-            .sequence => |seq_description| {
-                const element = try captureError(
-                    &returned_error,
-                    self.nativeSchema(seq_description.element.contract),
-                );
-                if (seq_description.maximum) |maximum| {
-                    const id = try captureError(&returned_error, raw.schema(.{ .vector = .{
-                        .element = try captureError(&returned_error, self.schemaId(element)),
-                        .maximum = maximum,
-                    } }));
-                    return captureError(&returned_error, self.internResult(id, &.{}, element));
-                }
-                return captureError(&returned_error, self.sequence(element));
-            },
-            else => return captureError(
-                &returned_error,
-                self.intern(
-                    try captureError(
-                        &returned_error,
-                        @import("horos_data").schema.native.lower(description, raw),
-                    ),
-                    &.{},
-                ),
-            ),
-        }
+        comptime _ = @import("horos_data").schema.native.Contract(description).finite;
+        return NativeSchema(description).build(self);
     }
     /// A checked forward reference. Every declaration must be completed before publication.
     pub fn declareSchema(self: *Context, kind: SchemaKind) Error!*const SchemaDeclaration {

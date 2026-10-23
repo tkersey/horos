@@ -264,13 +264,15 @@ intentional; the separate 42-image historical byte baseline remains unchanged.
 Local measurements used Zig 0.17.0 `safe`, Apple M2 Pro arm64, macOS 27.2
 (26B118), on October 23, 2026. Each snapshot ran eleven fresh-owner samples per
 fixture, interleaved by fixture; the table reports the median of the final ten.
-Baseline ran before candidate, with other development activity present.
+Baseline ran before candidate, with other development activity present. Candidate
+timings include the final shared native-descriptor lowering; its source records,
+images and allocation counts match the preceding typed construction exactly.
 
 | Fixture | Authoring µs | Allocation calls | Requested bytes | Peak live bytes | Subsequent lowering µs |
 |---|---:|---:|---:|---:|---:|
-| duplicate | 15.94 → 630.46 | 4 → 236 | 86,336 → 789,426 | 86,336 → 525,728 | 523.08 → 536.94 |
-| configured | 15.62 → 699.35 | 4 → 234 | 85,184 → 782,368 | 85,184 → 540,372 | 628.19 → 627.35 |
-| lazy | 11.98 → 524.44 | 3 → 226 | 51,336 → 782,816 | 51,336 → 559,872 | 449.81 → 461.08 |
+| duplicate | 16.48 → 602.75 | 4 → 236 | 86,336 → 789,426 | 86,336 → 525,728 | 491.06 → 515.06 |
+| configured | 17.29 → 685.73 | 4 → 234 | 85,184 → 782,368 | 85,184 → 540,372 | 605.38 → 609.38 |
+| lazy | 12.25 → 515.23 | 3 → 226 | 51,336 → 782,816 | 51,336 → 559,872 | 424.48 → 449.60 |
 
 Authoring includes `Context.module`'s checked capture-publication lowering and
 source snapshot. Raw baseline publication did neither. The subsequent lowering
