@@ -217,6 +217,9 @@ fn package(r: Runner, zig: []const u8, repository: []const u8, output: []const u
     );
     var admitted = try horos.data.program_image.Admitted.decode(r.a, image.stdout);
     defer admitted.deinit();
+    const hyper_image = try selected.run(&.{ zig, "build", "hyper" }, consumer, true);
+    var hyper_admitted = try horos.data.program_image.Admitted.decode(r.a, hyper_image.stdout);
+    defer hyper_admitted.deinit();
     inline for (.{
         .{ "category", "wrong handle family", "expected schema" },
         .{ "failure_literal_category", "wrong handle family", "expected failure_literal" },
@@ -272,6 +275,8 @@ fn packageConsumer(r: Runner, source: []const u8, output: []const u8) ![]const u
         "data.zig",
         "static.zig",
         "static_cases.zig",
+        "hyper_static.zig",
+        "hyper_static_cases.zig",
     }) |file| try r.write(
         try r.path(&.{ consumer, file }),
         try r.read(try r.path(&.{ source, "test/package_authoring", file })),
@@ -279,6 +284,10 @@ fn packageConsumer(r: Runner, source: []const u8, output: []const u8) ![]const u
     try r.write(
         try r.path(&.{ consumer, "client.zig" }),
         try r.read(try r.path(&.{ source, "examples/authoring_client.zig" })),
+    );
+    try r.write(
+        try r.path(&.{ consumer, "hyper_client.zig" }),
+        try r.read(try r.path(&.{ source, "examples/hyper_client.zig" })),
     );
     return consumer;
 }

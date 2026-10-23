@@ -36,3 +36,60 @@ for (const [kind, values] of [
   }, kind);
 }
 console.log("source oracle preserves nested owned snapshots and deliberately shared cells");
+
+for (const [kind, value] of [
+  ["hyper_constant_peer", 42],
+  ["hyper_ignored_argument", 43],
+  ["hyper_unused_query", 42],
+  ["hyper_ignored_successor", 42],
+  ["hyper_demanded_successor", 42],
+  ["hyper_lazy_product", 23],
+  ["hyper_lazy_sum", 1],
+  ["hyper_lazy_stream", 1],
+  ["hyper_stream_head", 23],
+  ["hyper_identity_project", 42],
+  ["hyper_run_constant", 42],
+  ["hyper_nested_need", 1103],
+]) {
+  const source = parseExactJson(execFileSync(emitter, [kind, "json"], {encoding: "utf8"}));
+  assert.deepEqual(execute(source, [], []), {
+    trace: [], kind: "Completed", value: word(value),
+  }, kind);
+}
+console.log("source oracle preserves hyperfunction peer and successor demand boundaries");
+
+for (const [kind, payloads, value] of [
+  ["obtain", [], 7],
+  ["run", [20, 10, 21, 205, 215], 35],
+  ["repeated", [20, 10, 21, 205, 10, 21, 205, 230], 50],
+  ["adaptive", [20, 10, 21, 205, 10, 21, 205, 230], 50],
+  ["dispose", [20, 10, 21, 205], 99],
+]) {
+  const source = parseExactJson(execFileSync(emitter, [`hyper_task_${kind}`, "json"], {encoding: "utf8"}));
+  assert.deepEqual(execute(source, [], payloads.map(() => word(5))), {
+    trace: payloads.map(value => ({kind: "Requested", identity: "hyper/task", payload: word(value)})),
+    kind: "Completed", value: word(value),
+  }, kind);
+}
+const adaptive = parseExactJson(execFileSync(emitter, ["hyper_task_adaptive", "json"], {encoding: "utf8"}));
+assert.deepEqual(execute(adaptive, [], [5, 5, 3, 5, 5].map(word)), {
+  trace: [20, 10, 21, 203, 213].map(value => ({kind: "Requested", identity: "hyper/task", payload: word(value)})),
+  kind: "Completed", value: word(33),
+});
+const composition = parseExactJson(execFileSync(emitter, ["hyper_composition", "json"], {encoding: "utf8"}));
+for (let input = 0; input < 256; input += 1) {
+  assert.deepEqual(execute(composition, [input], []), {
+    trace: [], kind: "Completed", value: [...word(2 * (input + 3)), Number(input === 7)],
+  }, `composition ${input}`);
+}
+for (const [kind, values] of [
+  ["hyper_duplicate", [12, 13]],
+  ["hyper_configured", [12, 14]],
+  ["hyper_lazy", [2, 3]],
+]) {
+  const source = parseExactJson(execFileSync(emitter, [kind, "json"], {encoding: "utf8"}));
+  assert.deepEqual(execute(source, [...word(2), ...word(3)], []), {
+    trace: [], kind: "Completed", value: values.flatMap(word),
+  }, kind);
+}
+console.log("source oracle preserves typed task effects, retained requesters, composition and configured definitions");

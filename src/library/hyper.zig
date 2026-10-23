@@ -1,577 +1,430 @@
-// Copyright (c) 2026 Boundary contributors. MIT license.
-//! Explicit pure call-by-name computations. Runtime closures use normal lowering.
-const source = @import("../source.zig");
-const Id = source.Id;
-pub const demand = @import("hyper_need.zig");
+const bridge = @import("bridge.zig");
+const a = bridge.a;
+const native = bridge.native;
+const runtime = @import("runtime/hyper.zig");
+const option_contract = @import("../authoring/option_contract.zig");
+pub const Group = @import("hyper_group.zig").Group;
+pub const group = @import("hyper_group.zig").group;
+pub const compose = @import("hyper_group.zig").compose;
+pub const Stream = @import("hyper_data.zig").Stream;
+pub const StreamNode = @import("hyper_data.zig").StreamNode;
+pub const StreamCell = @import("hyper_data.zig").StreamCell;
+pub const stream = @import("hyper_data.zig").stream;
+pub const emptyStream = @import("hyper_data.zig").emptyStream;
+pub const cons = @import("hyper_data.zig").cons;
+pub const lazyProduct = @import("hyper_data.zig").lazyProduct;
+pub const lazySum = @import("hyper_data.zig").lazySum;
 
-/// A zero-argument pure computation. Captures are checked by normal admission.
-pub fn delayed(b: *source.Builder, result: Id, captures: []const Id) source.Error!Id {
-    return b.schema(.{ .internal = .{ .computation = .{
-        .parameters = &.{},
-        .result = result,
-        .capture_bound = captures,
-    } } });
+pub const ir = @import("hyper_group.zig").interop;
+pub const demand = @import("hyper_need.zig").API(QueryAccess);
+
+pub fn Delayed(comptime R: type) type {
+    return a.Internal(.{ .callable = a.Signature(bridge.Empty, R) });
 }
 
-/// Demand a delayed value, producing a source term rather than a host result.
-pub fn force(b: *source.Builder, value: Id) source.Error!Id {
-    return b.term(.{ .apply = .{ .computation = value, .arguments = &.{} } });
-}
-
-pub const Pair = struct {
-    forward: Id,
-    backward: Id,
-    peer_forward: Id,
-    peer_backward: Id,
-    answer_forward: Id,
-    answer_backward: Id,
-};
-
-pub fn pair(b: *source.Builder, a: Id, z: Id) source.Error!Pair {
-    return pairWith(b, a, z, &.{});
-}
-
-/// A finite recursive interface group, not an unfolding of its endpoint types.
-/// The bound permits captures; lowering retains only the actually captured values.
-/// Reusable pure values cannot hide linear captures: ordinary fixed-point use
-/// analysis checks these schemas and the actual generated environments.
-pub fn pairWith(b: *source.Builder, a: Id, z: Id, captures: []const Id) source.Error!Pair {
-    if (a >= b.schemas.items.len or z >= b.schemas.items.len) return error.InvalidReference;
-    for (captures) |id| if (id >= b.schemas.items.len) return error.InvalidReference;
-    const cached = try b.specialization(Pair, "boundary.hyper.pair/v1", .{ a, z, captures });
-    if (cached.cached) |value| return value;
-    const forward = try b.reserveSchema();
-    const backward = try b.reserveSchema();
-    const peer_forward = try b.reserveSchema();
-    const peer_backward = try b.reserveSchema();
-    const answer_forward = try b.reserveSchema();
-    const answer_backward = try b.reserveSchema();
-    const ids = [_]Id{
-        forward,
-        backward,
-        peer_forward,
-        peer_backward,
-        answer_forward,
-        answer_backward,
+pub fn Hyper(comptime A: type, comptime B: type) type {
+    return struct {
+        pub const internal: a.InternalInfo = .{ .callable = a.Signature(
+            native.Fields(&.{"peer"}, &.{Delayed(Hyper(B, A))}),
+            Delayed(B),
+        ) };
     };
-    const bound = try b.allocator().alloc(Id, captures.len + ids.len + 2);
-    @memcpy(bound[0..captures.len], captures);
-    @memcpy(bound[captures.len..][0..ids.len], &ids);
-    bound[bound.len - 2] = a;
-    bound[bound.len - 1] = z;
-    const results = [_]Id{ answer_forward, answer_backward, forward, backward, z, a };
-    for (ids, results, 0..) |id, result, index| {
-        const parameters: []const Id = switch (index) {
-            0 => &.{peer_backward},
-            1 => &.{peer_forward},
-            else => &.{},
-        };
-        try b.defineSchema(id, .{ .internal = .{ .computation = .{
-            .parameters = parameters,
-            .result = result,
-            .capture_bound = bound,
-        } } });
-    }
-    return cached.finish(b, .{
-        .forward = forward,
-        .backward = backward,
-        .peer_forward = peer_forward,
-        .peer_backward = peer_backward,
-        .answer_forward = answer_forward,
-        .answer_backward = answer_backward,
+}
+
+pub fn Pair(comptime A: type, comptime B: type) type {
+    return opaque {
+        pub const Input = A;
+        pub const Output = B;
+        fn raw(self: *const @This()) *const runtime.Pair {
+            return @ptrCast(self);
+        }
+        pub fn input(self: *const @This()) *const a.Schema(A) {
+            return @ptrCast(self.raw().input());
+        }
+        pub fn output(self: *const @This()) *const a.Schema(B) {
+            return @ptrCast(self.raw().output());
+        }
+        pub fn forward(self: *const @This()) *const a.Schema(Hyper(A, B)) {
+            return @ptrCast(self.raw().forward());
+        }
+        pub fn backward(self: *const @This()) *const a.Schema(Hyper(B, A)) {
+            return @ptrCast(self.raw().backward());
+        }
+        pub fn peerForward(self: *const @This()) *const a.Schema(Delayed(Hyper(A, B))) {
+            return @ptrCast(self.raw().peerForward());
+        }
+        pub fn peerBackward(self: *const @This()) *const a.Schema(Delayed(Hyper(B, A))) {
+            return @ptrCast(self.raw().peerBackward());
+        }
+        pub fn answerForward(self: *const @This()) *const a.Schema(Delayed(B)) {
+            return @ptrCast(self.raw().answerForward());
+        }
+        pub fn answerBackward(self: *const @This()) *const a.Schema(Delayed(A)) {
+            return @ptrCast(self.raw().answerBackward());
+        }
+        pub fn swap(self: *const @This()) *const Pair(B, A) {
+            return @ptrCast(self.raw().swap());
+        }
+    };
+}
+
+fn pairType(comptime T: type) type {
+    if (@typeInfo(T) != .pointer or @typeInfo(T).pointer.size != .one)
+        @compileError("Horos hyper: expected a canonical pair");
+    const Child = @typeInfo(T).pointer.child;
+    if (@typeInfo(Child) != .@"opaque" or !@hasDecl(Child, "Input") or
+        !@hasDecl(Child, "Output")) @compileError("Horos hyper: expected a canonical pair");
+    if (T != *const Pair(Child.Input, Child.Output))
+        @compileError("Horos hyper: expected a canonical pair");
+    return Child;
+}
+
+pub fn pair(
+    c: *a.Context,
+    input: anytype,
+    output: anytype,
+    options: anytype,
+) a.Error!*const Pair(bridge.schemaShape(@TypeOf(input)), bridge.schemaShape(@TypeOf(output))) {
+    comptime option_contract.check("hyper.pair", @TypeOf(options), &.{"captures"});
+    const captures = bridge.list(.schema, bridge.option(options, "captures", .{}));
+    return @ptrCast(try runtime.pair(
+        bridge.context(c),
+        bridge.schema(input),
+        bridge.schema(output),
+        captures.slice(),
+    ));
+}
+
+pub fn delayed(
+    c: *a.Context,
+    result: anytype,
+    options: anytype,
+) a.Error!*const a.Schema(Delayed(bridge.schemaShape(@TypeOf(result)))) {
+    comptime option_contract.check("hyper.delayed", @TypeOf(options), &.{"captures"});
+    return c.callable(.{}, result, .{}, .{
+        .use = .reusable,
+        .captures = bridge.option(options, "captures", .{}),
     });
 }
 
-/// A staged body takes the complementary delayed participant and returns a
-/// delayed answer. Horos checks the actual body against this callable schema.
-pub fn make(b: *source.Builder, body: Id, interface: Id) source.Error!Id {
-    return b.lambda(body, interface);
+fn delayedResult(comptime S: type) type {
+    if (S == a.Dynamic) return a.Dynamic;
+    if (!@hasDecl(S, "internal") or S.internal != .callable)
+        @compileError("Horos hyper: expected a delayed shape");
+    const Sig = S.internal.callable;
+    if (Sig == a.Dynamic) return a.Dynamic;
+    if (Sig.parameters != a.Dynamic and @typeInfo(Sig.parameters).@"struct".field_types.len != 0)
+        @compileError("Horos hyper: expected a delayed shape");
+    return Sig.result;
 }
 
-/// Construct a delayed invocation. Neither body nor peer is entered until force.
-/// The result is a source term yielding Delayed<B>, preserving the normal staged
-/// distinction between source terms and source values.
-pub fn invoke(b: *source.Builder, participant: Id, peer: Id) source.Error!Id {
-    if (participant >= b.values.items.len) return error.InvalidReference;
-    const interface = b.values.items[@intCast(participant)].schema;
-    if (interface >= b.schemas.items.len) return error.InvalidReference;
-    const shape = b.schemas.items[@intCast(interface)];
-    if (shape != .internal or shape.internal != .computation) return error.TypeMismatch;
-    const answer = shape.internal.computation.result;
-    if (answer >= b.schemas.items.len) return error.InvalidReference;
-    const answer_shape = b.schemas.items[@intCast(answer)];
-    if (answer_shape != .internal or answer_shape.internal != .computation or
-        answer_shape.internal.computation.parameters.len != 0) return error.TypeMismatch;
-    const thunk = try b.declare(&.{}, answer_shape.internal.computation.result, &.{}, &.{});
-    const result = try b.variable(answer);
-    const applied = try b.term(.{ .apply = .{
-        .computation = participant,
-        .arguments = &.{peer},
-    } });
-    try b.define(thunk, try b.bind(result, applied, try force(b, try b.reference(result))));
-    return b.pure(try b.lambda(thunk, answer));
+pub fn force(
+    body: anytype,
+    value: anytype,
+) a.Error!*const a.Value(delayedResult(a.ShapeOf(@TypeOf(value)))) {
+    _ = try body.schemaOf(value);
+    return @ptrCast(try runtime.force(@ptrCast(body), @ptrCast(value)));
 }
 
-test "hyper recursive interfaces share finite schema declarations" {
-    const std = @import("std");
-    var b = source.Builder.init(std.testing.allocator);
-    defer b.deinit();
-    const integer = try b.scalar(u64);
-    const boolean = try b.scalar(bool);
-    const first = try pair(&b, integer, boolean);
-    const count = b.schemas.items.len;
-    for (0..100) |_| {
-        const again = try pair(&b, integer, boolean);
-        try std.testing.expectEqual(first, again);
-        try std.testing.expectEqual(count, b.schemas.items.len);
-    }
-    const entry = try b.declare(&.{}, integer, &.{}, &.{});
-    try b.define(entry, try b.pure(try b.constant(u64, 42)));
-    var compiled = try source.lower(std.testing.allocator, b.module(entry, try b.scalar(void)));
-    defer compiled.deinit();
+pub fn deferValue(
+    body: anytype,
+    schema: anytype,
+    value: anytype,
+) a.Error!*const a.Value(bridge.schemaShape(@TypeOf(schema))) {
+    _ = comptime delayedResult(bridge.schemaShape(@TypeOf(schema)));
+    const c = try body.context();
+    try runtime.pureDelay(bridge.context(c), bridge.schema(schema));
+    const function = try c.functionFor("hyper.defer", schema);
+    const nested = try body.closureBody(function);
+    try c.define(function, try nested.ret(value));
+    return body.lambda(function, schema);
 }
 
-test "hyper recursive wrapping cannot declare an exclusive capture reusable" {
-    const std = @import("std");
-    var b = source.Builder.init(std.testing.allocator);
-    defer b.deinit();
-    const integer = try b.scalar(u64);
-    const owned = try b.resource(integer);
-    _ = try pairWith(&b, integer, integer, &.{owned});
-    const entry = try b.declare(&.{}, integer, &.{}, &.{});
-    try b.define(entry, try b.pure(try b.constant(u64, 42)));
-    try std.testing.expectError(
-        error.InvalidOwnership,
-        source.lower(std.testing.allocator, b.module(entry, try b.scalar(void))),
+pub fn make(
+    body: anytype,
+    types: anytype,
+    function: anytype,
+) a.Error!*const a.Value(Hyper(pairType(@TypeOf(types)).Input, pairType(@TypeOf(types)).Output)) {
+    return body.lambda(function, types.forward());
+}
+
+pub fn base(
+    body: anytype,
+    types: anytype,
+    value: anytype,
+) a.Error!*const a.Value(Hyper(pairType(@TypeOf(types)).Input, pairType(@TypeOf(types)).Output)) {
+    const c = try body.context();
+    const function = try c.functionFor("hyper.base", types.forward());
+    const nested = try body.closureBody(function);
+    try c.define(function, try nested.ret(value));
+    return make(body, types, function);
+}
+
+pub fn invoke(
+    body: anytype,
+    participant: anytype,
+    peer: anytype,
+) a.Error!*const a.Value(a.ShapeOf(@TypeOf(participant)).internal.callable.result) {
+    const interface = try body.schemaOf(participant);
+    const reciprocal = try a.interop.refineValue(body, peer, (try interface.fields()).peer);
+    return @ptrCast(try runtime.invoke(
+        @ptrCast(body),
+        @ptrCast(participant),
+        @ptrCast(reciprocal),
+    ));
+}
+
+pub fn push(
+    body: anytype,
+    types: anytype,
+    transform: anytype,
+    tail: anytype,
+) a.Error!*const a.Value(Hyper(pairType(@TypeOf(types)).Input, pairType(@TypeOf(types)).Output)) {
+    const c = try body.context();
+    const function = try c.functionFor("hyper.push", types.forward());
+    const nested = try body.closureBody(function);
+    const argument_function = try c.functionFor("hyper.argument", types.answerBackward());
+    const argument_body = try nested.closureBody(argument_function);
+    const peer = try force(argument_body, try nested.parameter("peer"));
+    const answer = try invoke(argument_body, peer, tail);
+    try c.define(argument_function, try argument_body.ret(try force(argument_body, answer)));
+    const argument = try nested.lambda(argument_function, types.answerBackward());
+    try c.define(function, try nested.ret(try nested.call(transform, .{ .argument = argument })));
+    return make(body, types, function);
+}
+
+pub fn lift(
+    body: anytype,
+    types: anytype,
+    transform: anytype,
+) a.Error!*const a.Value(Hyper(pairType(@TypeOf(types)).Input, pairType(@TypeOf(types)).Output)) {
+    const c = try body.context();
+    const maker = try c.function("hyper.lift", .{}, types.forward(), .{});
+    const maker_body = try body.closureBody(maker);
+    const tail = try c.functionFor("hyper.lift.tail", types.peerForward());
+    const tail_body = try maker_body.closureBody(tail);
+    try c.define(tail, try tail_body.ret(try tail_body.call(maker, .{})));
+    const delayed_tail = try maker_body.lambda(tail, types.peerForward());
+    try c.define(maker, try maker_body.ret(try push(maker_body, types, transform, delayed_tail)));
+    return body.call(maker, .{});
+}
+
+pub fn identity(
+    body: anytype,
+    types: anytype,
+) a.Error!*const a.Value(Hyper(pairType(@TypeOf(types)).Input, pairType(@TypeOf(types)).Output)) {
+    const c = try body.context();
+    const transform = try c.function(
+        "hyper.identity",
+        .{ .argument = types.answerBackward() },
+        types.answerForward(),
+        .{},
     );
+    const nested = try body.closureBody(transform);
+    const thunk = try c.functionFor("hyper.identity.answer", types.answerForward());
+    const thunk_body = try nested.closureBody(thunk);
+    const argument = try force(thunk_body, try nested.parameter("argument"));
+    try c.define(thunk, try thunk_body.ret(argument));
+    try c.define(transform, try nested.ret(try nested.lambda(thunk, types.answerForward())));
+    return lift(body, types, transform);
 }
 
-pub const Ana = struct { function: Id, interface: Id };
-
-/// Step.emit receives source values and a staged query builder. It may emit zero,
-/// one, or arbitrarily many runtime queries; no host function enters the image.
-/// State must be admitted by the interface's capture bound.
-/// Each call emits a definition using the current Step configuration. Reuse the
-/// returned Ana with start to share code; runtime queries call that same maker.
-pub fn ana(b: *source.Builder, types: Pair, state: Id, comptime Step: type) source.Error!Ana {
-    const maker = try b.declare(&.{state}, types.forward, &.{}, &.{});
-    const body = try b.declare(&.{types.peer_backward}, types.answer_forward, &.{}, &.{});
-    try b.define(body, try Step.emit(b, Query{
-        .types = types,
-        .maker = maker,
-        .state = try b.reference(b.parameter(maker, 0)),
-        .peer = try b.reference(b.parameter(body, 0)),
-    }));
-    try b.define(maker, try b.pure(try make(b, body, types.forward)));
-    return .{ .function = maker, .interface = types.forward };
+pub fn run(
+    body: anytype,
+    types: anytype,
+    participant: anytype,
+) a.Error!*const a.Value(Delayed(pairType(@TypeOf(types)).Output)) {
+    const c = try body.context();
+    const peer = try c.functionFor("hyper.run.peer", types.peerBackward());
+    const nested = try body.closureBody(peer);
+    try c.define(peer, try nested.ret(try identity(nested, types.swap())));
+    return invoke(body, participant, try body.lambda(peer, types.peerBackward()));
 }
 
-pub fn start(b: *source.Builder, definition: Ana, state: Id) source.Error!Id {
-    return b.term(.{ .call = .{ .function = definition.function, .arguments = &.{state} } });
+pub fn project(
+    body: anytype,
+    types: anytype,
+    participant: anytype,
+    argument: anytype,
+) a.Error!*const a.Value(Delayed(pairType(@TypeOf(types)).Output)) {
+    const c = try body.context();
+    const peer = try c.functionFor("hyper.project.peer", types.peerBackward());
+    const nested = try body.closureBody(peer);
+    try c.define(peer, try nested.ret(try base(nested, types.swap(), argument)));
+    return invoke(body, participant, try body.lambda(peer, types.peerBackward()));
 }
 
-pub fn swap(types: Pair) Pair {
-    return .{
-        .forward = types.backward,
-        .backward = types.forward,
-        .peer_forward = types.peer_backward,
-        .peer_backward = types.peer_forward,
-        .answer_forward = types.answer_backward,
-        .answer_backward = types.answer_forward,
+fn AnaData(comptime S: type, comptime A: type, comptime B: type) type {
+    return struct {
+        types: *const Pair(A, B),
+        state: *const a.Schema(S),
+        maker: *const a.Function(a.Signature(native.Fields(&.{"state"}, &.{S}), Hyper(A, B))),
     };
 }
 
-pub const Query = struct {
-    types: Pair,
-    maker: Id,
-    state: Id,
-    peer: Id,
-
-    /// Return a delayed counterpart answer. Even looking up the counterpart is
-    /// deferred, so an unused query cannot evaluate its peer or successor state.
-    pub fn ask(self: Query, b: *source.Builder, next_state: Id) source.Error!Id {
-        const answer_shape = b.schemas.items[@intCast(self.types.answer_backward)];
-        const answer = answer_shape.internal.computation.result;
-        const tail = try b.declare(&.{}, self.types.forward, &.{}, &.{});
-        try b.define(tail, try b.term(.{ .call = .{
-            .function = self.maker,
-            .arguments = &.{next_state},
-        } }));
-        const thunk = try b.declare(&.{}, answer, &.{}, &.{});
-        const peer = try b.variable(self.types.backward);
-        const result = try b.variable(self.types.answer_backward);
-        const invoked = try invoke(
-            b,
-            try b.reference(peer),
-            try b.lambda(tail, self.types.peer_forward),
-        );
-        try b.define(
-            thunk,
-            try b.bind(
-                peer,
-                try force(b, self.peer),
-                try b.bind(result, invoked, try force(b, try b.reference(result))),
-            ),
-        );
-        return b.pure(try b.lambda(thunk, self.types.answer_backward));
-    }
-};
-
-fn delayedResult(b: *source.Builder, schema: Id) source.Error!Id {
-    if (schema >= b.schemas.items.len) return error.InvalidReference;
-    const shape = b.schemas.items[@intCast(schema)];
-    if (shape != .internal or shape.internal != .computation or
-        shape.internal.computation.parameters.len != 0) return error.TypeMismatch;
-    return shape.internal.computation.result;
-}
-
-/// Embed a source value without evaluating its expression before demand.
-pub fn deferValue(b: *source.Builder, schema: Id, value: Id) source.Error!Id {
-    const thunk = try b.declare(&.{}, try delayedResult(b, schema), &.{}, &.{});
-    try b.define(thunk, try b.pure(value));
-    return b.lambda(thunk, schema);
-}
-
-/// Constant hyperfunction; ignoring a pure peer does not force it.
-pub fn base(b: *source.Builder, types: Pair, value: Id) source.Error!Id {
-    const body = try b.declare(&.{types.peer_backward}, types.answer_forward, &.{}, &.{});
-    try b.define(body, try b.pure(value));
-    return make(b, body, types.forward);
-}
-
-/// transform is an ordinary checked source function Delayed<A> -> Delayed<B>.
-/// It may ignore its argument. tail is Delayed<Hyper<A,B>>.
-pub fn push(b: *source.Builder, types: Pair, transform: Id, tail: Id) source.Error!Id {
-    const body = try b.declare(&.{types.peer_backward}, types.answer_forward, &.{}, &.{});
-    const argument = try b.declare(&.{}, try delayedResult(b, types.answer_backward), &.{}, &.{});
-    const peer = try b.variable(types.backward);
-    const answer = try b.variable(types.answer_backward);
-    const requested = try invoke(b, try b.reference(peer), tail);
-    try b.define(
-        argument,
-        try b.bind(
-            peer,
-            try force(b, try b.reference(b.parameter(body, 0))),
-            try b.bind(answer, requested, try force(b, try b.reference(answer))),
-        ),
-    );
-    try b.define(body, try b.term(.{ .call = .{
-        .function = transform,
-        .arguments = &.{try b.lambda(argument, types.answer_backward)},
-    } }));
-    return make(b, body, types.forward);
-}
-
-/// Tie the recursive spine through finite code references. Calling the returned
-/// construction never invokes transform or unfolds future participant instances.
-pub fn lift(b: *source.Builder, types: Pair, transform: Id) source.Error!Id {
-    const cache = try b.specialization(Id, "boundary.hyper.lift/v1", .{ types, transform });
-    if (cache.cached) |function| return b.term(.{ .call = .{
-        .function = function,
-        .arguments = &.{},
-    } });
-    const maker = try b.declare(&.{}, types.forward, &.{}, &.{});
-    const tail = try b.declare(&.{}, types.forward, &.{}, &.{});
-    try b.define(tail, try b.term(.{ .call = .{ .function = maker, .arguments = &.{} } }));
-    try b.define(
-        maker,
-        try b.pure(try push(b, types, transform, try b.lambda(tail, types.peer_forward))),
-    );
-    _ = try cache.finish(b, maker);
-    return b.term(.{ .call = .{ .function = maker, .arguments = &.{} } });
-}
-
-/// Identity only exists at equal endpoint types. Its argument remains delayed.
-pub fn identity(b: *source.Builder, types: Pair) source.Error!Id {
-    const input = try delayedResult(b, types.answer_backward);
-    const output = try delayedResult(b, types.answer_forward);
-    if (input != output) return error.TypeMismatch;
-    const cache = try b.specialization(Id, "boundary.hyper.identity/v1", .{types});
-    const transform = if (cache.cached) |function| function else blk: {
-        const function = try b.declare(&.{types.answer_backward}, types.answer_forward, &.{}, &.{});
-        const thunk = try b.declare(&.{}, output, &.{}, &.{});
-        try b.define(thunk, try force(b, try b.reference(b.parameter(function, 0))));
-        try b.define(function, try b.pure(try b.lambda(thunk, types.answer_forward)));
-        break :blk try cache.finish(b, function);
+pub fn Ana(comptime S: type, comptime A: type, comptime B: type) type {
+    return opaque {
+        pub const State = S;
+        pub const Input = A;
+        pub const Output = B;
+        fn data(self: *const @This()) *const AnaData(S, A, B) {
+            return @ptrCast(@alignCast(self));
+        }
+        pub fn stateSchema(self: *const @This()) *const a.Schema(S) {
+            return self.data().state;
+        }
+        pub fn types(self: *const @This()) *const Pair(A, B) {
+            return self.data().types;
+        }
     };
-    return lift(b, types, transform);
 }
 
-pub fn run(b: *source.Builder, types: Pair, participant: Id) source.Error!Id {
-    const peer = try b.declare(&.{}, types.backward, &.{}, &.{});
-    try b.define(peer, try identity(b, swap(types)));
-    return invoke(b, participant, try b.lambda(peer, types.peer_backward));
+fn anaType(comptime T: type) type {
+    if (@typeInfo(T) != .pointer or @typeInfo(T).pointer.size != .one)
+        @compileError("Horos hyper: expected a canonical ana definition");
+    const Child = @typeInfo(T).pointer.child;
+    if (@typeInfo(Child) != .@"opaque" or !@hasDecl(Child, "State") or
+        !@hasDecl(Child, "Input") or !@hasDecl(Child, "Output"))
+        @compileError("Horos hyper: expected a canonical ana definition");
+    if (T != *const Ana(Child.State, Child.Input, Child.Output))
+        @compileError("Horos hyper: expected a canonical ana definition");
+    return Child;
 }
 
-pub fn project(b: *source.Builder, types: Pair, participant: Id, argument: Id) source.Error!Id {
-    const peer = try b.declare(&.{}, types.backward, &.{}, &.{});
-    try b.define(peer, try b.pure(try base(b, swap(types), argument)));
-    return invoke(b, participant, try b.lambda(peer, types.peer_backward));
-}
-
-/// Shared monomorphic interfaces for a finite set of endpoint types. This lists
-/// type pairs, never runtime states or interaction histories. Components use the
-/// same declared group so composition's rotated reciprocal calls stay compatible.
-pub const Group = struct {
-    endpoints: []const Id,
-    pairs: []const Pair,
-    pub fn get(self: Group, from: usize, to: usize) source.Error!Pair {
-        if (from >= self.endpoints.len or to >= self.endpoints.len) return error.InvalidReference;
-        const offset = @import("std").math.mul(
-            usize,
-            from,
-            self.endpoints.len,
-        ) catch return error.InvalidReference;
-        const index = @import("std").math.add(
-            usize,
-            offset,
-            to,
-        ) catch return error.InvalidReference;
-        if (index >= self.pairs.len) return error.InvalidReference;
-        return self.pairs[index];
-    }
-};
-
-pub fn group(b: *source.Builder, endpoints: []const Id, captures: []const Id) source.Error!Group {
-    const std = @import("std");
-    if (endpoints.len == 0) return error.InvalidSchema;
-    for (endpoints) |id| if (id >= b.schemas.items.len) return error.InvalidReference;
-    for (captures) |id| if (id >= b.schemas.items.len) return error.InvalidReference;
-    const cache = try b.specialization(Group, "boundary.hyper.group/v1", .{ endpoints, captures });
-    if (cache.cached) |value| return value;
-    const count = std.math.mul(usize, endpoints.len, endpoints.len) catch return error.Capacity;
-    const doubled = std.math.mul(usize, count, 2) catch return error.Capacity;
-    const nodes = std.math.add(usize, doubled, endpoints.len) catch return error.Capacity;
-    if (nodes > @import("horos_data").component.max_catalog_entries) return error.Capacity;
-    const with_endpoints = std.math.add(usize, nodes, endpoints.len) catch return error.Capacity;
-    const bound_length = std.math.add(
-        usize,
-        with_endpoints,
-        captures.len,
-    ) catch return error.Capacity;
-    const references = std.math.mul(usize, nodes, bound_length) catch return error.Capacity;
-    if (references > @import("horos_data").component.max_catalog_entries) return error.Capacity;
-    const ids = try b.allocator().alloc(Id, nodes);
-    for (ids) |*id| id.* = try b.reserveSchema();
-    const bound = try b.allocator().alloc(Id, bound_length);
-    @memcpy(bound[0..nodes], ids);
-    @memcpy(bound[nodes..][0..endpoints.len], endpoints);
-    @memcpy(bound[nodes + endpoints.len ..], captures);
-    const pairs = try b.allocator().alloc(Pair, count);
-    for (endpoints, 0..) |_, from| for (endpoints, 0..) |_, to| {
-        const index = from * endpoints.len + to;
-        const reverse = to * endpoints.len + from;
-        const hyper_id = ids[index];
-        const peer = ids[count + index];
-        try b.defineSchema(hyper_id, .{ .internal = .{ .computation = .{
-            .parameters = &.{ids[count + reverse]},
-            .result = ids[2 * count + to],
-            .capture_bound = bound,
-        } } });
-        try b.defineSchema(peer, .{ .internal = .{ .computation = .{
-            .parameters = &.{},
-            .result = hyper_id,
-            .capture_bound = bound,
-        } } });
-        pairs[index] = .{
-            .forward = hyper_id,
-            .backward = ids[reverse],
-            .peer_forward = peer,
-            .peer_backward = ids[count + reverse],
-            .answer_forward = ids[2 * count + to],
-            .answer_backward = ids[2 * count + from],
-        };
+fn QueryData(comptime S: type, comptime A: type, comptime B: type) type {
+    return struct {
+        definition: *const Ana(S, A, B),
+        state: *const a.Value(S),
+        peer: *const a.Value(Delayed(Hyper(B, A))),
     };
-    for (
-        endpoints,
-        0..,
-    ) |endpoint, index| try b.defineSchema(
-        ids[2 * count + index],
-        .{
-            .internal = .{
-                .computation = .{ .parameters = &.{}, .result = endpoint, .capture_bound = bound },
+}
+
+pub fn Query(comptime S: type, comptime A: type, comptime B: type) type {
+    return opaque {
+        pub const State = S;
+        pub const Input = A;
+        pub const Output = B;
+        fn data(self: *const @This()) *const QueryData(S, A, B) {
+            return @ptrCast(@alignCast(self));
+        }
+        pub fn state(self: *const @This()) *const a.Value(S) {
+            return self.data().state;
+        }
+        pub fn types(self: *const @This()) *const Pair(A, B) {
+            return self.data().definition.types();
+        }
+        pub fn ask(
+            self: *const @This(),
+            body: anytype,
+            next_state: anytype,
+        ) a.Error!*const a.Value(Delayed(A)) {
+            const c = try body.context();
+            const types_value = self.types();
+            _ = try body.schemaOf(self.data().peer);
+            const function = try c.functionFor("hyper.query", types_value.answerBackward());
+            const nested = try body.closureBody(function);
+            const tail = try c.functionFor("hyper.successor", types_value.peerForward());
+            const tail_body = try nested.closureBody(tail);
+            const next = try force(tail_body, next_state);
+            const successor = try start(tail_body, self.data().definition, next);
+            try c.define(tail, try tail_body.ret(successor));
+            const peer = try force(nested, self.data().peer);
+            const delayed_tail = try nested.lambda(tail, types_value.peerForward());
+            const answer = try invoke(nested, peer, delayed_tail);
+            try c.define(function, try nested.ret(try force(nested, answer)));
+            return body.lambda(function, types_value.answerBackward());
+        }
+    };
+}
+
+const QueryAccess = struct {
+    pub fn Shape(comptime T: type) type {
+        if (@typeInfo(T) != .pointer or @typeInfo(T).pointer.size != .one)
+            @compileError("Horos hyper: expected a canonical query");
+        const Child = @typeInfo(T).pointer.child;
+        if (@typeInfo(Child) != .@"opaque" or !@hasDecl(Child, "State") or
+            !@hasDecl(Child, "Input") or !@hasDecl(Child, "Output"))
+            @compileError("Horos hyper: expected a canonical query");
+        if (T != *const Query(Child.State, Child.Input, Child.Output))
+            @compileError("Horos hyper: expected a canonical query");
+        return Child;
+    }
+
+    pub fn peer(
+        query: anytype,
+    ) *const a.Value(Delayed(Hyper(Shape(@TypeOf(query)).Output, Shape(@TypeOf(query)).Input))) {
+        return query.data().peer;
+    }
+
+    pub fn rebind(
+        query: anytype,
+        body: anytype,
+        state: anytype,
+        counterpart: anytype,
+    ) a.Error!@TypeOf(query) {
+        const Q = Shape(@TypeOf(query));
+        const stored = try bridge.raw.interop.namedStorage(
+            bridge.context(try body.context()),
+            QueryData(Q.State, Q.Input, Q.Output),
+            .{
+                .definition = query.data().definition,
+                .state = try a.interop.refineValue(
+                    body,
+                    state,
+                    query.data().definition.stateSchema(),
+                ),
+                .peer = try a.interop.refineValue(body, counterpart, query.types().peerBackward()),
             },
+        );
+        return @ptrCast(stored);
+    }
+};
+
+pub fn ana(body: anytype, types: anytype, state: anytype, emitter: anytype) a.Error!*const Ana(
+    bridge.schemaShape(@TypeOf(state)),
+    pairType(@TypeOf(types)).Input,
+    pairType(@TypeOf(types)).Output,
+) {
+    const c = try body.context();
+    const S = bridge.schemaShape(@TypeOf(state));
+    const P = pairType(@TypeOf(types));
+    const maker = try c.function("hyper.ana", .{ .state = state }, types.forward(), .{});
+    const stored = try bridge.raw.interop.namedStorage(
+        bridge.context(c),
+        AnaData(S, P.Input, P.Output),
+        .{ .types = types, .state = state, .maker = maker },
+    );
+    const definition: *const Ana(S, P.Input, P.Output) = @ptrCast(stored);
+    const maker_body = try body.closureBody(maker);
+    const function = try c.functionFor("hyper.step", types.forward());
+    const step_body = try maker_body.closureBody(function);
+    const query_data = try bridge.raw.interop.namedStorage(
+        bridge.context(c),
+        QueryData(S, P.Input, P.Output),
+        .{
+            .definition = definition,
+            .state = try maker_body.parameter("state"),
+            .peer = try step_body.parameter("peer"),
         },
     );
-    return cache.finish(b, .{ .endpoints = try b.allocator().dupe(Id, endpoints), .pairs = pairs });
+    const query: *const Query(S, P.Input, P.Output) = @ptrCast(query_data);
+    try c.define(function, try emitter.emit(step_body, query));
+    try c.define(maker, try maker_body.ret(try make(maker_body, types, function)));
+    return definition;
 }
 
-/// compose(left: H(B,C), right: H(A,B)) -> H(A,C), with lazy reciprocal rotation.
-pub fn compose(
-    b: *source.Builder,
-    interfaces: Group,
-    a: usize,
-    middle: usize,
-    c: usize,
-    left: Id,
-    right: Id,
-) source.Error!Id {
-    const cache = try b.specialization(
-        Id,
-        "boundary.hyper.compose/v1",
-        .{ interfaces, a, middle, c },
-    );
-    const maker = if (cache.cached) |function| function else blk: {
-        const rotations = [_][3]usize{ .{ a, middle, c }, .{ c, a, middle }, .{ middle, c, a } };
-        var makers: [3]Id = undefined;
-        // Declare the finite cycle before defining any body. No recursive host expansion.
-        for (rotations, &makers) |rotation, *function| {
-            const ab = try interfaces.get(rotation[0], rotation[1]);
-            const bc = try interfaces.get(rotation[1], rotation[2]);
-            const ac = try interfaces.get(rotation[0], rotation[2]);
-            function.* = try b.declare(&.{ bc.forward, ab.forward }, ac.forward, &.{}, &.{});
-        }
-        for (rotations, makers, 0..) |rotation, function, index|
-            try composeBody(b, interfaces, rotation, function, makers[(index + 1) % 3]);
-        break :blk try cache.finish(b, makers[0]);
-    };
-    return b.term(.{ .call = .{ .function = maker, .arguments = &.{ left, right } } });
+pub fn start(
+    body: anytype,
+    definition: anytype,
+    state: anytype,
+) a.Error!*const a.Value(Hyper(
+    anaType(@TypeOf(definition)).Input,
+    anaType(@TypeOf(definition)).Output,
+)) {
+    return body.call(definition.data().maker, .{ .state = state });
 }
 
-fn composeBody(
-    b: *source.Builder,
-    interfaces: Group,
-    rotation: [3]usize,
-    maker: Id,
-    rotated: Id,
-) source.Error!void {
-    const bc = try interfaces.get(rotation[1], rotation[2]);
-    const ac = try interfaces.get(rotation[0], rotation[2]);
-    const outer = try b.declare(&.{ac.peer_backward}, ac.answer_forward, &.{}, &.{});
-    const inner = try b.declare(&.{}, bc.backward, &.{}, &.{});
-    const peer = try b.variable(ac.backward);
-    const combined = try b.term(.{ .call = .{ .function = rotated, .arguments = &.{
-        try b.reference(b.parameter(maker, 1)), try b.reference(peer),
-    } } });
-    try b.define(
-        inner,
-        try b.bind(peer, try force(b, try b.reference(b.parameter(outer, 0))), combined),
-    );
-    try b.define(
-        outer,
-        try invoke(
-            b,
-            try b.reference(b.parameter(maker, 0)),
-            try b.lambda(inner, bc.peer_backward),
-        ),
-    );
-    try b.define(maker, try b.pure(try make(b, outer, ac.forward)));
-}
-
-/// Ordinary immutable product whose fields are individually delayed.
-pub fn lazyProduct(b: *source.Builder, fields: []const Id) source.Error!Id {
-    const schemas = try b.allocator().alloc(Id, fields.len);
-    for (fields, schemas) |value, *schema| {
-        if (value >= b.values.items.len) return error.InvalidReference;
-        schema.* = b.values.items[@intCast(value)].schema;
-        _ = try delayedResult(b, schema.*);
-    }
-    return b.primitive(try b.schema(.{ .product = schemas }), .product, fields, 0);
-}
-
-/// Inspecting this sum's tag does not force its selected payload.
-pub fn lazySum(
-    b: *source.Builder,
-    alternatives: []const Id,
-    tag: usize,
-    payload: Id,
-) source.Error!Id {
-    if (tag >= alternatives.len) return error.TypeMismatch;
-    for (alternatives) |schema| _ = try delayedResult(b, schema);
-    return b.primitive(try b.schema(.{ .sum = alternatives }), .variant, &.{payload}, tag);
-}
-
-pub const Stream = struct { node: Id, cell: Id, element: Id, spine: Id };
-
-/// Finite code can describe an unbounded stream. Both the element and successor
-/// spine are pure delayed computations; observing a prefix need not demand either
-/// an unused element or suffix. All captures retain ordinary ownership checking.
-pub fn stream(b: *source.Builder, value: Id, captures: []const Id) source.Error!Stream {
-    if (value >= b.schemas.items.len) return error.InvalidReference;
-    for (captures) |id| if (id >= b.schemas.items.len) return error.InvalidReference;
-    const cache = try b.specialization(Stream, "boundary.hyper.stream/v1", .{ value, captures });
-    if (cache.cached) |definition| return definition;
-    const node = try b.reserveSchema();
-    const cell = try b.reserveSchema();
-    const element = try b.reserveSchema();
-    const spine = try b.reserveSchema();
-    const bound = try b.allocator().alloc(Id, captures.len + 5);
-    @memcpy(bound[0..captures.len], captures);
-    @memcpy(bound[captures.len..], &[_]Id{ value, node, cell, element, spine });
-    try b.defineSchema(node, .{ .sum = &.{ try b.scalar(void), cell } });
-    try b.defineSchema(cell, .{ .product = &.{ element, spine } });
-    try b.defineSchema(element, .{ .internal = .{ .computation = .{
-        .parameters = &.{},
-        .result = value,
-        .capture_bound = bound,
-    } } });
-    try b.defineSchema(spine, .{ .internal = .{ .computation = .{
-        .parameters = &.{},
-        .result = node,
-        .capture_bound = bound,
-    } } });
-    return cache.finish(b, .{ .node = node, .cell = cell, .element = element, .spine = spine });
-}
-
-pub fn emptyStream(b: *source.Builder, definition: Stream) source.Error!Id {
-    return b.primitive(definition.node, .variant, &.{try b.constant(void, {})}, 0);
-}
-pub fn cons(b: *source.Builder, definition: Stream, head: Id, tail: Id) source.Error!Id {
-    const cell = try b.primitive(definition.cell, .product, &.{ head, tail }, 0);
-    return b.primitive(definition.node, .variant, &.{cell}, 1);
-}
-
-test "hyper group rejects invalid schemas and excessive graph expansion before reservation" {
-    const std = @import("std");
-    var b = source.Builder.init(std.testing.allocator);
-    defer b.deinit();
-    const integer = try b.scalar(u64);
-    const before = b.schemas.items.len;
-    try std.testing.expectError(error.InvalidReference, group(&b, &.{before}, &.{}));
-    try std.testing.expectError(error.InvalidReference, pairWith(&b, integer, before, &.{}));
-    const repeated = @as([64]Id, @splat(integer));
-    try std.testing.expectError(error.Capacity, group(&b, &repeated, &.{}));
-    try std.testing.expectEqual(before, b.schemas.items.len);
-}
-
-test "hyper identity rejects distinct endpoint types" {
-    const std = @import("std");
-    var b = source.Builder.init(std.testing.allocator);
-    defer b.deinit();
-    const interfaces = try pair(&b, try b.scalar(bool), try b.scalar(u64));
-    try std.testing.expectError(error.TypeMismatch, identity(&b, interfaces));
-}
-
-test "ana emits each authored definition and start reuses its code" {
-    const std = @import("std");
-    const Step = struct {
-        var value: u64 = 0;
-        var calls: usize = 0;
-        pub fn emit(b: *source.Builder, query: Query) source.Error!Id {
-            calls += 1;
-            return b.pure(try deferValue(
-                b,
-                query.types.answer_forward,
-                try b.constant(u64, value),
-            ));
-        }
-    };
-    var b = source.Builder.init(std.testing.allocator);
-    defer b.deinit();
-    const integer = try b.scalar(u64);
-    const types = try pair(&b, integer, integer);
-    Step.calls = 0;
-    Step.value = 19;
-    const first = try ana(&b, types, integer, Step);
-    Step.value = 23;
-    const second = try ana(&b, types, integer, Step);
-    try std.testing.expectEqual(@as(usize, 2), Step.calls);
-    try std.testing.expect(first.function != second.function);
-    const count = b.functions.items.len;
-    for (0..100) |state| {
-        _ = try start(&b, first, try b.constant(u64, state));
-        _ = try start(&b, second, try b.constant(u64, state));
-    }
-    try std.testing.expectEqual(count, b.functions.items.len);
-    try std.testing.expectEqual(@as(usize, 2), Step.calls);
+test {
+    _ = @import("hyper_tests.zig");
+    _ = @import("hyper_group.zig");
 }
