@@ -237,6 +237,67 @@ retain complete actual schema/operation identity and ordered capture and region
 rows. Reusing an interface reuses declarations; it does not erase nominal identity
 or turn an emitter configuration into a cache keyed only by Zig type.
 
+## Recursive interaction
+
+`horos.library.hyper` uses the same typed bodies and values. `Hyper(A, B)` retains
+both endpoint shapes: its named `peer` is `Delayed(Hyper(B, A))`, and its result is
+`Delayed(B)`. `Pair(A, B)` is an opaque reciprocal schema family; use `forward()`,
+`backward()`, `peerForward()`, `peerBackward()`, `answerForward()`,
+`answerBackward()` and `swap()` to obtain its related interfaces.
+
+```zig
+const hyper = horos.library.hyper;
+const types = try hyper.pair(c, integer, integer, .{});
+const answer = try hyper.deferValue(body, types.answerForward(), try body.constant(u64, 42));
+const participant = try hyper.base(body, types, answer);
+const argument = try hyper.deferValue(body, types.answerBackward(), try body.constant(u64, 7));
+const result = try hyper.force(body, try hyper.project(body, types, participant, argument));
+```
+
+`base`, `push`, `lift`, `identity`, `compose`, `run`, `project`, `ana` and `start`
+retain their endpoint relationships. Calls return typed values directly; callers
+use ordinary body operations instead of binding raw source terms. `push` and
+`lift` accept an ordinary typed Function with one named `argument` parameter of
+`Delayed(A)` and result `Delayed(B)`. Author the argument force and result work
+inside the returned delay. `deferValue` only wraps a value already produced by
+its enclosing body; it cannot defer an earlier force, effect or failure.
+
+For heterogeneous composition, declare a named group before constructing its
+participants:
+
+```zig
+const cohort = try hyper.group(c, .{ .input = byte, .middle = integer, .output = record }, .{});
+const input_to_middle = cohort.get("input", "middle");
+const middle_to_output = cohort.get("middle", "output");
+const combined = try hyper.compose(body, cohort, "input", "middle", "output", left, right);
+```
+
+Here `left` has the second interface and `right` the first. Composition checks the
+middle endpoint and the actual shared capture contracts. Runtime endpoint names
+use the single explicit `hyper.ir` boundary: `from`, `to` and `select` retain
+known sides and mark only unavailable endpoint shapes `Dynamic`.
+
+`ana(body, types, state_schema, emitter)` invokes `emitter.emit(step_body, query)`
+once for that authoring call and returns an opaque definition. The emitter is an
+instance, so its runtime configuration and captured authored values remain part
+of that construction. `start(body, definition, state)` reuses the definition.
+`query.state()` exposes typed state; `query.ask(body, delayed_successor)` requires
+a pure `Delayed(State)`. Compute successor work inside that delay when it must
+remain unevaluated until demanded. An ignored reply does not force the successor.
+
+Task-valued endpoints can be declared before their reciprocal pair is complete.
+Use `declareSchema(.callable, Task)`, construct the pair with `task.schema()`, then
+`defineCallable` with the task's effects and peer capture bounds. Obtain the task
+by forcing its pure description, then execute it with `body.apply(task, .{})`.
+`hyper.force` checks purity and does not execute an effectful task. The lexical
+`hyper.demand` helpers interpret typed Need requests as counterpart task calls;
+ordinary handlers retain their non-tail continuations and ownership checks.
+
+See [recursive interaction](recursive-interaction.md) for the complete algebra,
+explicit delay construction and task knot. The public
+[`hyper_client.zig`](../examples/hyper_client.zig) exercises typed recursive
+schema promises and emits an ordinary BPI3 image.
+
 ## Explicit runtime integration
 
 `authoring.interop` owns runtime-selected names, raw IDs and checked refinement.
@@ -262,6 +323,18 @@ or `mapValue` to validate and assign an expected named interface; these operatio
 cannot relabel an already-authored incompatible named schema. Raw ID import checks
 available bounds and categories but cannot reconstruct historical provenance.
 Keep adopted catalogs stable; raw mutation is outside the checked guarantee.
+
+`interop.importFunction(c, id, expected_callable)` admits an undefined raw
+component function declaration after checking its actual parameter and result
+schemas, effect row and region row. It supplies the expected named metadata for
+ordinary typed calls. Already registered functions keep their existing metadata
+and scope; an arbitrary raw defined body cannot be imported this way.
+
+`interop.componentModule(c, entry, failure, interface)` snapshots a typed open
+component. Only functions listed in `interface.imports` may remain undefined.
+Pending schema declarations, lexical capture checks and independent component
+admission still apply. Pass the returned module and the same interface to
+`source.component.compile`; final linking checks the actual imported bindings.
 
 `interop.encodedLiteral(c, schema, bytes)` validates canonical bytes against the
 reachable schema and creates a Context-owned typed value reusable across bodies.

@@ -10,6 +10,7 @@ test {
     _ = @import("source/reference_roles.zig");
     _ = @import("authoring/cache_key.zig");
     _ = @import("authoring/checked_tests.zig");
+    _ = @import("authoring/runtime.zig");
     _ = @import("authoring_tests.zig");
     _ = @import("coalescing_tests.zig");
     _ = @import("coalescing_allocation_meter.zig");

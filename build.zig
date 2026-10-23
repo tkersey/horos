@@ -323,6 +323,18 @@ fn staticAuthoring(
         wrong.expect_errors = .{ .contains = case[1] };
         static_authoring.dependOn(&wrong.step);
     }
+    inline for (@import("test/package_authoring/hyper_static_cases.zig").cases) |case| {
+        const options = b.addOptions();
+        options.addOption([]const u8, "value", case[0]);
+        const wrong = b.addExecutable(.{ .name = case[0], .root_module = b.createModule(.{
+            .root_source_file = b.path("test/package_authoring/hyper_static.zig"),
+            .target = b.graph.host,
+            .imports = &.{.{ .name = "horos", .module = horos }},
+        }) });
+        wrong.root_module.addOptions("rejection_mode", options);
+        wrong.expect_errors = .{ .contains = case[1] };
+        static_authoring.dependOn(&wrong.step);
+    }
     inline for (.{ "pointer", "fake" }) |mode| {
         const options = b.addOptions();
         options.addOption([]const u8, "value", mode);
@@ -573,6 +585,7 @@ fn semanticsChecks(
     );
     baselineFixtures(b, source_emitter, source_fixtures, oracle, portable_baseline);
     const interaction_traces = interactionFixtures(b, source_emitter, source_fixtures, oracle);
+    hyperFixtures(b, authoring_cases, source_fixtures);
     oracle.has_side_effects = true;
     const semantics = b.step(
         "check-semantics",
@@ -589,6 +602,31 @@ fn semanticsChecks(
     semantics.dependOn(&exact_json.step);
 
     return semantics;
+}
+
+fn hyperFixtures(
+    b: *std.Build,
+    emitter: *std.Build.Step.Compile,
+    fixtures: *std.Build.Step,
+) void {
+    for ([_][]const u8{
+        "hyper_constant_peer",     "hyper_ignored_argument",   "hyper_unused_query",
+        "hyper_ignored_successor", "hyper_demanded_successor", "hyper_task_obtain",
+        "hyper_task_run",          "hyper_task_repeated",      "hyper_task_dispose",
+        "hyper_lazy_product",      "hyper_lazy_sum",           "hyper_lazy_stream",
+        "hyper_stream_head",       "hyper_identity_project",   "hyper_run_constant",
+        "hyper_composition",       "hyper_nested_need",        "hyper_task_adaptive",
+    }) |name| {
+        for ([_][]const u8{ "json", "bpi3" }) |format| {
+            const run = b.addRunArtifact(emitter);
+            run.addArgs(&.{ name, format });
+            fixtures.dependOn(&b.addInstallFileWithDir(
+                run.captureStdOut(.{}),
+                .prefix,
+                b.fmt("source-{s}.{s}", .{ name, format }),
+            ).step);
+        }
+    }
 }
 
 fn baselineFixtures(

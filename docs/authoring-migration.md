@@ -1,4 +1,8 @@
-# Horos 4 authoring migration
+# Horos authoring migration
+
+Horos 7.0.0 replaces the ordinary raw-ID hyperfunction signatures with the typed
+`library.hyper` surface described below. Existing typed authoring, portable
+formats and runtime authority remain in place.
 
 Canonical option records now reject unknown fields before runtime lowering.
 For example, `return_effect` is an error; use `return_effects`. Helpers passing
@@ -10,7 +14,7 @@ runtime rows, need not be comptime; empty `.{}` records remain supported where
 no fields are required. Omitted fields and explicit `null` keep their existing
 meanings.
 
-Horos 4.0.0 replaces the ordinary authoring interface. BMO1, BPI3, PST3,
+Horos 4.0.0 replaced the ordinary authoring interface. BMO1, BPI3, PST3,
 ABI 3 and nominal runtime authority retain their existing contracts.
 
 | Previous construction | Current construction |
@@ -66,10 +70,39 @@ Optional `resumption_slots` retain their runtime policy: null requests automatic
 declarations, while a supplied list (including an empty list) is checked against
 the handled operations.
 
-The public `hyper_authoring` adapter is retired. Its unchecked raw-value and term
-assertions are not part of the new interface. Deliberate `library.hyper` source
-construction remains available for its separate IR purpose. There is no old
-slice overload or parallel named/typed facade.
+## Typed hyperfunctions
+
+The public `hyper_authoring` adapter is retired. `library.hyper` now directly
+accepts canonical authoring schemas, bodies, values and functions. Its ordinary
+operations preserve endpoint, delayed-result and state shapes; they no longer
+accept raw Builder IDs or return raw terms. There is no parallel raw facade.
+
+| Previous hyper construction | Typed construction |
+|---|---|
+| `pairWith(builder, a, b, captures)` | `pair(context, a, b, .{ .captures = captures })` |
+| Pair schema ID fields | Opaque pair accessors such as `forward()` and `answerForward()` |
+| Positional endpoint group and numeric selection | `group(context, .{ .input = a, .output = b }, options)` and `get("input", "output")` |
+| Raw transform function ID | Ordinary typed Function with `.{ .argument = delayed_a }`, returning `delayed_b` |
+| `ana(builder, pair, state, StepType)` | `ana(body, pair, state_schema, Step{ ... })` |
+| `query.state` and a strict successor in `query.ask` | `query.state()` and `query.ask(body, delayed_successor)` |
+| Binding raw invocation terms | Typed values returned by `invoke`, `start`, `force` and ordinary body calls |
+| Executing a task with `force` | Force its pure description, then `body.apply(task, .{})` |
+
+Create a pure successor delay before the pair when it belongs in that pair's
+capture bound. Put successor computation inside the delay; `deferValue` only
+wraps an already-produced value. Retain each `Ana` definition to reuse its emitted
+code, and pass actual emitter instances when authoring distinct configurations.
+Task promises use `declareSchema(.callable, Task)` before the pair, followed by
+`defineCallable` with the actual effects and reciprocal peer captures.
+
+Runtime endpoint selection uses `hyper.ir.from`, `to` or `select`; only unknown
+sides become `Dynamic`. Component integrations use checked
+`authoring.interop.importFunction` for raw undefined function declarations and
+`componentModule` for publication with explicit imported functions. Raw IDs stay
+at those component, registry and deliberate malformed-fixture boundaries.
+
+See [recursive interaction](recursive-interaction.md) for operation signatures,
+Need interpretation and the shared group capture contract.
 
 ## Coordinated dependency qualification
 

@@ -341,6 +341,7 @@ const ContextData = struct {
     variable_schemas: std.AutoHashMapUnmanaged(p.Id, *const Schema) = .empty,
     lambda_schemas: std.AutoHashMapUnmanaged(p.Id, *const Schema) = .empty,
     handlers: std.ArrayList(*const Handler) = .empty,
+    library_storage: std.StringHashMapUnmanaged(*anyopaque) = .empty,
     capture_failure: ?Error = null,
 };
 fn contextData(c: *const Context) *ContextData {
@@ -738,15 +739,14 @@ pub const Context = opaque {
         options: CallableOptions,
     ) Error!void {
         _ = try self.declarationSlot(declaration, .callable);
-        const completed = try self.callable(parameters, result, allowed, options);
-        const info = data(SchemaData, completed);
+        const description = try self.callableDescription(parameters, result, allowed, options);
         _ = try self.bindSchema(
             declaration,
             .callable,
-            contextData(self).raw.schemas.items[@intCast(info.id)],
-            info.fields,
-            info.result,
-            info.captures,
+            description.shape,
+            description.fields,
+            result,
+            options.captures,
         );
     }
     pub fn record(self: *Context, names: []const Field) Error!*const Schema {
@@ -1291,6 +1291,30 @@ pub const Context = opaque {
         try self.ready();
         var returned_error: anyerror = undefined;
         errdefer self.poison(returned_error);
+        const description = try captureError(
+            &returned_error,
+            self.callableDescription(parameters, result, allowed, options),
+        );
+        const id = try captureError(
+            &returned_error,
+            contextData(self).raw.schema(description.shape),
+        );
+        return captureError(
+            &returned_error,
+            self.internComplete(id, description.fields, result, options.captures),
+        );
+    }
+    const CallableDescription = struct { shape: p.Schema, fields: []const Field };
+    fn callableDescription(
+        self: *Context,
+        parameters: []const Field,
+        result: *const Schema,
+        allowed: []const *const Operation,
+        options: CallableOptions,
+    ) Error!CallableDescription {
+        try self.ready();
+        var returned_error: anyerror = undefined;
+        errdefer self.poison(returned_error);
         const names = try captureError(&returned_error, self.fields(parameters));
         const ids = try captureError(
             &returned_error,
@@ -1300,33 +1324,20 @@ pub const Context = opaque {
             names,
             ids,
         ) |item, *id| id.* = try captureError(&returned_error, self.schemaId(item.schema));
-        const id = try captureError(
-            &returned_error,
-            contextData(self).raw.schema(
-                .{
-                    .internal = .{
-                        .computation = .{
-                            .parameters = ids,
-                            .result = try captureError(&returned_error, self.schemaId(result)),
-                            .effects = try captureError(&returned_error, self.row(allowed)),
-                            .capture_bound = try captureError(
-                                &returned_error,
-                                self.schemaIds(options.captures),
-                            ),
-                            .use = options.use,
-                            .regions = try captureError(
-                                &returned_error,
-                                self.regionIds(options.regions),
-                            ),
-                        },
-                    },
-                },
-            ),
-        );
-        return captureError(
-            &returned_error,
-            self.internComplete(id, names, result, options.captures),
-        );
+        return .{
+            .fields = names,
+            .shape = .{ .internal = .{ .computation = .{
+                .parameters = ids,
+                .result = try captureError(&returned_error, self.schemaId(result)),
+                .effects = try captureError(&returned_error, self.row(allowed)),
+                .capture_bound = try captureError(
+                    &returned_error,
+                    self.schemaIds(options.captures),
+                ),
+                .use = options.use,
+                .regions = try captureError(&returned_error, self.regionIds(options.regions)),
+            } } },
+        };
     }
     pub fn capability(self: *Context, operation_handle: *const Operation) Error!*const Schema {
         const op = data(OperationData, operation_handle);
@@ -2202,6 +2213,15 @@ pub const Context = opaque {
         failure: *const Schema,
         check_captures: bool,
     ) Error!source.Module {
+        return self.publishImports(entry, failure, check_captures, &.{});
+    }
+    fn publishImports(
+        self: *Context,
+        entry: *const Function,
+        failure: *const Schema,
+        check_captures: bool,
+        imports: []const @import("horos_data").component.Symbol,
+    ) Error!source.Module {
         const f = data(FunctionData, entry);
         try self.origin(f.owner);
         const failure_id = try self.schemaId(failure);
@@ -2220,7 +2240,7 @@ pub const Context = opaque {
         for (
             contextData(self).raw.functions.items,
             0..,
-        ) |function_item, id| if (function_item.body == null)
+        ) |function_item, id| if (function_item.body == null and !functionImported(imports, id))
             return self.reject(
                 error.UndefinedBody,
                 self.functionName(id) orelse "unnamed source function",
@@ -2236,6 +2256,12 @@ pub const Context = opaque {
             source.own(source.Module, contextData(self).raw.allocator(), result),
         );
     }
+    fn functionImported(imports: []const @import("horos_data").component.Symbol, id: p.Id) bool {
+        for (imports) |symbol| {
+            if (symbol.reference.kind == .function and symbol.reference.id == id) return true;
+        }
+        return false;
+    }
 };
 
 /// Forward statement builder. Finalization closes this scope to further authoring.
@@ -2250,6 +2276,13 @@ fn bodyData(body: *Body) *BodyData {
     return @ptrCast(@alignCast(body));
 }
 pub const Body = opaque {
+    pub fn context(self: *Body) Error!*Context {
+        try self.ready();
+        return bodyData(self).context;
+    }
+    pub fn schemaOf(self: *Body, value: *const Value) Error!*const Schema {
+        return (try self.useValue(value)).schema;
+    }
     fn ready(self: *Body) Error!void {
         try bodyData(self).context.ready();
         var cursor: ?*Scope = bodyData(self).scope;
@@ -4707,6 +4740,41 @@ pub const Body = opaque {
 /// provenance. The caller promises they belong to contextData(c).raw; available bounds and
 /// categories are checked. These adapters never certify raw source admission.
 pub const interop = struct {
+    pub fn componentModule(
+        c: *Context,
+        entry: *const Function,
+        failure: *const Schema,
+        interface: source.component.Interface,
+    ) !source.Module {
+        const module = try c.publishImports(entry, failure, false, interface.imports);
+        var checked = source.component.compileObserved(
+            contextData(c).raw.arena.child_allocator,
+            module,
+            interface,
+            .{ .captures = .{
+                .context = c,
+                .capture = Context.observeCapture,
+                .closure = Context.observeClosure,
+            } },
+        ) catch |err| return contextData(c).capture_failure orelse err;
+        defer checked.deinit();
+        if (contextData(c).capture_failure) |err| return err;
+        return module;
+    }
+    pub fn libraryStorage(c: *Context, comptime T: type) Error!*T {
+        try c.ready();
+        const state = contextData(c);
+        if (state.library_storage.get(@typeName(T))) |stored|
+            return @ptrCast(@alignCast(stored));
+        var returned_error: anyerror = undefined;
+        errdefer c.poison(returned_error);
+        const stored = try captureError(&returned_error, c.save(T, .{}));
+        try captureError(
+            &returned_error,
+            state.library_storage.put(state.raw.allocator(), @typeName(T), @ptrCast(stored)),
+        );
+        return stored;
+    }
     pub fn namedTemporary(c: *Context, comptime T: type, count: usize) Error![]T {
         try c.ready();
         var returned_error: anyerror = undefined;
@@ -5330,6 +5398,37 @@ pub const interop = struct {
         }
         return error.InvalidReference;
     }
+    pub fn importFunction(c: *Context, id: p.Id, expected: *const Schema) Error!*const Function {
+        try completeMetadata(c, expected);
+        const raw = contextData(c).raw;
+        if (id >= raw.functions.items.len) return error.InvalidReference;
+        const schema_id = try c.schemaId(expected);
+        const shape = raw.schemas.items[@intCast(schema_id)];
+        if (shape != .internal or shape.internal != .computation) return error.InvalidCategory;
+        const signature = shape.internal.computation;
+        const function = raw.functions.items[@intCast(id)];
+        if (function.parameters.len != signature.parameters.len or
+            function.result != signature.result or
+            !std.mem.eql(p.Id, function.effects, signature.effects) or
+            !std.mem.eql(p.Id, function.regions, signature.regions)) return error.SchemaMismatch;
+        for (function.parameters, signature.parameters) |variable, wanted| {
+            if (variable >= raw.variables.items.len) return error.InvalidReference;
+            if (raw.variables.items[@intCast(variable)] != wanted) return error.SchemaMismatch;
+        }
+        for (contextData(c).functions.items) |existing| {
+            if (data(FunctionData, existing).id == id) return refineFunction(c, existing, expected);
+        }
+        if (function.body != null) return error.InvalidCategory;
+        const info = data(SchemaData, expected);
+        return c.saveFunction(.{
+            .owner = c,
+            .id = id,
+            .name = "imported function",
+            .parameters = info.fields,
+            .result = info.result orelse return error.InvalidSchema,
+            .callable_schema = expected,
+        });
+    }
     pub fn functionId(c: *Context, value: *const Function) Error!p.Id {
         const item = data(FunctionData, value);
         try c.origin(item.owner);
@@ -5427,4 +5526,38 @@ fn recursiveImportAllocation(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(imported, fields[0].schema);
     try std.testing.expectEqual(unit, try interop.schemaId(c, (try imported.checkedResult()).?));
     try std.testing.expectEqual(imported, data(SchemaData, imported).captures[0]);
+}
+
+test "callable completion fills one reserved schema and poisons allocation failures atomically" {
+    try @import("../allocation_testing.zig").check(
+        std.testing.allocator,
+        callableCompletionAllocation,
+        .{},
+    );
+}
+
+fn callableCompletionAllocation(allocator: std.mem.Allocator) !void {
+    var raw = source.Builder.init(allocator);
+    defer raw.deinit();
+    const c = try Context.init(&raw);
+    const integer = try c.scalar(u64);
+    const declaration = try c.declareSchema(.callable);
+    const count = raw.schemas.items.len;
+    const schema = declaration.schema();
+    c.defineCallable(declaration, &.{.{ .name = "self", .schema = schema }}, integer, &.{}, .{
+        .use = .reusable,
+        .captures = &.{schema},
+    }) catch |err| {
+        try std.testing.expectEqual(error.OutOfMemory, err);
+        try std.testing.expect(data(SchemaData, schema).pending != null);
+        try std.testing.expectError(error.PoisonedAuthoring, c.ready());
+        return err;
+    };
+    try std.testing.expectEqual(count, raw.schemas.items.len);
+    const fields = try schema.checkedFields();
+    try std.testing.expectEqual(@as(usize, 1), fields.len);
+    try std.testing.expectEqualStrings("self", fields[0].name);
+    try std.testing.expectEqual(schema, fields[0].schema);
+    try std.testing.expectEqual(integer, (try schema.checkedResult()).?);
+    try std.testing.expectEqual(schema, data(SchemaData, schema).captures[0]);
 }
