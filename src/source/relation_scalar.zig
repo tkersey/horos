@@ -33,13 +33,50 @@ fn fold(ctx: *relation.Context, value: ast.Value) Error!ast.Value {
     const result = k.primitive(ctx.a, ctx.before, facts, value, known, ctx.left) catch |err|
         return if (err == error.SpecializationLimit) error.RelationLimit else err;
     try require(result == .known);
-    const count = std.math.add(usize, ctx.before.constants.len, 1) catch return error.RelationLimit;
+    const literal = try appendFolded(ctx, result.known);
+    return .{ .schema = value.schema, .expression = .{ .literal = literal } };
+}
+fn appendFolded(ctx: *relation.Context, literal: p.Literal) Error!u64 {
+    const original_count = ctx.before.constants.len;
+    try require(ctx.constants.len >= original_count);
+    const emitted = if (ctx.constants.len > original_count) ctx.constants[original_count] else null;
+    const retain_unit = if (emitted) |unit|
+        ctx.before.schemas[@intCast(literal.schema)] == .unit and unit.schema != literal.schema
+    else
+        false;
+    const index = std.math.add(usize, original_count, @intFromBool(retain_unit)) catch
+        return error.RelationLimit;
+    const count = std.math.add(usize, index, 1) catch return error.RelationLimit;
     try ctx.spend(count);
     const constants = try ctx.a.alloc(p.Literal, count);
-    @memcpy(constants[0..ctx.before.constants.len], ctx.before.constants);
-    constants[ctx.before.constants.len] = result.known;
+    @memcpy(constants[0..original_count], ctx.before.constants);
+    if (retain_unit) constants[original_count] = emitted.?;
+    constants[index] = literal;
     ctx.expected.constants = constants;
-    return .{ .schema = value.schema, .expression = .{ .literal = ctx.before.constants.len } };
+    if (emitted) |unit| {
+        try require(ctx.constants.len == original_count + 1);
+        const selected = try @import("check.zig").selectUnit(
+            ctx.expected.schemas,
+            constants,
+            ctx.left,
+        ) orelse return error.InvalidRelation;
+        try require(selected.schema == unit.schema);
+        try transportEmittedUnit(ctx, original_count, selected.constant orelse count);
+    }
+    return index;
+}
+fn transportEmittedUnit(ctx: *relation.Context, before: u64, after: u64) Error!void {
+    for (@constCast(ctx.expected.values)) |*value| {
+        try ctx.spend(1);
+        if (value.expression != .primitive) continue;
+        const op = &value.expression.primitive;
+        if (op.opcode == .constant and op.immediate == before) op.immediate = after;
+        try ctx.spend(op.failures.len);
+        for (@constCast(op.failures)) |*failure|
+            if (failure.value == before) {
+                failure.value = after;
+            };
+    }
 }
 fn leaf(ctx: *relation.Context, id: p.Id) bool {
     const value = ctx.before.values[@intCast(id)];

@@ -854,6 +854,122 @@ fn emittedConstantModule(b: *source.Builder, failure: bool) !source.Module {
     return b.module(entry, unit);
 }
 
+const EmittedFold = enum { nonunit, same_unit, different_unit };
+const EmittedFoldFixture = struct { module: source.Module, folded: u64 };
+
+fn emittedFoldFixture(
+    b: *source.Builder,
+    failure: bool,
+    kind: EmittedFold,
+) !EmittedFoldFixture {
+    const original = try emittedConstantModule(b, failure);
+    const schema = if (kind == .nonunit) try b.scalar(bool) else if (kind == .same_unit)
+        original.failure
+    else blk: {
+        const reserved = try b.reserveSchema();
+        try b.defineSchema(reserved, .unit);
+        break :blk reserved;
+    };
+    const operand = if (kind == .nonunit) try b.constant(bool, false) else try b.literal(.{
+        .schema = try b.schema(.{ .product = &.{schema} }),
+        .bytes = &.{},
+    });
+    const folded = try b.primitive(
+        schema,
+        if (kind == .nonunit) .boolean_not else .field,
+        &.{operand},
+        0,
+    );
+    transportEmittedReferences(b.values.items, b.constants.items.len);
+    const body = b.functions.items[@intCast(original.entry)].body.?;
+    const next = try b.bind(try b.variable(schema), try b.pure(folded), body);
+    b.functions.items[@intCast(original.entry)].body = next;
+    return .{ .module = b.module(original.entry, original.failure), .folded = folded };
+}
+
+fn transportEmittedReferences(values: []source.ast.Value, target: u64) void {
+    for (values) |*value| {
+        if (value.expression != .primitive) continue;
+        const primitive = &value.expression.primitive;
+        if (primitive.opcode == .constant) primitive.immediate = target;
+        for (@constCast(primitive.failures)) |*failure| failure.value = target;
+    }
+}
+
+fn expectEmittedReferences(values: []const source.ast.Value, target: u64) !void {
+    var references: usize = 0;
+    for (values) |value| {
+        if (value.expression != .primitive) continue;
+        const primitive = value.expression.primitive;
+        if (primitive.opcode == .constant) {
+            try std.testing.expectEqual(target, primitive.immediate);
+            references += 1;
+        }
+        for (primitive.failures) |failure| {
+            try std.testing.expectEqual(target, failure.value);
+            references += 1;
+        }
+    }
+    try std.testing.expect(references > 0);
+}
+
+fn emittedFoldSuccessor(
+    allocator: std.mem.Allocator,
+    fixture: EmittedFoldFixture,
+    kind: EmittedFold,
+) !source.Module {
+    var successor = try source.own(source.Module, allocator, fixture.module);
+    const retained: usize = @intFromBool(kind == .different_unit);
+    const count = fixture.module.constants.len;
+    const constants = try allocator.alloc(data.program.Literal, count + retained + 1);
+    @memcpy(constants[0..count], fixture.module.constants);
+    if (retained == 1) constants[count] = .{ .schema = fixture.module.failure, .bytes = &.{} };
+    constants[count + retained] = .{
+        .schema = fixture.module.values[@intCast(fixture.folded)].schema,
+        .bytes = if (kind == .nonunit) &.{1} else &.{},
+    };
+    successor.constants = constants;
+    @constCast(successor.values)[@intCast(fixture.folded)].expression = .{
+        .literal = count + retained,
+    };
+    transportEmittedReferences(
+        @constCast(successor.values),
+        count + @intFromBool(kind == .nonunit),
+    );
+    return successor;
+}
+
+test "source scalar folds transport emitted raw and failure constants across unit schemas" {
+    for ([_]bool{ false, true }) |failure| {
+        inline for (std.meta.tags(EmittedFold)) |kind| {
+            var b = source.Builder.init(a);
+            defer b.deinit();
+            const fixture = try emittedFoldFixture(&b, failure, kind);
+            var work: u64 = 1_000_000;
+            try source.admitWithWork(a, fixture.module, &work);
+            const successor = try emittedFoldSuccessor(b.allocator(), fixture, kind);
+            try source.admitWithWork(a, successor, &work);
+            var step: source.relation.Step = .{
+                .successor = successor,
+                .rule = .{ .scalar = .{ .value = fixture.folded, .rule = .fold } },
+            };
+            try source.relation.validate(a, fixture.module, successor, &.{step}, .{});
+            const target = fixture.module.constants.len + @intFromBool(kind == .nonunit);
+            try expectEmittedReferences(successor.values, target);
+            const mutant = try source.own(source.Module, b.allocator(), successor);
+            transportEmittedReferences(@constCast(mutant.values), if (target == 1) 2 else 1);
+            step.successor = mutant;
+            try std.testing.expectError(error.InvalidRelation, source.relation.validate(
+                a,
+                fixture.module,
+                mutant,
+                &.{step},
+                .{},
+            ));
+        }
+    }
+}
+
 fn identityRelocation(
     allocator: std.mem.Allocator,
     module: source.Module,
@@ -1046,11 +1162,38 @@ test "source emitted catalog transport rejects malformed raw constant references
     }
 }
 
+fn expectSpecializedEmittedFold(
+    before: source.Module,
+    folded: u64,
+    result: *const source.specialize.Output,
+) !void {
+    const successor = result.module();
+    try std.testing.expect(successor.constants.len > before.constants.len + 1);
+    const retained = successor.constants[before.constants.len];
+    try std.testing.expectEqual(before.failure, retained.schema);
+    try std.testing.expectEqual(@as(usize, 0), retained.bytes.len);
+    try expectEmittedReferences(successor.values[0..before.values.len], before.constants.len);
+    var witnessed = false;
+    for (result.value_proofs.items) |proof| {
+        if (proof.before != folded or !proof.folded) continue;
+        const expression = successor.values[@intCast(proof.after)].expression;
+        try std.testing.expect(expression == .literal);
+        const literal = successor.constants[@intCast(expression.literal)];
+        try std.testing.expectEqual(before.values[@intCast(folded)].schema, literal.schema);
+        try std.testing.expectEqualSlices(u8, &.{1}, literal.bytes);
+        witnessed = true;
+    }
+    try std.testing.expect(witnessed);
+}
+
 test "source specialization relation covers retained emitted constant references" {
     for ([_]bool{ false, true }) |failure| {
         var b = source.Builder.init(a);
         defer b.deinit();
-        const module = try emittedConstantModule(&b, failure);
+        const fixture = try emittedFoldFixture(&b, failure, .nonunit);
+        const module = fixture.module;
+        var work: u64 = 1_000_000;
+        try source.admitWithWork(a, module, &work);
         const pe = source.specialize;
         const request: pe.Request = .{
             .context = .{
@@ -1066,9 +1209,9 @@ test "source specialization relation covers retained emitted constant references
         };
         var result = try pe.specialize(a, module, request);
         defer result.deinit();
-        var work: u64 = 1_000_000;
         try source.admitWithWork(a, result.module(), &work);
         try pe.validate(a, module, request, &result);
+        try expectSpecializedEmittedFold(module, fixture.folded, &result);
         var step: source.relation.Step = .{
             .successor = result.module(),
             .rule = .{ .specialization = .{

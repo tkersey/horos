@@ -43,6 +43,7 @@ pub const Context = struct {
     policy: Policy,
     left: *u64,
     constructors: []const bindings.Binding = &.{},
+    constants: []const data.program.Literal = &.{},
     successor_constructors: []const bindings.Binding = &.{},
     successor_constants: []const data.program.Literal = &.{},
     pub fn spend(self: *Context, count: usize) Error!void {
@@ -78,6 +79,7 @@ pub fn validate(
             .policy = current_policy,
             .left = &left,
             .constructors = before_catalog.constructors,
+            .constants = before_catalog.constants,
         };
         try ctx.spend(before.values.len);
         try ctx.spend(before.terms.len);

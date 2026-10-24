@@ -120,6 +120,15 @@ pub fn coverage(
     const constants = state.covered[@backingInt(relocation.Kind.constant)];
     try relation.Context.require(successor.constants.len <= constants.len);
     @memset(constants[successor.constants.len..], true);
+    for (ctx.constants[ctx.before.constants.len..], ctx.before.constants.len..) |literal, index| {
+        try ctx.spend(1);
+        if (index >= successor.constants.len) break;
+        if (try @import("static_value.zig").literalEqualWithWork(
+            literal,
+            successor.constants[index],
+            ctx.left,
+        )) constants[index] = true;
+    }
     try state.proofs();
     try state.sources();
     try state.complete();

@@ -169,8 +169,7 @@ pub fn specialize(a: std.mem.Allocator, original: ast.Module, requested: Request
     out.builder.region_count = m.region_count;
     var scratch = std.heap.ArenaAllocator.init(a);
     defer scratch.deinit();
-    var admitted_source = try source.lower(a, m);
-    admitted_source.deinit();
+    try retainEmittedConstants(a, &out);
     const checked = try @import("check.zig").analyze(scratch.allocator(), m);
     const schema_facts = try data.admission.schemas(storage, m.schemas);
     if (requested.function >= m.functions.len) return error.InvalidReference;
@@ -197,6 +196,16 @@ pub fn specialize(a: std.mem.Allocator, original: ast.Module, requested: Request
     out.key = try identity(a, original, requested);
     try validate(a, original, requested, &out);
     return out;
+}
+fn retainEmittedConstants(a: std.mem.Allocator, out: *Output) Error!void {
+    var admitted = try source.lower(a, out.original);
+    defer admitted.deinit();
+    const storage = out.builder.allocator();
+    try out.builder.constants.appendSlice(storage, try source.own(
+        []const p.Literal,
+        storage,
+        admitted.program.constants[out.original.constants.len..],
+    ));
 }
 const Engine = struct {
     out: *Output,
