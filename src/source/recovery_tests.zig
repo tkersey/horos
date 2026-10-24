@@ -637,6 +637,120 @@ fn rawSlice(b: *source.Builder) !RawSlice {
     };
 }
 
+test "constructor derivation preserves admitted capture order and owns its bindings" {
+    try std.testing.checkAllAllocationFailures(a, deriveRawBindings, .{});
+}
+
+fn deriveRawBindings(allocator: std.mem.Allocator) !void {
+    const bindings = source.constructor_bindings;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const fixture = try rawSlice(&b);
+    var work: u64 = 1_000_000;
+    const admitted = try bindings.admit(a, b.allocator(), fixture.module, &work);
+    const derived = try bindings.derive(allocator, allocator, fixture.module, &work);
+    defer {
+        for (derived) |binding| allocator.free(binding.captures);
+        allocator.free(derived);
+    }
+    try std.testing.expectEqualDeep(admitted, derived);
+    try std.testing.expectEqual(@as(usize, 1), derived.len);
+    try std.testing.expectEqual(fixture.target, derived[0].function);
+    try std.testing.expectEqualSlices(u64, &.{ 1, 2 }, derived[0].captures);
+}
+
+test "constructor derivation accepts unattached internal effects without admitting execution" {
+    const bindings = source.constructor_bindings;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const fixture = try rawSlice(&b);
+    b.effects.items[0].external = false;
+    var work: u64 = 1_000_000;
+    const derived = try bindings.derive(a, b.allocator(), fixture.module, &work);
+    try std.testing.expectEqual(@as(usize, 1), derived.len);
+    try std.testing.expectEqual(fixture.target, derived[0].function);
+    try std.testing.expectError(
+        error.InvalidEffect,
+        bindings.admit(a, b.allocator(), fixture.module, &work),
+    );
+    try std.testing.expectError(
+        error.InvalidEffect,
+        bindings.admitCatalog(a, b.allocator(), fixture.module, &work),
+    );
+    const Observer = struct {
+        called: bool = false,
+        fn receive(
+            context: *anyopaque,
+            _: data.activation.Program,
+            _: @import("check.zig").Facts,
+        ) source.Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.called = true;
+        }
+    };
+    var observer: Observer = .{};
+    try std.testing.expectError(error.InvalidEffect, source.admitObservedWithWork(
+        a,
+        fixture.module,
+        &work,
+        .{ .context = &observer, .receive = Observer.receive },
+    ));
+    try std.testing.expect(!observer.called);
+}
+
+test "constructor derivation rejects malformed raw indexes schemas operands and captures" {
+    const bindings = source.constructor_bindings;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const fixture = try rawSlice(&b);
+    const raw = &b.values.items[@intCast(fixture.raw)];
+    const original = raw.*;
+    var work: u64 = 1_000_000;
+    raw.expression.primitive.immediate = 1;
+    try std.testing.expectError(
+        error.InvalidReference,
+        bindings.derive(a, b.allocator(), fixture.module, &work),
+    );
+    raw.* = original;
+    raw.schema = fixture.module.failure;
+    try std.testing.expectError(
+        error.TypeMismatch,
+        bindings.derive(a, b.allocator(), fixture.module, &work),
+    );
+    raw.* = original;
+    raw.expression.primitive.operands = &.{std.math.maxInt(u64)};
+    try std.testing.expectError(
+        error.InvalidSource,
+        bindings.derive(a, b.allocator(), fixture.module, &work),
+    );
+    raw.* = original;
+    raw.expression.primitive.operands = original.expression.primitive.operands[0..1];
+    try std.testing.expectError(
+        error.TypeMismatch,
+        bindings.derive(a, b.allocator(), fixture.module, &work),
+    );
+}
+
+test "constructor derivation rejects capture bounds before later schema repair" {
+    const bindings = source.constructor_bindings;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const fixture = try rawSlice(&b);
+    const schema = b.values.items[@intCast(fixture.raw)].schema;
+    const signature = &b.schemas.items[@intCast(schema)].internal.computation;
+    const capture_bound = signature.capture_bound;
+    signature.capture_bound = &.{};
+    var work: u64 = 1_000_000;
+    try std.testing.expectError(
+        error.InvalidOwnership,
+        bindings.derive(a, b.allocator(), fixture.module, &work),
+    );
+    signature.capture_bound = capture_bound;
+    const derived = try bindings.derive(a, b.allocator(), fixture.module, &work);
+    const admitted = try bindings.admit(a, b.allocator(), fixture.module, &work);
+    try std.testing.expectEqualDeep(admitted, derived);
+}
+
 test "source slices retain supplied captures while replacing registration-only bridge functions" {
     const bindings = @import("constructor_bindings.zig");
     var b = source.Builder.init(a);

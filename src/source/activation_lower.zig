@@ -164,13 +164,70 @@ pub const AdmissionObserver = struct {
     receive: *const fn (*anyopaque, ir.Program, check.Facts) source.Error!void,
 };
 
+const Observation = union(enum) {
+    admission: AdmissionObserver,
+    constructors: *ConstructorDerivation,
+};
+
+const ConstructorDerivation = struct {
+    storage: std.mem.Allocator,
+    bindings: []const source.constructor_bindings.Binding = &.{},
+
+    fn receive(self: *@This(), compiler: *Compiler, program: ir.Program) Error!void {
+        _ = try data.contracts.validateDiagnosedWithWork(
+            compiler.allocator,
+            program,
+            null,
+            compiler.work,
+        );
+        try data.admission.spend(compiler.work, program.constructors.len);
+        const bindings = try self.storage.alloc(
+            source.constructor_bindings.Binding,
+            program.constructors.len,
+        );
+        var initialized: usize = 0;
+        errdefer {
+            for (bindings[0..initialized]) |binding| self.storage.free(binding.captures);
+            self.storage.free(bindings);
+        }
+        for (bindings, program.constructors) |*binding, constructor| {
+            const captures = compiler.facts.functions[@intCast(constructor.function)].items;
+            try data.admission.spend(compiler.work, captures.len);
+            binding.* = .{
+                .function = constructor.function,
+                .schema = constructor.schema,
+                .captures = try self.storage.dupe(u64, captures),
+            };
+            initialized += 1;
+        }
+        self.bindings = bindings;
+    }
+};
+
+pub fn deriveConstructorBindings(
+    allocator: std.mem.Allocator,
+    storage: std.mem.Allocator,
+    input: ast.Module,
+    work: *u64,
+) Error![]const source.constructor_bindings.Binding {
+    var derivation: ConstructorDerivation = .{ .storage = storage };
+    _ = try lowerBody(allocator, input, &.{}, false, &.{}, .{}, false, work, .{
+        .constructors = &derivation,
+    });
+    return derivation.bindings;
+}
+
 pub fn admitObservedWithWork(
     allocator: std.mem.Allocator,
     input: ast.Module,
     work: *u64,
     observer: ?AdmissionObserver,
 ) Error!void {
-    _ = try lowerBody(allocator, input, &.{}, false, &.{}, .{}, false, work, observer);
+    const observation: ?Observation = if (observer) |selected|
+        .{ .admission = selected }
+    else
+        null;
+    _ = try lowerBody(allocator, input, &.{}, false, &.{}, .{}, false, work, observation);
 }
 
 fn lowerBody(
@@ -182,35 +239,38 @@ fn lowerBody(
     options: source.CompileOptions,
     recovery_input: bool,
     work: ?*u64,
-    observer: ?AdmissionObserver,
+    observer: ?Observation,
 ) Error!?Construction {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const owned = input;
     // The source checker is independent of both lowering representations.
     // Only genuine captures are enumerated; intermediate free sets share roots.
     options.stage(.source_check);
-    const facts = try check.analyzeComponentWithWork(a, owned, imports, options.diagnostic, work);
-    const traits = try data.traits.deriveWithWork(a, owned.schemas, work);
+    const facts = try check.analyzeComponentWithWork(a, input, imports, options.diagnostic, work);
+    const traits = try data.traits.deriveWithWork(a, input.schemas, work);
     options.stage(.lowering);
     var compiler: Compiler = .{
         .work = work,
         .allocator = a,
-        .source = owned,
+        .source = input,
         .facts = facts,
         .capture_observer = options.captures,
         .slot_variables = if (options.captures != null) try a.alloc(
             []const ?p.Id,
-            owned.functions.len,
+            input.functions.len,
         ) else &.{},
-        .cacheable = try @import("value_cache.zig").deriveWithWork(a, owned, traits, work),
+        .cacheable = try @import("value_cache.zig").deriveWithWork(a, input, traits, work),
         .uses = traits,
         .recovery_enabled = options.recovery,
     };
     const program = try lowerProgram(&compiler, options);
     if (options.diagnostic) |diagnostic| diagnostic.function = null;
     try checkPrimitiveCatalog(&compiler, program, options);
+    if (observer) |selected| if (selected == .constructors) {
+        try selected.constructors.receive(&compiler, program);
+        return null;
+    };
     options.stage(.target_check);
     var original_facts = try checkTarget(
         allocator,
@@ -223,7 +283,10 @@ fn lowerBody(
         options,
     );
     original_facts.deinit();
-    if (observer) |selected| try selected.receive(selected.context, program, facts);
+    if (observer) |selected| {
+        const admitted = selected.admission;
+        try admitted.receive(admitted.context, program, facts);
+    }
     if (work != null) return null;
     const ordered = try optimizeDirect(&compiler, program, options);
     if (!component and !recovery_input) return try coalesce(allocator, ordered, &compiler, options);

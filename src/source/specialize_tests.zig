@@ -1689,6 +1689,12 @@ test "source relocation transports raw constructor indices across registration o
     const raw = try b.primitive(computation, .computation, &.{}, 0);
     try b.define(entry, try b.term(.{ .apply = .{ .computation = raw, .arguments = &.{} } }));
     const before = b.module(entry, unit);
+    var work: u64 = 1_000_000;
+    const bindings = source.constructor_bindings;
+    const derived = try bindings.derive(a, b.allocator(), before, &work);
+    try std.testing.expectEqualDeep(try bindings.admit(a, b.allocator(), before, &work), derived);
+    try std.testing.expectEqual(target_a, derived[0].function);
+    try std.testing.expectEqual(target_b, derived[1].function);
     var maps = try identitySourceMaps(b.allocator(), before);
     std.mem.swap(?u64, &@constCast(maps.functions)[0], &@constCast(maps.functions)[1]);
     const untransported = try source.relation.Relocation.relocate(b.allocator(), before, maps);
@@ -1701,6 +1707,9 @@ test "source relocation transports raw constructor indices across registration o
     ));
     maps.constructors = &.{ 1, 0 };
     const after = try source.relation.Relocation.relocate(b.allocator(), before, maps);
+    const reordered = try bindings.derive(a, b.allocator(), after, &work);
+    try std.testing.expectEqual(target_b, reordered[0].function);
+    try std.testing.expectEqual(target_a, reordered[1].function);
     try std.testing.expectEqual(
         @as(u64, 1),
         after.values[@intCast(raw)].expression.primitive.immediate,

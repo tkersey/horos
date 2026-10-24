@@ -10,6 +10,7 @@ pub const Catalog = struct {
     constants: []const data.program.Literal,
 };
 pub const Binding = struct { function: u64, schema: u64, captures: []const u64 };
+pub const derive = @import("activation_lower.zig").deriveConstructorBindings;
 pub const Transport = struct {
     functions: ?[]const ?u64 = null,
     schemas: ?[]const ?u64 = null,
