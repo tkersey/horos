@@ -169,7 +169,11 @@ pub fn specialize(a: std.mem.Allocator, original: ast.Module, requested: Request
     out.builder.region_count = m.region_count;
     var scratch = std.heap.ArenaAllocator.init(a);
     defer scratch.deinit();
-    try retainEmittedConstants(a, &out);
+    var admission_work: u64 = std.math.maxInt(u64);
+    try source.admitObservedWithWork(a, m, &admission_work, .{
+        .context = &out,
+        .receive = retainEmittedConstants,
+    });
     const checked = try @import("check.zig").analyze(scratch.allocator(), m);
     const schema_facts = try data.admission.schemas(storage, m.schemas);
     if (requested.function >= m.functions.len) return error.InvalidReference;
@@ -197,14 +201,17 @@ pub fn specialize(a: std.mem.Allocator, original: ast.Module, requested: Request
     try validate(a, original, requested, &out);
     return out;
 }
-fn retainEmittedConstants(a: std.mem.Allocator, out: *Output) Error!void {
-    var admitted = try source.lower(a, out.original);
-    defer admitted.deinit();
+fn retainEmittedConstants(
+    context: *anyopaque,
+    program: data.activation.Program,
+    _: @import("check.zig").Facts,
+) source.Error!void {
+    const out: *Output = @ptrCast(@alignCast(context));
     const storage = out.builder.allocator();
     try out.builder.constants.appendSlice(storage, try source.own(
         []const p.Literal,
         storage,
-        admitted.program.constants[out.original.constants.len..],
+        program.constants[out.original.constants.len..],
     ));
 }
 const Engine = struct {
