@@ -9,6 +9,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 permissions:
   contents: read
+  actions: read
 jobs:
   source:
     name: Source preflight
@@ -36,13 +37,12 @@ jobs:
         run: bash tools/test-tiger-style.sh
   qualify:
     name: Qualification / ${{ matrix.lane }}
-    needs: source
     strategy:
       fail-fast: false
       matrix:
         lane: [installation, contracts]
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -66,6 +66,7 @@ jobs:
           key: horos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ hashFiles('build.zig.zon') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             horos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ hashFiles('build.zig.zon') }}-
+            horos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-
       - name: Select working cache
         if: matrix.lane == 'contracts'
         run: |
@@ -79,14 +80,24 @@ jobs:
           if [ "${{ matrix.lane }}" = installation ]; then
             zig build check-package -Doptimize=safe --summary all
           else
-            zig build check -Doptimize=safe --summary all
+            zig build check -Doptimize=safe --summary all --verbose
           fi
       - name: Admit complete bounded compiler cache
         id: cache_size
         if: ${{ !cancelled() && matrix.lane == 'contracts' }}
         continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
         run: |
           echo 'save=false' >> "$GITHUB_OUTPUT"
+          started=$(gh api "repos/$GH_REPO/actions/runs/$RUN_ID" --jq .run_started_at)
+          elapsed=$(( $(date +%s) - $(date -d "$started" +%s) ))
+          if [ "$elapsed" -ge 480 ]; then
+            echo 'Leaving compiler cache in place; insufficient time for optional upload.'
+            exit 0
+          fi
           test -d .zig-cache/o || exit 0
           test -z "$(find .zig-cache ! -type d ! -type f -print -quit)" || exit 0
           test -n "$(find .zig-cache/o -type f -size +0c -print -quit)" || exit 0
@@ -99,6 +110,7 @@ jobs:
       - name: Save useful cache without deleting outputs
         if: ${{ !cancelled() && steps.cache_size.outputs.save == 'true' }}
         continue-on-error: true
+        timeout-minutes: 1
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25
         with:
           path: .zig-cache-upload

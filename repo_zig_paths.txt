@@ -251,6 +251,7 @@ src/source/clause_payload_example.zig
 src/source/component.zig
 src/source/component_examples.zig
 src/source/component_tests.zig
+src/source/constructor_bindings.zig
 src/source/control_examples.zig
 src/source/custody_edge_example.zig
 src/source/custody_order_example.zig
@@ -275,6 +276,13 @@ src/source/reentrant_example.zig
 src/source/reference_roles.zig
 src/source/reference_roles_rejections.zig
 src/source/reference_roles_tests.zig
+src/source/relation.zig
+src/source/relation_inline.zig
+src/source/relation_layout.zig
+src/source/relation_record.zig
+src/source/relation_relocate.zig
+src/source/relation_scalar.zig
+src/source/relation_specialization.zig
 src/source/resource_example.zig
 src/source/retained_scope_example.zig
 src/source/scalar_contract_example.zig
@@ -282,6 +290,7 @@ src/source/scheduler_example.zig
 src/source/scoped_reader_example.zig
 src/source/service_example.zig
 src/source/shallow_resume_example.zig
+src/source/slice.zig
 src/source/slot_order.zig
 src/source/specialize.zig
 src/source/specialize_tests.zig

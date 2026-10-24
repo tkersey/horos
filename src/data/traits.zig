@@ -9,7 +9,20 @@ pub fn derive(
     allocator: std.mem.Allocator,
     schemas: []const p.Schema,
 ) @import("admission.zig").Error!Facts {
-    for (schemas) |schema| try @import("admission.zig").references(schemas, schema);
+    return deriveWithWork(allocator, schemas, null);
+}
+
+pub fn deriveWithWork(
+    allocator: std.mem.Allocator,
+    schemas: []const p.Schema,
+    work: ?*u64,
+) @import("admission.zig").Error!Facts {
+    const admission = @import("admission.zig");
+    try admission.spend(work, schemas.len);
+    for (schemas) |schema| {
+        try admission.schemaWork(work, schema);
+        try admission.references(schemas, schema);
+    }
     const copy = try allocator.alloc(bool, schemas.len);
     errdefer allocator.free(copy);
     const drop = try allocator.alloc(bool, schemas.len);
@@ -25,6 +38,7 @@ pub fn derive(
     while (changed) {
         changed = false;
         for (schemas, 0..) |schema, index| {
+            try admission.schemaWork(work, schema);
             const observed = properties(schema, facts);
             inline for (.{ "copy", "drop", "clone" }) |field| {
                 if (!@field(observed, field) and @field(facts, field)[index]) {

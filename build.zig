@@ -5,7 +5,8 @@ pub fn build(b: *std.Build) void {
         if (!std.mem.eql(u8, @import("builtin").zig_version_string, "0.17.0"))
             @compileError("Zig 0.17.0 is required");
     }
-    const target = b.standardTargetOptions(.{});
+    const host = qualificationHost(b);
+    const target = b.standardTargetOptions(.{ .default_target = host.query });
     const optimize = b.standardOptimizeOption(.{});
     const public_data = b.addModule("horos_data", .{
         .root_source_file = b.path("src/data/root.zig"),
@@ -17,7 +18,7 @@ pub fn build(b: *std.Build) void {
     // Build-host generators must not inherit an exported consumer's target.
     const data = b.createModule(.{
         .root_source_file = b.path("src/data/root.zig"),
-        .target = b.graph.host,
+        .target = host,
         .optimize = optimize,
     });
     _ = b.addModule("horos", .{
@@ -28,13 +29,13 @@ pub fn build(b: *std.Build) void {
     });
     const horos = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
-        .target = b.graph.host,
+        .target = host,
         .optimize = optimize,
         .imports = &.{.{ .name = "horos_data", .module = data }},
     });
-    benchmarks(b, data, optimize);
+    benchmarks(b, optimize);
     const static_contracts = staticContracts(b, data, optimize);
-    const data_step = dataChecks(b, static_contracts, optimize);
+    const data_step = dataChecks(b, host, static_contracts, optimize);
     const static_authoring = staticAuthoring(b, horos, data);
     const native_linker = compiler(b, target, public_data, data, optimize);
     const component_step = componentChecks(b, horos, native_linker, optimize);
@@ -59,6 +60,17 @@ pub fn build(b: *std.Build) void {
     aggregate.dependOn(wasm_checks.invocation);
     publicExamples(b, horos, native, optimize);
     b.default_step = aggregate;
+}
+
+fn qualificationHost(b: *std.Build) std.Build.ResolvedTarget {
+    const host = b.graph.host;
+    if (host.result.os.tag != .linux or host.result.cpu.arch != .x86_64) return host;
+    return b.resolveTargetQuery(.{
+        .cpu_arch = host.result.cpu.arch,
+        .cpu_model = .baseline,
+        .os_tag = host.result.os.tag,
+        .abi = host.result.abi,
+    });
 }
 
 const source_examples = [_][]const u8{
@@ -115,14 +127,15 @@ fn staticContracts(
         "check-static-contracts",
         "Reject unclassified opcode and reference-contract mutations",
     );
-    portableRoleChecks(b, static_contracts, optimize);
+    portableRoleChecks(b, data.resolved_target.?, static_contracts, optimize);
     sourceRoleChecks(b, data, static_contracts, optimize);
-    opcodeCheck(b, static_contracts, optimize);
+    opcodeCheck(b, data.resolved_target.?, static_contracts, optimize);
     return static_contracts;
 }
 
 fn portableRoleChecks(
     b: *std.Build,
+    host: std.Build.ResolvedTarget,
     static_contracts: *std.Build.Step,
     optimize: std.lang.Optimize,
 ) void {
@@ -133,7 +146,7 @@ fn portableRoleChecks(
             .name = "portable-role-" ++ mode,
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/data/reference_roles_rejections.zig"),
-                .target = b.graph.host,
+                .target = host,
                 .optimize = optimize,
             }),
         });
@@ -165,7 +178,7 @@ fn sourceRoleChecks(
             .name = "source-role-" ++ mode,
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/source/reference_roles_rejections.zig"),
-                .target = b.graph.host,
+                .target = data.resolved_target,
                 .optimize = optimize,
                 .imports = &.{.{ .name = "horos_data", .module = data }},
             }),
@@ -181,7 +194,12 @@ fn sourceRoleChecks(
     }
 }
 
-fn opcodeCheck(b: *std.Build, static_contracts: *std.Build.Step, optimize: std.lang.Optimize) void {
+fn opcodeCheck(
+    b: *std.Build,
+    host: std.Build.ResolvedTarget,
+    static_contracts: *std.Build.Step,
+    optimize: std.lang.Optimize,
+) void {
     const mutation = b.addWriteFiles();
     _ = mutation.add(
         "program.zig",
@@ -202,7 +220,7 @@ fn opcodeCheck(b: *std.Build, static_contracts: *std.Build.Step, optimize: std.l
         .name = "unclassified-opcode",
         .root_module = b.createModule(.{
             .root_source_file = mutation_root,
-            .target = b.graph.host,
+            .target = host,
             .optimize = optimize,
         }),
     });
@@ -212,26 +230,33 @@ fn opcodeCheck(b: *std.Build, static_contracts: *std.Build.Step, optimize: std.l
 
 fn dataChecks(
     b: *std.Build,
+    host: std.Build.ResolvedTarget,
     static_contracts: *std.Build.Step,
     optimize: std.lang.Optimize,
 ) *std.Build.Step {
     const tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/data/test_root.zig"),
-            .target = b.graph.host,
+            .target = host,
             .optimize = optimize,
         }),
     });
     const data_step = b.step("check-data", "Check canonical records and pure admission");
     const run_data_tests = b.addRunArtifact(tests);
+    run_data_tests.has_side_effects = true;
     data_step.dependOn(&run_data_tests.step);
     data_step.dependOn(static_contracts);
     return data_step;
 }
 
-fn benchmarks(b: *std.Build, data: *std.Build.Module, optimize: std.lang.Optimize) void {
+fn benchmarks(b: *std.Build, optimize: std.lang.Optimize) void {
     // Optional measurements use the ordinary structural compiler and admission.
     // Timing is deliberately not a correctness threshold or part of `check`.
+    const data = b.createModule(.{
+        .root_source_file = b.path("src/data/root.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
     const admission_bench = b.addExecutable(
         .{
             .name = "admission-bench",
@@ -291,7 +316,7 @@ fn staticAuthoring(
         options.addOption([]const u8, "value", case[0]);
         const wrong = b.addExecutable(.{ .name = case[0], .root_module = b.createModule(.{
             .root_source_file = b.path("test/package_authoring/static.zig"),
-            .target = b.graph.host,
+            .target = horos.resolved_target,
             .imports = &.{.{ .name = "horos", .module = horos }},
         }) });
         wrong.root_module.addOptions("rejection_mode", options);
@@ -307,7 +332,7 @@ fn staticAuthoring(
                 .root_module = b.createModule(
                     .{
                         .root_source_file = b.path("src/cache_key_rejections.zig"),
-                        .target = b.graph.host,
+                        .target = data.resolved_target,
                         .imports = &.{.{ .name = "horos_data", .module = data }},
                     },
                 ),
@@ -335,15 +360,19 @@ fn compiler(
         .optimize = optimize,
         .imports = &.{.{ .name = "horos_data", .module = public_data }},
     }) });
-    const native_linker = if (target.query.isNative()) linker else b.addExecutable(.{
-        .name = "horos-link-host",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/component_link.zig"),
-            .target = b.graph.host,
-            .optimize = optimize,
-            .imports = &.{.{ .name = "horos_data", .module = data }},
-        }),
-    });
+    const host = data.resolved_target.?;
+    const native_linker = if (target.query.isNative() or target.query.eql(host.query))
+        linker
+    else
+        b.addExecutable(.{
+            .name = "horos-link-host",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tools/component_link.zig"),
+                .target = host,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "horos_data", .module = data }},
+            }),
+        });
 
     const installed_linker = b.addInstallArtifact(linker, .{});
     b.getInstallStep().dependOn(&installed_linker.step);
@@ -362,7 +391,7 @@ fn componentChecks(
 ) *std.Build.Step {
     const helper = b.addExecutable(.{ .name = "horos-checks", .root_module = b.createModule(.{
         .root_source_file = b.path("tools/component_example.zig"),
-        .target = b.graph.host,
+        .target = horos.resolved_target,
         .optimize = optimize,
         .imports = &.{.{ .name = "horos", .module = horos }},
     }) });
@@ -399,13 +428,14 @@ fn authoringChecks(
 ) AuthoringChecks {
     const authoring = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("src/test_root.zig"),
-        .target = b.graph.host,
+        .target = data.resolved_target,
         .optimize = optimize,
         .imports = &.{.{ .name = "horos_data", .module = data }},
     }) });
     // Both complete test roots already include the component cases. Share their
     // runners instead of compiling and executing two subset-only test binaries.
     const run_authoring_tests = b.addRunArtifact(authoring);
+    run_authoring_tests.has_side_effects = true;
 
     const authoring_step = b.step(
         "check-authoring",
@@ -427,7 +457,7 @@ fn compactEmitter(
             .root_module = b.createModule(
                 .{
                     .root_source_file = b.path("test/v2/emit_compact.zig"),
-                    .target = b.graph.host,
+                    .target = horos.resolved_target,
                     .optimize = optimize,
                     .imports = &.{.{ .name = "horos", .module = horos }},
                 },
@@ -511,7 +541,7 @@ fn semanticsChecks(
             .root_module = b.createModule(
                 .{
                     .root_source_file = b.path("src/authoring_cases.zig"),
-                    .target = b.graph.host,
+                    .target = data.resolved_target,
                     .optimize = optimize,
                     .imports = &.{.{ .name = "horos_data", .module = data }},
                 },
@@ -530,7 +560,7 @@ fn semanticsChecks(
             .root_module = b.createModule(
                 .{
                     .root_source_file = b.path("test/v2/emit_source.zig"),
-                    .target = b.graph.host,
+                    .target = horos.resolved_target,
                     .optimize = optimize,
                     .imports = &.{.{ .name = "horos", .module = horos }},
                 },
@@ -551,8 +581,8 @@ fn semanticsChecks(
     semantics.dependOn(&oracle.step);
     semantics.dependOn(&interaction_traces.step);
     semantics.dependOn(portable_baseline);
-    semantics.dependOn(&oracleScopeChecks(b, horos, optimize, authoring_cases).step);
-    semantics.dependOn(&borrowReturnChecks(b, horos, optimize).step);
+    semantics.dependOn(&oracleScopeChecks(b, source_emitter, authoring_cases).step);
+    semantics.dependOn(&borrowReturnChecks(b, source_emitter).step);
     semantics.dependOn(&run_authoring_tests.step);
     const exact_json = b.addSystemCommand(&.{ "node", "--test" });
     exact_json.addFileArg2(b.path("test/v2/exact_json.test.mjs"), .{});
@@ -654,7 +684,7 @@ fn publicExamples(
 ) void {
     const client = b.addExecutable(.{ .name = "authoring-client", .root_module = b.createModule(.{
         .root_source_file = b.path("examples/authoring_client.zig"),
-        .target = b.graph.host,
+        .target = horos.resolved_target,
         .optimize = optimize,
         .imports = &.{.{ .name = "horos", .module = horos }},
     }) });
@@ -673,7 +703,7 @@ fn publicExamples(
             .name = entry[0],
             .root_module = b.createModule(.{
                 .root_source_file = b.path("examples/" ++ entry[0] ++ ".zig"),
-                .target = b.graph.host,
+                .target = horos.resolved_target,
                 .optimize = optimize,
                 .imports = &.{.{ .name = "horos", .module = horos }},
             }),
@@ -687,22 +717,14 @@ fn publicExamples(
 
 fn oracleScopeChecks(
     b: *std.Build,
-    horos: *std.Build.Module,
-    optimize: std.lang.Optimize,
+    source_emitter: *std.Build.Step.Compile,
     authoring_cases: *std.Build.Step.Compile,
 ) *std.Build.Step.Run {
-    const emitter = b.addExecutable(.{
-        .name = "oracle-scopes",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("test/v2/oracle_scopes.zig"),
-            .target = b.graph.host,
-            .optimize = optimize,
-            .imports = &.{.{ .name = "horos", .module = horos }},
-        }),
-    });
+    const emit = b.addRunArtifact(source_emitter);
+    emit.addArg("--oracle-scopes");
     const check = b.addSystemCommand(&.{"node"});
     check.addFileArg2(b.path("test/v2/oracle_scopes.mjs"), .{});
-    check.addFileArg2(b.addRunArtifact(emitter).captureStdOut(.{}), .{});
+    check.addFileArg2(emit.captureStdOut(.{}), .{});
     check.addFileArg2(authoring_cases.getEmittedBin(), .{});
     check.has_side_effects = true;
     return check;
@@ -710,17 +732,10 @@ fn oracleScopeChecks(
 
 fn borrowReturnChecks(
     b: *std.Build,
-    horos: *std.Build.Module,
-    optimize: std.lang.Optimize,
+    source_emitter: *std.Build.Step.Compile,
 ) *std.Build.Step.Run {
-    const tests = b.addExecutable(.{
-        .name = "borrow-returns",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("test/v2/borrow_returns.zig"),
-            .target = b.graph.host,
-            .optimize = optimize,
-            .imports = &.{.{ .name = "horos", .module = horos }},
-        }),
-    });
-    return b.addRunArtifact(tests);
+    const check = b.addRunArtifact(source_emitter);
+    check.addArg("--borrow-returns");
+    check.has_side_effects = true;
+    return check;
 }

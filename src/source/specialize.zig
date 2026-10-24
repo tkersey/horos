@@ -88,8 +88,16 @@ fn extend(a: std.mem.Allocator, env: Env, item: Binding) !Env {
     return result;
 }
 pub fn identity(a: std.mem.Allocator, m: ast.Module, request: Request) Error![32]u8 {
+    return identityWithWork(a, m, request, null);
+}
+pub fn identityWithWork(
+    a: std.mem.Allocator,
+    m: ast.Module,
+    request: Request,
+    work: ?*u64,
+) Error![32]u8 {
     var digest = std.crypto.hash.sha2.Sha256.init(.{});
-    var writer: data.wire.Writer = .{ .hasher = &digest };
+    var writer: data.wire.Writer = .{ .hasher = &digest, .remaining = work };
     try writer.put("horos.source-specialization/1\x00");
     try data.record.write(ast.Module, m, &writer);
     try data.record.writeAlloc(Request, a, request, &writer);
@@ -161,8 +169,11 @@ pub fn specialize(a: std.mem.Allocator, original: ast.Module, requested: Request
     out.builder.region_count = m.region_count;
     var scratch = std.heap.ArenaAllocator.init(a);
     defer scratch.deinit();
-    var admitted_source = try source.lower(a, m);
-    admitted_source.deinit();
+    var admission_work: u64 = std.math.maxInt(u64);
+    try source.admitObservedWithWork(a, m, &admission_work, .{
+        .context = &out,
+        .receive = retainEmittedConstants,
+    });
     const checked = try @import("check.zig").analyze(scratch.allocator(), m);
     const schema_facts = try data.admission.schemas(storage, m.schemas);
     if (requested.function >= m.functions.len) return error.InvalidReference;
@@ -174,13 +185,14 @@ pub fn specialize(a: std.mem.Allocator, original: ast.Module, requested: Request
     ) |k, param| try values.validate(storage, m, schema_facts, m.variables[@intCast(param)], k);
     var engine: Engine = .{
         .out = &out,
-        .facts = schema_facts,
         .captures = checked.functions,
         .left = requested.policy.work,
+        .reads = .{ .module = m, .facts = schema_facts },
     };
+    defer engine.reads.deinit(storage);
     const root = try engine.request(
         requested.function,
-        requested.arguments,
+        out.request.arguments,
     ) orelse return error.UnsupportedSpecialization;
     out.entry = out.functions.items[root].after;
     var cursor: usize = 0;
@@ -189,11 +201,24 @@ pub fn specialize(a: std.mem.Allocator, original: ast.Module, requested: Request
     try validate(a, original, requested, &out);
     return out;
 }
+fn retainEmittedConstants(
+    context: *anyopaque,
+    program: data.activation.Program,
+    _: @import("check.zig").Facts,
+) source.Error!void {
+    const out: *Output = @ptrCast(@alignCast(context));
+    const storage = out.builder.allocator();
+    try out.builder.constants.appendSlice(storage, try source.own(
+        []const p.Literal,
+        storage,
+        program.constants[out.original.constants.len..],
+    ));
+}
 const Engine = struct {
     out: *Output,
-    facts: data.admission.SchemaFacts,
     captures: []const @import("check.zig").Set,
     left: u64,
+    reads: values.ReadCache,
     fn a(self: *Engine) std.mem.Allocator {
         return self.out.builder.allocator();
     }
@@ -295,7 +320,7 @@ const Engine = struct {
             .{
                 .before = id,
                 .after = residual,
-                .arguments = try source.own([]const Knowledge, self.a(), arguments),
+                .arguments = arguments,
             },
         );
         return index;
@@ -355,10 +380,8 @@ const Engine = struct {
         if (frame.expression.expression == .primitive) {
             const before = frame.expression;
             frame.expression.expression.primitive.operands = frame.args;
-            frame.knowledge = try values.normalize(self.a(), try values.primitive(
+            frame.knowledge = try values.normalize(self.a(), try self.reads.primitive(
                 self.a(),
-                self.out.original,
-                self.facts,
                 before,
                 frame.known,
                 &self.left,
@@ -606,10 +629,8 @@ const Engine = struct {
                 env = try extend(self.a(), env, .{
                     .before = before,
                     .after = after.*,
-                    .knowledge = try values.field(
+                    .knowledge = try self.reads.field(
                         self.a(),
-                        self.out.original,
-                        self.facts,
                         x.knowledge,
                         i,
                         &self.left,
@@ -680,6 +701,22 @@ pub const validate = @import("specialize_validate.zig").validate;
 
 pub fn requestEqual(a: std.mem.Allocator, lhs: Request, rhs: Request) Error!bool {
     return data.record.equalAlloc(Request, a, lhs, rhs);
+}
+
+pub fn requestEqualWithWork(
+    a: std.mem.Allocator,
+    lhs: Request,
+    rhs: Request,
+    work: ?*u64,
+) Error!bool {
+    try data.admission.spend(work, 1);
+    if (lhs.function != rhs.function or lhs.arguments.len != rhs.arguments.len or
+        !data.record.equal(Context, lhs.context, rhs.context) or
+        !data.record.equal(Policy, lhs.policy, rhs.policy)) return false;
+    for (lhs.arguments, rhs.arguments) |left, right| {
+        if (!try values.equalWithWork(a, left, right, work)) return false;
+    }
+    return true;
 }
 
 test "specialization traverses deep value and term derivations" {

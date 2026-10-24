@@ -10,10 +10,81 @@ fn spend(left: *u64, count: u64) Error!void {
     if (left.* < count) return error.SpecializationLimit;
     left.* -= count;
 }
+fn readValue(
+    a: std.mem.Allocator,
+    schemas: []const p.Schema,
+    facts: data.admission.SchemaFacts,
+    schema: p.Id,
+    reader: *data.wire.Reader,
+    left: *u64,
+) Error![]const u8 {
+    return data.admission.readValueWithWork(a, schemas, facts, schema, reader, left) catch |err|
+        return if (err == error.ValueWorkLimit) error.SpecializationLimit else err;
+}
 pub const Knowledge = union(enum) {
     dynamic,
     known: p.Literal,
     product: struct { schema: p.Id, fields: []const Knowledge },
+};
+pub const ReadCache = struct {
+    const Key = struct { schema: p.Id, pointer: usize, length: usize, start: usize };
+    module: ast.Module,
+    facts: data.admission.SchemaFacts,
+    entries: std.AutoArrayHashMapUnmanaged(Key, usize) = .empty,
+
+    pub fn deinit(self: *ReadCache, a: std.mem.Allocator) void {
+        self.entries.deinit(a);
+        self.* = undefined;
+    }
+    fn read(
+        self: *ReadCache,
+        a: std.mem.Allocator,
+        schema: p.Id,
+        reader: *data.wire.Reader,
+        left: *u64,
+    ) Error![]const u8 {
+        try spend(left, 1);
+        const key: Key = .{
+            .schema = schema,
+            .pointer = @intFromPtr(reader.input.ptr),
+            .length = reader.input.len,
+            .start = reader.position,
+        };
+        if (self.entries.get(key)) |end| {
+            reader.position = end;
+            return reader.input[key.start..end];
+        }
+        try spend(left, 1);
+        var measured = reader.*;
+        const bytes = try readValue(a, self.module.schemas, self.facts, schema, &measured, left);
+        const count = std.math.add(usize, self.entries.count(), 1) catch
+            return error.SpecializationLimit;
+        if (count > self.entries.capacity()) {
+            try spend(left, count);
+            try self.entries.ensureTotalCapacity(a, count);
+        }
+        self.entries.putAssumeCapacityNoClobber(key, measured.position);
+        reader.* = measured;
+        return bytes;
+    }
+    pub fn field(
+        self: *ReadCache,
+        a: std.mem.Allocator,
+        value: Knowledge,
+        index: p.Id,
+        left: *u64,
+    ) Error!Knowledge {
+        return fieldWithCache(a, self.module, self.facts, value, index, left, self);
+    }
+    pub fn primitive(
+        self: *ReadCache,
+        a: std.mem.Allocator,
+        value: ast.Value,
+        operands: []const Knowledge,
+        left: *u64,
+    ) Error!Knowledge {
+        return primitiveWithCache(a, self.module, self.facts, value, operands, left, self);
+    }
 };
 pub fn own(a: std.mem.Allocator, value: Knowledge) Error!Knowledge {
     return source.own(Knowledge, a, value);
@@ -24,6 +95,44 @@ pub fn ownMany(a: std.mem.Allocator, values: []const Knowledge) Error![]const Kn
 pub fn equal(a: std.mem.Allocator, lhs: Knowledge, rhs: Knowledge) Error!bool {
     return data.record.equalAlloc(Knowledge, a, lhs, rhs);
 }
+pub fn literalEqualWithWork(lhs: p.Literal, rhs: p.Literal, work: ?*u64) Error!bool {
+    if (lhs.schema != rhs.schema or lhs.bytes.len != rhs.bytes.len) return false;
+    try data.admission.spend(work, lhs.bytes.len);
+    return std.mem.eql(u8, lhs.bytes, rhs.bytes);
+}
+pub fn equalWithWork(
+    a: std.mem.Allocator,
+    lhs: Knowledge,
+    rhs: Knowledge,
+    work: ?*u64,
+) Error!bool {
+    const Pair = struct { lhs: Knowledge, rhs: Knowledge };
+    var pending: std.ArrayList(Pair) = .empty;
+    defer pending.deinit(a);
+    try data.admission.spend(work, 1);
+    try pending.append(a, .{ .lhs = lhs, .rhs = rhs });
+    while (pending.pop()) |pair| {
+        try data.admission.spend(work, 1);
+        if (std.meta.activeTag(pair.lhs) != std.meta.activeTag(pair.rhs)) return false;
+        switch (pair.lhs) {
+            .dynamic => {},
+            .known => |left| {
+                if (!try literalEqualWithWork(left, pair.rhs.known, work)) return false;
+            },
+            .product => |left| {
+                const right = pair.rhs.product;
+                if (left.schema != right.schema or
+                    left.fields.len != right.fields.len) return false;
+                try data.admission.spend(work, left.fields.len);
+                for (left.fields, right.fields) |x, y| try pending.append(
+                    a,
+                    .{ .lhs = x, .rhs = y },
+                );
+            },
+        }
+    }
+    return true;
+}
 const Validation = struct { schema: p.Id, value: Knowledge };
 pub fn validate(
     a: std.mem.Allocator,
@@ -32,16 +141,37 @@ pub fn validate(
     schema: p.Id,
     k: Knowledge,
 ) Error!void {
+    return validateWithWork(a, m, facts, schema, k, null);
+}
+pub fn validateWithWork(
+    a: std.mem.Allocator,
+    m: ast.Module,
+    facts: data.admission.SchemaFacts,
+    schema: p.Id,
+    k: Knowledge,
+    work: ?*u64,
+) Error!void {
     var pending: std.ArrayList(Validation) = .empty;
     defer pending.deinit(a);
     var current: Validation = .{ .schema = schema, .value = k };
     var remaining = true;
     while (remaining) {
+        try data.admission.spend(work, 1);
         switch (current.value) {
             .dynamic => {},
             .known => |literal| {
                 if (literal.schema != current.schema) return error.TypeMismatch;
-                try data.admission.value(a, m.schemas, facts, literal);
+                var reader: data.wire.Reader = .{ .input = literal.bytes };
+                if (work) |left| {
+                    _ = try readValue(a, m.schemas, facts, literal.schema, &reader, left);
+                } else _ = try data.admission.readValue(
+                    a,
+                    m.schemas,
+                    facts,
+                    literal.schema,
+                    &reader,
+                );
+                try reader.finish();
             },
             .product => |v| {
                 if (v.schema != current.schema or current.schema >= m.schemas.len or
@@ -49,6 +179,7 @@ pub fn validate(
                 if (!facts.exportable[@intCast(current.schema)]) return error.InvalidValue;
                 const fields = m.schemas[@intCast(current.schema)].product;
                 if (v.fields.len != fields.len) return error.TypeMismatch;
+                try data.admission.spend(work, fields.len);
                 var index = fields.len;
                 while (index > 0) {
                     index -= 1;
@@ -67,6 +198,17 @@ pub fn field(
     index: p.Id,
     left: *u64,
 ) Error!Knowledge {
+    return fieldWithCache(a, m, facts, value, index, left, null);
+}
+fn fieldWithCache(
+    a: std.mem.Allocator,
+    m: ast.Module,
+    facts: data.admission.SchemaFacts,
+    value: Knowledge,
+    index: p.Id,
+    left: *u64,
+    cache: ?*ReadCache,
+) Error!Knowledge {
     return switch (value) {
         .dynamic => .dynamic,
         .product => |v| if (index < v.fields.len) v.fields[@intCast(index)] else .dynamic,
@@ -76,7 +218,10 @@ pub fn field(
             var reader: data.wire.Reader = .{ .input = v.bytes };
             for (shape.product, 0..) |schema, i| {
                 try spend(left, 1);
-                const bytes = try data.admission.readValue(a, m.schemas, facts, schema, &reader);
+                const bytes = if (cache) |memo|
+                    try memo.read(a, schema, &reader, left)
+                else
+                    try readValue(a, m.schemas, facts, schema, &reader, left);
                 if (i == index) break :blk .{ .known = .{ .schema = schema, .bytes = bytes } };
             }
             unreachable;
@@ -102,6 +247,7 @@ fn encoded(
     fields: []const Knowledge,
     left: *u64,
 ) Error!Knowledge {
+    try spend(left, fields.len);
     var measure: data.wire.Writer = .{};
     if (prefix) |v| try measure.natural(v);
     for (fields) |f| {
@@ -125,6 +271,17 @@ pub fn primitive(
     operands: []const Knowledge,
     left: *u64,
 ) Error!Knowledge {
+    return primitiveWithCache(a, m, facts, value, operands, left, null);
+}
+fn primitiveWithCache(
+    a: std.mem.Allocator,
+    m: ast.Module,
+    facts: data.admission.SchemaFacts,
+    value: ast.Value,
+    operands: []const Knowledge,
+    left: *u64,
+    cache: ?*ReadCache,
+) Error!Knowledge {
     const op = value.expression.primitive;
     const schema = value.schema;
     // Knowledge reifies into ordinary source literals. Keep its entire
@@ -136,8 +293,10 @@ pub fn primitive(
         if (full == .known) return full;
         return .{ .product = .{ .schema = schema, .fields = try a.dupe(Knowledge, operands) } };
     }
-    if (op.opcode == .field) return field(a, m, facts, operands[0], op.immediate, left);
+    if (op.opcode == .field)
+        return fieldWithCache(a, m, facts, operands[0], op.immediate, left, cache);
     if (op.opcode == .move) return operands[0];
+    try spend(left, operands.len);
     for (operands) |v| if (v != .known) return .dynamic;
     switch (op.opcode) {
         .product, .field, .move => unreachable,
@@ -164,13 +323,13 @@ pub fn primitive(
         .integer_bit_xor,
         .equal,
         .less,
-        => return binaryPrimitive(a, m, value, operands),
+        => return binaryPrimitive(a, m, value, operands, left),
         .integer_convert, .integer_bit_not, .enum_tag => {
-            return unaryPrimitive(a, m, value, operands);
+            return unaryPrimitive(a, m, value, operands, left);
         },
         .variant_tag, .variant_payload => return variantPrimitive(a, m, value, operands),
         .sequence_length, .sequence_get => {
-            return sequencePrimitive(a, m, facts, value, operands, left);
+            return sequencePrimitive(a, m, facts, value, operands, left, cache);
         },
         .select => return if (operands[0].known.bytes[0] == 1) operands[1] else operands[2],
         // Unknown primitive rules, allocation with observable identity, and
@@ -183,15 +342,19 @@ fn binaryPrimitive(
     m: ast.Module,
     value: ast.Value,
     operands: []const Knowledge,
+    left: *u64,
 ) Error!Knowledge {
     const op = value.expression.primitive;
     const schema = value.schema;
     const shape = m.schemas[@intCast(operands[0].known.schema)];
+    try scalarValidationWork(shape, 1, left);
     const lhs = data.scalar.fromBytes(shape, operands[0].known.bytes) catch return .dynamic;
+    try scalarValidationWork(shape, 1, left);
     const right = data.scalar.fromBytes(
         shape,
         operands[1].known.bytes,
     ) catch return .dynamic;
+    try scalarValidationWork(shape, 1, left);
     const result = data.scalar.binary(op.opcode, shape, lhs, right) catch return .dynamic;
     return if (result == .value) scalar(a, m, schema, result.value) else .dynamic;
 }
@@ -200,14 +363,17 @@ fn unaryPrimitive(
     m: ast.Module,
     value: ast.Value,
     operands: []const Knowledge,
+    left: *u64,
 ) Error!Knowledge {
     const op = value.expression.primitive;
     const schema = value.schema;
     const shape = m.schemas[@intCast(operands[0].known.schema)];
+    try scalarValidationWork(shape, 1, left);
     const input = data.scalar.fromBytes(
         shape,
         operands[0].known.bytes,
     ) catch return .dynamic;
+    try scalarValidationWork(shape, if (op.opcode == .enum_tag) 1 else 2, left);
     const result = data.scalar.unary(
         op.opcode,
         shape,
@@ -215,6 +381,12 @@ fn unaryPrimitive(
         input,
     ) catch return .dynamic;
     return if (result == .value) scalar(a, m, schema, result.value) else .dynamic;
+}
+fn scalarValidationWork(shape: p.Schema, passes: u64, left: *u64) Error!void {
+    if (shape != .enumeration) return;
+    const count = std.math.mul(u64, shape.enumeration.len, passes) catch
+        return error.SpecializationLimit;
+    try spend(left, count);
 }
 fn variantPrimitive(
     a: std.mem.Allocator,
@@ -237,6 +409,7 @@ fn sequencePrimitive(
     value: ast.Value,
     operands: []const Knowledge,
     left: *u64,
+    cache: ?*ReadCache,
 ) Error!Knowledge {
     const op = value.expression.primitive;
     const schema = value.schema;
@@ -264,7 +437,10 @@ fn sequencePrimitive(
     var i: u64 = 0;
     while (i <= index) : (i += 1) {
         try spend(left, 1);
-        const bytes = try data.admission.readValue(a, m.schemas, facts, element, &reader);
+        const bytes = if (cache) |memo|
+            try memo.read(a, element, &reader, left)
+        else
+            try readValue(a, m.schemas, facts, element, &reader, left);
         if (i == index) return encoded(
             a,
             schema,
@@ -294,6 +470,7 @@ pub fn normalize(a: std.mem.Allocator, value: Knowledge, left: *u64) Error!Knowl
         if (entering) {
             try spend(left, 1);
             if (current == .product) {
+                try spend(left, current.product.fields.len);
                 const fields = try a.alloc(Knowledge, current.product.fields.len);
                 if (fields.len == 0) {
                     current = try encoded(a, current.product.schema, null, fields, left);
@@ -365,7 +542,7 @@ fn deepStaticKnowledge(
     var left: u64 = 100_000;
     const normalized = try normalize(arena.allocator(), root, &left);
     try std.testing.expect(try equal(a, root, normalized));
-    try std.testing.expectEqual(@as(u64, 100_000 - 8193), left);
+    try std.testing.expectEqual(@as(u64, 100_000 - 16_385), left);
 }
 
 test "static knowledge traverses deep partial products and allocation failures" {
@@ -411,6 +588,311 @@ test "static knowledge traverses deep partial products and allocation failures" 
     defer arena.deinit();
     var left: u64 = 100_000;
     const normalized = try normalize(arena.allocator(), root, &left);
+    left = 16_384;
+    try std.testing.expectError(
+        error.SpecializationLimit,
+        normalize(arena.allocator(), root, &left),
+    );
     fields[0][0] = .dynamic;
     try std.testing.expect(!try equal(a, root, normalized));
+}
+
+const read_cache_module: ast.Module = .{
+    .entry = 0,
+    .failure = 0,
+    .schemas = &.{
+        .unit,
+        .u8,
+        .u16,
+        .{ .seq = 1 },
+        .{ .product = &.{ 1, 0, 3 } },
+        .{ .product = &.{} },
+        .{ .sum = &.{ 0, 1 } },
+        .boolean,
+        .u64,
+        .{ .product = &.{ 4, 5, 1 } },
+    },
+    .constants = &.{},
+    .effects = &.{},
+    .handlers = &.{},
+    .region_count = 0,
+    .variables = &.{},
+    .values = &.{},
+    .terms = &.{},
+    .functions = &.{},
+};
+const read_cache_facts: data.admission.SchemaFacts = .{
+    .minimum = &.{ 0, 1, 2, 1, 2, 0, 1, 1, 8, 3 },
+    .exportable = &.{ true, true, true, true, true, true, true, true, true, true },
+};
+
+fn readCacheDifferential(a: std.mem.Allocator) !void {
+    var cache: ReadCache = .{ .module = read_cache_module, .facts = read_cache_facts };
+    defer cache.deinit(a);
+    const cases = [_]Knowledge{
+        .{ .known = .{ .schema = 9, .bytes = &.{ 7, 2, 8, 9, 10 } } },
+        .{ .known = .{ .schema = 5, .bytes = &.{} } },
+        .dynamic,
+        .{ .product = .{ .schema = 9, .fields = &.{
+            .{ .known = .{ .schema = 4, .bytes = &.{ 7, 2, 8, 9 } } },
+            .{ .known = .{ .schema = 5, .bytes = &.{} } },
+            .dynamic,
+        } } },
+    };
+    var left: u64 = 100_000;
+    for (0..2) |_| for (cases) |value| for (0..4) |index| {
+        const expected = try field(a, cache.module, cache.facts, value, index, &left);
+        const actual = try cache.field(a, value, index, &left);
+        try std.testing.expect(try equal(a, expected, actual));
+        if (actual == .known) try std.testing.expect(
+            actual.known.bytes.ptr == expected.known.bytes.ptr,
+        );
+    };
+    const bytes: [32]u8 = @splat(1);
+    for (0..bytes.len) |start| {
+        var reader: data.wire.Reader = .{ .input = &bytes, .position = start };
+        const actual = try cache.read(a, 1, &reader, &left);
+        try std.testing.expectEqualSlices(u8, bytes[start .. start + 1], actual);
+    }
+}
+
+test "static read cache matches uncached fields and releases partial growth" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, readCacheDifferential, .{});
+}
+
+test "static read cache distinguishes exact keys and fresh validation ownership" {
+    const a = std.testing.allocator;
+    var cache: ReadCache = .{ .module = read_cache_module, .facts = read_cache_facts };
+    defer cache.deinit(a);
+    var first = [_]u8{ 1, 2, 3, 4 };
+    var second = first;
+    var left: u64 = 1000;
+    const readers = [_]data.wire.Reader{
+        .{ .input = &first },                .{ .input = &first },  .{ .input = first[0..2] },
+        .{ .input = &first, .position = 1 }, .{ .input = &second }, .{ .input = &first },
+    };
+    for (readers, [_]p.Id{ 1, 2, 1, 1, 1, 0 }, 0..) |input, schema, index| {
+        var reader = input;
+        _ = try cache.read(a, schema, &reader, &left);
+        try std.testing.expectEqual(index + 1, cache.entries.count());
+    }
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    for (readers, [_]p.Id{ 1, 2, 1, 1, 1, 0 }) |input, schema| {
+        var reader = input;
+        left = 1;
+        const result = try cache.read(failing.allocator(), schema, &reader, &left);
+        try std.testing.expect(result.ptr == input.input[input.position..].ptr);
+        try std.testing.expectEqual(input.position + result.len, reader.position);
+        try std.testing.expectEqual(@as(u64, 0), left);
+    }
+    try std.testing.expect(!failing.has_induced_failure);
+    var checked: ReadCache = .{ .module = cache.module, .facts = cache.facts };
+    defer checked.deinit(a);
+    var reader = readers[0];
+    left = 1;
+    try std.testing.expectError(error.SpecializationLimit, checked.read(a, 1, &reader, &left));
+    try std.testing.expectEqual(@as(usize, 0), checked.entries.count());
+}
+
+test "static read cache does not publish failed decoding growth or allocation" {
+    const a = std.testing.allocator;
+    var cache: ReadCache = .{ .module = read_cache_module, .facts = read_cache_facts };
+    defer cache.deinit(a);
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 1 });
+    var reader: data.wire.Reader = .{ .input = &.{} };
+    var left: u64 = 4;
+    try std.testing.expectError(
+        error.SpecializationLimit,
+        cache.read(failing.allocator(), 0, &reader, &left),
+    );
+    try std.testing.expect(!failing.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 0), cache.entries.count());
+    failing.fail_index = failing.alloc_index + 1;
+    left = 100;
+    try std.testing.expectError(
+        error.OutOfMemory,
+        cache.read(failing.allocator(), 0, &reader, &left),
+    );
+    try std.testing.expectEqual(@as(usize, 0), cache.entries.count());
+    try std.testing.expectEqual(@as(usize, 0), reader.position);
+    failing.fail_index = std.math.maxInt(usize);
+    _ = try cache.read(failing.allocator(), 0, &reader, &left);
+    try std.testing.expectEqual(@as(usize, 1), cache.entries.count());
+    const invalid: data.wire.Reader = .{ .input = &.{2} };
+    for (0..2) |_| {
+        var actual = invalid;
+        left = 100;
+        try std.testing.expectError(error.InvalidValue, cache.read(a, 7, &actual, &left));
+        try std.testing.expectEqual(@as(usize, 1), cache.entries.count());
+        try std.testing.expectEqual(@as(usize, 0), actual.position);
+        actual = invalid;
+        try std.testing.expectError(
+            error.InvalidValue,
+            readValue(a, cache.module.schemas, cache.facts, 7, &actual, &left),
+        );
+    }
+}
+
+test "static read cache preserves sequence projections and residual partial values" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cache: ReadCache = .{ .module = read_cache_module, .facts = read_cache_facts };
+    defer cache.deinit(a);
+    const op: ast.Value = .{ .schema = 6, .expression = .{ .primitive = .{
+        .opcode = .sequence_get,
+        .operands = &.{ 0, 1 },
+    } } };
+    const operands = [_]Knowledge{
+        .{ .known = .{ .schema = 3, .bytes = &.{ 2, 8, 9 } } },
+        .{ .known = .{ .schema = 8, .bytes = &.{ 1, 0, 0, 0, 0, 0, 0, 0 } } },
+    };
+    var left: u64 = 1000;
+    const expected = try primitive(a, cache.module, cache.facts, op, &operands, &left);
+    for (0..2) |_| try std.testing.expect(try equal(
+        a,
+        expected,
+        try cache.primitive(a, op, &operands, &left),
+    ));
+    try std.testing.expectEqual(@as(usize, 2), cache.entries.count());
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    left = 0;
+    const partial: Knowledge = .{ .product = .{ .schema = 4, .fields = &.{
+        .dynamic, .{ .known = .{ .schema = 0, .bytes = &.{} } }, .dynamic,
+    } } };
+    try std.testing.expect(try equal(a, partial.product.fields[1], try cache.field(
+        failing.allocator(),
+        partial,
+        1,
+        &left,
+    )));
+    try std.testing.expect(try cache.field(failing.allocator(), .dynamic, 0, &left) == .dynamic);
+    try std.testing.expect(!failing.has_induced_failure);
+}
+
+fn scalarEnumModule(schemas: []const p.Schema) ast.Module {
+    var module = read_cache_module;
+    module.schemas = schemas;
+    return module;
+}
+
+const scalar_enum_facts: data.admission.SchemaFacts = .{
+    .minimum = &.{ 4, 4 },
+    .exportable = &.{ true, true },
+};
+const scalar_enum_tag: ast.Value = .{ .schema = 1, .expression = .{ .primitive = .{
+    .opcode = .enum_tag,
+    .operands = &.{0},
+} } };
+
+test "static enum scalar scans consume shared work before allocation through both paths" {
+    const a = std.testing.allocator;
+    var tags: [4096]u32 = undefined;
+    for (&tags, 0..) |*tag, index| tag.* = @intCast(index);
+    const schemas = [_]p.Schema{ .{ .enumeration = &tags }, .u32 };
+    const module = scalarEnumModule(&schemas);
+    const operands = [_]Knowledge{.{ .known = .{ .schema = 0, .bytes = &.{ 255, 15, 0, 0 } } }};
+    const cost = 1 + 2 * tags.len;
+    for ([_]bool{ false, true }) |cached| {
+        var cache: ReadCache = .{ .module = module, .facts = scalar_enum_facts };
+        defer cache.deinit(a);
+        var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+        for ([_]u64{ 1, tags.len, cost - 1 }) |budget| {
+            var left = budget;
+            try std.testing.expectError(error.SpecializationLimit, if (cached)
+                cache.primitive(failing.allocator(), scalar_enum_tag, &operands, &left)
+            else
+                primitive(
+                    failing.allocator(),
+                    module,
+                    scalar_enum_facts,
+                    scalar_enum_tag,
+                    &operands,
+                    &left,
+                ));
+            try std.testing.expect(!failing.has_induced_failure);
+        }
+        var left: u64 = 2 * cost;
+        for (0..2) |index| {
+            const actual = if (cached)
+                try cache.primitive(a, scalar_enum_tag, &operands, &left)
+            else
+                try primitive(a, module, scalar_enum_facts, scalar_enum_tag, &operands, &left);
+            defer a.free(actual.known.bytes);
+            try std.testing.expectEqual(@as(p.Id, 1), actual.known.schema);
+            try std.testing.expectEqualSlices(u8, operands[0].known.bytes, actual.known.bytes);
+            try std.testing.expectEqual(@as(u64, (1 - index) * cost), left);
+        }
+        try std.testing.expectError(error.SpecializationLimit, if (cached)
+            cache.primitive(failing.allocator(), scalar_enum_tag, &operands, &left)
+        else
+            primitive(
+                failing.allocator(),
+                module,
+                scalar_enum_facts,
+                scalar_enum_tag,
+                &operands,
+                &left,
+            ));
+        try std.testing.expect(!failing.has_induced_failure);
+    }
+}
+
+test "static enum scalar membership failure remains residual with sufficient work" {
+    const a = std.testing.allocator;
+    const schemas = [_]p.Schema{ .{ .enumeration = &.{ 0, 7, 42 } }, .u32 };
+    const module = scalarEnumModule(&schemas);
+    const operands = [_]Knowledge{.{ .known = .{ .schema = 0, .bytes = &.{ 99, 0, 0, 0 } } }};
+    var cache: ReadCache = .{ .module = module, .facts = scalar_enum_facts };
+    defer cache.deinit(a);
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    var left: u64 = 100;
+    try std.testing.expect(try primitive(
+        failing.allocator(),
+        module,
+        scalar_enum_facts,
+        scalar_enum_tag,
+        &operands,
+        &left,
+    ) == .dynamic);
+    try std.testing.expectEqual(@as(u64, 96), left);
+    try std.testing.expect(try cache.primitive(
+        failing.allocator(),
+        scalar_enum_tag,
+        &operands,
+        &left,
+    ) == .dynamic);
+    try std.testing.expectEqual(@as(u64, 92), left);
+    try std.testing.expect(!failing.has_induced_failure);
+}
+
+test "static integer and boolean scalar semantics retain constant work and faults" {
+    const a = std.testing.allocator;
+    const cases = .{
+        .{ p.Opcode.integer_add, @as(p.Id, 1), 1, &[_]u8{ 2, 3 }, &[_]u8{5} },
+        .{ p.Opcode.integer_add, @as(p.Id, 1), 1, &[_]u8{ 255, 1 }, null },
+        .{ p.Opcode.integer_div, @as(p.Id, 1), 1, &[_]u8{ 3, 0 }, null },
+        .{ p.Opcode.integer_convert, @as(p.Id, 1), 2, &[_]u8{3}, &[_]u8{ 3, 0 } },
+        .{ p.Opcode.integer_bit_not, @as(p.Id, 1), 1, &[_]u8{3}, &[_]u8{252} },
+        .{ p.Opcode.equal, @as(p.Id, 7), 7, &[_]u8{ 1, 0 }, &[_]u8{0} },
+        .{ p.Opcode.boolean_not, @as(p.Id, 7), 7, &[_]u8{1}, &[_]u8{0} },
+    };
+    inline for (cases) |case| {
+        var operands: [case[3].len]Knowledge = undefined;
+        for (&operands, 0..) |*operand, index| operand.* = .{ .known = .{
+            .schema = case[1],
+            .bytes = case[3][index .. index + 1],
+        } };
+        const op: ast.Value = .{ .schema = case[2], .expression = .{ .primitive = .{
+            .opcode = case[0],
+            .operands = &.{},
+        } } };
+        var left: u64 = operands.len;
+        const actual = try primitive(a, read_cache_module, read_cache_facts, op, &operands, &left);
+        if (@TypeOf(case[4]) != @TypeOf(null)) {
+            defer a.free(actual.known.bytes);
+            try std.testing.expectEqualSlices(u8, case[4], actual.known.bytes);
+        } else try std.testing.expect(actual == .dynamic);
+        try std.testing.expectEqual(@as(u64, 0), left);
+    }
 }

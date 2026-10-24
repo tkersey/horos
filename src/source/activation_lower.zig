@@ -120,17 +120,116 @@ fn lowerInternal(
 ) Error!Construction {
     options.resetObservations();
     if (component and options.recovery) return error.InvalidSource;
-    return lowerBody(allocator, input, imports, component, borrows, options, false) catch |err| {
+    return (lowerBody(
+        allocator,
+        input,
+        imports,
+        component,
+        borrows,
+        options,
+        false,
+        null,
+        null,
+    ) catch |err| {
         if (options.diagnostic) |diagnostic| diagnostic.code = err;
         return err;
-    };
+    }).?;
 }
 
 /// Reconstruct the canonical input to recovery-preserving coalescing. The
 /// frontend remains trusted; no submitted intermediate program is accepted.
 pub fn lowerRecoveryInput(allocator: std.mem.Allocator, input: ast.Module) Error!Construction {
-    return lowerBody(allocator, input, &.{}, false, &.{}, .{ .recovery = true }, true);
+    return (try lowerBody(
+        allocator,
+        input,
+        &.{},
+        false,
+        &.{},
+        .{ .recovery = true },
+        true,
+        null,
+        null,
+    )).?;
 }
+pub fn admitWithWork(
+    allocator: std.mem.Allocator,
+    input: ast.Module,
+    work: *u64,
+) Error!void {
+    return admitObservedWithWork(allocator, input, work, null);
+}
+
+pub const AdmissionObserver = struct {
+    context: *anyopaque,
+    receive: *const fn (*anyopaque, ir.Program, check.Facts) source.Error!void,
+};
+
+const Observation = union(enum) {
+    admission: AdmissionObserver,
+    constructors: *ConstructorDerivation,
+};
+
+const ConstructorDerivation = struct {
+    storage: std.mem.Allocator,
+    bindings: []const source.constructor_bindings.Binding = &.{},
+
+    fn receive(self: *@This(), compiler: *Compiler, program: ir.Program) Error!void {
+        _ = try data.contracts.validateDiagnosedWithWork(
+            compiler.allocator,
+            program,
+            null,
+            compiler.work,
+        );
+        try data.admission.spend(compiler.work, program.constructors.len);
+        const bindings = try self.storage.alloc(
+            source.constructor_bindings.Binding,
+            program.constructors.len,
+        );
+        var initialized: usize = 0;
+        errdefer {
+            for (bindings[0..initialized]) |binding| self.storage.free(binding.captures);
+            self.storage.free(bindings);
+        }
+        for (bindings, program.constructors) |*binding, constructor| {
+            const captures = compiler.facts.functions[@intCast(constructor.function)].items;
+            try data.admission.spend(compiler.work, captures.len);
+            binding.* = .{
+                .function = constructor.function,
+                .schema = constructor.schema,
+                .captures = try self.storage.dupe(u64, captures),
+            };
+            initialized += 1;
+        }
+        self.bindings = bindings;
+    }
+};
+
+pub fn deriveConstructorBindings(
+    allocator: std.mem.Allocator,
+    storage: std.mem.Allocator,
+    input: ast.Module,
+    work: *u64,
+) Error![]const source.constructor_bindings.Binding {
+    var derivation: ConstructorDerivation = .{ .storage = storage };
+    _ = try lowerBody(allocator, input, &.{}, false, &.{}, .{}, false, work, .{
+        .constructors = &derivation,
+    });
+    return derivation.bindings;
+}
+
+pub fn admitObservedWithWork(
+    allocator: std.mem.Allocator,
+    input: ast.Module,
+    work: *u64,
+    observer: ?AdmissionObserver,
+) Error!void {
+    const observation: ?Observation = if (observer) |selected|
+        .{ .admission = selected }
+    else
+        null;
+    _ = try lowerBody(allocator, input, &.{}, false, &.{}, .{}, false, work, observation);
+}
+
 fn lowerBody(
     allocator: std.mem.Allocator,
     input: ast.Module,
@@ -139,32 +238,39 @@ fn lowerBody(
     borrows: []const data.borrow_contract.Summary,
     options: source.CompileOptions,
     recovery_input: bool,
-) Error!Construction {
+    work: ?*u64,
+    observer: ?Observation,
+) Error!?Construction {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const owned = input;
     // The source checker is independent of both lowering representations.
     // Only genuine captures are enumerated; intermediate free sets share roots.
     options.stage(.source_check);
-    const facts = try check.analyzeComponent(a, owned, imports, options.diagnostic);
-    const traits = try data.traits.derive(a, owned.schemas);
+    const facts = try check.analyzeComponentWithWork(a, input, imports, options.diagnostic, work);
+    const traits = try data.traits.deriveWithWork(a, input.schemas, work);
     options.stage(.lowering);
     var compiler: Compiler = .{
+        .work = work,
         .allocator = a,
-        .source = owned,
+        .source = input,
         .facts = facts,
         .capture_observer = options.captures,
         .slot_variables = if (options.captures != null) try a.alloc(
             []const ?p.Id,
-            owned.functions.len,
+            input.functions.len,
         ) else &.{},
-        .cacheable = try @import("value_cache.zig").derive(a, owned, traits),
+        .cacheable = try @import("value_cache.zig").deriveWithWork(a, input, traits, work),
         .uses = traits,
         .recovery_enabled = options.recovery,
     };
     const program = try lowerProgram(&compiler, options);
     if (options.diagnostic) |diagnostic| diagnostic.function = null;
+    try checkPrimitiveCatalog(&compiler, program, options);
+    if (observer) |selected| if (selected == .constructors) {
+        try selected.constructors.receive(&compiler, program);
+        return null;
+    };
     options.stage(.target_check);
     var original_facts = try checkTarget(
         allocator,
@@ -177,9 +283,39 @@ fn lowerBody(
         options,
     );
     original_facts.deinit();
+    if (observer) |selected| {
+        const admitted = selected.admission;
+        try admitted.receive(admitted.context, program, facts);
+    }
+    if (work != null) return null;
     const ordered = try optimizeDirect(&compiler, program, options);
-    if (!component and !recovery_input) return coalesce(allocator, ordered, &compiler, options);
-    return ownConstruction(allocator, ordered, &compiler, imports, component, borrows, options);
+    if (!component and !recovery_input) return try coalesce(allocator, ordered, &compiler, options);
+    return try ownConstruction(allocator, ordered, &compiler, imports, component, borrows, options);
+}
+
+fn checkPrimitiveCatalog(
+    compiler: *Compiler,
+    program: ir.Program,
+    options: source.CompileOptions,
+) Error!void {
+    try data.admission.spend(compiler.work, compiler.source.values.len);
+    const slots = try compiler.allocator.alloc(p.Id, compiler.source.values.len);
+    for (compiler.source.values, slots) |value, *slot| slot.* = value.schema;
+    for (compiler.source.values, 0..) |value, index| {
+        if (value.expression != .primitive) continue;
+        if (options.diagnostic) |diagnostic| diagnostic.value = index;
+        const op = value.expression.primitive;
+        try data.admission.spend(compiler.work, op.operands.len);
+        try data.admission.spend(compiler.work, op.failures.len);
+        try data.admission.validateInstructionShapeWithWork(program, .{
+            .opcode = op.opcode,
+            .result_type = value.schema,
+            .operands = op.operands,
+            .immediate = op.immediate,
+            .failures = op.failures,
+        }, slots, compiler.uses, compiler.work);
+    }
+    if (options.diagnostic) |diagnostic| diagnostic.value = null;
 }
 
 const CompilationObserver = struct {
@@ -282,7 +418,7 @@ fn checkTarget(
         diagnostic.variable = null;
         diagnostic.origins = .{};
     }
-    return data.activation_ownership.analyzeObserved(
+    return data.activation_ownership.analyzeObservedWithWork(
         allocator,
         program,
         if (options.diagnostic) |diagnostic| &diagnostic.target else null,
@@ -297,6 +433,7 @@ fn checkTarget(
             }
         else
             null,
+        compiler.work,
     ) catch |err|
         {
             if (options.diagnostic) |diagnostic| {
@@ -313,6 +450,7 @@ fn checkTarget(
 
 const ConstructorKey = struct { function: p.Id, schema: p.Id };
 const Compiler = struct {
+    work: ?*u64 = null,
     allocator: std.mem.Allocator,
     source: ast.Module,
     facts: check.Facts,
@@ -430,6 +568,7 @@ const Compiler = struct {
         const shape = self.source.schemas[@intCast(schema)];
         if (shape != .internal or shape.internal != .computation) return error.TypeMismatch;
         const free = self.facts.functions[@intCast(function)].items;
+        try data.admission.spend(self.work, free.len);
         const fields = try self.allocator.alloc(p.Id, free.len);
         for (fields, free) |*field, name| field.* = self.source.variables[@intCast(name)];
         const capture = self.captures.items.len;
@@ -448,22 +587,27 @@ const Compiler = struct {
     }
 
     fn unit(self: *Compiler) Error!p.Id {
-        for (self.constants.items, 0..) |literal, id| {
-            if (self.source.schemas[@intCast(literal.schema)] == .unit) return id;
-        }
-        for (self.source.schemas, 0..) |shape, schema| {
-            if (shape != .unit) continue;
-            const id = self.constants.items.len;
-            try self.constants.append(self.allocator, .{ .schema = schema, .bytes = &.{} });
-            return id;
-        }
-        return error.TypeMismatch;
+        const selected = try check.selectUnit(
+            self.source.schemas,
+            self.constants.items,
+            self.work,
+        ) orelse return error.TypeMismatch;
+        if (selected.constant) |id| return id;
+        const id = self.constants.items.len;
+        try self.constants.append(self.allocator, .{ .schema = selected.schema, .bytes = &.{} });
+        return id;
     }
 };
 
-fn stableHandlers(allocator: std.mem.Allocator, input: []const p.Handler) Error![]const ir.Handler {
+fn stableHandlers(
+    allocator: std.mem.Allocator,
+    input: []const p.Handler,
+    work: ?*u64,
+) Error![]const ir.Handler {
+    try data.admission.spend(work, input.len);
     const output = try allocator.alloc(ir.Handler, input.len);
     for (output, input) |*target, handler| {
+        try data.admission.spend(work, handler.clauses.len);
         const clauses = try allocator.alloc(ir.Clause, handler.clauses.len);
         for (clauses, handler.clauses) |*clause, original| {
             clause.* = .{
@@ -517,7 +661,10 @@ const Function = struct {
         const definition = compiler.source.functions[@intCast(self.id)];
         try self.custody.append(compiler.allocator, .{});
         const free = compiler.facts.functions[@intCast(self.id)].items;
-        const inputs = try compiler.allocator.alloc(p.Id, free.len + definition.parameters.len);
+        const input_count = std.math.add(usize, free.len, definition.parameters.len) catch
+            return error.RelationLimit;
+        try data.admission.spend(compiler.work, input_count);
+        const inputs = try compiler.allocator.alloc(p.Id, input_count);
         var environment: p.Id = none;
         for (free, 0..) |name, index| {
             environment = try self.bind(environment, name);
@@ -554,6 +701,7 @@ const Function = struct {
     }
 
     fn slot(self: *Function, schema: p.Id) Error!p.Id {
+        try data.admission.spend(self.compiler.work, 1);
         const id = self.slots.items.len;
         try self.slots.append(self.compiler.allocator, schema);
         if (self.compiler.capture_observer != null) try self.slot_variables.append(
@@ -574,6 +722,7 @@ const Function = struct {
 
     fn bindingCustody(self: *Function, parent: p.Id, names: []const p.Id) Error!p.Id {
         for (names) |name| {
+            try data.admission.spend(self.compiler.work, 1);
             const schema = self.compiler.source.variables[@intCast(name)];
             if (self.compiler.uses.copy[@intCast(schema)]) continue;
             const id = self.custody.items.len;
@@ -588,6 +737,7 @@ const Function = struct {
     }
 
     fn reserveBlock(self: *Function) Error!p.Id {
+        try data.admission.spend(self.compiler.work, 1);
         const id = self.compiler.blocks.items.len;
         try self.compiler.blocks.append(self.compiler.allocator, .{
             .function = self.id,
@@ -643,6 +793,7 @@ const Function = struct {
     }
 
     fn emit(self: *Function, task: Task) Error!void {
+        try data.admission.spend(self.compiler.work, 1);
         var block: Block = .{ .function = self, .environment = task.environment };
         const terminator = try self.term(&block, task);
         self.compiler.blocks.items[@intCast(task.block)] = .{
@@ -657,6 +808,7 @@ const Function = struct {
         var current = task;
         var traversed: usize = 0;
         while (self.compiler.source.terms[@intCast(current.term)] == .bind) {
+            try data.admission.spend(self.compiler.work, 1);
             const expression = self.compiler.source.terms[@intCast(current.term)];
             const binding = expression.bind;
             const value_term = self.compiler.source.terms[@intCast(binding.value)];
@@ -698,8 +850,8 @@ const Function = struct {
             block.environment = current.environment;
             // Staging remains eager. A repeated cell read after a write must
             // execute again, even when source expressions share an ID.
-            block.computed.clearRetainingCapacity();
-            block.products.clearRetainingCapacity();
+            block.computed.clearAndFree(self.compiler.allocator);
+            block.products.clearAndFree(self.compiler.allocator);
         }
         return self.termAfterValues(block, current);
     }
@@ -776,6 +928,7 @@ const Function = struct {
     fn match(self: *Function, block: *Block, task: Task) Error!ir.Terminator {
         const selected = self.compiler.source.terms[@intCast(task.term)].match_sum;
         const value = try block.value(selected.value);
+        try data.admission.spend(self.compiler.work, selected.cases.len);
         const cases = try self.compiler.allocator.alloc(ir.Edge, selected.cases.len);
         for (cases, selected.cases) |*edge_value, case| {
             const env = try self.bind(task.environment, case.variable);
@@ -791,6 +944,7 @@ const Function = struct {
     fn unpack(self: *Function, block: *Block, task: Task) Error!ir.Terminator {
         const unpacking = self.compiler.source.terms[@intCast(task.term)].unpack_product;
         const value = try block.value(unpacking.value);
+        try data.admission.spend(self.compiler.work, unpacking.variables.len);
         const destinations = try self.compiler.allocator.alloc(p.Id, unpacking.variables.len);
         var env = task.environment;
         for (destinations, unpacking.variables) |*destination, name| {
@@ -986,6 +1140,7 @@ const Block = struct {
         defer tasks.deinit(compiler.allocator);
         try tasks.append(compiler.allocator, try self.valueTask(id));
         while (tasks.items.len != 0) {
+            try data.admission.spend(compiler.work, 1);
             const task = &tasks.items[tasks.items.len - 1];
             const expression = compiler.source.values[@intCast(task.id)].expression;
             if (expression == .primitive and task.next < task.operands.len) {
@@ -1012,6 +1167,7 @@ const Block = struct {
         const compiler = self.function.compiler;
         const expression = compiler.source.values[@intCast(id)].expression;
         const count = if (expression == .primitive) expression.primitive.operands.len else 0;
+        try data.admission.spend(compiler.work, count);
         return .{ .id = id, .operands = try compiler.allocator.alloc(p.Id, count) };
     }
 
@@ -1039,6 +1195,7 @@ const Block = struct {
     fn captures(self: *Block, function: p.Id) Error![]const p.Id {
         const compiler = self.function.compiler;
         const free = compiler.facts.functions[@intCast(function)].items;
+        try data.admission.spend(compiler.work, free.len);
         const result = try compiler.allocator.alloc(p.Id, free.len);
         for (result, free) |*slot, name| {
             slot.* = try self.function.resolve(self.environment, name);
@@ -1049,6 +1206,9 @@ const Block = struct {
     fn callArguments(self: *Block, function: p.Id, supplied: []const p.Id) Error![]const p.Id {
         const captured = try self.captures(function);
         const arguments = try self.values(supplied);
+        const count = std.math.add(usize, captured.len, arguments.len) catch
+            return error.RelationLimit;
+        try data.admission.spend(self.function.compiler.work, count);
         return std.mem.concat(self.function.compiler.allocator, p.Id, &.{ captured, arguments });
     }
 
@@ -1080,6 +1240,7 @@ const Block = struct {
     }
 
     fn values(self: *Block, supplied: []const p.Id) Error![]const p.Id {
+        try data.admission.spend(self.function.compiler.work, supplied.len);
         const result = try self.function.compiler.allocator.alloc(p.Id, supplied.len);
         for (result, supplied) |*slot, id| slot.* = try self.value(id);
         return result;
@@ -1093,6 +1254,8 @@ const Block = struct {
 fn lowerProgram(compiler: *Compiler, options: source.CompileOptions) Error!ir.Program {
     const a = compiler.allocator;
     const owned = compiler.source;
+    try data.admission.spend(compiler.work, owned.constants.len);
+    try data.admission.spend(compiler.work, owned.functions.len);
     try compiler.constants.appendSlice(a, owned.constants);
     const functions = try a.alloc(ir.Function, owned.functions.len);
     for (functions, 0..) |*function, id| {
@@ -1100,7 +1263,11 @@ fn lowerProgram(compiler: *Compiler, options: source.CompileOptions) Error!ir.Pr
         var lowering: Function = .{
             .compiler = compiler,
             .id = id,
-            .bindings = .{ .allocator = a, .name_count = owned.variables.len },
+            .bindings = .{
+                .allocator = a,
+                .name_count = owned.variables.len,
+                .work = compiler.work,
+            },
         };
         function.* = try lowering.lower();
     }
@@ -1115,7 +1282,7 @@ fn lowerProgram(compiler: *Compiler, options: source.CompileOptions) Error!ir.Pr
         .effects = owned.effects,
         .functions = functions,
         .blocks = compiler.blocks.items,
-        .handlers = try stableHandlers(a, owned.handlers),
+        .handlers = try stableHandlers(a, owned.handlers, compiler.work),
         .scopes = .{
             .captures = compiler.captures.items,
             .region_count = owned.region_count,

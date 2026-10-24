@@ -5,10 +5,11 @@ const std = @import("std");
 const Id = @import("horos_data").program.Id;
 pub const empty = std.math.maxInt(Id);
 const Node = struct { left: Id, right: Id };
-pub const Error = std.mem.Allocator.Error || error{UnboundVariable};
+pub const Error = std.mem.Allocator.Error || error{ UnboundVariable, RelationLimit };
 
 pub const Scopes = struct {
     allocator: std.mem.Allocator,
+    work: ?*u64 = null,
     name_count: usize,
     nodes: std.ArrayList(Node) = .empty,
 
@@ -34,6 +35,7 @@ pub const Scopes = struct {
         var lower = low;
         var upper = high;
         while (upper - lower > 1) {
+            try @import("horos_data").admission.spend(self.work, 1);
             const node: Node = if (current == empty)
                 .{ .left = empty, .right = empty }
             else
@@ -51,6 +53,7 @@ pub const Scopes = struct {
                 upper = middle;
             }
         }
+        try @import("horos_data").admission.spend(self.work, depth + 1);
         var id = self.nodes.items.len;
         try self.nodes.append(self.allocator, .{ .left = value, .right = empty });
         while (depth != 0) {
@@ -69,6 +72,7 @@ pub const Scopes = struct {
         var low: usize = 0;
         var high = self.name_count;
         while (current != empty) {
+            try @import("horos_data").admission.spend(self.work, 1);
             const node = self.nodes.items[@intCast(current)];
             if (high - low == 1) return node.left;
             const middle = low + (high - low) / 2;

@@ -226,6 +226,7 @@ pub fn Fields(comptime names: []const [:0]const u8, comptime children: []const t
 }
 
 pub fn enumTags(comptime T: type) [@typeInfo(T).@"enum".field_values.len]u32 {
+    @setEvalBranchQuota(100_000);
     const description = info(T);
     var tags: [@typeInfo(T).@"enum".field_values.len]u32 = undefined;
     inline for (@typeInfo(description.enumeration).@"enum".field_values, 0..) |value, index|

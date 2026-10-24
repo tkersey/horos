@@ -3,6 +3,7 @@
 //! Roots are private analysis indexes, never supplied certificates. This layer
 //! does not yet establish lexical disposal, capture bounds or region safety.
 const std = @import("std");
+const admission = @import("admission.zig");
 const p = @import("program.zig");
 const ir = @import("activation.zig");
 const sets = @import("analysis_sets.zig");
@@ -59,7 +60,7 @@ pub fn analyze(allocator: std.mem.Allocator, image: ir.Program) Error!Facts {
 /// whose destinations have no downstream demand. Compiler deletion eligibility only;
 /// this must not replace capture/retention liveness.
 pub fn analyzeInputDemand(allocator: std.mem.Allocator, image: ir.Program) Error!Facts {
-    return analyzeComponentDemand(allocator, image, &.{}, true);
+    return analyzeComponentDemand(allocator, image, &.{}, true, null);
 }
 
 pub fn analyzeComponent(
@@ -67,7 +68,16 @@ pub fn analyzeComponent(
     image: ir.Program,
     imports: []const p.Id,
 ) Error!Facts {
-    return analyzeComponentDemand(allocator, image, imports, false);
+    return analyzeComponentWithWork(allocator, image, imports, null);
+}
+
+pub fn analyzeComponentWithWork(
+    allocator: std.mem.Allocator,
+    image: ir.Program,
+    imports: []const p.Id,
+    work: ?*u64,
+) Error!Facts {
+    return analyzeComponentDemand(allocator, image, imports, false, work);
 }
 
 fn analyzeComponentDemand(
@@ -75,8 +85,9 @@ fn analyzeComponentDemand(
     image: ir.Program,
     imports: []const p.Id,
     comptime require_edge_sources: bool,
+    allowance: ?*u64,
 ) Error!Facts {
-    try structure.validateComponent(allocator, image, imports);
+    try structure.validateComponentWithWork(allocator, image, imports, allowance);
     const arena = try allocator.create(std.heap.ArenaAllocator);
     arena.* = std.heap.ArenaAllocator.init(allocator);
     errdefer {
@@ -91,15 +102,20 @@ fn analyzeComponentDemand(
     const temporary = scratch.allocator();
     const pool = try a.create(sets.Pool);
     var limit: usize = 0;
-    for (image.functions) |function| limit = @max(limit, function.layout.slots.len);
-    pool.* = .{ .allocator = allocator, .limit = limit };
+    for (image.functions) |function| {
+        try admission.spend(allowance, 1);
+        limit = @max(limit, function.layout.slots.len);
+    }
+    pool.* = .{ .allocator = allocator, .limit = limit, .work = allowance };
     errdefer pool.deinit();
+    try admission.spend(allowance, image.blocks.len);
     var analysis: Analysis = .{
+        .allowance = allowance,
         .allocator = temporary,
         .retained = a,
         .image = image,
         .pool = pool,
-        .uses = try traits.derive(temporary, image.schemas),
+        .uses = try traits.deriveWithWork(temporary, image.schemas, allowance),
         .entries = try a.alloc(?State, image.blocks.len),
         .queued = try temporary.alloc(bool, image.blocks.len),
         .work = try Queue.init(temporary, image.blocks.len),
@@ -110,6 +126,7 @@ fn analyzeComponentDemand(
     @memset(analysis.queued, false);
     const index = try analysis.solve(imports);
     const liveness = try Liveness.derive(&analysis, require_edge_sources);
+    pool.work = null;
     return .{
         .positions = analysis.positions,
         .live = liveness.positions,
@@ -123,6 +140,7 @@ fn analyzeComponentDemand(
 }
 
 const Analysis = struct {
+    allowance: ?*u64 = null,
     allocator: std.mem.Allocator,
     retained: std.mem.Allocator,
     image: ir.Program,
@@ -134,11 +152,15 @@ const Analysis = struct {
     work: Queue,
 
     fn solve(self: *Analysis, imports: []const p.Id) Error!usize {
+        try admission.spend(self.allowance, 1);
         for (self.image.functions, 0..) |function, id| {
+            try admission.spend(self.allowance, 1);
+            try admission.spend(self.allowance, imports.len);
             if (std.mem.indexOfScalar(p.Id, imports, id) != null) continue;
             var inputs = sets.empty;
             var obligations = sets.empty;
             for (function.inputs) |input| {
+                try admission.spend(self.allowance, 1);
                 inputs = try self.pool.insert(inputs, input);
                 const schema = function.layout.slots[@intCast(input)];
                 if (!self.uses.drop[@intCast(schema)])
@@ -152,11 +174,13 @@ const Analysis = struct {
         }
         var index: usize = 0;
         while (self.work.pop()) |block_id| {
+            try admission.spend(self.allowance, 1);
             index += 1;
             self.queued[@intCast(block_id)] = false;
             try self.block(block_id, false);
         }
         for (self.entries, 0..) |entry, block_id| {
+            try admission.spend(self.allowance, 1);
             // A source failure can make a syntactically constructed continuation
             // unreachable. Its references are checked, but it has no entry state.
             if (entry != null) try self.block(block_id, true);
@@ -165,6 +189,7 @@ const Analysis = struct {
     }
 
     fn merge(self: *Analysis, id: p.Id, incoming: State) Error!void {
+        try admission.spend(self.allowance, 1);
         const index: usize = @intCast(id);
         const old = self.entries[index];
         const next: State = if (old) |previous| .{
@@ -181,6 +206,7 @@ const Analysis = struct {
     }
 
     fn block(self: *Analysis, id: p.Id, checking: bool) Error!void {
+        try admission.spend(self.allowance, 1);
         const code = self.image.blocks[@intCast(id)];
         var flow: Flow = .{
             .analysis = self,
@@ -188,17 +214,23 @@ const Analysis = struct {
             .state = self.entries[@intCast(id)].?,
             .checking = checking,
         };
+        const position_count = std.math.add(usize, code.instructions.len, 1) catch
+            return error.OutOfMemory;
+        try admission.spend(self.allowance, position_count);
         if (!checking) {
             if (self.positions[@intCast(id)].len == 0)
                 self.positions[@intCast(id)] = try self.retained.alloc(
                     State,
-                    code.instructions.len + 1,
+                    position_count,
                 );
             self.positions[@intCast(id)][0] = flow.state;
         }
         for (code.instructions, 0..) |instruction, position| {
-            for (instruction.operands) |operand|
+            try admission.spend(self.allowance, 1);
+            for (instruction.operands) |operand| {
+                try admission.spend(self.allowance, 1);
                 try flow.read(operand, !instruction.opcode.borrowsOperands());
+            }
             if (checking) {
                 if (self.pool.contains(flow.state.obligations, instruction.destination))
                     return error.OverwrittenOwner;
@@ -213,10 +245,14 @@ const Analysis = struct {
         try controlReads(&flow, code.terminator);
         var next: Successors = .{ .image = self.image, .code = code };
         while (next.next()) |successor| {
+            try admission.spend(self.allowance, 1);
             var branch = flow;
-            if (code.terminator == .unpack_product)
-                for (code.terminator.unpack_product.destinations) |destination|
+            if (code.terminator == .unpack_product) {
+                for (code.terminator.unpack_product.destinations) |destination| {
+                    try admission.spend(self.allowance, 1);
                     try branch.write(destination);
+                }
+            }
             try branch.edge(successor.edge, successor.returned);
             if (!checking) try self.merge(successor.edge.block, branch.state);
         }
@@ -256,6 +292,7 @@ const Flow = struct {
     checking: bool,
 
     fn read(self: *Flow, slot: p.Id, consuming: bool) Error!void {
+        try admission.spend(self.analysis.allowance, 1);
         const pool = self.analysis.pool;
         if (self.checking and (!pool.contains(self.state.initialized, slot) or
             (self.state.available != self.state.initialized and !pool.contains(
@@ -273,10 +310,15 @@ const Flow = struct {
     }
 
     fn readAll(self: *Flow, slots: []const p.Id) Error!void {
-        for (slots) |slot| try self.read(slot, true);
+        try admission.spend(self.analysis.allowance, 1);
+        for (slots) |slot| {
+            try admission.spend(self.analysis.allowance, 1);
+            try self.read(slot, true);
+        }
     }
 
     fn write(self: *Flow, slot: p.Id) Error!void {
+        try admission.spend(self.analysis.allowance, 1);
         const pool = self.analysis.pool;
         if (self.checking and pool.contains(self.state.obligations, slot))
             return error.OverwrittenOwner;
@@ -296,23 +338,30 @@ const Flow = struct {
     }
 
     fn edge(self: *Flow, next: ir.Edge, returned: ?p.Id) Error!void {
+        try admission.spend(self.analysis.allowance, 1);
         // All sources are consumed/read in the predecessor view before any
         // destination is established. This admits swaps without sequential writes.
         var returned_used = false;
-        for (next.assignments) |assignment| switch (assignment.source) {
-            .slot => |slot| try self.read(slot, true),
-            .returned => {
-                if (self.checking and returned_used and
-                    !self.analysis.uses.copy[@intCast(returned.?)])
-                    return error.InvalidOwnership;
-                returned_used = true;
-            },
-        };
+        for (next.assignments) |assignment| {
+            try admission.spend(self.analysis.allowance, 1);
+            switch (assignment.source) {
+                .slot => |slot| try self.read(slot, true),
+                .returned => {
+                    if (self.checking and returned_used and
+                        !self.analysis.uses.copy[@intCast(returned.?)])
+                        return error.InvalidOwnership;
+                    returned_used = true;
+                },
+            }
+        }
         if (self.checking and !returned_used) {
             if (returned) |schema| if (!self.analysis.uses.drop[@intCast(schema)])
                 return error.InvalidOwnership;
         }
-        for (next.assignments) |assignment| try self.write(assignment.destination);
+        for (next.assignments) |assignment| {
+            try admission.spend(self.analysis.allowance, 1);
+            try self.write(assignment.destination);
+        }
     }
 };
 
@@ -383,6 +432,7 @@ const Liveness = struct {
     fn derive(analysis: *Analysis, comptime require_edge_sources: bool) Error!Liveness {
         const a = analysis.allocator;
         const image = analysis.image;
+        try admission.spend(analysis.allowance, image.blocks.len);
         var result: Liveness = .{
             .analysis = analysis,
             .entries = try a.alloc(sets.Root, image.blocks.len),
@@ -398,10 +448,12 @@ const Liveness = struct {
         try result.deriveParents();
         var remaining = image.blocks.len;
         while (remaining != 0) {
+            try admission.spend(analysis.allowance, 1);
             remaining -= 1;
             if (analysis.entries[remaining] != null) try result.enqueue(remaining);
         }
         while (result.work.pop()) |id| {
+            try admission.spend(analysis.allowance, 1);
             result.visits += 1;
             result.queued[@intCast(id)] = false;
             const root = try result.block(id, require_edge_sources);
@@ -412,12 +464,16 @@ const Liveness = struct {
             ] else result.parents[
                 @intCast(id)
             ].items;
-            for (parents) |parent| try result.enqueue(parent);
+            for (parents) |parent| {
+                try admission.spend(analysis.allowance, 1);
+                try result.enqueue(parent);
+            }
         }
         return result;
     }
 
     fn deriveParents(self: *Liveness) Error!void {
+        try admission.spend(self.analysis.allowance, 1);
         const a = self.analysis.allocator;
         const image = self.analysis.image;
         if (comptime compact_parents) {
@@ -425,9 +481,11 @@ const Liveness = struct {
             @memset(counts, 0);
             var edge_count: usize = 0;
             for (image.blocks, 0..) |code, id| {
+                try admission.spend(self.analysis.allowance, 1);
                 if (self.analysis.entries[id] == null) continue;
                 var successors: Successors = .{ .image = image, .code = code };
                 while (successors.next()) |next| {
+                    try admission.spend(self.analysis.allowance, 1);
                     const child: usize = @intCast(next.edge.block);
                     counts[child] = std.math.add(
                         usize,
@@ -437,18 +495,22 @@ const Liveness = struct {
                     edge_count = std.math.add(usize, edge_count, 1) catch return error.OutOfMemory;
                 }
             }
+            try admission.spend(self.analysis.allowance, edge_count);
             const parents = try a.alloc(p.Id, edge_count);
             var offset: usize = 0;
             for (self.parents, counts) |*row, count| {
+                try admission.spend(self.analysis.allowance, 1);
                 row.* = parents[offset..][0..count];
                 offset += count;
             }
             // Replay the same immutable edge traversal, preserving predecessor order.
             @memset(counts, 0);
             for (image.blocks, 0..) |code, id| {
+                try admission.spend(self.analysis.allowance, 1);
                 if (self.analysis.entries[id] == null) continue;
                 var successors: Successors = .{ .image = image, .code = code };
                 while (successors.next()) |next| {
+                    try admission.spend(self.analysis.allowance, 1);
                     const child: usize = @intCast(next.edge.block);
                     self.parents[child][counts[child]] = id;
                     counts[child] += 1;
@@ -456,36 +518,46 @@ const Liveness = struct {
             }
         } else {
             for (image.blocks, 0..) |code, id| {
+                try admission.spend(self.analysis.allowance, 1);
                 if (self.analysis.entries[id] == null) continue;
                 var successors: Successors = .{ .image = image, .code = code };
-                while (successors.next()) |next|
+                while (successors.next()) |next| {
+                    try admission.spend(self.analysis.allowance, 1);
                     try self.parents[@intCast(next.edge.block)].append(a, id);
+                }
             }
         }
     }
 
     fn enqueue(self: *Liveness, id: p.Id) Error!void {
+        try admission.spend(self.analysis.allowance, 1);
         if (self.queued[@intCast(id)]) return;
         self.work.push(id);
         self.queued[@intCast(id)] = true;
     }
 
     fn pinOwners(self: *Liveness, id: p.Id, position: usize, root: sets.Root) Error!sets.Root {
+        try admission.spend(self.analysis.allowance, 1);
         const obligations = self.analysis.positions[@intCast(id)][position].obligations;
         return self.analysis.pool.unite(root, obligations);
     }
 
     fn edge(self: *Liveness, next: ir.Edge, comptime require_edge_sources: bool) Error!sets.Root {
+        try admission.spend(self.analysis.allowance, 1);
         const pool = self.analysis.pool;
         const after = self.entries[@intCast(next.block)];
         var before = after;
         // Invert the simultaneous assignment: clear all destinations before
         // adding any required predecessor sources, including cyclic swaps.
-        for (next.assignments) |assignment| before = try pool.remove(
-            before,
-            assignment.destination,
-        );
         for (next.assignments) |assignment| {
+            try admission.spend(self.analysis.allowance, 1);
+            before = try pool.remove(
+                before,
+                assignment.destination,
+            );
+        }
+        for (next.assignments) |assignment| {
+            try admission.spend(self.analysis.allowance, 1);
             if (assignment.source == .slot and (require_edge_sources or pool.contains(
                 after,
                 assignment.destination,
@@ -496,26 +568,32 @@ const Liveness = struct {
     }
 
     fn block(self: *Liveness, id: p.Id, comptime require_edge_sources: bool) Error!sets.Root {
+        try admission.spend(self.analysis.allowance, 1);
         const code = self.analysis.image.blocks[@intCast(id)];
         const pool = self.analysis.pool;
         var live: LiveReads = .{ .pool = pool };
         var successors: Successors = .{ .image = self.analysis.image, .code = code };
         while (successors.next()) |next| {
+            try admission.spend(self.analysis.allowance, 1);
             var root = try self.edge(next.edge, require_edge_sources);
             if (code.terminator == .unpack_product)
                 root = try pool.excluding(root, code.terminator.unpack_product.destinations);
             live.root = try pool.unite(live.root, root);
         }
         try controlReads(&live, code.terminator);
+        const position_count = std.math.add(usize, code.instructions.len, 1) catch
+            return error.OutOfMemory;
+        try admission.spend(self.analysis.allowance, position_count);
         var position = code.instructions.len;
         live.root = try self.pinOwners(id, position, live.root);
         if (self.positions[@intCast(id)].len == 0)
             self.positions[@intCast(id)] = try self.analysis.retained.alloc(
                 sets.Root,
-                position + 1,
+                position_count,
             );
         self.positions[@intCast(id)][position] = live.root;
         while (position != 0) {
+            try admission.spend(self.analysis.allowance, 1);
             position -= 1;
             const operation = code.instructions[position];
             live.root = try pool.remove(live.root, operation.destination);

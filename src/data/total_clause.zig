@@ -50,21 +50,27 @@ const Visit = struct { id: p.Id, leave: bool = false };
 
 /// Every reachable path terminates in an ordinary return. The explicit DFS
 /// stack is bounded by CFG edges; each node is checked once, without recursion.
-pub fn validate(
+pub fn validateWithWork(
     allocator: std.mem.Allocator,
     image: ir.Program,
     id: p.Id,
     uses: traits.Facts,
+    work: ?*u64,
 ) a.Error!void {
+    try a.spend(work, 1);
     const function = image.functions[@intCast(id)];
-    for (function.layout.slots) |schema| if (!uses.copy[@intCast(schema)])
-        return error.InvalidOwnership;
+    for (function.layout.slots) |schema| {
+        try a.spend(work, 1);
+        if (!uses.copy[@intCast(schema)])
+            return error.InvalidOwnership;
+    }
     var states: std.AutoHashMapUnmanaged(p.Id, bool) = .empty;
     defer states.deinit(allocator);
     var pending: std.ArrayList(Visit) = .empty;
     defer pending.deinit(allocator);
     try pending.append(allocator, .{ .id = function.entry });
     while (pending.pop()) |visit| {
+        try a.spend(work, 1);
         if (visit.leave) {
             states.getPtr(visit.id).?.* = true;
             continue;
@@ -76,26 +82,41 @@ pub fn validate(
         try states.put(allocator, visit.id, false);
         const block = image.blocks[@intCast(visit.id)];
         if (block.function != id) return error.InvalidReference;
-        for (block.instructions) |operation| if (!instruction(operation))
-            return error.InvalidProgram;
+        for (block.instructions) |operation| {
+            try a.spend(work, 1);
+            if (!instruction(operation))
+                return error.InvalidProgram;
+        }
         try pending.append(allocator, .{ .id = visit.id, .leave = true });
         switch (block.terminator) {
             .return_value => {},
-            .jump => |edge| try push(allocator, &pending, edge),
+            .jump => |edge| try push(allocator, &pending, edge, work),
             .branch => |v| {
-                try push(allocator, &pending, v.when_false);
-                try push(allocator, &pending, v.when_true);
+                try push(allocator, &pending, v.when_false, work);
+                try push(allocator, &pending, v.when_true, work);
             },
-            .switch_variant => |v| for (v.cases) |edge| try push(allocator, &pending, edge),
-            .unpack_product => |v| try push(allocator, &pending, v.next),
+            .switch_variant => |v| for (v.cases) |edge| {
+                try a.spend(work, 1);
+                try push(allocator, &pending, edge, work);
+            },
+            .unpack_product => |v| try push(allocator, &pending, v.next, work),
             else => return error.InvalidProgram,
         }
     }
 }
 
-fn push(allocator: std.mem.Allocator, pending: *std.ArrayList(Visit), edge: ir.Edge) a.Error!void {
-    for (edge.assignments) |assignment| if (assignment.source == .returned)
-        return error.InvalidProgram;
+fn push(
+    allocator: std.mem.Allocator,
+    pending: *std.ArrayList(Visit),
+    edge: ir.Edge,
+    work: ?*u64,
+) a.Error!void {
+    try a.spend(work, 1);
+    for (edge.assignments) |assignment| {
+        try a.spend(work, 1);
+        if (assignment.source == .returned)
+            return error.InvalidProgram;
+    }
     try pending.append(allocator, .{ .id = edge.block });
 }
 
@@ -122,4 +143,13 @@ test "tail clause wire tag is explicit and rejects the predecessor flag" {
         error.InvalidTag,
         records.read(ir.Clause, &reader, std.testing.allocator, &budget, &context),
     );
+}
+
+pub fn validate(
+    allocator: std.mem.Allocator,
+    image: ir.Program,
+    id: p.Id,
+    uses: traits.Facts,
+) a.Error!void {
+    return validateWithWork(allocator, image, id, uses, null);
 }

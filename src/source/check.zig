@@ -11,6 +11,7 @@ const compact = data.analysis_sets;
 /// Analysis storage is owned by the caller's arena. Only genuine function
 /// captures are enumerated; term/value sets remain shared roots.
 pub const Facts = struct {
+    work: ?*u64 = null,
     sets: *compact.Pool,
     values: []compact.Root,
     terms: []compact.Root,
@@ -73,6 +74,14 @@ pub fn analyze(allocator: std.mem.Allocator, source: ast.Module) Error!Facts {
     return analyzeDiagnosed(allocator, source, null);
 }
 
+pub fn analyzeWithWork(
+    allocator: std.mem.Allocator,
+    source: ast.Module,
+    work: ?*u64,
+) Error!Facts {
+    return analyzeComponentWithWork(allocator, source, &.{}, null, work);
+}
+
 pub fn analyzeDiagnosed(
     allocator: std.mem.Allocator,
     source: ast.Module,
@@ -87,7 +96,19 @@ pub fn analyzeComponent(
     imports: []const p.Id,
     diagnostic: ?*@import("diagnostic.zig").Diagnostic,
 ) Error!Facts {
+    return analyzeComponentWithWork(allocator, source, imports, diagnostic, null);
+}
+
+pub fn analyzeComponentWithWork(
+    allocator: std.mem.Allocator,
+    source: ast.Module,
+    imports: []const p.Id,
+    diagnostic: ?*@import("diagnostic.zig").Diagnostic,
+    work: ?*u64,
+) Error!Facts {
+    try sourceWork(source, work);
     for (imports, 0..) |id, at| {
+        try data.admission.spend(work, at);
         if (id >= source.functions.len or std.mem.indexOfScalar(
             p.Id,
             imports[0..at],
@@ -96,12 +117,13 @@ pub fn analyzeComponent(
         if (source.functions[@intCast(id)].body != null) return error.InvalidSource;
     }
     if (source.entry >= source.functions.len) return error.InvalidReference;
-    _ = try data.admission.schemas(allocator, source.schemas);
+    _ = try data.admission.schemasWithWork(allocator, source.schemas, work);
     try declarationSchemas(source, diagnostic);
     const pool = try allocator.create(compact.Pool);
-    pool.* = .{ .allocator = allocator, .limit = source.variables.len };
+    pool.* = .{ .allocator = allocator, .limit = source.variables.len, .work = work };
     const function_roots = try roots(allocator, source.functions.len);
     const facts: Facts = .{
+        .work = work,
         .sets = pool,
         .values = try roots(allocator, source.values.len),
         .terms = try roots(allocator, source.terms.len),
@@ -139,31 +161,50 @@ pub fn analyzeComponent(
     return facts;
 }
 
+fn sourceWork(source: ast.Module, work: ?*u64) Error!void {
+    inline for (.{
+        "schemas",   "constants", "effects", "handlers",  "resources",
+        "variables", "values",    "terms",   "functions",
+    }) |field| try data.admission.spend(work, @field(source, field).len);
+    for (source.effects) |effect| try data.admission.spend(work, effect.bodies.len);
+    for (source.handlers) |handler| {
+        try data.admission.spend(work, handler.state.len);
+        try data.admission.spend(work, handler.clauses.len);
+    }
+    for (source.values) |value| if (value.expression == .primitive) {
+        try data.admission.spend(work, value.expression.primitive.operands.len);
+    };
+}
+
 fn valueVariables(source: ast.Module, facts: Facts, function_roots: []compact.Root) Error!bool {
     const pool = facts.sets;
     var changed = false;
-    for (source.values, 0..) |value, id| switch (value.expression) {
-        .variable => |variable| {
-            const next = try pool.insert(facts.values[id], variable);
-            changed = next != facts.values[id] or changed;
-            facts.values[id] = next;
-        },
-        .literal => {},
-        .primitive => |primitive| for (primitive.operands) |operand| {
-            changed = try pool.merge(
-                &facts.values[id],
-                facts.values[@intCast(operand)],
-                &.{},
-            ) or changed;
-        },
-        .lambda => |function| {
-            changed = try pool.merge(
-                &facts.values[id],
-                function_roots[@intCast(function)],
-                &.{},
-            ) or changed;
-        },
-    };
+    for (source.values, 0..) |value, id| {
+        try data.admission.spend(facts.work, 1);
+        switch (value.expression) {
+            .variable => |variable| {
+                const next = try pool.insert(facts.values[id], variable);
+                changed = next != facts.values[id] or changed;
+                facts.values[id] = next;
+            },
+            .literal => {},
+            .primitive => |primitive| for (primitive.operands) |operand| {
+                try data.admission.spend(facts.work, 1);
+                changed = try pool.merge(
+                    &facts.values[id],
+                    facts.values[@intCast(operand)],
+                    &.{},
+                ) or changed;
+            },
+            .lambda => |function| {
+                changed = try pool.merge(
+                    &facts.values[id],
+                    function_roots[@intCast(function)],
+                    &.{},
+                ) or changed;
+            },
+        }
+    }
     return changed;
 }
 
@@ -176,8 +217,10 @@ fn termVariables(
     const pool = facts.sets;
     var changed = false;
     for (source.terms, 0..) |term, id| {
+        try data.admission.spend(facts.work, 1);
         const refs = references[id];
         for (refs.values.items) |value_id| {
+            try data.admission.spend(facts.work, 1);
             changed = try pool.merge(
                 &facts.terms[id],
                 facts.values[@intCast(value_id)],
@@ -198,6 +241,7 @@ fn termVariables(
                 ) or changed;
             },
             .match_sum => |match| for (match.cases) |case| {
+                try data.admission.spend(facts.work, 1);
                 changed = try pool.merge(
                     &facts.terms[id],
                     facts.terms[@intCast(case.body)],
@@ -212,6 +256,7 @@ fn termVariables(
                 ) or changed;
             },
             else => for (refs.terms.items) |term_id| {
+                try data.admission.spend(facts.work, 1);
                 changed = try pool.merge(
                     &facts.terms[id],
                     facts.terms[@intCast(term_id)],
@@ -293,6 +338,7 @@ fn checkHandlerCapture(
 }
 
 pub const References = struct {
+    work: ?*u64 = null,
     allocator: std.mem.Allocator,
     values: Set = .empty,
     terms: Set = .empty,
@@ -304,6 +350,7 @@ pub const References = struct {
         comptime cardinality: reference_roles.Cardinality,
         value: anytype,
     ) Error!void {
+        try data.admission.spend(self.work, if (cardinality == .list) value.len else 1);
         if (comptime role == .match_case) {
             for (value) |case| try reference_roles.visitMatchCase(case, self);
             return;
@@ -355,22 +402,37 @@ fn checkValues(source: ast.Module, diagnostic: ?*@import("diagnostic.zig").Diagn
     }
 }
 
+pub fn selectUnit(
+    schemas: []const p.Schema,
+    constants: []const p.Literal,
+    work: ?*u64,
+) Error!?struct { schema: p.Id, constant: ?p.Id } {
+    for (constants, 0..) |literal, id| {
+        try data.admission.spend(work, 1);
+        if (literal.schema >= schemas.len) return error.InvalidSchema;
+        if (schemas[@intCast(literal.schema)] == .unit)
+            return .{ .schema = literal.schema, .constant = id };
+    }
+    for (schemas, 0..) |schema, id| {
+        try data.admission.spend(work, 1);
+        if (schema == .unit) return .{ .schema = id, .constant = null };
+    }
+    return null;
+}
+
 fn checkTerms(
     allocator: std.mem.Allocator,
     source: ast.Module,
     facts: Facts,
     diagnostic: ?*@import("diagnostic.zig").Diagnostic,
 ) Error![]References {
-    var unit: ?p.Id = null;
-    for (source.schemas, 0..) |schema, id| if (schema == .unit) {
-        unit = id;
-        break;
-    };
+    const selected = try selectUnit(source.schemas, source.constants, facts.work);
+    const unit = if (selected) |literal| literal.schema else null;
     const term_references = try allocator.alloc(References, source.terms.len);
     for (source.terms, 0..) |term, id| {
         if (diagnostic) |d| d.term = id;
         const references = &term_references[id];
-        references.* = .{ .allocator = allocator };
+        references.* = .{ .allocator = allocator, .work = facts.work };
         try references.collect(term);
         for (references.values.items) |value_id|
             if (value_id >= source.values.len)
@@ -476,6 +538,7 @@ fn unpackResult(
         shape.product.len != unpack.variables.len)
         return error.TypeMismatch;
     for (unpack.variables, shape.product, 0..) |variable, schema, index| {
+        try data.admission.spend(facts.work, index);
         if (std.mem.indexOfScalar(p.Id, unpack.variables[0..index], variable) != null)
             return error.InvalidSource;
         if (source.variables[@intCast(variable)] != schema) return error.TypeMismatch;
@@ -494,6 +557,7 @@ fn checkFunctions(
             d.function = id;
             d.term = function.body;
         }
+        if (function.body == null) try data.admission.spend(facts.work, imports.len);
         if (function.body == null and std.mem.indexOfScalar(
             p.Id,
             imports,
@@ -501,6 +565,7 @@ fn checkFunctions(
         ) == null) return error.UndefinedFunction;
         if (function.body) |body| if (body >= source.terms.len) return error.InvalidReference;
         for (function.parameters, 0..) |variable, index| {
+            try data.admission.spend(facts.work, index + 1);
             if (variable >= source.variables.len or std.mem.indexOfScalar(
                 p.Id,
                 function.parameters[0..index],
@@ -528,6 +593,7 @@ fn deriveCaptures(
         changed = try valueVariables(source, facts, function_roots);
         changed = try termVariables(source, facts, term_references, function_roots) or changed;
         for (source.functions, 0..) |function, id| {
+            try data.admission.spend(facts.work, 1);
             if (function.body) |body| changed = try pool.merge(
                 &function_roots[id],
                 facts.terms[@intCast(body)],
