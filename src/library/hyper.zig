@@ -164,9 +164,9 @@ pub fn invoke(
     body: anytype,
     participant: anytype,
     peer: anytype,
-) a.Error!*const a.Value(a.ShapeOf(@TypeOf(participant)).internal.callable.result) {
+) @TypeOf(@as(*a.Body(a.Dynamic), undefined).apply(participant, .{ .peer = peer })) {
     const interface = try body.schemaOf(participant);
-    const reciprocal = try a.interop.refineValue(body, peer, (try interface.fields()).peer);
+    const reciprocal = try a.interop.refineValue(body, peer, try interface.fieldSchema("peer"));
     return @ptrCast(try runtime.invoke(
         bridge.body(body),
         @ptrCast(participant),
@@ -263,17 +263,15 @@ pub fn run(
 ) a.Error!*const a.Value(observationAnswer(@TypeOf(types), @TypeOf(participant))) {
     const c = try body.context();
     const checked = try observationParticipant(body, types, participant);
-    if (comptime a.ShapeOf(@TypeOf(participant)) != a.Dynamic) {
-        const interface = try body.schemaOf(participant);
-        const reciprocal = try (try interface.fields()).peer.resultSchema();
-        const input = try reciprocal.resultSchema();
-        const output = try interface.resultSchema();
-        _ = try a.interop.refineSchema(
-            c,
-            try input.resultSchema(),
-            try output.resultSchema(),
-        );
-    }
+    const interface = try body.schemaOf(participant);
+    const reciprocal = try (try interface.fieldSchema("peer")).requiredResultSchema();
+    const input = try reciprocal.requiredResultSchema();
+    const output = try interface.requiredResultSchema();
+    _ = try a.interop.refineSchema(
+        c,
+        try input.requiredResultSchema(),
+        try output.requiredResultSchema(),
+    );
     const peer = try c.functionFor("hyper.run.peer", types.peerBackward());
     const nested = try body.closureBody(peer);
     try c.define(peer, try nested.ret(try identity(nested, types.swap())));
@@ -288,15 +286,13 @@ pub fn project(
 ) a.Error!*const a.Value(observationAnswer(@TypeOf(types), @TypeOf(participant))) {
     const c = try body.context();
     const checked = try observationParticipant(body, types, participant);
-    if (comptime a.ShapeOf(@TypeOf(participant)) != a.Dynamic) {
-        const interface = try body.schemaOf(participant);
-        const reciprocal = try (try interface.fields()).peer.resultSchema();
-        _ = try a.interop.refineSchema(
-            c,
-            try body.schemaOf(argument),
-            try reciprocal.resultSchema(),
-        );
-    }
+    const interface = try body.schemaOf(participant);
+    const reciprocal = try (try interface.fieldSchema("peer")).requiredResultSchema();
+    _ = try a.interop.refineSchema(
+        c,
+        try body.schemaOf(argument),
+        try reciprocal.requiredResultSchema(),
+    );
     const peer = try c.functionFor("hyper.project.peer", types.peerBackward());
     const nested = try body.closureBody(peer);
     try c.define(peer, try nested.ret(try base(nested, types.swap(), argument)));
@@ -475,5 +471,6 @@ pub fn start(
 
 test {
     _ = @import("hyper_tests.zig");
+    _ = @import("hyper_partial_tests.zig");
     _ = @import("hyper_group.zig");
 }

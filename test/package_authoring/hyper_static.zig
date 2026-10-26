@@ -46,7 +46,11 @@ fn rejectValues(
     value: anytype,
 ) !void {
     const types = try hyper.pair(c, integer, boolean, .{});
-    if (comptime selected("hyper_force_body") or selected("hyper_invoke_body")) {
+    if (comptime selected("hyper_invoke_scalar")) {
+        _ = try hyper.invoke(body, value, value);
+    } else if (comptime selected("hyper_invoke_schema")) {
+        _ = try hyper.invoke(body, integer, value);
+    } else if (comptime selected("hyper_force_body") or selected("hyper_invoke_body")) {
         try rejectBody(c, body, integer, value);
     } else if (comptime selected("hyper_selected_run") or selected("hyper_selected_project") or
         selected("hyper_partial_project"))

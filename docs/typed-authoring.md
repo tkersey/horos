@@ -92,7 +92,12 @@ corresponding known children. Copying a metadata declaration onto an unrelated
 Zig type cannot manufacture a canonical handle.
 
 `try schema.fields()` returns named typed child handles. `try
-schema.resultSchema()` retains its result relationship. `parameter`, `field`,
+schema.resultSchema()` retains its result relationship. `fieldSchema("name")`
+selects a child while preserving any known shape, including when the parameter
+row is unknown. `requiredResultSchema()` preserves known result shapes and
+returns `InvalidSchema` when runtime metadata has no result. Both reject pending
+declarations. The existing `resultSchema()` remains optional for `Dynamic`.
+`parameter`, `field`,
 `ProductParts.get`, `variant` and `caseOf` take compile-time names when used through
 the ordinary interface. `match` takes named finished cases:
 

@@ -847,6 +847,20 @@ pub fn Schema(comptime S: type) type {
                 @field(out, name) = @ptrCast(stored[i].schema);
             return out;
         }
+        pub fn fieldSchema(
+            self: *const Self,
+            comptime name: []const u8,
+        ) Error!*const Schema(child(reflectedFields(S), name, "schema field")) {
+            const stored = try erased(.schema, self).checkedFields();
+            for (stored) |field| {
+                if (std.mem.eql(u8, field.name, name)) return @ptrCast(field.schema);
+            }
+            return error.UnknownName;
+        }
+        pub fn requiredResultSchema(self: *const Self) Error!*const Schema(reflectedResult(S)) {
+            return @ptrCast((try erased(.schema, self).checkedResult()) orelse
+                return error.InvalidSchema);
+        }
         pub fn resultSchema(self: *const Self) Error!(if (S == Dynamic) ?*const Schema(
             Dynamic,
         ) else *const Schema(reflectedResult(S))) {

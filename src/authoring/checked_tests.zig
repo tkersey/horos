@@ -2,6 +2,56 @@ const std = @import("std");
 const a = @import("../authoring.zig");
 const source = @import("../source.zig");
 
+test "checked schema projections preserve partial knowledge and actual metadata" {
+    var raw = source.Builder.init(std.testing.allocator);
+    defer raw.deinit();
+    const c = try a.Context.init(&raw);
+    const integer = try c.schema(u64);
+    const known = try c.callable(.{ .peer = integer }, integer, .{}, .{ .use = .reusable });
+    try std.testing.expect(@TypeOf(try known.fieldSchema("peer")) == @TypeOf(integer));
+    try std.testing.expect(@TypeOf(try known.requiredResultSchema()) == @TypeOf(integer));
+    const names = try a.interop.RuntimeNamed(.schema).init(c, &.{
+        .{ .name = "peer", .handle = a.interop.erase(integer) },
+    });
+    const partial = try c.callable(names, integer, .{}, .{ .use = .reusable });
+    const field = try partial.fieldSchema("peer");
+    const result = try partial.requiredResultSchema();
+    try std.testing.expect(@TypeOf(field) == *const a.Schema(a.Dynamic));
+    try std.testing.expect(@TypeOf(result) == @TypeOf(integer));
+    try std.testing.expectEqual(
+        try a.interop.schemaId(c, integer),
+        try a.interop.schemaId(c, field),
+    );
+    try std.testing.expectEqual(integer, result);
+    try std.testing.expectError(error.UnknownName, partial.fieldSchema("missing"));
+    const erased = a.interop.erase(known);
+    try std.testing.expectEqual(a.interop.erase(integer), try erased.requiredResultSchema());
+    try std.testing.expectEqual(a.interop.erase(integer), (try erased.resultSchema()).?);
+    try std.testing.expectError(
+        error.InvalidSchema,
+        a.interop.erase(integer).requiredResultSchema(),
+    );
+}
+
+test "checked schema projections reject unfinished declarations" {
+    var raw = source.Builder.init(std.testing.allocator);
+    defer raw.deinit();
+    const c = try a.Context.init(&raw);
+    const declaration = try c.declareSchema(.callable, a.Dynamic);
+    try std.testing.expectError(error.UndefinedSchema, declaration.schema().fieldSchema("peer"));
+    try std.testing.expectError(error.UndefinedSchema, declaration.schema().requiredResultSchema());
+    const integer = try c.schema(u64);
+    try c.defineCallable(declaration, .{ .peer = integer }, integer, .{}, .{ .use = .reusable });
+    try std.testing.expectEqual(
+        a.interop.erase(integer),
+        try declaration.schema().fieldSchema("peer"),
+    );
+    try std.testing.expectEqual(
+        a.interop.erase(integer),
+        try declaration.schema().requiredResultSchema(),
+    );
+}
+
 test "checked component imports retain actual signatures and publish only declared imports" {
     var raw = source.Builder.init(std.testing.allocator);
     defer raw.deinit();
