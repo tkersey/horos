@@ -85,7 +85,8 @@ pub fn cons(
 }
 
 fn ProductShape(comptime T: type) type {
-    if (@typeInfo(T) != .@"struct" or @typeInfo(T).@"struct".is_tuple)
+    if (@typeInfo(T) != .@"struct" or
+        (@typeInfo(T).@"struct".is_tuple and @typeInfo(T).@"struct".field_types.len != 0))
         @compileError("Horos hyper.lazyProduct: expected named delayed values");
     const fields = @typeInfo(T).@"struct";
     var children: [fields.field_types.len]type = undefined;

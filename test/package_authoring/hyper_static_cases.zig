@@ -1,4 +1,9 @@
 pub const cases = .{
+    .{ "hyper_force_body", "Horos authoring: expected a canonical handle pointer" },
+    .{ "hyper_invoke_body", "Horos authoring: expected a canonical handle pointer" },
+    .{ "hyper_selected_run", "Horos refineSchema: incompatible schema shape" },
+    .{ "hyper_selected_project", "Horos refineSchema.result: incompatible schema shape" },
+    .{ "hyper_partial_project", "Horos refineSchema.result: incompatible schema shape" },
     .{ "hyper_identity_endpoints", "Horos define result: incompatible schema shape" },
     .{
         "hyper_reciprocal",

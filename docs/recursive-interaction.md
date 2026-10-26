@@ -151,8 +151,12 @@ Obtaining the task does not perform its effects. Use `body.apply` to execute it;
 identical to a pure delay.
 
 `demand.family(c, name, state_schema, contribution_schema)` creates a nominal
-local operation and capability. Its `effect()`, `capability()` and `stateDelay()`
-accessors retain those contracts. In a step, construct
+local operation and capability. Its `state()`, `contribution()`, `effect()` and
+`capability()` accessors retain those contracts. Family construction and ordinary
+requests support exclusive state under the existing local-operation ownership
+rules. Hyper interpretation creates the reusable successor-state delay where it
+adapts the request; that construction retains its existing capture checks.
+In a step, construct
 `demand.interpret(body, query, need, result_schema, options)`, author work using
 `interpretation.body()`, and call `demand.handle(body, interpretation, work)`.
 The interpretation retains its lexical peer internally. Each
@@ -194,6 +198,12 @@ name)` retains A in `Pair(A, Dynamic)`, `to(group, name, known_to)` retains B in
 `Pair(Dynamic, B)`, and `select(group, from_name, to_name)` returns
 `Pair(Dynamic, Dynamic)`. Unknown runtime names reject. This boundary selects
 checked group members; it does not expose a second raw constructor API.
+
+`run` and `project` retain a participant's known answer shape when the selected
+pair has a Dynamic output. When the participant's answer is Dynamic, checked
+refinement uses the pair's output shape. Projection still checks the participant's
+known input, and `run` requires matching input and output endpoints. Actual
+reciprocal interfaces and capture contracts remain checked in both cases.
 
 Each pair has ordinary callable and delay schemas. Composition uses three
 mutually referring maker functions, declared before their bodies are defined.
@@ -284,6 +294,13 @@ not need a source snapshot. Allocation counts use the existing requested-byte
 meter, include successful growth, and exclude allocator metadata and RSS. Every
 owner released its allocations. Graph counting, encoding and output are outside
 timed intervals. These measurements are observations, not performance gates.
+
+The October 26 Need-family repair was also compared with `fc5607bc` using eleven
+fresh-owner samples for each of the five task/Need fixtures. Source and compiled
+graph counts, allocation calls, requested bytes and BPI3 identities were unchanged.
+The obtain/run/repeated/adaptive/dispose images remained 1,200/1,201/1,221/1,265/1,218
+bytes. Median authoring times moved in both directions within 3%; no speedup is
+claimed. The obtain fixture's peak requested storage decreased by twelve bytes.
 
 Completing a reserved callable directly avoids generating a second copy of its
 schema. On the three-endpoint composition fixture this reduced the initial typed

@@ -9,6 +9,12 @@ pub const Unit = a.Shape(void);
 pub fn context(c: *a.Context) *raw.Context {
     return @ptrCast(c);
 }
+pub fn body(value: anytype) *raw.Body {
+    const S = a.ShapeOf(@TypeOf(value));
+    if (@TypeOf(value) != *a.Body(S))
+        @compileError("Horos library: expected a canonical body handle");
+    return @ptrCast(value);
+}
 pub fn schemaShape(comptime T: type) type {
     const S = a.ShapeOf(T);
     if (T != *const a.Schema(S)) @compileError("Horos library: expected a canonical schema handle");

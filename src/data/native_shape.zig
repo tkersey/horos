@@ -57,6 +57,10 @@ pub fn Contract(comptime description: Info) type {
 fn requireFinite(comptime description: Info) void {
     switch (description) {
         .product, .sum => |Children| {
+            @setEvalBranchQuota(@intCast(@min(
+                std.math.maxInt(u32),
+                (@typeInfo(Children).@"struct".field_types.len *| 2) +| 4,
+            )));
             for (@typeInfo(Children).@"struct".field_types) |Child|
                 _ = Contract(Child.contract).finite;
         },

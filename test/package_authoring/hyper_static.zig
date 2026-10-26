@@ -46,7 +46,13 @@ fn rejectValues(
     value: anytype,
 ) !void {
     const types = try hyper.pair(c, integer, boolean, .{});
-    if (comptime selected("hyper_identity_endpoints")) {
+    if (comptime selected("hyper_force_body") or selected("hyper_invoke_body")) {
+        try rejectBody(c, body, integer, value);
+    } else if (comptime selected("hyper_selected_run") or selected("hyper_selected_project") or
+        selected("hyper_partial_project"))
+    {
+        try rejectObservation(c, body, integer, boolean);
+    } else if (comptime selected("hyper_identity_endpoints")) {
         _ = try hyper.identity(body, types);
     } else if (comptime selected("hyper_strict_answer")) {
         _ = try hyper.base(body, types, try body.constant(bool, false));
@@ -73,6 +79,52 @@ fn rejectValues(
         const wrong_peer = try hyper.deferValue(body, types.peerForward(), participant);
         _ = try hyper.invoke(body, participant, wrong_peer);
     } else try rejectComposition(c, integer, boolean, body, value);
+}
+
+fn BodyWrapper(comptime B: type) type {
+    return struct {
+        body: B,
+        pub fn schemaOf(
+            self: *@This(),
+            value: anytype,
+        ) a.Error!*const a.Schema(a.ShapeOf(@TypeOf(value))) {
+            return self.body.schemaOf(value);
+        }
+    };
+}
+
+fn rejectBody(c: *a.Context, body: anytype, integer: anytype, value: anytype) !void {
+    const types = try hyper.pair(c, integer, integer, .{});
+    const answer = try hyper.deferValue(body, types.answerForward(), value);
+    var wrapper: BodyWrapper(@TypeOf(body)) = .{ .body = body };
+    if (comptime selected("hyper_force_body")) {
+        _ = try hyper.force(&wrapper, answer);
+    } else {
+        const participant = try hyper.base(body, types, answer);
+        const peer = try hyper.deferValue(body, types.peerBackward(), participant);
+        _ = try hyper.invoke(&wrapper, participant, peer);
+    }
+}
+
+fn rejectObservation(c: *a.Context, body: anytype, integer: anytype, boolean: anytype) !void {
+    const interfaces = try hyper.group(c, .{ .input = integer, .output = boolean }, .{});
+    const types = interfaces.get("input", "output");
+    const runtime_types = try hyper.ir.select(interfaces, "input", "output");
+    const answer = try hyper.deferValue(body, types.answerForward(), try body.constant(bool, true));
+    const participant = try hyper.base(body, types, answer);
+    if (comptime selected("hyper_selected_run")) {
+        _ = try hyper.run(body, runtime_types, participant);
+    } else if (comptime selected("hyper_partial_project")) {
+        const partial = try hyper.ir.from(interfaces, "input", "output");
+        _ = try hyper.project(
+            body,
+            runtime_types,
+            try a.interop.refineValue(body, participant, partial.forward()),
+            answer,
+        );
+    } else {
+        _ = try hyper.project(body, runtime_types, participant, answer);
+    }
 }
 
 fn rejectComposition(

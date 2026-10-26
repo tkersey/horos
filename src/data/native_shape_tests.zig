@@ -1,6 +1,22 @@
 const std = @import("std");
 const native = @import("schema.zig").native;
 
+fn WideChildren(comptime width: usize) type {
+    @setEvalBranchQuota(width * 1000);
+    var names: [width][:0]const u8 = undefined;
+    const children: [width]type = @splat(native.Shape(u64));
+    for (&names, 0..) |*name, i| name.* = std.fmt.comptimePrint("field{d}", .{i});
+    return native.Fields(&names, &children);
+}
+
+test "native finite contracts admit wide product and sum rows" {
+    inline for (.{ 1024, 2048 }) |width| {
+        const children = WideChildren(width);
+        _ = native.Contract(.{ .product = children }).finite;
+        _ = native.Contract(.{ .sum = children }).finite;
+    }
+}
+
 test "native contracts normalize structure and preserve names, order, and bounds" {
     const A = struct { count: u64, done: bool };
     const B = struct { count: u64, done: bool };

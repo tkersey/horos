@@ -4,6 +4,52 @@ const a = @import("../authoring.zig");
 const hyper = @import("hyper.zig");
 const native = @import("horos_data").schema.native;
 
+test "typed hyper lazy products admit the canonical empty record" {
+    var raw = source.Builder.init(std.testing.allocator);
+    defer raw.deinit();
+    const c = try a.Context.init(&raw);
+    const empty = try c.schema(struct {});
+    const entry = try c.function("empty", .{}, empty, .{});
+    const body = try c.body(entry);
+    const value = try hyper.lazyProduct(body, .{});
+    try std.testing.expect(@TypeOf(value) == *const a.Value(a.Shape(struct {})));
+    try c.define(entry, try body.ret(value));
+    var compiled = try c.compile(std.testing.allocator, entry, try c.schema(void));
+    defer compiled.deinit();
+}
+
+test "typed hyper observations retain known answers through runtime pair selection" {
+    var raw = source.Builder.init(std.testing.allocator);
+    defer raw.deinit();
+    const c = try a.Context.init(&raw);
+    const integer = try c.schema(u64);
+    const interfaces = try hyper.group(c, .{ .value = integer }, .{});
+    const types = interfaces.get("value", "value");
+    const from = try hyper.ir.from(interfaces, "value", "value");
+    const selected = try hyper.ir.select(interfaces, "value", "value");
+    const entry = try c.function("selected", .{}, integer, .{});
+    const body = try c.body(entry);
+    const answer = try hyper.deferValue(body, types.answerForward(), try body.constant(u64, 42));
+    const participant = try hyper.base(body, types, answer);
+    const Answer = *const a.Value(hyper.Delayed(a.Shape(u64)));
+    const projected = try hyper.project(body, from, participant, answer);
+    try std.testing.expect(@TypeOf(projected) == Answer);
+    try std.testing.expect(
+        @TypeOf(try hyper.project(body, selected, participant, answer)) == Answer,
+    );
+    try std.testing.expect(@TypeOf(try hyper.run(body, from, participant)) == Answer);
+    try std.testing.expect(@TypeOf(try hyper.run(body, selected, participant)) == Answer);
+    const erased = a.interop.erase(participant);
+    try std.testing.expect(@TypeOf(try hyper.project(body, types, erased, answer)) == Answer);
+    try std.testing.expect(@TypeOf(try hyper.run(body, types, erased)) == Answer);
+    const partial = try a.interop.refineValue(body, participant, from.forward());
+    try std.testing.expect(@TypeOf(try hyper.project(body, types, partial, answer)) == Answer);
+    try std.testing.expect(@TypeOf(try hyper.run(body, types, partial)) == Answer);
+    try c.define(entry, try body.ret(try hyper.force(body, projected)));
+    var compiled = try c.compile(std.testing.allocator, entry, try c.schema(void));
+    defer compiled.deinit();
+}
+
 test "typed hyper pair completes around a promised effectful task endpoint" {
     var raw = source.Builder.init(std.testing.allocator);
     defer raw.deinit();
@@ -146,6 +192,81 @@ test "typed hyper Need capabilities remain nominal under equal display names" {
     ));
 }
 
+test "typed hyper Need resource states require ownership only when suspended for reuse" {
+    inline for (.{ false, true }) |reusable| {
+        var raw = source.Builder.init(std.testing.allocator);
+        defer raw.deinit();
+        const c = try a.Context.init(&raw);
+        const unit = try c.schema(void);
+        const owned = try c.resource(unit);
+        const need = try hyper.demand.family(c, "resource", owned, unit);
+        if (reusable) _ = try hyper.delayed(c, need.state(), .{ .captures = .{need.state()} });
+        const entry = try c.function("entry", .{}, unit, .{});
+        const body = try c.body(entry);
+        try c.define(entry, try body.ret(try body.constant(void, {})));
+        if (reusable) {
+            try std.testing.expectError(error.InvalidOwnership, c.compile(
+                std.testing.allocator,
+                entry,
+                unit,
+            ));
+        } else {
+            var compiled = try c.compile(std.testing.allocator, entry, unit);
+            compiled.deinit();
+        }
+    }
+}
+
+test "typed hyper Need transfers linear callable states through ordinary handlers" {
+    var raw = source.Builder.init(std.testing.allocator);
+    defer raw.deinit();
+    const c = try a.Context.init(&raw);
+    const unit = try c.schema(void);
+    const task = try c.callable(.{}, unit, .{}, .{ .use = .linear });
+    const need = try hyper.demand.family(c, "linear", task, unit);
+    const handler = try c.handler(need.effect(), unit, unit, .{
+        .use = .linear,
+        .mode = .deep,
+        .captures = .{need.capability()},
+        .body_captures = .{task},
+        .return_effects = .{},
+    });
+    const returns = try c.returnFunction(handler);
+    const return_body = try c.body(returns);
+    try c.define(returns, try return_body.ret(try return_body.parameter("result")));
+    const clause = try c.clauseFunction(handler);
+    const clause_body = try c.body(clause);
+    const contribution = try clause_body.apply(try clause_body.parameter("payload"), .{});
+    const resumed = try clause_body.resumeValue(
+        try clause_body.parameter("resumption"),
+        contribution,
+    );
+    try c.define(clause, try clause_body.ret(resumed));
+    const thunk = try c.functionFor("payload", task);
+    const thunk_body = try c.body(thunk);
+    try c.define(thunk, try thunk_body.ret(try thunk_body.constant(void, {})));
+    const entry = try c.function("entry", .{}, unit, .{});
+    const body = try c.body(entry);
+    const value = try body.lambda(thunk, task);
+    const schema = try c.handledSchema(handler);
+    const work = try c.functionFor("work", schema);
+    const work_body = try body.closureBody(work);
+    const result = try hyper.demand.request(
+        work_body,
+        need,
+        try work_body.parameter("capability"),
+        value,
+    );
+    try c.define(work, try work_body.ret(result));
+    try c.define(entry, try body.ret(try body.handleWith(
+        handler,
+        try body.lambda(work, schema),
+        .{},
+    )));
+    var compiled = try c.compile(std.testing.allocator, entry, unit);
+    defer compiled.deinit();
+}
+
 test "typed hyper nested same named Need families admit lexical routing" {
     var raw = source.Builder.init(std.testing.allocator);
     defer raw.deinit();
@@ -174,7 +295,12 @@ test "typed hyper endpoints compare normalized structures across native names" {
     var raw = source.Builder.init(std.testing.allocator);
     defer raw.deinit();
     const c = try a.Context.init(&raw);
-    const types = try hyper.pair(c, try c.schema(Left), try c.schema(Right), .{});
+    const interfaces = try hyper.group(c, .{
+        .left = try c.schema(Left),
+        .right = try c.schema(Right),
+    }, .{});
+    const types = interfaces.get("left", "right");
+    const selected = try hyper.ir.select(interfaces, "left", "right");
     const entry = try c.function("aliases", .{}, try c.schema(Left), .{});
     const body = try c.body(entry);
     const value = try body.product(try c.schema(Left), .{
@@ -183,10 +309,73 @@ test "typed hyper endpoints compare normalized structures across native names" {
     const answer = try hyper.deferValue(body, types.answerForward(), value);
     const participant = try hyper.base(body, types, answer);
     const input = try hyper.deferValue(body, types.answerBackward(), value);
-    const result = try hyper.force(body, try hyper.project(body, types, participant, input));
+    const projected = try hyper.project(body, selected, participant, input);
+    try std.testing.expect(@TypeOf(projected) == *const a.Value(hyper.Delayed(a.Shape(Left))));
+    const result = try hyper.force(body, projected);
     try c.define(entry, try body.ret(result));
     var compiled = try c.compile(std.testing.allocator, entry, try c.schema(void));
     defer compiled.deinit();
+}
+
+test "typed hyper selected observations preserve effectful task answer layers" {
+    var raw = source.Builder.init(std.testing.allocator);
+    defer raw.deinit();
+    const c = try a.Context.init(&raw);
+    const integer = try c.schema(u64);
+    const effect = try c.external("task", integer, integer);
+    const task = try c.callable(.{}, integer, .{effect}, .{ .use = .reusable });
+    const interfaces = try hyper.group(c, .{ .task = task }, .{});
+    const types = interfaces.get("task", "task");
+    const selected = try hyper.ir.select(interfaces, "task", "task");
+    const function = try c.functionFor("task", task);
+    const task_body = try c.body(function);
+    try c.define(function, try task_body.ret(try task_body.perform(
+        effect,
+        try task_body.constant(u64, 42),
+    )));
+    const entry = try c.function("entry", .{}, integer, .{effect});
+    const body = try c.body(entry);
+    const value = try body.lambda(function, task);
+    const answer = try hyper.deferValue(body, types.answerForward(), value);
+    const participant = try hyper.base(body, types, answer);
+    const projected = try hyper.project(body, selected, participant, answer);
+    const run = try hyper.run(body, selected, participant);
+    const Answer = *const a.Value(hyper.Delayed(a.ShapeOf(@TypeOf(task))));
+    try std.testing.expect(@TypeOf(projected) == Answer);
+    try std.testing.expect(@TypeOf(run) == Answer);
+    const forced = try hyper.force(body, projected);
+    try std.testing.expect(@TypeOf(forced) == @TypeOf(value));
+    try c.define(entry, try body.ret(try body.apply(forced, .{})));
+    var compiled = try c.compile(std.testing.allocator, entry, try c.schema(void));
+    defer compiled.deinit();
+}
+
+test "typed hyper selected observations reject incompatible actual capture graphs" {
+    inline for (.{ false, true }) |run| {
+        var raw = source.Builder.init(std.testing.allocator);
+        defer raw.deinit();
+        const c = try a.Context.init(&raw);
+        const integer = try c.schema(u64);
+        const narrow = try hyper.group(c, .{ .value = integer }, .{});
+        const other = try hyper.group(c, .{ .value = integer }, .{
+            .captures = .{try c.schema(bool)},
+        });
+        const types = narrow.get("value", "value");
+        const selected = try hyper.ir.select(other, "value", "value");
+        const entry = try c.function("entry", .{}, integer, .{});
+        const body = try c.body(entry);
+        const answer = try hyper.deferValue(
+            body,
+            types.answerForward(),
+            try body.constant(u64, 42),
+        );
+        const participant = try hyper.base(body, types, answer);
+        const observed = if (run)
+            hyper.run(body, selected, participant)
+        else
+            hyper.project(body, selected, participant, answer);
+        try std.testing.expectError(error.SchemaMismatch, observed);
+    }
 }
 
 test "typed hyper recursive descriptors release every failed construction allocation" {

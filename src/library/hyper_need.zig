@@ -17,7 +17,6 @@ pub fn API(comptime QueryAccess: type) type {
                 contribution: *const a.Schema(C),
                 effect: *const a.Operation(Op(S, C)),
                 capability: *const a.Schema(a.Internal(.{ .capability = Op(S, C) })),
-                state_delay: *const a.Schema(hyper.Delayed(S)),
             };
         }
 
@@ -41,9 +40,6 @@ pub fn API(comptime QueryAccess: type) type {
                     self: *const @This(),
                 ) *const a.Schema(a.Internal(.{ .capability = Op(S, C) })) {
                     return self.data().capability;
-                }
-                pub fn stateDelay(self: *const @This()) *const a.Schema(hyper.Delayed(S)) {
-                    return self.data().state_delay;
                 }
             };
         }
@@ -81,7 +77,6 @@ pub fn API(comptime QueryAccess: type) type {
                     .contribution = contribution,
                     .effect = effect,
                     .capability = try c.capability(effect),
-                    .state_delay = try hyper.delayed(c, state, .{ .captures = .{state} }),
                 },
             );
             return @ptrCast(stored);
@@ -290,7 +285,8 @@ pub fn API(comptime QueryAccess: type) type {
                 state,
                 try nested.parameter("peer"),
             );
-            const successor = try hyper.deferValue(nested, need.stateDelay(), state);
+            const delay = try hyper.delayed(c, need.state(), .{ .captures = .{need.state()} });
+            const successor = try hyper.deferValue(nested, delay, state);
             const task = try hyper.force(nested, try query.ask(nested, successor));
             const contribution = try a.interop.refineValue(
                 nested,

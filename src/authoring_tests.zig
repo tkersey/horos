@@ -1332,7 +1332,15 @@ fn namedContinuationCatalog(
     snapshot: bool,
     unused_narrow: bool,
 ) !void {
-    return namedContinuationRoute(allocator, matching, retained, snapshot, unused_narrow, false);
+    return namedContinuationRoute(
+        allocator,
+        matching,
+        retained,
+        snapshot,
+        unused_narrow,
+        false,
+        false,
+    );
 }
 
 fn namedContinuationRoute(
@@ -1342,6 +1350,7 @@ fn namedContinuationRoute(
     snapshot: bool,
     unused_narrow: bool,
     direct_helper: bool,
+    component: bool,
 ) !void {
     var raw = source.Builder.init(allocator);
     defer raw.deinit();
@@ -1373,6 +1382,7 @@ fn namedContinuationRoute(
     try defineUnusedHandler(c, unused_narrow, op, integer);
     const entry = try c.function("entry", .{ .record = left }, integer, &.{});
     const body = try c.body(entry);
+    const imported = if (component) try namedContinuationImport(&raw, c, body) else null;
     const record = try body.parameter("record");
     const shape = try c.handledSchema(h);
     const work_fn = try c.functionFor("work", shape);
@@ -1382,11 +1392,80 @@ fn namedContinuationRoute(
     const result = before orelse try work.field(record, "left");
     try c.define(work_fn, try work.ret(result));
     try c.define(entry, try body.ret(try body.handleWith(h, try body.lambda(work_fn, shape), .{})));
+    if (imported) |id| return namedContinuationComponent(allocator, c, entry, unit, id);
     var compiled = if (snapshot)
         try source.lowerObserved(allocator, try c.module(entry, unit), .{})
     else
         try c.compileWithOptions(allocator, entry, unit, .{});
     compiled.deinit();
+}
+
+fn namedContinuationImport(raw: *source.Builder, c: *a.Context, body: anytype) !source.Id {
+    const unit = try c.schema(void);
+    const imported = try raw.declare(&.{}, try a.interop.schemaId(c, unit), &.{}, &.{});
+    const signature = try c.callable(.{}, unit, &.{}, .{ .use = .reusable });
+    const function = try a.interop.importFunction(c, imported, signature);
+    _ = try body.call(function, .{});
+    return imported;
+}
+
+fn namedContinuationComponent(
+    allocator: std.mem.Allocator,
+    c: *a.Context,
+    entry: anytype,
+    unit: anytype,
+    imported: source.Id,
+) !void {
+    const interface: source.component.Interface = .{
+        .imports = &.{.{ .name = "import", .reference = .{ .kind = .function, .id = imported } }},
+        .exports = &.{.{
+            .name = "entry",
+            .reference = .{ .kind = .function, .id = try a.interop.functionId(c, entry) },
+        }},
+        .borrows = &.{.{ .function = imported }},
+    };
+    const module = try a.interop.componentModule(c, entry, unit, interface);
+    var trace: OriginalCaptureTrace = .{};
+    var compiled = try source.component.compileObserved(allocator, module, interface, .{
+        .observer = .{ .context = &trace, .enter = OriginalCaptureTrace.enter },
+        .captures = .{
+            .context = &trace,
+            .capture = OriginalCaptureTrace.capture,
+            .closure = OriginalCaptureTrace.closure,
+        },
+    });
+    defer compiled.deinit();
+    try testing.expectEqual(@as(usize, 1), compiled.object.imports.len);
+    try testing.expect(trace.captures > 0);
+    try testing.expectEqual(@as(usize, 0), trace.transformed_captures);
+}
+
+const OriginalCaptureTrace = struct {
+    optimized: bool = false,
+    captures: usize = 0,
+    transformed_captures: usize = 0,
+    fn enter(pointer: *anyopaque, stage: source.CompileStage) void {
+        const self: *@This() = @ptrCast(@alignCast(pointer));
+        if (stage == .direct_optimization) self.optimized = true;
+    }
+    fn capture(
+        pointer: *anyopaque,
+        _: *const @import("horos_data").activation_ownership.CaptureSite,
+        _: source.Id,
+    ) void {
+        const self: *@This() = @ptrCast(@alignCast(pointer));
+        self.captures += 1;
+        if (self.optimized) self.transformed_captures += 1;
+    }
+    fn closure(_: *anyopaque, _: source.Id, _: source.Id) void {}
+};
+
+test "component imports preserve named continuation capture admission" {
+    try namedContinuationRoute(testing.allocator, true, true, false, false, false, true);
+    try testing.expectError(
+        error.SchemaMismatch,
+        namedContinuationRoute(testing.allocator, false, true, false, false, false, true),
+    );
 }
 
 test "canonical coalescing preserves named captures using authoritative liveness" {
@@ -1413,10 +1492,10 @@ test "a valid unused same-effect handler does not narrow fresh local capture adm
 
 test "direct helper suspension summaries retain the actual capability recipient" {
     for ([_]bool{ false, true }) |snapshot| {
-        try namedContinuationRoute(testing.allocator, true, true, snapshot, true, true);
+        try namedContinuationRoute(testing.allocator, true, true, snapshot, true, true, false);
         try testing.expectError(
             error.SchemaMismatch,
-            namedContinuationRoute(testing.allocator, false, true, snapshot, true, true),
+            namedContinuationRoute(testing.allocator, false, true, snapshot, true, true, false),
         );
     }
 }

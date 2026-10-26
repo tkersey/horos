@@ -123,7 +123,7 @@ pub fn force(
     value: anytype,
 ) a.Error!*const a.Value(delayedResult(a.ShapeOf(@TypeOf(value)))) {
     _ = try body.schemaOf(value);
-    return @ptrCast(try runtime.force(@ptrCast(body), @ptrCast(value)));
+    return @ptrCast(try runtime.force(bridge.body(body), @ptrCast(value)));
 }
 
 pub fn deferValue(
@@ -168,7 +168,7 @@ pub fn invoke(
     const interface = try body.schemaOf(participant);
     const reciprocal = try a.interop.refineValue(body, peer, (try interface.fields()).peer);
     return @ptrCast(try runtime.invoke(
-        @ptrCast(body),
+        bridge.body(body),
         @ptrCast(participant),
         @ptrCast(reciprocal),
     ));
@@ -229,16 +229,55 @@ pub fn identity(
     return lift(body, types, transform);
 }
 
+fn participantAnswer(comptime T: type) type {
+    const S = a.ShapeOf(T);
+    if (S == a.Dynamic) return a.Dynamic;
+    if (!@hasDecl(S, "internal") or S.internal != .callable)
+        @compileError("Horos hyper: expected a participant shape");
+    if (S.internal.callable == a.Dynamic) return a.Dynamic;
+    return delayedResult(S.internal.callable.result);
+}
+
+fn observationParticipant(
+    body: anytype,
+    types: anytype,
+    participant: anytype,
+) a.Error!*const a.Value(if (participantAnswer(@TypeOf(participant)) == a.Dynamic)
+    Hyper(pairType(@TypeOf(types)).Input, pairType(@TypeOf(types)).Output)
+else
+    a.ShapeOf(@TypeOf(participant))) {
+    if (comptime participantAnswer(@TypeOf(participant)) == a.Dynamic)
+        return a.interop.refineValue(body, participant, types.forward());
+    return participant;
+}
+
+fn observationAnswer(comptime P: type, comptime V: type) type {
+    const Answer = participantAnswer(V);
+    return Delayed(if (Answer == a.Dynamic) pairType(P).Output else Answer);
+}
+
 pub fn run(
     body: anytype,
     types: anytype,
     participant: anytype,
-) a.Error!*const a.Value(Delayed(pairType(@TypeOf(types)).Output)) {
+) a.Error!*const a.Value(observationAnswer(@TypeOf(types), @TypeOf(participant))) {
     const c = try body.context();
+    const checked = try observationParticipant(body, types, participant);
+    if (comptime a.ShapeOf(@TypeOf(participant)) != a.Dynamic) {
+        const interface = try body.schemaOf(participant);
+        const reciprocal = try (try interface.fields()).peer.resultSchema();
+        const input = try reciprocal.resultSchema();
+        const output = try interface.resultSchema();
+        _ = try a.interop.refineSchema(
+            c,
+            try input.resultSchema(),
+            try output.resultSchema(),
+        );
+    }
     const peer = try c.functionFor("hyper.run.peer", types.peerBackward());
     const nested = try body.closureBody(peer);
     try c.define(peer, try nested.ret(try identity(nested, types.swap())));
-    return invoke(body, participant, try body.lambda(peer, types.peerBackward()));
+    return invoke(body, checked, try body.lambda(peer, types.peerBackward()));
 }
 
 pub fn project(
@@ -246,12 +285,22 @@ pub fn project(
     types: anytype,
     participant: anytype,
     argument: anytype,
-) a.Error!*const a.Value(Delayed(pairType(@TypeOf(types)).Output)) {
+) a.Error!*const a.Value(observationAnswer(@TypeOf(types), @TypeOf(participant))) {
     const c = try body.context();
+    const checked = try observationParticipant(body, types, participant);
+    if (comptime a.ShapeOf(@TypeOf(participant)) != a.Dynamic) {
+        const interface = try body.schemaOf(participant);
+        const reciprocal = try (try interface.fields()).peer.resultSchema();
+        _ = try a.interop.refineSchema(
+            c,
+            try body.schemaOf(argument),
+            try reciprocal.resultSchema(),
+        );
+    }
     const peer = try c.functionFor("hyper.project.peer", types.peerBackward());
     const nested = try body.closureBody(peer);
     try c.define(peer, try nested.ret(try base(nested, types.swap(), argument)));
-    return invoke(body, participant, try body.lambda(peer, types.peerBackward()));
+    return invoke(body, checked, try body.lambda(peer, types.peerBackward()));
 }
 
 fn AnaData(comptime S: type, comptime A: type, comptime B: type) type {

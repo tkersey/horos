@@ -280,6 +280,7 @@ fn lowerBody(
         component,
         borrows,
         null,
+        compiler.originalCaptureObserver(),
         options,
     );
     original_facts.deinit();
@@ -402,13 +403,15 @@ fn checkTarget(
     component: bool,
     borrows: []const data.borrow_contract.Summary,
     origins: ?[]const p.Id,
+    observer: ?data.activation_ownership.CaptureObserver,
     options: source.CompileOptions,
 ) Error!data.activation_flow.Facts {
-    if (component) return data.activation_ownership.analyzeComponent(
+    if (component) return data.activation_ownership.analyzeComponentObserved(
         allocator,
         program,
         imports,
         borrows,
+        observer,
     );
     // Admission can fail before setting a location (notably on allocation).
     // A previous pass's function ID belongs to a different, unprojected catalog.
@@ -422,17 +425,7 @@ fn checkTarget(
         allocator,
         program,
         if (options.diagnostic) |diagnostic| &diagnostic.target else null,
-        if (origins == null and compiler.capture_observer != null)
-            .{
-                .context = compiler,
-                .capture = Compiler.observeCapture,
-                .explanation = if (compiler.capture_observer.?.explanation != null)
-                    Compiler.observeExplanation
-                else
-                    null,
-            }
-        else
-            null,
+        observer,
         compiler.work,
     ) catch |err|
         {
@@ -468,6 +461,15 @@ const Compiler = struct {
     captures: std.ArrayList(p.Capture) = .empty,
     constructors: std.ArrayList(p.Constructor) = .empty,
     constructor_ids: std.AutoHashMapUnmanaged(ConstructorKey, p.Id) = .empty,
+
+    fn originalCaptureObserver(self: *Compiler) ?data.activation_ownership.CaptureObserver {
+        const observer = self.capture_observer orelse return null;
+        return .{
+            .context = self,
+            .capture = observeCapture,
+            .explanation = if (observer.explanation != null) observeExplanation else null,
+        };
+    }
 
     fn rememberBinding(self: *Compiler, function: p.Id, variable: p.Id, slot: p.Id) Error!void {
         if (!self.recovery_enabled) return;
@@ -1351,6 +1353,7 @@ fn ownConstruction(
         imports,
         component,
         borrows,
+        null,
         null,
         options,
     );
