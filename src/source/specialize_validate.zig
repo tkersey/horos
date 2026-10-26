@@ -11,25 +11,34 @@ const k = pe.values;
 const Error = pe.Error;
 const Binding = struct { before: p.Id, after: p.Id, knowledge: pe.Knowledge };
 const Env = []const Binding;
-const V = struct { knowledge: pe.Knowledge, total: bool };
+const V = struct { knowledge: pe.Knowledge, total: bool, height: usize = 0 };
 const CheckedValue = struct { id: p.Id, fact: V };
-const CheckedTerm = struct { id: p.Id, knowledge: pe.Knowledge };
+const TermFact = struct { knowledge: pe.Knowledge, height: usize };
+const CheckedTerm = struct { id: p.Id, fact: TermFact };
 const Case = @FieldType(@FieldType(ast.Term, "match_sum"), "cases");
 const CaseItem = @typeInfo(Case).pointer.child;
+
+fn nextDepth(depth: usize) Error!usize {
+    return std.math.add(usize, depth, 1) catch return error.SpecializationLimit;
+}
 
 fn require(ok: bool) Error!void {
     if (!ok) return error.InvalidSpecialization;
 }
-fn extend(a: std.mem.Allocator, env: Env, item: Binding) Error!Env {
+fn extend(a: std.mem.Allocator, env: Env, left: ?*u64, item: Binding) Error!Env {
     // An environment is a capture-avoiding renaming of the current source
     // scope. Shadowing retires the old source binding; every other binding
     // must keep a distinct target variable. All binder forms extend here.
+    try data.admission.spend(left, env.len);
     var retained: usize = 0;
     for (env) |binding| if (binding.before != item.before) {
         try require(binding.after != item.after);
         retained += 1;
     };
-    const result = try a.alloc(Binding, retained + 1);
+    const count = std.math.add(usize, retained, 1) catch return error.RelationLimit;
+    try data.admission.spend(left, count);
+    try data.admission.spend(left, env.len);
+    const result = try a.alloc(Binding, count);
     var cursor: usize = 0;
     for (env) |binding| if (binding.before != item.before) {
         result[cursor] = binding;
@@ -38,9 +47,10 @@ fn extend(a: std.mem.Allocator, env: Env, item: Binding) Error!Env {
     result[retained] = item;
     return result;
 }
-fn lookup(env: Env, id: p.Id) Error!Binding {
+fn lookup(env: Env, id: p.Id, left: ?*u64) Error!Binding {
     var i = env.len;
     while (i != 0) {
+        try data.admission.spend(left, 1);
         i -= 1;
         if (env[i].before == id) return env[i];
     }
@@ -52,29 +62,54 @@ pub fn validate(
     request: pe.Request,
     out: *const pe.Output,
 ) Error!void {
+    return validateBody(a, original, request, out, null) catch |err|
+        return if (err == error.RelationLimit) error.SpecializationLimit else err;
+}
+
+pub fn validateWithWork(
+    a: std.mem.Allocator,
+    original: ast.Module,
+    request: pe.Request,
+    out: *const pe.Output,
+    remaining: *u64,
+) Error!void {
+    return validateBody(a, original, request, out, remaining);
+}
+
+fn validateBody(
+    a: std.mem.Allocator,
+    original: ast.Module,
+    request: pe.Request,
+    out: *const pe.Output,
+    work: ?*u64,
+) Error!void {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const storage = arena.allocator();
     const residual = out.module();
-    try validateEnvelope(storage, original, request, out);
+    const root_arguments = try validateEnvelope(storage, original, request, out, work);
     // Source admission precedes primitive evaluation; malformed operand shapes
     // cannot reach constant rules through a forged derivation.
-    var admitted_original = try source.lower(a, original);
-    admitted_original.deinit();
-    const original_facts = try @import("check.zig").analyze(storage, original);
-    const schema_facts = try data.admission.schemas(storage, original.schemas);
+    try admit(a, original, work);
+    const original_facts = try @import("check.zig").analyzeWithWork(storage, original, work);
+    const schema_facts = try data.admission.schemasWithWork(storage, original.schemas, work);
     try require(request.function < original.functions.len);
     const requested_function = original.functions[@intCast(request.function)];
     try require(request.arguments.len == requested_function.parameters.len);
-    for (request.arguments, requested_function.parameters) |fact, parameter| try k.validate(
+    for (request.arguments, requested_function.parameters) |fact, parameter| try k.validateWithWork(
         storage,
         original,
         schema_facts,
         original.variables[@intCast(parameter)],
         fact,
+        work,
     );
     // Source type/scope checking is additional to the semantic derivation.
-    _ = try @import("check.zig").analyze(storage, residual);
+    _ = try @import("check.zig").analyzeWithWork(storage, residual, work);
+    try data.admission.spend(work, out.functions.items.len);
+    const arguments = try storage.alloc(?[]const pe.Knowledge, out.functions.items.len);
+    @memset(arguments, null);
+    arguments[0] = root_arguments;
     var checker: Checker = .{
         .a = storage,
         .before = original,
@@ -82,22 +117,32 @@ pub fn validate(
         .out = out,
         .facts = schema_facts,
         .left = request.policy.work,
+        .work = work,
         .captures = original_facts.functions,
         .max_depth = request.policy.depth,
+        .reads = .{ .module = original, .facts = schema_facts },
+        .arguments = arguments,
     };
+    defer checker.reads.deinit(storage);
     for (out.functions.items, 0..) |f, i| try checker.function(f, i);
-    var admitted_residual = try source.lower(a, residual);
-    admitted_residual.deinit();
+    try admit(a, residual, work);
+}
+fn admit(a: std.mem.Allocator, module: ast.Module, work: ?*u64) Error!void {
+    if (work) |remaining| return source.admitWithWork(a, module, remaining);
+    var admitted = try source.lower(a, module);
+    admitted.deinit();
 }
 fn validateEnvelope(
     storage: std.mem.Allocator,
     original: ast.Module,
     request: pe.Request,
     out: *const pe.Output,
-) Error!void {
+    work: ?*u64,
+) Error![]const pe.Knowledge {
     const residual = out.module();
-    try require(std.mem.eql(u8, &out.key, &try pe.identity(storage, original, request)));
-    try require(try pe.requestEqual(storage, request, out.request));
+    const identity = try pe.identityWithWork(storage, original, request, work);
+    try require(std.mem.eql(u8, &out.key, &identity));
+    try require(try pe.requestEqualWithWork(storage, request, out.request, work));
     try require(data.record.equal(ast.Module, original, out.original));
     try require(
         original.failure == residual.failure and original.region_count == residual.region_count,
@@ -124,10 +169,52 @@ fn validateEnvelope(
             out.entry == out.functions.items[0].after,
     );
     try require(request.arguments.len == out.functions.items[0].arguments.len);
-    var normalization_work = request.policy.work;
-    for (request.arguments, out.functions.items[0].arguments) |raw, canonical| try require(
-        try k.equal(storage, try k.normalize(storage, raw, &normalization_work), canonical),
-    );
+    return validateCanonicalArguments(storage, request, out, work);
+}
+fn validateCanonicalArguments(
+    storage: std.mem.Allocator,
+    request: pe.Request,
+    out: *const pe.Output,
+    work: ?*u64,
+) Error![]const pe.Knowledge {
+    var left = request.policy.work;
+    try data.admission.spend(work, request.arguments.len);
+    const arguments = try storage.alloc(pe.Knowledge, request.arguments.len);
+    for (
+        request.arguments,
+        out.functions.items[0].arguments,
+        arguments,
+    ) |raw, canonical, *argument| {
+        argument.* = try normalize(storage, raw, &left, work);
+        try require(try k.equalWithWork(storage, argument.*, canonical, work));
+    }
+    return arguments;
+}
+const EvaluationWork = struct {
+    local: *u64,
+    global: ?*u64,
+    available: u64,
+    left: u64,
+
+    fn init(local: *u64, global: ?*u64) EvaluationWork {
+        const available = if (global) |remaining| @min(local.*, remaining.*) else local.*;
+        return .{ .local = local, .global = global, .available = available, .left = available };
+    }
+    fn finish(self: *EvaluationWork) void {
+        const spent = self.available - self.left;
+        self.local.* -= spent;
+        if (self.global) |remaining| remaining.* -= spent;
+    }
+};
+fn normalize(
+    a: std.mem.Allocator,
+    value: pe.Knowledge,
+    local: *u64,
+    global: ?*u64,
+) Error!pe.Knowledge {
+    var evaluation = EvaluationWork.init(local, global);
+    defer evaluation.finish();
+    return k.normalize(a, value, &evaluation.left);
 }
 const Visit = struct {
     proof_id: usize,
@@ -137,9 +224,24 @@ const Visit = struct {
     depth: usize,
     parent: usize,
 };
+const FactKey = struct {
+    proof_id: usize,
+    env_address: usize,
+    env_length: usize,
+
+    fn of(visit: Visit) FactKey {
+        return .{
+            .proof_id = visit.proof_id,
+            .env_address = @intFromPtr(visit.env.ptr),
+            .env_length = visit.env.len,
+        };
+    }
+};
 const ValueFrame = struct {
     visit: Visit,
     expected: ast.Value,
+    checked: ?V = null,
+    height: usize = 0,
     knowledge: pe.Knowledge = .dynamic,
     total: bool = true,
     cursor: usize = 0,
@@ -149,6 +251,8 @@ const ValueFrame = struct {
 const TermFrame = struct {
     visit: Visit,
     expected: ast.Term,
+    height: usize = 0,
+    cached: bool = false,
     knowledge: pe.Knowledge = .dynamic,
     cursor: usize = 0,
     first: CheckedTerm = undefined,
@@ -164,13 +268,25 @@ const Checker = struct {
     captures: []const @import("check.zig").Set,
     facts: data.admission.SchemaFacts,
     left: u64,
+    work: ?*u64,
     max_depth: usize,
+    reads: k.ReadCache,
+    arguments: []?[]const pe.Knowledge,
+    value_facts: std.AutoHashMapUnmanaged(FactKey, V) = .empty,
+    term_facts: std.AutoHashMapUnmanaged(FactKey, TermFact) = .empty,
 
     fn spend(self: *Checker, depth: usize) Error!void {
-        try require(self.left > 0 and depth <= self.max_depth);
+        if (self.left == 0 or depth > self.max_depth) return error.SpecializationLimit;
+        try data.admission.spend(self.work, 1);
         self.left -= 1;
     }
+    fn checkHeight(self: *Checker, visit: Visit, height: usize) Error!void {
+        const deepest = std.math.add(usize, visit.depth, height) catch
+            return error.SpecializationLimit;
+        if (deepest > self.max_depth) return error.SpecializationLimit;
+    }
     fn function(self: *Checker, f: pe.FunctionProof, i: usize) Error!void {
+        try data.admission.spend(self.work, 1);
         try require(f.before < self.before.functions.len and
             f.after == self.before.functions.len + i);
         try require(self.captures[@intCast(f.before)].items.len == 0);
@@ -182,13 +298,14 @@ const Checker = struct {
             std.mem.eql(p.Id, b.regions, r.regions));
         var env: Env = &.{};
         var cursor: usize = 0;
-        for (b.parameters, f.arguments) |v, fact| {
-            try k.validate(
+        for (b.parameters, self.arguments[i] orelse f.arguments) |v, fact| {
+            try k.validateWithWork(
                 self.a,
                 self.before,
                 self.facts,
                 self.before.variables[@intCast(v)],
                 fact,
+                self.work,
             );
             var target = v;
             if (fact != .known) {
@@ -197,7 +314,11 @@ const Checker = struct {
                 cursor += 1;
                 try self.variable(v, target);
             }
-            env = try extend(self.a, env, .{ .before = v, .after = target, .knowledge = fact });
+            env = try extend(self.a, env, self.work, .{
+                .before = v,
+                .after = target,
+                .knowledge = fact,
+            });
         }
         try require(cursor == r.parameters.len);
         _ = try self.term(.{
@@ -208,6 +329,24 @@ const Checker = struct {
             .depth = 0,
             .parent = self.out.term_proofs.items.len,
         });
+    }
+    fn primitive(
+        self: *Checker,
+        expression: ast.Value,
+        args: []const pe.Knowledge,
+    ) Error!pe.Knowledge {
+        var evaluation = EvaluationWork.init(&self.left, self.work);
+        defer evaluation.finish();
+        return k.normalize(
+            self.a,
+            try self.reads.primitive(self.a, expression, args, &evaluation.left),
+            &evaluation.left,
+        );
+    }
+    fn field(self: *Checker, knowledge: pe.Knowledge, index: usize) Error!pe.Knowledge {
+        var evaluation = EvaluationWork.init(&self.left, self.work);
+        defer evaluation.finish();
+        return self.reads.field(self.a, knowledge, index, &evaluation.left);
     }
     fn variable(self: *Checker, before: p.Id, after: p.Id) Error!void {
         try require(after >= self.before.variables.len and
@@ -223,6 +362,11 @@ const Checker = struct {
         const b = self.before.values[@intCast(visit.before)];
         try require(b.schema == self.after.values[@intCast(visit.after)].schema);
         var frame: ValueFrame = .{ .visit = visit, .expected = b };
+        if (self.value_facts.get(FactKey.of(visit))) |fact| {
+            try self.checkHeight(visit, fact.height);
+            frame.checked = fact;
+            return frame;
+        }
         switch (b.expression) {
             .literal => |v| {
                 try require(proof.children.len == 0);
@@ -230,7 +374,7 @@ const Checker = struct {
             },
             .variable => |v| {
                 try require(proof.children.len == 0);
-                const bound = try lookup(visit.env, v);
+                const bound = try lookup(visit.env, v, self.work);
                 frame.knowledge = bound.knowledge;
                 frame.expected.expression = .{ .variable = bound.after };
             },
@@ -241,6 +385,7 @@ const Checker = struct {
             },
             .primitive => |op| {
                 try require(proof.children.len == op.operands.len);
+                try data.admission.spend(self.work, op.operands.len);
                 frame.args = try self.a.alloc(p.Id, op.operands.len);
                 frame.known = try self.a.alloc(pe.Knowledge, op.operands.len);
             },
@@ -248,27 +393,30 @@ const Checker = struct {
         return frame;
     }
     fn finishValue(self: *Checker, frame: *ValueFrame) Error!V {
+        if (frame.checked) |fact| return fact;
         const visit = frame.visit;
         const b = self.before.values[@intCast(visit.before)];
         const r = self.after.values[@intCast(visit.after)];
         if (b.expression == .primitive) {
             frame.expected.expression.primitive.operands = frame.args;
-            frame.knowledge = try k.normalize(
-                self.a,
-                try k.primitive(self.a, self.before, self.facts, b, frame.known, &self.left),
-                &self.left,
-            );
+            frame.knowledge = try self.primitive(b, frame.known);
             frame.total = frame.total and frame.knowledge == .known;
         }
         if (self.out.value_proofs.items[visit.proof_id].folded) {
             try require(frame.total and frame.knowledge == .known and r.expression == .literal);
-            try require(data.record.equal(
-                p.Literal,
+            try require(try k.literalEqualWithWork(
                 frame.knowledge.known,
                 self.after.constants[@intCast(r.expression.literal)],
+                self.work,
             ));
         } else try require(data.record.equal(ast.Value, frame.expected, r));
-        return .{ .knowledge = frame.knowledge, .total = frame.total };
+        const fact: V = .{
+            .knowledge = frame.knowledge,
+            .total = frame.total,
+            .height = frame.height,
+        };
+        try self.value_facts.put(self.a, FactKey.of(visit), fact);
+        return fact;
     }
     fn value(self: *Checker, root: Visit) Error!V {
         var stack: std.ArrayList(ValueFrame) = .empty;
@@ -279,7 +427,9 @@ const Checker = struct {
             const frame = &stack.items[stack.items.len - 1];
             const visit = frame.visit;
             const b = self.before.values[@intCast(visit.before)];
-            if (b.expression == .primitive and frame.cursor < frame.args.len) {
+            if (frame.checked == null and b.expression == .primitive and
+                frame.cursor < frame.args.len)
+            {
                 const index = frame.cursor;
                 const child_id = self.out.value_proofs.items[visit.proof_id].children[index];
                 try require(child_id < visit.proof_id);
@@ -289,7 +439,7 @@ const Checker = struct {
                     .before = b.expression.primitive.operands[index],
                     .after = frame.args[index],
                     .env = visit.env,
-                    .depth = visit.depth + 1,
+                    .depth = try nextDepth(visit.depth),
                     .parent = visit.proof_id,
                 };
                 try stack.append(self.a, try self.valueFrame(child_visit));
@@ -301,6 +451,7 @@ const Checker = struct {
                 const parent = &stack.items[stack.items.len - 1];
                 parent.known[parent.cursor] = result.knowledge;
                 parent.total = parent.total and result.total;
+                parent.height = @max(parent.height, try nextDepth(result.height));
                 parent.cursor += 1;
             }
         }
@@ -308,7 +459,7 @@ const Checker = struct {
     }
     fn checkedValue(
         self: *Checker,
-        frame: *const TermFrame,
+        frame: *TermFrame,
         index: usize,
         before: p.Id,
     ) Error!CheckedValue {
@@ -316,14 +467,16 @@ const Checker = struct {
         const proofs = self.out.term_proofs.items[visit.proof_id].values;
         try require(index < proofs.len and proofs[index] < self.out.value_proofs.items.len);
         const id = self.out.value_proofs.items[proofs[index]].after;
-        return .{ .id = id, .fact = try self.value(.{
+        const fact = try self.value(.{
             .proof_id = proofs[index],
             .before = before,
             .after = id,
             .env = visit.env,
-            .depth = visit.depth + 1,
+            .depth = try nextDepth(visit.depth),
             .parent = self.out.value_proofs.items.len,
-        }) };
+        });
+        frame.height = @max(frame.height, try nextDepth(fact.height));
+        return .{ .id = id, .fact = fact };
     }
     fn child(
         self: *Checker,
@@ -340,7 +493,7 @@ const Checker = struct {
             .before = before,
             .after = self.out.term_proofs.items[proofs[index]].after,
             .env = env,
-            .depth = visit.depth + 1,
+            .depth = try nextDepth(visit.depth),
             .parent = visit.proof_id,
         } };
     }
@@ -362,12 +515,15 @@ const Checker = struct {
                     .expected = undefined,
                 }),
                 .done => |knowledge| {
-                    result = .{ .id = frame.visit.after, .knowledge = knowledge };
+                    const fact: TermFact = .{ .knowledge = knowledge, .height = frame.height };
+                    if (!frame.cached)
+                        try self.term_facts.put(self.a, FactKey.of(frame.visit), fact);
+                    result = .{ .id = frame.visit.after, .fact = fact };
                     _ = stack.pop();
                 },
             }
         }
-        return result.?.knowledge;
+        return result.?.fact.knowledge;
     }
     fn finish(self: *Checker, frame: *const TermFrame) Error!Action {
         try require(data.record.equal(
@@ -385,6 +541,12 @@ const Checker = struct {
             visit.before < self.before.terms.len and visit.after < self.after.terms.len);
         const proof = self.out.term_proofs.items[visit.proof_id];
         try require(proof.before == visit.before and proof.after == visit.after);
+        if (self.term_facts.get(FactKey.of(visit))) |fact| {
+            try self.checkHeight(visit, fact.height);
+            frame.height = fact.height;
+            frame.cached = true;
+            return .{ .done = fact.knowledge };
+        }
         const b = self.before.terms[@intCast(visit.before)];
         const r = self.after.terms[@intCast(visit.after)];
         frame.expected = b;
@@ -444,6 +606,10 @@ const Checker = struct {
             break :blk self.out.functions.items[i];
         } else null;
         if (target) |f| try require(f.before == v.function and f.arguments.len == v.arguments.len);
+        const arguments = if (target != null and self.arguments[proof.callee.?] == null) blk: {
+            try data.admission.spend(self.work, v.arguments.len);
+            break :blk try self.a.alloc(pe.Knowledge, v.arguments.len);
+        } else null;
         for (v.arguments, 0..) |arg, i| {
             const x = try self.checkedValue(frame, i, arg);
             if (target) |f| {
@@ -451,15 +617,14 @@ const Checker = struct {
                     .dynamic
                 else
                     x.fact.knowledge;
-                try require(try k.equal(
-                    self.a,
-                    try k.normalize(self.a, justified, &self.left),
-                    f.arguments[i],
-                ));
+                const normalized = try normalize(self.a, justified, &self.left, self.work);
+                try require(try k.equalWithWork(self.a, normalized, f.arguments[i], self.work));
+                if (arguments) |retained| retained[i] = normalized;
                 if (f.arguments[i] == .known) continue;
             }
             try args.append(self.a, x.id);
         }
+        if (arguments) |retained| self.arguments[proof.callee.?] = retained;
         frame.expected = .{ .call = .{
             .function = if (target) |f| f.after else v.function,
             .arguments = args.items,
@@ -478,6 +643,7 @@ const Checker = struct {
             i += 1;
         }
         inline for (.{ "bodies", "use_site_capabilities" }) |name| {
+            try data.admission.spend(self.work, @field(v, name).len);
             const args = try self.a.alloc(p.Id, @field(v, name).len);
             for (@field(v, name), args) |arg, *to| {
                 to.* = (try self.checkedValue(frame, i, arg)).id;
@@ -498,17 +664,10 @@ const Checker = struct {
         var next_env = visit.env;
         for (v.variables, r.unpack_product.variables, 0..) |v1, v2, i| {
             try self.variable(v1, v2);
-            next_env = try extend(self.a, next_env, .{
+            next_env = try extend(self.a, next_env, self.work, .{
                 .before = v1,
                 .after = v2,
-                .knowledge = try k.field(
-                    self.a,
-                    self.before,
-                    self.facts,
-                    frame.value.fact.knowledge,
-                    i,
-                    &self.left,
-                ),
+                .knowledge = try self.field(frame.value.fact.knowledge, i),
             });
         }
         return self.child(frame, 0, v.body, next_env);
@@ -523,6 +682,7 @@ const Checker = struct {
         if (proof.selected) |tag| return self.selectedMatch(frame, tag);
         try require(r == .match_sum and proof.children.len == v.cases.len and
             r.match_sum.cases.len == v.cases.len);
+        try data.admission.spend(self.work, v.cases.len);
         frame.cases = try self.a.alloc(CaseItem, v.cases.len);
         return self.matchCase(frame);
     }
@@ -543,12 +703,12 @@ const Checker = struct {
         try require(first == .value);
         const literal = self.after.values[@intCast(first.value)];
         try require(literal.schema == schema and literal.expression == .literal and
-            data.record.equal(
-                p.Literal,
+            try k.literalEqualWithWork(
                 payload_fact.value.known,
                 self.after.constants[@intCast(literal.expression.literal)],
+                self.work,
             ));
-        const next_env = try extend(self.a, visit.env, .{
+        const next_env = try extend(self.a, visit.env, self.work, .{
             .before = branch.variable,
             .after = r.bind.variable,
             .knowledge = payload_fact.value,
@@ -566,7 +726,7 @@ const Checker = struct {
         const left = v.cases[frame.cursor];
         const right = r.cases[frame.cursor];
         try self.variable(left.variable, right.variable);
-        const next_env = try extend(self.a, visit.env, .{
+        const next_env = try extend(self.a, visit.env, self.work, .{
             .before = left.variable,
             .after = right.variable,
             .knowledge = .dynamic,
@@ -574,6 +734,7 @@ const Checker = struct {
         return self.child(frame, frame.cursor, left.body, next_env);
     }
     fn resumeTerm(self: *Checker, frame: *TermFrame, result: CheckedTerm) Error!Action {
+        frame.height = @max(frame.height, try nextDepth(result.fact.height));
         const visit = frame.visit;
         const b = self.before.terms[@intCast(visit.before)];
         const r = self.after.terms[@intCast(visit.after)];
@@ -582,7 +743,7 @@ const Checker = struct {
             .conditional => return self.resumeConditional(frame, result),
             .yield_then => {
                 frame.expected = .{ .yield_then = result.id };
-                frame.knowledge = result.knowledge;
+                frame.knowledge = result.fact.knowledge;
             },
             .unpack_product => {
                 frame.expected = .{ .unpack_product = .{
@@ -590,7 +751,7 @@ const Checker = struct {
                     .variables = r.unpack_product.variables,
                     .body = result.id,
                 } };
-                frame.knowledge = result.knowledge;
+                frame.knowledge = result.fact.knowledge;
             },
             .match_sum => {
                 if (self.out.term_proofs.items[visit.proof_id].selected != null) {
@@ -599,7 +760,7 @@ const Checker = struct {
                         .value = r.bind.value,
                         .next = result.id,
                     } };
-                    frame.knowledge = result.knowledge;
+                    frame.knowledge = result.fact.knowledge;
                 } else {
                     frame.cases[frame.cursor] = .{
                         .variable = r.match_sum.cases[frame.cursor].variable,
@@ -621,10 +782,10 @@ const Checker = struct {
             frame.first = result;
             frame.cursor = 1;
             try self.variable(b.variable, r.variable);
-            const next_env = try extend(self.a, visit.env, .{
+            const next_env = try extend(self.a, visit.env, self.work, .{
                 .before = b.variable,
                 .after = r.variable,
-                .knowledge = result.knowledge,
+                .knowledge = result.fact.knowledge,
             });
             return self.child(frame, 1, b.next, next_env);
         }
@@ -633,7 +794,7 @@ const Checker = struct {
             .value = frame.first.id,
             .next = result.id,
         } };
-        frame.knowledge = result.knowledge;
+        frame.knowledge = result.fact.knowledge;
         return self.finish(frame);
     }
     fn resumeConditional(self: *Checker, frame: *TermFrame, result: CheckedTerm) Error!Action {
@@ -642,7 +803,7 @@ const Checker = struct {
         const b = self.before.terms[@intCast(visit.before)].conditional;
         if (proof.selected != null) {
             try require(visit.after == result.id);
-            return .{ .done = result.knowledge };
+            return .{ .done = result.fact.knowledge };
         }
         if (frame.cursor == 0) {
             frame.first = result;
@@ -654,8 +815,34 @@ const Checker = struct {
             .when_true = frame.first.id,
             .when_false = result.id,
         } };
-        if (try k.equal(self.a, frame.first.knowledge, result.knowledge))
-            frame.knowledge = frame.first.knowledge;
+        const first = frame.first.fact.knowledge;
+        if (try k.equalWithWork(self.a, first, result.fact.knowledge, self.work))
+            frame.knowledge = first;
         return self.finish(frame);
     }
 };
+
+test "specialization evaluator intersection stops before unpaid allocation" {
+    const value: pe.Knowledge = .{ .product = .{ .schema = 0, .fields = &.{
+        .dynamic, .dynamic,
+    } } };
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var local: u64 = 10;
+    var global: u64 = 2;
+    try std.testing.expectError(
+        error.SpecializationLimit,
+        normalize(failing.allocator(), value, &local, &global),
+    );
+    try std.testing.expectEqual(@as(u64, 9), local);
+    try std.testing.expectEqual(@as(u64, 1), global);
+    try std.testing.expect(!failing.has_induced_failure);
+    local = 2;
+    global = 10;
+    try std.testing.expectError(
+        error.SpecializationLimit,
+        normalize(failing.allocator(), value, &local, &global),
+    );
+    try std.testing.expectEqual(@as(u64, 1), local);
+    try std.testing.expectEqual(@as(u64, 9), global);
+    try std.testing.expect(!failing.has_induced_failure);
+}

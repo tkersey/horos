@@ -2,6 +2,7 @@
 //! Program-bound control relevance. Only this owner expands uncertainty to the
 //! conservative clause set. A selection cannot be constructed from caller facts.
 const std = @import("std");
+const admission = @import("admission.zig");
 const p = @import("program.zig");
 const ir = @import("activation.zig");
 const contracts = @import("contracts.zig");
@@ -154,7 +155,15 @@ pub const Selection = opaque {
             @intCast(schema)
         ]) return false;
         for (stored.targets) |target| {
+            try admission.spend(
+                if (stored.owner) |owner| owner.data().work else null,
+                1,
+            );
             const signature = try contracts.resumption(stored.image, target.resumption);
+            try admission.spend(
+                if (stored.owner) |owner| owner.data().work else null,
+                signature.capture_bound.len,
+            );
             if (std.mem.indexOfScalar(p.Id, signature.capture_bound, schema) == null) return false;
         }
         return true;
@@ -162,6 +171,7 @@ pub const Selection = opaque {
 };
 
 const Storage = struct {
+    work: ?*u64 = null,
     allocator: std.mem.Allocator,
     image: ir.Program,
     conservative: [][]const Target,
@@ -205,11 +215,14 @@ pub const Analysis = opaque {
     }
     pub const Constructors = struct { ids: []const p.Id, conservative: bool };
     pub fn constructorsAt(self: *const Analysis, block: p.Id, slot: p.Id) Error!Constructors {
+        try admission.spend(self.data().work, 1);
         const stored: *Storage = @ptrCast(@alignCast(@constCast(self)));
-        for (stored.constructor_queries.items) |known|
+        for (stored.constructor_queries.items) |known| {
+            try admission.spend(self.data().work, 1);
             if (known.block == block and
                 known.slot == slot)
                 return known.result;
+        }
         const result = try self.deriveConstructors(block, slot);
         try stored.constructor_queries.append(
             stored.allocator,
@@ -218,6 +231,7 @@ pub const Analysis = opaque {
         return result;
     }
     fn deriveConstructors(self: *const Analysis, block: p.Id, slot: p.Id) Error!Constructors {
+        try admission.spend(self.data().work, 1);
         const stored = self.data();
         const values = stored.values orelse {
             // The full target solver is unnecessary for handler-free images.
@@ -225,6 +239,7 @@ pub const Analysis = opaque {
             const instructions = stored.image.blocks[@intCast(block)].instructions;
             var position = instructions.len;
             while (position != 0) {
+                try admission.spend(self.data().work, 1);
                 position -= 1;
                 const instruction = instructions[position];
                 if (instruction.destination != slot) continue;
@@ -240,18 +255,23 @@ pub const Analysis = opaque {
         var ids: std.ArrayList(p.Id) = .empty;
         var conservative = origins == empty;
         var iterator = values.origins.iterator(origins);
-        while (iterator.next()) |origin| switch (origin) {
-            .constructor => |id| try ids.append(stored.allocator, id),
-            else => conservative = true,
-        };
+        while (iterator.next()) |origin| {
+            try admission.spend(self.data().work, 1);
+            switch (origin) {
+                .constructor => |id| try ids.append(stored.allocator, id),
+                else => conservative = true,
+            }
+        }
         return .{ .ids = ids.items, .conservative = conservative };
     }
     /// Build a presentation from final fixed-point facts, never worklist history.
     /// The invocation arena owns it; use Explanation.copy to retain it.
     pub fn explain(self: *const Analysis, selection: *const Selection) Error!Explanation {
+        try admission.spend(self.data().work, 1);
         if (selection.data().owner != self) return error.InvalidReference;
         if (self.data().values) |values| if (values.seeds == null) return error.InvalidReference;
         for (self.data().explanations.items) |known| {
+            try admission.spend(self.data().work, 1);
             if (std.meta.eql(
                 known.boundary,
                 selection.boundary(),
@@ -290,7 +310,19 @@ pub const Analysis = opaque {
         }
         return self.data().conservative[@intCast(effect)];
     }
+    pub fn targetsWithWork(
+        self: *const Analysis,
+        boundary: Boundary,
+        effect: p.Id,
+    ) Error![]const Target {
+        try admission.spend(
+            self.data().work,
+            self.data().calls[@intCast(boundary.block)].len,
+        );
+        return self.targets(boundary, effect);
+    }
     pub fn select(self: *const Analysis, boundary: Boundary, effect: p.Id) Error!*const Selection {
+        try admission.spend(self.data().work, 1);
         const stored = try self.data().allocator.create(SelectionData);
         var knowledge: Knowledge = .{ .conservative = true };
         if (boundary.role == .operation and self.data().operations[
@@ -305,6 +337,7 @@ pub const Analysis = opaque {
                 ].terminator.perform.capability == null,
             };
         for (self.data().calls[@intCast(boundary.block)]) |known| {
+            try admission.spend(self.data().work, 1);
             if (known.role == boundary.role and
                 known.effect == effect and
                 known.targets != null)
@@ -315,7 +348,7 @@ pub const Analysis = opaque {
             .image = self.data().image,
             .boundary = boundary,
             .effect = effect,
-            .targets = self.targets(boundary, effect),
+            .targets = try self.targetsWithWork(boundary, effect),
             .knowledge = knowledge,
         };
         return @ptrCast(stored);
@@ -327,11 +360,14 @@ pub const Analysis = opaque {
         boundary: Boundary,
         declared: []const p.Id,
     ) Error![]const p.Id {
+        try admission.spend(self.data().work, 1);
         var result: std.ArrayList(p.Id) = .empty;
         for (self.data().calls[@intCast(boundary.block)]) |known| {
-            if (known.role != boundary.role or contracts.containsEffect(
+            try admission.spend(self.data().work, 1);
+            if (known.role != boundary.role or try contracts.containsEffectWithWork(
                 declared,
                 known.effect,
+                self.data().work,
             )) continue;
             if (result.items.len == 0) try result.appendSlice(self.data().allocator, declared);
             try result.append(self.data().allocator, known.effect);
@@ -350,10 +386,12 @@ pub const Analysis = opaque {
     /// row is empty. Use the owned-value traversal and admitted obligation bit,
     /// not effect membership, for an arbitrary interaction projection.
     pub fn mayRunDisposal(self: *const Analysis, schema: p.Id) Error!bool {
+        try admission.spend(self.data().work, 1);
         const stored: *Storage = @ptrCast(@alignCast(@constCast(self)));
         if (stored.disposal_query == null) stored.disposal_query = try DisposalExecution.derive(
             stored.allocator,
             stored.image,
+            stored.work,
         );
         return stored.disposal_query.?.contains(schema);
     }
@@ -365,6 +403,7 @@ pub const Analysis = opaque {
         constructor: p.Id,
         effect: p.Id,
     ) Error!InvocationSources {
+        try admission.spend(self.data().work, 1);
         const stored = self.data();
         const relative = stored.relative orelse return .{ .conservative = true };
         const function = stored.image.constructors[@intCast(constructor)].function;
@@ -377,11 +416,14 @@ pub const Analysis = opaque {
                 @intCast(effect)
             ],
         );
-        while (iterator.next()) |origin| switch (origin) {
-            .input => |input| try inputs.append(stored.allocator, @intCast(input)),
-            .environmental => {},
-            else => result.conservative = true,
-        };
+        while (iterator.next()) |origin| {
+            try admission.spend(self.data().work, 1);
+            switch (origin) {
+                .input => |input| try inputs.append(stored.allocator, @intCast(input)),
+                .environmental => {},
+                else => result.conservative = true,
+            }
+        }
         result.inputs = try inputs.toOwnedSlice(stored.allocator);
         return result;
     }
@@ -394,6 +436,7 @@ pub const Analysis = opaque {
         returned: bool,
         effect: p.Id,
     ) Error!SuspensionSources {
+        try admission.spend(self.data().work, 1);
         return (try self.positionSources(block, position, returned)).effects[@intCast(effect)];
     }
     pub fn returnSources(
@@ -402,6 +445,7 @@ pub const Analysis = opaque {
         position: usize,
         returned: bool,
     ) Error!SuspensionSources {
+        try admission.spend(self.data().work, 1);
         return (try self.positionSources(block, position, returned)).returns;
     }
     fn positionSources(
@@ -410,12 +454,16 @@ pub const Analysis = opaque {
         position: usize,
         returned: bool,
     ) Error!PositionSources {
+        try admission.spend(self.data().work, 1);
         const stored: *Storage = @ptrCast(@alignCast(@constCast(self)));
-        for (stored.positions.items) |query|
+        for (stored.positions.items) |query| {
+            try admission.spend(self.data().work, 1);
             if (query.block == block and
                 query.position == position and
                 query.returned == returned)
                 return query;
+        }
+        try admission.spend(stored.work, stored.image.effects.len);
         const effects = try stored.allocator.alloc(SuspensionSources, stored.image.effects.len);
         var result: PositionSources = .{
             .block = block,
@@ -426,8 +474,10 @@ pub const Analysis = opaque {
         };
         if (stored.relative) |relative| {
             const query = try relative.fromPosition(block, position, returned);
-            for (query.suspensions, effects) |summary, *sources|
+            for (query.suspensions, effects) |summary, *sources| {
+                try admission.spend(self.data().work, 1);
                 sources.* = try positionSource(stored, relative, summary);
+            }
             result.returns = try positionSource(stored, relative, query.returns);
         } else @memset(effects, .{ .conservative = true });
         try stored.positions.append(stored.allocator, result);
@@ -441,12 +491,15 @@ pub const Analysis = opaque {
         var sources: SuspensionSources = .{};
         var slots: std.ArrayList(p.Id) = .empty;
         var iterator = relative.origins.iterator(summary);
-        while (iterator.next()) |origin| switch (origin) {
-            .input => |slot| try slots.append(stored.allocator, slot),
-            .returned => sources.pending_return = true,
-            .environmental => {},
-            else => sources.conservative = true,
-        };
+        while (iterator.next()) |origin| {
+            try admission.spend(stored.work, 1);
+            switch (origin) {
+                .input => |slot| try slots.append(stored.allocator, slot),
+                .returned => sources.pending_return = true,
+                .environmental => {},
+                else => sources.conservative = true,
+            }
+        }
         sources.slots = try slots.toOwnedSlice(stored.allocator);
         return sources;
     }
@@ -456,8 +509,11 @@ pub const Analysis = opaque {
         effects: []const p.Id,
         region: p.Id,
     ) Error!void {
-        for (try self.effectRow(boundary, effects)) |effect|
+        try admission.spend(self.data().work, 1);
+        for (try self.effectRow(boundary, effects)) |effect| {
+            try admission.spend(self.data().work, 1);
             try self.captureRegion(boundary, effect, region);
+        }
     }
     fn captureRegion(
         self: *const Analysis,
@@ -465,9 +521,12 @@ pub const Analysis = opaque {
         effect: p.Id,
         region: p.Id,
     ) Error!void {
-        for (self.targets(boundary, effect)) |target| {
+        try admission.spend(self.data().work, 1);
+        for (try self.targetsWithWork(boundary, effect)) |target| {
+            try admission.spend(self.data().work, 1);
             if (!target.retains) continue;
             const signature = try contracts.resumption(self.data().image, target.resumption);
+            try admission.spend(self.data().work, signature.owned_regions.len);
             if (std.mem.indexOfScalar(
                 p.Id,
                 signature.owned_regions,
@@ -480,19 +539,25 @@ pub const Analysis = opaque {
         boundary: Boundary,
         effects: []const p.Id,
     ) Error!void {
-        for (try self.effectRow(boundary, effects)) |effect|
+        try admission.spend(self.data().work, 1);
+        for (try self.effectRow(boundary, effects)) |effect| {
+            try admission.spend(self.data().work, 1);
             try self.captureCleanup(boundary, effect);
+        }
     }
     fn captureCleanup(self: *const Analysis, boundary: Boundary, effect: p.Id) Error!void {
+        try admission.spend(self.data().work, 1);
         // Intrinsic multi-shot prohibition is independent of relevance.
         if (self.data().image.effects[
             @intCast(effect)
         ].control_use == .multi) return error.InvalidOwnership;
-        for (self.targets(boundary, effect)) |target|
+        for (try self.targetsWithWork(boundary, effect)) |target| {
+            try admission.spend(self.data().work, 1);
             if (!(try contracts.resumption(
                 self.data().image,
                 target.resumption,
             )).obligations) return error.InvalidOwnership;
+        }
     }
     /// An injected closure can dispose owned captures before the saved body
     /// resumes. Additional effects must cover that body's retained state too,
@@ -503,17 +568,25 @@ pub const Analysis = opaque {
         token: p.ResumptionType,
         uses: @import("traits.zig").Facts,
     ) Error!void {
+        try admission.spend(self.data().work, 1);
         const admitted = self.data().image.effects[@intCast(token.effect)].use_site_effects;
         for (try self.effectRow(boundary, admitted)) |effect| {
+            try admission.spend(self.data().work, 1);
             // Declared injection effects were checked when the token captured
             // its continuation. Its broader resume row is not that witness.
-            if (contracts.containsEffect(admitted, effect)) continue;
+            if (try contracts.containsEffectWithWork(admitted, effect, self.data().work)) continue;
             const selected = try self.select(boundary, effect);
-            for (token.capture_bound) |schema| if (!try selected.captureAllowed(
-                uses,
-                schema,
-            )) return error.InvalidOwnership;
-            for (token.owned_regions) |region| try self.captureRegion(boundary, effect, region);
+            for (token.capture_bound) |schema| {
+                try admission.spend(self.data().work, 1);
+                if (!try selected.captureAllowed(
+                    uses,
+                    schema,
+                )) return error.InvalidOwnership;
+            }
+            for (token.owned_regions) |region| {
+                try admission.spend(self.data().work, 1);
+                try self.captureRegion(boundary, effect, region);
+            }
             if (token.obligations) try self.captureCleanup(boundary, effect);
         }
     }
@@ -527,25 +600,32 @@ pub const Analysis = opaque {
         nodes: []const @import("graph.zig").Node,
         activations: []const ?@import("process_state.zig").Activation,
     ) Error!void {
+        try admission.spend(self.data().work, 1);
         const values = self.data().values orelse return;
         var pending: std.ArrayList(StatePending) = .empty;
         for (nodes, activations) |node, activation| {
+            try admission.spend(self.data().work, 1);
             if (activation) |frame| {
                 const block = if (node == .control)
                     node.control.block
                 else
                     node.continuation.source_block;
                 const row = try values.at(allocator, @intCast(block), @intCast(frame.position));
-                for (frame.bindings) |binding| try pending.append(
-                    allocator,
-                    .{ .value = binding.value, .allowed = row.get(@intCast(binding.slot)) },
-                );
+                for (frame.bindings) |binding| {
+                    try admission.spend(self.data().work, 1);
+                    try pending.append(
+                        allocator,
+                        .{ .value = binding.value, .allowed = row.get(@intCast(binding.slot)) },
+                    );
+                }
             }
             if (node == .computation) {
                 const closure = node.computation;
                 const fields = nodes[@intCast(closure.environment.id)].environment.values;
-                for (fields, values.captures[@intCast(closure.constructor)]) |value, allowed|
+                for (fields, values.captures[@intCast(closure.constructor)]) |value, allowed| {
+                    try admission.spend(self.data().work, 1);
                     try pending.append(allocator, .{ .value = value, .allowed = allowed });
+                }
             }
         }
         try validatePendingState(values, allocator, nodes, &pending);
@@ -570,7 +650,7 @@ pub const Analysis = opaque {
             const node = nodes[@intCast(ref.id)];
             if (node == .attachment) {
                 const definition = nodes[@intCast(node.attachment.handler.id)].handler.definition;
-                if (!values.receives(allowed, definition)) return error.InvalidOwnership;
+                if (!try values.receives(allowed, definition)) return error.InvalidOwnership;
                 continue;
             }
             if ((try seen.getOrPut(
@@ -629,8 +709,23 @@ pub fn deriveObserved(
     component: bool,
     explanations: bool,
 ) Error!*const Analysis {
+    return deriveObservedWithWork(allocator, image, imports, component, explanations, null);
+}
+
+pub fn deriveObservedWithWork(
+    allocator: std.mem.Allocator,
+    image: ir.Program,
+    imports: []const p.Id,
+    component: bool,
+    explanations: bool,
+    work: ?*u64,
+) Error!*const Analysis {
+    try admission.spend(work, 1);
+    try admission.spend(work, image.effects.len);
+    try admission.spend(work, image.blocks.len);
     const stored = try allocator.create(Storage);
     stored.* = .{
+        .work = work,
         .allocator = allocator,
         .image = image,
         .conservative = try allocator.alloc([]const Target, image.effects.len),
@@ -642,28 +737,35 @@ pub fn deriveObserved(
     for (
         image.blocks,
         0..,
-    ) |block, id|
+    ) |block, id| {
+        try admission.spend(work, 1);
         if (block.terminator == .perform and
             block.terminator.perform.capability == null)
         {
             stored.operations[id] = &.{};
-        };
+        }
+    }
     for (stored.conservative, 0..) |*row, effect| {
+        try admission.spend(work, 1);
         var targets: std.ArrayList(Target) = .empty;
-        for (image.handlers, 0..) |handler, handler_id| for (handler.clauses, 0..) |clause, index| {
-            if (clause.effect != effect) continue;
-            try targets.append(
-                allocator,
-                .{
-                    .handler = handler_id,
-                    .clause = index,
-                    .effect = effect,
-                    .function = clause.function,
-                    .resumption = clause.resumption,
-                    .retains = contracts.retainsResumption(clause),
-                },
-            );
-        };
+        for (image.handlers, 0..) |handler, handler_id| {
+            try admission.spend(work, 1);
+            for (handler.clauses, 0..) |clause, index| {
+                try admission.spend(work, 1);
+                if (clause.effect != effect) continue;
+                try targets.append(
+                    allocator,
+                    .{
+                        .handler = handler_id,
+                        .clause = index,
+                        .effect = effect,
+                        .function = clause.function,
+                        .resumption = clause.resumption,
+                        .retains = contracts.retainsResumption(clause),
+                    },
+                );
+            }
+        }
         row.* = try targets.toOwnedSlice(allocator);
     }
     if (!component and imports.len == 0 and image.handlers.len != 0)
@@ -674,9 +776,12 @@ pub fn deriveObserved(
 fn derivePrecise(stored: *Storage, explanations: bool) Error!void {
     const allocator = stored.allocator;
     const image = stored.image;
-    const origins = try Origins.init(allocator, image);
+    const origins = try Origins.init(allocator, image, stored.work);
     var flow = try Values.init(allocator, image, origins, false);
-    if (explanations) flow.seeds = try allocator.dupe(Row, flow.entries);
+    if (explanations) {
+        try admission.spend(stored.work, flow.entries.len);
+        flow.seeds = try allocator.dupe(Row, flow.entries);
+    }
     try flow.solve();
     const concrete = try allocator.create(Values);
     concrete.* = flow;
@@ -695,58 +800,70 @@ fn deriveOperations(stored: *Storage, flow: *const Values) Error!void {
     const allocator = stored.allocator;
     const image = stored.image;
     const origins = flow.origins;
-    for (image.blocks, 0..) |block, id| if (block.terminator == .perform) {
-        const op = block.terminator.perform;
-        if (op.capability == null) {
-            stored.operations[id] = &.{}; // Environmental, never nearest-handler dispatch.
-            continue;
+    for (image.blocks, 0..) |block, id| {
+        try admission.spend(stored.work, 1);
+        if (block.terminator == .perform) {
+            const op = block.terminator.perform;
+            if (op.capability == null) {
+                stored.operations[id] = &.{}; // Environmental, never nearest-handler dispatch.
+                continue;
+            }
+            const targets = flow.exits[id].get(@intCast(op.capability.?));
+            if (targets == empty or origins.contains(targets, .unknown)) continue;
+            var selected: std.ArrayList(Target) = .empty;
+            for (stored.conservative[@intCast(op.effect)]) |target| {
+                try admission.spend(stored.work, 1);
+                if (try flow.receives(targets, target.handler))
+                    try selected.append(allocator, target);
+            }
+            stored.operations[id] = try selected.toOwnedSlice(allocator);
         }
-        const targets = flow.exits[id].get(@intCast(op.capability.?));
-        if (targets == empty or origins.contains(targets, .unknown)) continue;
-        var selected: std.ArrayList(Target) = .empty;
-        for (stored.conservative[@intCast(op.effect)]) |target| {
-            if (flow.receives(targets, target.handler)) try selected.append(allocator, target);
-        }
-        stored.operations[id] = try selected.toOwnedSlice(allocator);
-    };
+    }
 }
 
 fn deriveCalls(stored: *Storage, flow: *const Values, relative: *const Values) Error!void {
     const allocator = stored.allocator;
     const image = stored.image;
     const origins = flow.origins;
-    for (image.blocks, 0..) |block, id| if (block.terminator == .call) {
-        const call = block.terminator.call;
-        var rows: std.ArrayList(CallTargets) = .empty;
-        for (image.effects, 0..) |_, effect| {
-            if (!contracts.containsEffect(
-                image.functions[@intCast(call.function)].effects,
-                effect,
-            ) and relative.suspensions[@intCast(call.function)][effect] == empty) continue;
-            const actual = try origins.substitute(
-                relative.suspensions[@intCast(call.function)][@intCast(effect)],
-                call.arguments,
-                flow.exits[id],
-            );
-            if (origins.contains(actual, .unknown)) {
-                try rows.append(allocator, .{ .effect = effect, .targets = null });
-                continue;
+    for (image.blocks, 0..) |block, id| {
+        try admission.spend(stored.work, 1);
+        if (block.terminator == .call) {
+            const call = block.terminator.call;
+            var rows: std.ArrayList(CallTargets) = .empty;
+            for (image.effects, 0..) |_, effect| {
+                try admission.spend(stored.work, 1);
+                if (!try contracts.containsEffectWithWork(
+                    image.functions[@intCast(call.function)].effects,
+                    effect,
+                    stored.work,
+                ) and relative.suspensions[@intCast(call.function)][effect] == empty) continue;
+                const actual = try origins.substitute(
+                    relative.suspensions[@intCast(call.function)][@intCast(effect)],
+                    call.arguments,
+                    flow.exits[id],
+                );
+                if (origins.contains(actual, .unknown)) {
+                    try rows.append(allocator, .{ .effect = effect, .targets = null });
+                    continue;
+                }
+                var selected: std.ArrayList(Target) = .empty;
+                for (stored.conservative[@intCast(effect)]) |target| {
+                    try admission.spend(stored.work, 1);
+                    if (try flow.receives(actual, target.handler))
+                        try selected.append(allocator, target);
+                }
+                try rows.append(
+                    allocator,
+                    .{
+                        .effect = effect,
+                        .targets = try selected.toOwnedSlice(allocator),
+                        .environmental = origins.contains(actual, .environmental),
+                    },
+                );
             }
-            var selected: std.ArrayList(Target) = .empty;
-            for (stored.conservative[@intCast(effect)]) |target|
-                if (flow.receives(actual, target.handler))
-                    try selected.append(allocator, target);
-            try rows.append(
-                allocator,
-                .{
-                    .effect = effect,
-                    .targets = try selected.toOwnedSlice(allocator),
-                    .environmental = origins.contains(actual, .environmental),
-                },
-            );
+            stored.calls[id] = try rows.toOwnedSlice(allocator);
         }
-        stored.calls[id] = try rows.toOwnedSlice(allocator);
-    };
+    }
 }
 
 fn deriveStructuredCalls(
@@ -757,6 +874,7 @@ fn deriveStructuredCalls(
     const allocator = stored.allocator;
     const image = stored.image;
     for (image.blocks, 0..) |block, id| {
+        try admission.spend(stored.work, 1);
         var rows: std.ArrayList(CallTargets) = .empty;
         switch (block.terminator) {
             .apply => |v| try closureTargets(
@@ -847,8 +965,9 @@ fn deriveInjectedTargets(
     // recipients. Injection can add disposal effects outside
     // that row without replacing any of those recipients.
     for (injected.items) |row| {
+        try admission.spend(stored.work, 1);
         try rows.append(allocator, row);
-        if (!contracts.containsEffect(token.effects, row.effect)) {
+        if (!try contracts.containsEffectWithWork(token.effects, row.effect, stored.work)) {
             var resumed = row;
             resumed.role = .resumed;
             try rows.append(allocator, resumed);
@@ -904,11 +1023,13 @@ fn resumptionTargets(
     const schema = stored.image.functions[@intCast(block.function)].layout.slots[@intCast(slot)];
     const signature = try contracts.resumption(stored.image, schema);
     for (stored.image.effects, 0..) |_, effect| {
-        if (contracts.containsEffect(signature.effects, effect) or
+        try admission.spend(stored.work, 1);
+        if (try contracts.containsEffectWithWork(signature.effects, effect, stored.work) or
             !relative.disposal.?.contains(schema, effect))
             continue;
         var present = false;
         for (rows.items) |*row| {
+            try admission.spend(stored.work, 1);
             if (row.role != .resumed or row.effect != effect) continue;
             // A closure's known origin cannot restrict separate captured
             // values whose cleanup may run during disposal or cancellation.
@@ -932,11 +1053,15 @@ fn handlerTargets(
 ) Error!void {
     const handler = stored.image.handlers[@intCast(id)];
     for (stored.image.effects, 0..) |_, effect| {
-        if (contracts.containsEffect(handler.effects, effect)) continue;
+        try admission.spend(stored.work, 1);
+        if (try contracts.containsEffectWithWork(handler.effects, effect, stored.work)) continue;
         var possible = relative.suspensions[@intCast(handler.return_function)][effect] != empty;
-        for (handler.clauses) |clause| possible = possible or relative.suspensions[
-            @intCast(clause.function)
-        ][effect] != empty;
+        for (handler.clauses) |clause| {
+            try admission.spend(stored.work, 1);
+            possible = possible or relative.suspensions[
+                @intCast(clause.function)
+            ][effect] != empty;
+        }
         if (possible) try rows.append(
             stored.allocator,
             .{ .role = .handler, .effect = effect, .targets = null },
@@ -960,15 +1085,14 @@ fn closureTargets(
     const origin_set = values.get(@intCast(slot));
     const origins = flow.origins;
     const image = stored.image;
-    const schema = image.functions[
-        @intCast(image.blocks[block].function)
-    ].layout.slots[
-        @intCast(slot)
-    ];
+    const owner = image.functions[@intCast(image.blocks[block].function)];
+    const schema = owner.layout.slots[@intCast(slot)];
     const signature = try contracts.computation(image, schema);
     for (image.effects, 0..) |_, effect| {
-        var possible = contracts.containsEffect(signature.effects, effect);
+        try admission.spend(stored.work, 1);
+        var possible = try contracts.containsEffectWithWork(signature.effects, effect, stored.work);
         for (image.constructors) |constructor| {
+            try admission.spend(stored.work, 1);
             if (constructor.schema == schema and relative.suspensions[
                 @intCast(constructor.function)
             ][effect] != empty) possible = true;
@@ -995,11 +1119,14 @@ fn closureTargets(
             try rows.append(stored.allocator, .{ .role = role, .effect = effect, .targets = null });
             continue;
         }
-        if (actual == empty and !contracts.containsEffect(signature.effects, effect)) continue;
+        if (actual == empty and
+            !try contracts.containsEffectWithWork(signature.effects, effect, stored.work)) continue;
         var selected: std.ArrayList(Target) = .empty;
-        for (stored.conservative[@intCast(effect)]) |target|
-            if (flow.receives(actual, target.handler))
+        for (stored.conservative[@intCast(effect)]) |target| {
+            try admission.spend(stored.work, 1);
+            if (try flow.receives(actual, target.handler))
                 try selected.append(stored.allocator, target);
+        }
         try rows.append(
             stored.allocator,
             .{
@@ -1030,6 +1157,7 @@ fn closureOrigins(
     var actual: Set = empty;
     var found = false;
     for (image.constructors, 0..) |constructor, id| {
+        try admission.spend(flow.origins.work, 1);
         if (constructor.schema != schema or !origins.contains(
             origin_set,
             .{ .constructor = id },
@@ -1044,6 +1172,7 @@ fn closureOrigins(
             ],
         );
         while (iter.next()) |origin| {
+            try admission.spend(flow.origins.work, 1);
             if (origin == .environmental) {
                 actual = try origins.unite(actual, try origins.one(.environmental));
                 continue;
@@ -1090,12 +1219,17 @@ const empty = set_pool.empty;
 // Disjoint finite ranges retain every origin distinction. Rows hold canonical
 // roots, so copying a slot never copies or allocates its origin membership.
 const Origins = struct {
+    work: ?*u64 = null,
     pool: set_pool.Pool,
     resumptions: u64,
     constructors: u64,
     inputs: u64,
 
-    fn init(allocator: std.mem.Allocator, image: ir.Program) Error!*Origins {
+    fn init(
+        allocator: std.mem.Allocator,
+        image: ir.Program,
+        work: ?*u64,
+    ) Error!*Origins {
         const resumptions = std.math.add(u64, 3, image.handlers.len) catch return error.Capacity;
         const constructors = std.math.add(
             u64,
@@ -1108,11 +1242,15 @@ const Origins = struct {
             image.constructors.len,
         ) catch return error.Capacity;
         var count: usize = 0;
-        for (image.functions) |function| count = @max(count, function.layout.slots.len);
+        for (image.functions) |function| {
+            try admission.spend(work, 1);
+            count = @max(count, function.layout.slots.len);
+        }
         const limit = std.math.add(u64, inputs, count) catch return error.Capacity;
         const self = try allocator.create(Origins);
         self.* = .{
-            .pool = .{ .allocator = allocator, .limit = limit },
+            .pool = .{ .allocator = allocator, .limit = limit, .work = work },
+            .work = work,
             .resumptions = resumptions,
             .constructors = constructors,
             .inputs = inputs,
@@ -1140,12 +1278,14 @@ const Origins = struct {
         return .{ .input = @intCast(id - self.inputs) };
     }
     fn one(self: *Origins, value: Origin) Error!Set {
+        try admission.spend(self.work, 1);
         return self.pool.insert(empty, self.member(value));
     }
     fn contains(self: *const Origins, set: Set, value: Origin) bool {
         return self.pool.contains(set, self.member(value));
     }
     fn unite(self: *Origins, left: Set, right: Set) Error!Set {
+        try admission.spend(self.work, 1);
         return self.pool.unite(left, right);
     }
     const Iterator = struct {
@@ -1159,9 +1299,11 @@ const Origins = struct {
         return .{ .owner = self, .members = self.pool.iterator(set) };
     }
     fn substitute(self: *Origins, summary: Set, arguments: []const p.Id, values: Row) Error!Set {
+        try admission.spend(self.work, 1);
         var result: Set = empty;
         var iter = self.iterator(summary);
         while (iter.next()) |value| {
+            try admission.spend(self.work, 1);
             const source = if (value == .input) values.get(
                 @intCast(arguments[value.input]),
             ) else try self.one(value);
@@ -1279,6 +1421,7 @@ const Row = struct {
         var length: usize = 1;
         var result: View = undefined;
         while (length != 0) {
+            try admission.spend(pool.work, 1);
             const frame = &pending[length - 1];
             switch (frame.phase) {
                 .enter => {
@@ -1470,7 +1613,7 @@ test "position suspension sources distinguish a suffix from its full-block backe
     defer arena.deinit();
     const allocator = arena.allocator();
     const image = PositionDeliveryFixture.image;
-    const origins = try Origins.init(allocator, image);
+    const origins = try Origins.init(allocator, image, null);
     var relative = try Values.init(allocator, image, origins, true);
     try relative.solve();
     const before = try relative.fromPosition(0, 0, false);
@@ -1549,7 +1692,7 @@ test "position suspension sources substitute callee inputs and preserve an await
     defer arena.deinit();
     const allocator = arena.allocator();
     const image = PositionCallDeliveryFixture.image;
-    const origins = try Origins.init(allocator, image);
+    const origins = try Origins.init(allocator, image, null);
     var relative = try Values.init(allocator, image, origins, true);
     try relative.solve();
     try std.testing.expectEqual(
@@ -1570,31 +1713,39 @@ const DisposalExecution = struct {
     fn contains(self: DisposalExecution, schema: p.Id) bool {
         return self.bits[@intCast(schema)];
     }
-    fn any(self: DisposalExecution, schemas: []const p.Id) bool {
+    fn any(self: DisposalExecution, schemas: []const p.Id, work: ?*u64) Error!bool {
+        try admission.spend(work, schemas.len);
         for (schemas) |schema| if (self.contains(schema)) return true;
         return false;
     }
-    fn derive(allocator: std.mem.Allocator, image: ir.Program) Error!DisposalExecution {
+    fn derive(
+        allocator: std.mem.Allocator,
+        image: ir.Program,
+        work: ?*u64,
+    ) Error!DisposalExecution {
+        try admission.spend(work, image.schemas.len);
         const result: DisposalExecution = .{ .bits = try allocator.alloc(bool, image.schemas.len) };
         @memset(result.bits, false);
         var changed = true;
         while (changed) {
+            try admission.spend(work, 1);
             changed = false;
             for (image.schemas, 0..) |schema, id| {
+                try admission.spend(work, 1);
                 if (result.bits[id]) continue;
                 const present = switch (schema) {
-                    .product, .sum => |fields| result.any(fields),
+                    .product, .sum => |fields| try result.any(fields, work),
                     .seq => |element| result.contains(element),
                     inline .vector, .array => |value| result.contains(value.element),
                     .internal => |internal| switch (internal) {
-                        .computation => |value| result.any(value.capture_bound),
+                        .computation => |value| try result.any(value.capture_bound, work),
                         .suspension_package => |token| result.contains(token),
                         // Admission requires this bit whenever a capture retains
                         // protection. Other owned captured values recurse even
                         // without a directly retained protection frame.
                         .resumption => |value| value.use != .multi and
                             (value.obligations or
-                                result.any(value.capture_bound)),
+                                try result.any(value.capture_bound, work)),
                         .capability, .cell, .region, .abstract_resource, .borrowed => false,
                     },
                     .unit,
@@ -1630,137 +1781,202 @@ const DisposalEffects = struct {
     fn contains(self: DisposalEffects, schema: p.Id, effect: usize) bool {
         return self.bits[@as(usize, @intCast(schema)) * self.width + effect];
     }
-    fn any(self: DisposalEffects, schemas: []const p.Id, effect: usize) bool {
+    fn any(
+        self: DisposalEffects,
+        schemas: []const p.Id,
+        effect: usize,
+        work: ?*u64,
+    ) Error!bool {
+        try admission.spend(work, schemas.len);
         for (schemas) |schema| if (self.contains(schema, effect)) return true;
         return false;
     }
-    fn derive(allocator: std.mem.Allocator, image: ir.Program) Error!DisposalEffects {
+    fn derive(
+        allocator: std.mem.Allocator,
+        image: ir.Program,
+        work: ?*u64,
+    ) Error!DisposalEffects {
         // First overapproximate every nested disposal. Local discharge must be
         // proved against that relation, never against its own masked result.
-        const unmasked = try solve(allocator, image, null);
+        const unmasked = try solve(allocator, image, null, work);
+        try admission.spend(work, unmasked.bits.len);
         const local = try allocator.alloc(bool, unmasked.bits.len);
         @memset(local, true);
+        try admission.spend(work, image.schemas.len);
         const produced = try allocator.alloc(bool, image.schemas.len);
         @memset(produced, false);
-        const scope = try @import("effect_scope.zig").derive(allocator, image);
-        for (image.functions) |function| if (function.entry == @import("relocation.zig").missing)
-            @memset(local, false);
-        for (image.blocks) |block|
+        const scope = try @import("effect_scope.zig").deriveComponentWithWork(
+            allocator,
+            image,
+            &.{},
+            work,
+        );
+        for (image.functions) |function| {
+            try admission.spend(work, 1);
+            if (function.entry == @import("relocation.zig").missing)
+                @memset(local, false);
+        }
+        for (image.blocks) |block| {
+            try admission.spend(work, 1);
             switch (block.terminator) {
-                .handle => |handle| {
-                    const handler = image.handlers[@intCast(handle.handler)];
-                    const slots = image.functions[@intCast(block.function)].layout.slots;
-                    const body = try contracts.computation(image, slots[@intCast(handle.body)]);
-                    for (handler.clauses) |clause| {
-                        produced[@intCast(clause.resumption)] = true;
-                        for (image.effects, 0..) |_, effect| {
-                            var confined = @import("effect_scope.zig").discharged(
-                                image,
-                                scope,
-                                handler,
-                                body,
-                                effect,
-                            );
-                            for (body.capture_bound) |schema|
-                                confined = confined and
-                                    !unmasked.contains(schema, effect);
-                            for (body.parameters[handler.clauses.len..]) |schema|
-                                confined = confined and
-                                    !unmasked.contains(schema, effect);
-                            for (handler.state) |schema| confined = confined and !scope.contains(
-                                schema,
-                                effect,
-                            ) and !unmasked.contains(schema, effect);
-                            local[
-                                @as(usize, @intCast(clause.resumption)) * unmasked.width + effect
-                            ] =
-                                local[
-                                    @as(
-                                        usize,
-                                        @intCast(clause.resumption),
-                                    ) * unmasked.width + effect
-                                ] and confined;
-                        }
-                    }
-                },
+                .handle => try localHandler(
+                    image,
+                    block,
+                    scope,
+                    unmasked,
+                    local,
+                    produced,
+                    work,
+                ),
                 // A successor receives an existing capture, not a fresh body's
                 // correlated capability parameters.
                 .resume_with => |resume_| for (image.handlers[
                     @intCast(resume_.handler)
                 ].clauses) |clause| {
+                    try admission.spend(work, 1);
                     for (
                         image.effects,
                         0..,
-                    ) |_, effect| local[
-                        @as(usize, @intCast(clause.resumption)) * unmasked.width + effect
-                    ] = false;
+                    ) |_, effect| {
+                        try admission.spend(work, 1);
+                        local[
+                            @as(usize, @intCast(clause.resumption)) * unmasked.width + effect
+                        ] = false;
+                    }
                 },
                 else => {},
-            };
-        for (produced, 0..) |known, schema| if (!known) {
-            for (image.effects, 0..) |_, effect| local[schema * unmasked.width + effect] = false;
-        };
-        return solve(allocator, image, local);
+            }
+        }
+        for (produced, 0..) |known, schema| {
+            try admission.spend(work, 1);
+            if (!known) {
+                for (image.effects, 0..) |_, effect| {
+                    try admission.spend(work, 1);
+                    local[schema * unmasked.width + effect] = false;
+                }
+            }
+        }
+        return solve(allocator, image, local, work);
+    }
+    fn localHandler(
+        image: ir.Program,
+        block: ir.Block,
+        scope: @import("effect_scope.zig").Facts,
+        unmasked: DisposalEffects,
+        local: []bool,
+        produced: []bool,
+        work: ?*u64,
+    ) Error!void {
+        const handle = block.terminator.handle;
+        const handler = image.handlers[@intCast(handle.handler)];
+        const slots = image.functions[@intCast(block.function)].layout.slots;
+        const body = try contracts.computation(image, slots[@intCast(handle.body)]);
+        for (handler.clauses) |clause| {
+            try admission.spend(work, 1);
+            produced[@intCast(clause.resumption)] = true;
+            for (image.effects, 0..) |_, effect| {
+                try admission.spend(work, 1);
+                var confined = try @import("effect_scope.zig").dischargedWithWork(
+                    image,
+                    scope,
+                    handler,
+                    body,
+                    effect,
+                    work,
+                );
+                for (body.capture_bound) |schema| {
+                    try admission.spend(work, 1);
+                    confined = confined and
+                        !unmasked.contains(schema, effect);
+                }
+                for (body.parameters[handler.clauses.len..]) |schema| {
+                    try admission.spend(work, 1);
+                    confined = confined and
+                        !unmasked.contains(schema, effect);
+                }
+                for (handler.state) |schema| {
+                    try admission.spend(work, 1);
+                    confined = confined and !scope.contains(
+                        schema,
+                        effect,
+                    ) and !unmasked.contains(schema, effect);
+                }
+                local[
+                    @as(usize, @intCast(clause.resumption)) * unmasked.width + effect
+                ] =
+                    local[
+                        @as(
+                            usize,
+                            @intCast(clause.resumption),
+                        ) * unmasked.width + effect
+                    ] and confined;
+            }
+        }
     }
     fn solve(
         allocator: std.mem.Allocator,
         image: ir.Program,
         local: ?[]const bool,
+        work: ?*u64,
     ) Error!DisposalEffects {
+        const length = std.math.mul(usize, image.schemas.len, image.effects.len) catch
+            return error.Capacity;
+        try admission.spend(work, length);
         const result: DisposalEffects = .{
-            .bits = try allocator.alloc(
-                bool,
-                std.math.mul(
-                    usize,
-                    image.schemas.len,
-                    image.effects.len,
-                ) catch return error.Capacity,
-            ),
+            .bits = try allocator.alloc(bool, length),
             .width = image.effects.len,
         };
         @memset(result.bits, false);
         var changed = true;
         while (changed) {
+            try admission.spend(work, 1);
             changed = false;
-            for (image.schemas, 0..) |schema, id| for (image.effects, 0..) |_, effect| {
-                const index = id * result.width + effect;
-                if (result.bits[index]) continue;
-                const present = switch (schema) {
-                    .product, .sum => |fields| result.any(fields, effect),
-                    .seq => |element| result.contains(element, effect),
-                    .vector => |v| result.contains(v.element, effect),
-                    .array => |v| result.contains(v.element, effect),
-                    .internal => |internal| switch (internal) {
-                        .computation => |v| result.any(v.capture_bound, effect),
-                        .suspension_package => |v| result.contains(v, effect),
-                        .resumption => |v| blk: {
-                            if (v.use == .multi) break :blk false;
-                            const escapes = !contracts.containsEffect(
-                                v.handled,
-                                effect,
-                            ) or contracts.containsEffect(v.escaping, effect);
-                            // A deep token lists same-family effects only when
-                            // they can select outside its own delimiter. Shallow
-                            // rows also list local effects, so require escaping.
-                            // A nested token retains its own recipient. Mask it
-                            // only when every producer proves confinement to the
-                            // fresh delimiter, including its owned inputs.
-                            const confined = if (local) |facts| facts[index] else false;
-                            break :blk (contracts.containsEffect(
-                                v.effects,
-                                effect,
-                            ) and (v.mode == .deep or escapes)) or
-                                ((!confined or escapes) and result.any(v.capture_bound, effect));
+            for (image.schemas, 0..) |schema, id| {
+                try admission.spend(work, 1);
+                for (image.effects, 0..) |_, effect| {
+                    try admission.spend(work, 1);
+                    const index = id * result.width + effect;
+                    if (result.bits[index]) continue;
+                    const present = switch (schema) {
+                        .product, .sum => |fields| try result.any(fields, effect, work),
+                        .seq => |element| result.contains(element, effect),
+                        .vector => |v| result.contains(v.element, effect),
+                        .array => |v| result.contains(v.element, effect),
+                        .internal => |internal| switch (internal) {
+                            .computation => |v| try result.any(v.capture_bound, effect, work),
+                            .suspension_package => |v| result.contains(v, effect),
+                            .resumption => |v| blk: {
+                                if (v.use == .multi) break :blk false;
+                                const escapes = !try contracts.containsEffectWithWork(
+                                    v.handled,
+                                    effect,
+                                    work,
+                                ) or try contracts.containsEffectWithWork(v.escaping, effect, work);
+                                // A deep token lists same-family effects only when
+                                // they can select outside its own delimiter. Shallow
+                                // rows also list local effects, so require escaping.
+                                // A nested token retains its own recipient. Mask it
+                                // only when every producer proves confinement to the
+                                // fresh delimiter, including its owned inputs.
+                                const confined = if (local) |facts| facts[index] else false;
+                                break :blk (try contracts.containsEffectWithWork(
+                                    v.effects,
+                                    effect,
+                                    work,
+                                ) and (v.mode == .deep or escapes)) or
+                                    ((!confined or escapes) and
+                                        try result.any(v.capture_bound, effect, work));
+                            },
+                            .capability, .cell, .region, .abstract_resource, .borrowed => false,
                         },
-                        .capability, .cell, .region, .abstract_resource, .borrowed => false,
-                    },
-                    else => false,
-                };
-                if (present) {
-                    result.bits[index] = true;
-                    changed = true;
+                        else => false,
+                    };
+                    if (present) {
+                        result.bits[index] = true;
+                        changed = true;
+                    }
                 }
-            };
+            }
         }
         return result;
     }
@@ -1792,11 +2008,15 @@ const Values = struct {
         position: usize,
         returned: bool,
     ) Error!PositionQuery {
+        try admission.spend(self.origins.work, 1);
         const code = self.image.blocks[@intCast(start)];
         var reader = self.*;
+        try admission.spend(self.origins.work, self.image.blocks.len);
+        try admission.spend(self.origins.work, self.image.effects.len);
         reader.entries = try self.allocator.alloc(Row, self.image.blocks.len);
         reader.exits = try self.allocator.alloc(Row, self.image.blocks.len);
         for (self.image.blocks, reader.entries, reader.exits) |block, *entry_row, *exit_row| {
+            try admission.spend(self.origins.work, 1);
             entry_row.* = .{
                 .len = self.image.functions[
                     @intCast(block.function)
@@ -1806,16 +2026,15 @@ const Values = struct {
         }
         var query: PositionQuery = .{
             .reachable = try self.allocator.alloc(bool, self.image.blocks.len),
-            .suspensions = try sets(self.allocator, self.image.effects.len),
+            .suspensions = try sets(self.allocator, self.image.effects.len, self.origins.work),
         };
         @memset(query.reachable, false);
         reader.position_query = &query;
         var seed: Row = .{ .len = self.image.functions[@intCast(code.function)].layout.slots.len };
-        for (0..seed.len) |slot| try seed.set(
-            self.allocator,
-            slot,
-            try self.origins.one(.{ .input = slot }),
-        );
+        for (0..seed.len) |slot| {
+            try admission.spend(self.origins.work, 1);
+            try seed.set(self.allocator, slot, try self.origins.one(.{ .input = slot }));
+        }
         if (returned) {
             reader.exits[@intCast(start)] = seed;
             switch (code.terminator) {
@@ -1844,16 +2063,25 @@ const Values = struct {
         }
         // The initial suffix is distinct from a later backedge to its block:
         // a loop executes that block's full instruction sequence.
-        reader.changed = true;
-        while (reader.changed) {
-            reader.changed = false;
-            for (self.image.blocks, 0..) |block, id| if (query.reachable[id])
-                try reader.transferBlock(id, block);
-        }
+        try reader.convergePosition(query.reachable);
         return query;
     }
 
-    fn sets(a: std.mem.Allocator, count: usize) Error![]Set {
+    fn convergePosition(self: *Values, reachable: []const bool) Error!void {
+        self.changed = true;
+        while (self.changed) {
+            try admission.spend(self.origins.work, 1);
+            self.changed = false;
+            for (self.image.blocks, 0..) |block, id| {
+                try admission.spend(self.origins.work, 1);
+                if (reachable[id])
+                    try self.transferBlock(id, block);
+            }
+        }
+    }
+
+    fn sets(a: std.mem.Allocator, count: usize, work: ?*u64) Error![]Set {
+        try admission.spend(work, count);
         const result = try a.alloc(Set, count);
         @memset(result, empty);
         return result;
@@ -1864,43 +2092,54 @@ const Values = struct {
         origins: *Origins,
         relative: bool,
     ) Error!Values {
+        try admission.spend(origins.work, image.blocks.len);
+        try admission.spend(origins.work, image.functions.len);
         var self: Values = .{
             .allocator = a,
             .origins = origins,
             .image = image,
             .entries = try a.alloc(Row, image.blocks.len),
             .exits = try a.alloc(Row, image.blocks.len),
-            .returns = try sets(a, image.functions.len),
+            .returns = try sets(a, image.functions.len, origins.work),
             .captures = try a.alloc([]Set, image.constructors.len),
             .bindings = try a.alloc([]bool, image.handlers.len),
             .relative = relative,
             .suspensions = try a.alloc([]Set, if (relative) image.functions.len else 0),
         };
         for (self.bindings, 0..) |*row, id| {
+            try admission.spend(origins.work, 1);
+            try admission.spend(origins.work, image.handlers.len);
             row.* = try a.alloc(bool, image.handlers.len);
             @memset(row.*, false);
             row.*[id] = true;
         }
         for (image.blocks, 0..) |block, id| {
+            try admission.spend(origins.work, 1);
             const count = image.functions[@intCast(block.function)].layout.slots.len;
             self.entries[id] = .{ .len = count };
             self.exits[id] = .{ .len = count };
         }
-        for (image.constructors, 0..) |constructor, id|
+        for (image.constructors, 0..) |constructor, id| {
+            try admission.spend(origins.work, 1);
             self.captures[id] = try sets(
                 a,
                 image.scopes.captures[@intCast(constructor.capture)].fields.len,
+                origins.work,
             );
+        }
         if (relative) {
             try self.initRelative();
             return self;
         }
         try self.unknownInputs(image.roots.entry);
         for (image.handlers, 0..) |handler, handler_id| {
+            try admission.spend(origins.work, 1);
             try self.unknownInputs(handler.return_function);
             for (handler.clauses) |clause| {
+                try admission.spend(origins.work, 1);
                 const function = image.functions[@intCast(clause.function)];
                 for (function.inputs, 0..) |_, index| {
+                    try admission.spend(origins.work, 1);
                     if (contracts.retainsResumption(clause) and index == function.inputs.len - 1) {
                         try self.input(
                             clause.function,
@@ -1914,32 +2153,43 @@ const Values = struct {
         return self;
     }
     fn initRelative(self: *Values) Error!void {
+        try admission.spend(self.origins.work, 1);
         const a = self.allocator;
         const image = self.image;
         const origins = self.origins;
-        const disposal = try DisposalEffects.derive(a, image);
+        const disposal = try DisposalEffects.derive(a, image, self.origins.work);
         self.disposal = disposal;
         for (image.functions, 0..) |function, id| {
-            self.suspensions[id] = try sets(a, image.effects.len);
+            try admission.spend(self.origins.work, 1);
+            try admission.spend(self.origins.work, image.effects.len);
+            self.suspensions[id] = try sets(a, image.effects.len, self.origins.work);
             // Cancellation can discard an owned slot at any execution
             // position. This also covers authored failure and instruction
             // faults without treating a normal terminator as a proof that
             // captured cleanup cannot run. Position queries use concrete
             // state custody separately and do not inherit this whole-layout
             // approximation for their own activation.
-            for (function.layout.slots) |schema| for (image.effects, 0..) |_, effect| {
-                if (disposal.contains(
-                    schema,
-                    effect,
-                )) self.suspensions[id][effect] = try origins.one(.unknown);
-            };
+            for (function.layout.slots) |schema| {
+                try admission.spend(self.origins.work, 1);
+                for (image.effects, 0..) |_, effect| {
+                    try admission.spend(self.origins.work, 1);
+                    if (disposal.contains(
+                        schema,
+                        effect,
+                    )) self.suspensions[id][effect] = try origins.one(.unknown);
+                }
+            }
             for (
                 function.inputs,
                 0..,
-            ) |_, index| try self.input(id, index, try origins.one(.{ .input = index }));
+            ) |_, index| {
+                try admission.spend(self.origins.work, 1);
+                try self.input(id, index, try origins.one(.{ .input = index }));
+            }
         }
     }
     fn join(self: *Values, into: *Set, source: Set) Error!void {
+        try admission.spend(self.origins.work, 1);
         const merged = try self.origins.unite(into.*, source);
         if (merged != into.*) {
             into.* = merged;
@@ -1947,6 +2197,7 @@ const Values = struct {
         }
     }
     fn joinSlot(self: *Values, row: *Row, slot: usize, source: Set) Error!void {
+        try admission.spend(self.origins.work, 1);
         const original = row.get(slot);
         const merged = try self.origins.unite(original, source);
         if (merged != original) {
@@ -1955,24 +2206,32 @@ const Values = struct {
         }
     }
     fn input(self: *Values, function: p.Id, index: usize, value: Set) Error!void {
+        try admission.spend(self.origins.work, 1);
         const f = self.image.functions[@intCast(function)];
         if (f.entry == @import("relocation.zig").missing) return;
         try self.joinSlot(&self.entries[@intCast(f.entry)], @intCast(f.inputs[index]), value);
     }
     fn unknownInputs(self: *Values, function: p.Id) Error!void {
+        try admission.spend(self.origins.work, 1);
         for (
             self.image.functions[@intCast(function)].inputs,
             0..,
-        ) |_, index| try self.input(function, index, try self.origins.one(.unknown));
+        ) |_, index| {
+            try admission.spend(self.origins.work, 1);
+            try self.input(function, index, try self.origins.one(.unknown));
+        }
     }
     fn solve(self: *Values) Error!void {
+        try admission.spend(self.origins.work, 1);
         try self.converge();
         if (self.relative) return;
         // A declaration without a witnessed binding is not an empty-target
         // proof. Its inputs remain independently checkable under unknown values.
         for (self.image.functions, 0..) |function, id| {
+            try admission.spend(self.origins.work, 1);
             if (function.entry == @import("relocation.zig").missing) continue;
             for (function.inputs, 0..) |slot, index| {
+                try admission.spend(self.origins.work, 1);
                 if (self.entries[@intCast(function.entry)].get(@intCast(slot)) == empty) {
                     const unknown = try self.origins.one(.unknown);
                     try self.input(id, index, unknown);
@@ -1992,11 +2251,14 @@ const Values = struct {
     // it. This is a may-rebind relation, never a strong update of an allocation
     // site. Distinct branch views can therefore keep independent handlers.
     fn deriveBindings(self: *Values) Error!void {
+        try admission.spend(self.origins.work, 1);
         for (self.image.blocks, 0..) |block, id| {
+            try admission.spend(self.origins.work, 1);
             if (block.terminator != .resume_with) continue;
             const operation = block.terminator.resume_with;
             const origins = self.exits[id].get(@intCast(operation.resumption));
             for (self.bindings, 0..) |row, handler_id| {
+                try admission.spend(self.origins.work, 1);
                 if (origins == empty or self.origins.contains(
                     origins,
                     .unknown,
@@ -2006,14 +2268,25 @@ const Values = struct {
         }
         // Finite transitive closure: a successor can capture a new token that
         // is itself resumed with another successor. No branch/path IDs grow.
-        for (0..self.bindings.len) |via| for (self.bindings) |row| {
-            if (row[via]) for (self.bindings[via], 0..) |reachable, destination| {
-                row[destination] = row[destination] or reachable;
-            };
-        };
+        for (0..self.bindings.len) |via| {
+            try admission.spend(self.origins.work, 1);
+            for (self.bindings) |row| {
+                try admission.spend(self.origins.work, 1);
+                if (row[via]) {
+                    for (self.bindings[via], 0..) |reachable, destination| {
+                        try admission.spend(self.origins.work, 1);
+                        row[destination] = row[destination] or reachable;
+                    }
+                }
+            }
+        }
     }
-    fn receives(self: *const Values, origins: Set, handler: p.Id) bool {
+    fn receives(self: *const Values, origins: Set, handler: p.Id) Error!bool {
         var iter = self.origins.iterator(origins);
+        try admission.spend(
+            self.origins.work,
+            self.origins.pool.count(origins),
+        );
         while (iter.next()) |origin| if (origin == .handler and self.bindings[
             @intCast(origin.handler)
         ][
@@ -2022,10 +2295,15 @@ const Values = struct {
         return false;
     }
     fn converge(self: *Values) Error!void {
+        try admission.spend(self.origins.work, 1);
         self.changed = true;
         while (self.changed) {
+            try admission.spend(self.origins.work, 1);
             self.changed = false;
-            for (self.image.blocks, 0..) |block, id| try self.transferBlock(id, block);
+            for (self.image.blocks, 0..) |block, id| {
+                try admission.spend(self.origins.work, 1);
+                try self.transferBlock(id, block);
+            }
         }
     }
     fn body(
@@ -2036,6 +2314,7 @@ const Values = struct {
         supplied: usize,
         handler: ?p.Id,
     ) Error!void {
+        try admission.spend(self.origins.work, 1);
         if (self.relative) return;
         const values = self.exits[block_id];
         const origin_set = values.get(@intCast(slot));
@@ -2045,19 +2324,24 @@ const Values = struct {
             @intCast(slot)
         ];
         for (self.image.constructors, 0..) |constructor, id| {
+            try admission.spend(self.origins.work, 1);
             if (constructor.schema != schema) continue;
             const uncertain = self.origins.contains(origin_set, .unknown);
             if (!self.origins.contains(origin_set, .{ .constructor = id }) and !uncertain) continue;
             for (
                 self.captures[id],
                 0..,
-            ) |capture, index| try self.input(
-                constructor.function,
-                index,
-                if (uncertain) try self.origins.one(.unknown) else capture,
-            );
+            ) |capture, index| {
+                try admission.spend(self.origins.work, 1);
+                try self.input(
+                    constructor.function,
+                    index,
+                    if (uncertain) try self.origins.one(.unknown) else capture,
+                );
+            }
             const prefix = self.captures[id].len;
             for (0..supplied) |index| {
+                try admission.spend(self.origins.work, 1);
                 const fresh = try self.origins.one(
                     if (handler) |h| .{ .handler = h } else .unknown,
                 );
@@ -2066,11 +2350,14 @@ const Values = struct {
             for (
                 arguments,
                 0..,
-            ) |argument, index| try self.input(
-                constructor.function,
-                prefix + supplied + index,
-                values.get(@intCast(argument)),
-            );
+            ) |argument, index| {
+                try admission.spend(self.origins.work, 1);
+                try self.input(
+                    constructor.function,
+                    prefix + supplied + index,
+                    values.get(@intCast(argument)),
+                );
+            }
         }
     }
 
@@ -2081,24 +2368,33 @@ const Values = struct {
         returned: Set,
         unpack: ?ir.Terminator,
     ) Error!void {
+        try admission.spend(self.origins.work, 1);
         if (self.position_query) |query| if (!query.reachable[@intCast(next.block)]) {
             query.reachable[@intCast(next.block)] = true;
             self.changed = true;
         };
         const source = self.exits[id];
         var incoming = source;
-        if (unpack) |term| switch (term) {
-            .unpack_product => |v| for (v.destinations) |destination| {
-                try incoming.set(
-                    self.allocator,
-                    @intCast(destination),
-                    source.get(@intCast(v.value)),
-                );
-            },
-            else => {},
-        };
+        if (unpack) |term| {
+            switch (term) {
+                .unpack_product => |v| for (v.destinations) |destination| {
+                    try admission.spend(self.origins.work, 1);
+                    try incoming.set(
+                        self.allocator,
+                        @intCast(destination),
+                        source.get(@intCast(v.value)),
+                    );
+                },
+                else => {},
+            }
+        }
         // Every assignment reads the same predecessor, including permutations.
         for (next.assignments) |assignment| {
+            try admission.spend(self.origins.work, 1);
+            if (unpack) |term| try admission.spend(
+                self.origins.work,
+                term.unpack_product.destinations.len,
+            );
             const value = switch (assignment.source) {
                 .slot => |from| if (unpack != null and std.mem.indexOfScalar(
                     p.Id,
@@ -2120,12 +2416,15 @@ const Values = struct {
         block_id: usize,
         position: usize,
     ) Error!Row {
+        try admission.spend(self.origins.work, 1);
         var reader = self.*;
         reader.allocator = allocator;
         var row: Row = .{ .len = self.entries[block_id].len };
         row.copyFrom(self.entries[block_id]);
-        for (self.image.blocks[block_id].instructions[0..position]) |instruction|
+        for (self.image.blocks[block_id].instructions[0..position]) |instruction| {
+            try admission.spend(self.origins.work, 1);
             try reader.transferInstruction(&row, instruction, false);
+        }
         return row;
     }
     fn transferInstruction(
@@ -2134,19 +2433,25 @@ const Values = struct {
         instruction: ir.Instruction,
         record_captures: bool,
     ) Error!void {
+        try admission.spend(self.origins.work, 1);
         var result: Set = empty;
         switch (instruction.opcode) {
             .computation => {
                 if (self.relative) {
                     result = try self.origins.one(.unknown);
                 } else {
-                    if (record_captures) for (
-                        instruction.operands,
-                        0..,
-                    ) |operand, index| try self.join(
-                        &self.captures[@intCast(instruction.immediate)][index],
-                        values.get(@intCast(operand)),
-                    );
+                    if (record_captures) {
+                        for (
+                            instruction.operands,
+                            0..,
+                        ) |operand, index| {
+                            try admission.spend(self.origins.work, 1);
+                            try self.join(
+                                &self.captures[@intCast(instruction.immediate)][index],
+                                values.get(@intCast(operand)),
+                            );
+                        }
+                    }
                     result = try self.origins.one(.{ .constructor = instruction.immediate });
                 }
             },
@@ -2169,12 +2474,16 @@ const Values = struct {
             .package,
             .unpack,
             => {
-                for (instruction.operands) |operand| result = try self.origins.unite(
-                    result,
-                    values.get(@intCast(operand)),
-                );
+                for (instruction.operands) |operand| {
+                    try admission.spend(self.origins.work, 1);
+                    result = try self.origins.unite(
+                        result,
+                        values.get(@intCast(operand)),
+                    );
+                }
             },
             .select => for (instruction.operands[1..]) |operand| {
+                try admission.spend(self.origins.work, 1);
                 result = try self.origins.unite(result, values.get(@intCast(operand)));
             },
             // Cells and opaque representations deliberately lose precision.
@@ -2184,30 +2493,48 @@ const Values = struct {
         try values.set(self.allocator, @intCast(instruction.destination), result);
     }
     fn transferBlock(self: *Values, id: usize, block_value: ir.Block) Error!void {
+        try admission.spend(self.origins.work, 1);
         return self.transferBlockFrom(id, block_value, self.entries[id]);
     }
     fn implicitCallable(self: *Values, summary: []Set, schema: p.Id) Error!void {
+        try admission.spend(self.origins.work, 1);
         const signature = try contracts.computation(self.image, schema);
         for (self.image.constructors) |constructor| {
+            try admission.spend(self.origins.work, 1);
             if (constructor.schema != schema) continue;
             for (self.suspensions[@intCast(constructor.function)], 0..) |targets_, effect| {
-                if (targets_ != empty and !contracts.containsEffect(signature.effects, effect))
+                try admission.spend(self.origins.work, 1);
+                if (targets_ != empty and !try contracts.containsEffectWithWork(
+                    signature.effects,
+                    effect,
+                    self.origins.work,
+                ))
                     try self.join(&summary[effect], try self.origins.one(.unknown));
             }
         }
     }
     fn implicitHandler(self: *Values, summary: []Set, id: p.Id) Error!void {
+        try admission.spend(self.origins.work, 1);
         const handler = self.image.handlers[@intCast(id)];
         for (self.image.effects, 0..) |_, effect| {
-            if (contracts.containsEffect(handler.effects, effect)) continue;
+            try admission.spend(self.origins.work, 1);
+            if (try contracts.containsEffectWithWork(
+                handler.effects,
+                effect,
+                self.origins.work,
+            )) continue;
             var possible = self.suspensions[@intCast(handler.return_function)][effect] != empty;
-            for (handler.clauses) |clause| possible = possible or self.suspensions[
-                @intCast(clause.function)
-            ][effect] != empty;
+            for (handler.clauses) |clause| {
+                try admission.spend(self.origins.work, 1);
+                possible = possible or self.suspensions[
+                    @intCast(clause.function)
+                ][effect] != empty;
+            }
             if (possible) try self.join(&summary[effect], try self.origins.one(.unknown));
         }
     }
     fn transferTermInputs(self: *Values, id: usize, block_value: ir.Block) Error!void {
+        try admission.spend(self.origins.work, 1);
         const values = &self.exits[id];
         const term = block_value.terminator;
         switch (term) {
@@ -2221,7 +2548,10 @@ const Values = struct {
                 for (
                     v.arguments,
                     0..,
-                ) |slot, index| try self.input(v.function, index, values.get(@intCast(slot)));
+                ) |slot, index| {
+                    try admission.spend(self.origins.work, 1);
+                    try self.input(v.function, index, values.get(@intCast(slot)));
+                }
             },
             .apply => |v| try self.body(id, v.computation, v.arguments, 0, null),
             .handle => |v| try self.body(
@@ -2243,11 +2573,15 @@ const Values = struct {
                 );
             },
             .resume_computation => |v| try self.transferSuppliedBody(id, v.computation),
-            .perform => |v| for (v.bodies) |slot| try self.transferSuppliedBody(id, slot),
+            .perform => |v| for (v.bodies) |slot| {
+                try admission.spend(self.origins.work, 1);
+                try self.transferSuppliedBody(id, slot);
+            },
             else => {},
         }
     }
     fn transferSuppliedBody(self: *Values, id: usize, slot: p.Id) Error!void {
+        try admission.spend(self.origins.work, 1);
         const block = self.image.blocks[id];
         const schema = self.image.functions[@intCast(block.function)].layout.slots[@intCast(slot)];
         try self.body(
@@ -2259,6 +2593,7 @@ const Values = struct {
         );
     }
     fn transferSuspensions(self: *Values, block_value: ir.Block, values: Row) Error!void {
+        try admission.spend(self.origins.work, 1);
         const term = block_value.terminator;
         const summary = if (self.position_query) |query|
             query.suspensions
@@ -2276,12 +2611,16 @@ const Values = struct {
                 );
                 for (self.image.effects[
                     @intCast(v.effect)
-                ].use_site_effects) |effect| try self.join(
-                    &summary[@intCast(effect)],
-                    try self.origins.one(.unknown),
-                );
+                ].use_site_effects) |effect| {
+                    try admission.spend(self.origins.work, 1);
+                    try self.join(
+                        &summary[@intCast(effect)],
+                        try self.origins.one(.unknown),
+                    );
+                }
             },
             .call => |v| for (self.image.effects, 0..) |_, effect| {
+                try admission.spend(self.origins.work, 1);
                 const targets = try self.origins.substitute(
                     self.suspensions[@intCast(v.function)][@intCast(effect)],
                     v.arguments,
@@ -2300,6 +2639,7 @@ const Values = struct {
             else => for (self.image.functions[
                 @intCast(block_value.function)
             ].effects) |effect| {
+                try admission.spend(self.origins.work, 1);
                 try self.join(&summary[@intCast(effect)], try self.origins.one(.unknown));
             },
         }
@@ -2310,6 +2650,7 @@ const Values = struct {
         block_value: ir.Block,
         summary: []Set,
     ) Error!void {
+        try admission.spend(self.origins.work, 1);
         const term = block_value.terminator;
         const slots = self.image.functions[@intCast(block_value.function)].layout.slots;
         switch (term) {
@@ -2328,10 +2669,13 @@ const Values = struct {
                 summary,
                 slots[@intCast(v.computation)],
             ),
-            .perform => |v| for (v.bodies) |slot| try self.implicitCallable(
-                summary,
-                slots[@intCast(slot)],
-            ),
+            .perform => |v| for (v.bodies) |slot| {
+                try admission.spend(self.origins.work, 1);
+                try self.implicitCallable(
+                    summary,
+                    slots[@intCast(slot)],
+                );
+            },
             else => {},
         }
     }
@@ -2341,16 +2685,20 @@ const Values = struct {
         block_value: ir.Block,
         entry_row: Row,
     ) Error!void {
+        try admission.spend(self.origins.work, 1);
         const values = &self.exits[id];
         // Re-evaluate this straight-line transfer from its monotone entry. Exit
         // rows are retained between rounds, but each instruction is a strong
         // assignment within this one activation view.
         values.copyFrom(entry_row);
-        for (block_value.instructions) |operation| try self.transferInstruction(
-            values,
-            operation,
-            true,
-        );
+        for (block_value.instructions) |operation| {
+            try admission.spend(self.origins.work, 1);
+            try self.transferInstruction(
+                values,
+                operation,
+                true,
+            );
+        }
         const term = block_value.terminator;
         try self.transferTermInputs(id, block_value);
         const returned: Set = if (term == .call)
@@ -2369,6 +2717,7 @@ const Values = struct {
                 try self.edge(id, v.when_false, returned, null);
             },
             .switch_variant => |v| for (v.cases) |next| {
+                try admission.spend(self.origins.work, 1);
                 try self.edge(id, next, returned, null);
             },
             .unpack_product => |v| try self.edge(id, v.next, returned, term),
@@ -2410,11 +2759,14 @@ const ExplanationBuilder = struct {
     const List = std.ArrayList(usize);
 
     fn add(self: *ExplanationBuilder, reason: Explanation.Reason) Error!usize {
+        try admission.spend(self.stored.work, 1);
         const id = self.reasons.items.len;
         try self.reasons.append(self.stored.allocator, reason);
         return id;
     }
     fn push(self: *ExplanationBuilder, list: *List, id: usize) Error!void {
+        try admission.spend(self.stored.work, 1);
+        try admission.spend(self.stored.work, list.items.len);
         if (std.mem.indexOfScalar(usize, list.items, id) == null)
             try list.append(self.stored.allocator, id);
     }
@@ -2425,15 +2777,20 @@ const ExplanationBuilder = struct {
         location: Explanation.Location,
         approximation: bool,
     ) Error!void {
+        try admission.spend(self.stored.work, 1);
         try self.push(
             list,
             try self.add(.{ .rule = rule, .location = location, .approximation = approximation }),
         );
     }
     fn members(self: *ExplanationBuilder, set: Set) Error![]const Origin {
+        try admission.spend(self.stored.work, 1);
         var result: std.ArrayList(Origin) = .empty;
         var iterator = self.stored.values.?.origins.iterator(set);
-        while (iterator.next()) |origin| try result.append(self.stored.allocator, origin);
+        while (iterator.next()) |origin| {
+            try admission.spend(self.stored.work, 1);
+            try result.append(self.stored.allocator, origin);
+        }
         return result.items;
     }
     fn slot(
@@ -2443,6 +2800,7 @@ const ExplanationBuilder = struct {
         position: usize,
         value: p.Id,
     ) Error!usize {
+        try admission.spend(self.stored.work, 1);
         return self.fact(.{
             .kind = .slot,
             .relative = relative,
@@ -2452,62 +2810,106 @@ const ExplanationBuilder = struct {
         });
     }
     fn fact(self: *ExplanationBuilder, key: Key) Error!usize {
+        try admission.spend(self.stored.work, 1);
         if (self.memo.get(key)) |existing| return existing;
         const id = try self.add(.{ .rule = .summary_dependency });
         try self.memo.put(self.stored.allocator, key, id);
         try self.pending.append(self.stored.allocator, key);
         return id;
     }
+    const ExplanationRequest = struct {
+        key: Key,
+        id: usize,
+        fn before(_: void, left: @This(), right: @This()) bool {
+            if (left.key.relative != right.key.relative) return !left.key.relative;
+            if (left.key.a != right.key.a) return left.key.a < right.key.a;
+            if (left.key.b != right.key.b) return left.key.b < right.key.b;
+            return left.key.c < right.key.c;
+        }
+        fn sort(items: []@This(), work: ?*u64) Error!void {
+            var parent = items.len / 2;
+            while (parent != 0) {
+                try admission.spend(work, 1);
+                parent -= 1;
+                try sift(items, parent, work);
+            }
+            var end = items.len;
+            while (end > 1) {
+                try admission.spend(work, 1);
+                end -= 1;
+                std.mem.swap(@This(), &items[0], &items[end]);
+                try sift(items[0..end], 0, work);
+            }
+        }
+        fn sift(items: []@This(), start: usize, work: ?*u64) Error!void {
+            var root = start;
+            while (root < items.len / 2) {
+                try admission.spend(work, 1);
+                var child = root * 2 + 1;
+                if (child + 1 < items.len and before({}, items[child], items[child + 1]))
+                    child += 1;
+                if (!before({}, items[root], items[child])) return;
+                std.mem.swap(@This(), &items[root], &items[child]);
+                root = child;
+            }
+        }
+    };
+
     fn finish(self: *ExplanationBuilder) Error!void {
+        try admission.spend(self.stored.work, 1);
         // Intern before scheduling, so cycles share an id and graph depth never
         // consumes native stack. Publish only after every placeholder is filled.
-        while (self.pending.pop()) |key| try self.expand(key);
+        while (self.pending.pop()) |key| {
+            try admission.spend(self.stored.work, 1);
+            try self.expand(key);
+        }
         // Dependencies do not depend on presentation origins. Discover them
         // first, then replay each required block prefix once in position order.
         // This shares the equation owner's transfer without a second solver or
         // a persistent position cache for every explanation node.
-        const Request = struct {
-            key: Key,
-            id: usize,
-            fn before(_: void, left: @This(), right: @This()) bool {
-                if (left.key.relative != right.key.relative) return !left.key.relative;
-                if (left.key.a != right.key.a) return left.key.a < right.key.a;
-                if (left.key.b != right.key.b) return left.key.b < right.key.b;
-                return left.key.c < right.key.c;
-            }
-        };
+        const Request = ExplanationRequest;
         var requests: std.ArrayList(Request) = .empty;
         defer requests.deinit(self.stored.allocator);
         var iterator = self.memo.iterator();
-        while (iterator.next()) |entry| if (entry.key_ptr.kind == .slot) {
-            try requests.append(
-                self.stored.allocator,
-                .{ .key = entry.key_ptr.*, .id = entry.value_ptr.* },
-            );
-        };
-        std.mem.sort(Request, requests.items, {}, Request.before);
+        while (iterator.next()) |entry| {
+            try admission.spend(self.stored.work, 1);
+            if (entry.key_ptr.kind == .slot) {
+                try requests.append(
+                    self.stored.allocator,
+                    .{ .key = entry.key_ptr.*, .id = entry.value_ptr.* },
+                );
+            }
+        }
+        if (self.stored.work) |_| {
+            try Request.sort(requests.items, self.stored.work);
+        } else std.mem.sort(Request, requests.items, {}, Request.before);
         var first: usize = 0;
         while (first < requests.items.len) {
+            try admission.spend(self.stored.work, 1);
             const key = requests.items[first].key;
             var reader = (if (key.relative) self.stored.relative else self.stored.values).?.*;
             var row = reader.entries[key.a];
             var position: usize = 0;
             var end = first;
             while (end < requests.items.len) : (end += 1) {
+                try admission.spend(self.stored.work, 1);
                 const request = requests.items[end];
                 if (request.key.relative != key.relative or request.key.a != key.a) break;
-                while (position < request.key.b) : (position += 1)
+                while (position < request.key.b) : (position += 1) {
+                    try admission.spend(self.stored.work, 1);
                     try reader.transferInstruction(
                         &row,
                         self.stored.image.blocks[key.a].instructions[position],
                         false,
                     );
+                }
                 self.reasons.items[request.id].origins = try self.members(row.get(request.key.c));
             }
             first = end;
         }
     }
     fn expand(self: *ExplanationBuilder, key: Key) Error!void {
+        try admission.spend(self.stored.work, 1);
         const id = self.memo.get(key).?;
         var inputs: List = .empty;
         var reason: Explanation.Reason = .{ .rule = .summary_dependency };
@@ -2526,6 +2928,7 @@ const ExplanationBuilder = struct {
         inputs: *List,
         reason: *Explanation.Reason,
     ) Error!void {
+        try admission.spend(self.stored.work, 1);
         const image = self.stored.image;
         const block = image.blocks[key.a];
         reason.location = .{
@@ -2544,6 +2947,7 @@ const ExplanationBuilder = struct {
         inputs: *List,
         reason: *Explanation.Reason,
     ) Error!void {
+        try admission.spend(self.stored.work, 1);
         const block = self.stored.image.blocks[key.a];
         const instruction = block.instructions[key.b - 1];
         if (instruction.destination != key.c) {
@@ -2571,14 +2975,20 @@ const ExplanationBuilder = struct {
             .sequence_pop_last,
             .resource_unpack,
             .unpack,
-            => for (instruction.operands) |operand| try self.push(
-                inputs,
-                try self.slot(key.relative, key.a, key.b - 1, operand),
-            ),
-            .select => for (instruction.operands[1..]) |operand| try self.push(
-                inputs,
-                try self.slot(key.relative, key.a, key.b - 1, operand),
-            ),
+            => for (instruction.operands) |operand| {
+                try admission.spend(self.stored.work, 1);
+                try self.push(
+                    inputs,
+                    try self.slot(key.relative, key.a, key.b - 1, operand),
+                );
+            },
+            .select => for (instruction.operands[1..]) |operand| {
+                try admission.spend(self.stored.work, 1);
+                try self.push(
+                    inputs,
+                    try self.slot(key.relative, key.a, key.b - 1, operand),
+                );
+            },
             else => {},
         }
     }
@@ -2631,12 +3041,17 @@ const ExplanationBuilder = struct {
         inputs: *List,
         reason: *Explanation.Reason,
     ) Error!void {
+        try admission.spend(self.stored.work, 1);
         const image = self.stored.image;
         const flow = (if (key.relative) self.stored.relative else self.stored.values).?;
         const block = image.blocks[key.a];
         reason.rule = .branch_join;
         reason.approximation = true;
         if (key.relative and image.functions[@intCast(block.function)].entry == key.a) {
+            try admission.spend(
+                self.stored.work,
+                image.functions[@intCast(block.function)].inputs.len,
+            );
             if (std.mem.indexOfScalar(
                 p.Id,
                 image.functions[@intCast(block.function)].inputs,
@@ -2658,8 +3073,10 @@ const ExplanationBuilder = struct {
                 }),
             );
         }
-        for (image.blocks, 0..) |predecessor, predecessor_id|
+        for (image.blocks, 0..) |predecessor, predecessor_id| {
+            try admission.spend(self.stored.work, 1);
             try self.expandPredecessor(key, inputs, predecessor, predecessor_id);
+        }
     }
     fn expandPredecessor(
         self: *ExplanationBuilder,
@@ -2668,9 +3085,10 @@ const ExplanationBuilder = struct {
         predecessor: ir.Block,
         predecessor_id: usize,
     ) Error!void {
+        try admission.spend(self.stored.work, 1);
         const image = self.stored.image;
         const block = image.blocks[key.a];
-        if (predecessor.function == block.function)
+        if (predecessor.function == block.function) {
             switch (predecessor.terminator) {
                 .jump, .yield_value => |edge_| try self.edge(
                     inputs,
@@ -2683,6 +3101,7 @@ const ExplanationBuilder = struct {
                     try self.edge(inputs, key, predecessor_id, v.when_false);
                 },
                 .switch_variant => |v| for (v.cases) |edge_| {
+                    try admission.spend(self.stored.work, 1);
                     try self.edge(inputs, key, predecessor_id, edge_);
                 },
                 inline .call,
@@ -2698,7 +3117,8 @@ const ExplanationBuilder = struct {
                 .unpack_product,
                 => |v| try self.edge(inputs, key, predecessor_id, v.next),
                 .return_value, .fail => {},
-            };
+            }
+        }
         try self.expandPredecessorInputs(key, inputs, predecessor, predecessor_id);
     }
     fn expandPredecessorInputs(
@@ -2708,11 +3128,16 @@ const ExplanationBuilder = struct {
         predecessor: ir.Block,
         predecessor_id: usize,
     ) Error!void {
+        try admission.spend(self.stored.work, 1);
         const image = self.stored.image;
         const block = image.blocks[key.a];
         if (!key.relative and image.functions[
             @intCast(block.function)
         ].entry == key.a) {
+            try admission.spend(
+                self.stored.work,
+                image.functions[@intCast(block.function)].inputs.len,
+            );
             if (std.mem.indexOfScalar(
                 p.Id,
                 image.functions[@intCast(block.function)].inputs,
@@ -2752,6 +3177,7 @@ const ExplanationBuilder = struct {
         inputs: *List,
         reason: *Explanation.Reason,
     ) Error!void {
+        try admission.spend(self.stored.work, 1);
         const image = self.stored.image;
         const flow = (if (key.relative) self.stored.relative else self.stored.values).?;
         reason.rule = .direct_return;
@@ -2760,7 +3186,8 @@ const ExplanationBuilder = struct {
         for (
             image.blocks,
             0..,
-        ) |block, block_id|
+        ) |block, block_id| {
+            try admission.spend(self.stored.work, 1);
             if (block.function == key.a and
                 block.terminator == .return_value)
             {
@@ -2773,7 +3200,8 @@ const ExplanationBuilder = struct {
                         block.terminator.return_value,
                     ),
                 );
-            };
+            }
+        }
     }
     fn expandCapture(
         self: *ExplanationBuilder,
@@ -2781,6 +3209,7 @@ const ExplanationBuilder = struct {
         inputs: *List,
         reason: *Explanation.Reason,
     ) Error!void {
+        try admission.spend(self.stored.work, 1);
         const image = self.stored.image;
         const flow = (if (key.relative) self.stored.relative else self.stored.values).?;
         reason.rule = .closure_capture;
@@ -2789,21 +3218,25 @@ const ExplanationBuilder = struct {
         for (
             image.blocks,
             0..,
-        ) |block, block_id| for (
-            block.instructions,
-            0..,
-        ) |instruction, position| {
-            if (instruction.opcode == .computation and instruction.immediate == key.a)
-                try self.push(
-                    inputs,
-                    try self.slot(
-                        false,
-                        block_id,
-                        position,
-                        instruction.operands[key.b],
-                    ),
-                );
-        };
+        ) |block, block_id| {
+            try admission.spend(self.stored.work, 1);
+            for (
+                block.instructions,
+                0..,
+            ) |instruction, position| {
+                try admission.spend(self.stored.work, 1);
+                if (instruction.opcode == .computation and instruction.immediate == key.a)
+                    try self.push(
+                        inputs,
+                        try self.slot(
+                            false,
+                            block_id,
+                            position,
+                            instruction.operands[key.b],
+                        ),
+                    );
+            }
+        }
     }
     fn expandSuspension(
         self: *ExplanationBuilder,
@@ -2811,6 +3244,7 @@ const ExplanationBuilder = struct {
         inputs: *List,
         reason: *Explanation.Reason,
     ) Error!void {
+        try admission.spend(self.stored.work, 1);
         const image = self.stored.image;
         const flow = (if (key.relative) self.stored.relative else self.stored.values).?;
         reason.location.function = key.a;
@@ -2818,15 +3252,19 @@ const ExplanationBuilder = struct {
         for (
             image.functions[key.a].layout.slots,
             0..,
-        ) |schema, slot_id| if (flow.disposal.?.contains(schema, key.b)) {
-            try self.leaf(
-                inputs,
-                .owned_cleanup,
-                .{ .function = key.a, .slot = slot_id },
-                true,
-            );
-        };
+        ) |schema, slot_id| {
+            try admission.spend(self.stored.work, 1);
+            if (flow.disposal.?.contains(schema, key.b)) {
+                try self.leaf(
+                    inputs,
+                    .owned_cleanup,
+                    .{ .function = key.a, .slot = slot_id },
+                    true,
+                );
+            }
+        }
         for (image.blocks, 0..) |block, block_id| {
+            try admission.spend(self.stored.work, 1);
             if (block.function != key.a) continue;
             try self.expandBlockSuspension(key, inputs, block, block_id);
         }
@@ -2838,6 +3276,7 @@ const ExplanationBuilder = struct {
         block: ir.Block,
         block_id: usize,
     ) Error!void {
+        try admission.spend(self.stored.work, 1);
         const image = self.stored.image;
         const flow = (if (key.relative) self.stored.relative else self.stored.values).?;
         const location: Explanation.Location = .{
@@ -2858,9 +3297,10 @@ const ExplanationBuilder = struct {
                         ),
                     ) else try self.leaf(inputs, .environmental, location, false);
                 }
-                if (contracts.containsEffect(
+                if (try contracts.containsEffectWithWork(
                     image.effects[@intCast(v.effect)].use_site_effects,
                     key.b,
+                    self.stored.work,
                 )) try self.leaf(inputs, .scoped_input, location, true);
             },
             .call => try self.expandCallSuspension(key, inputs, block, block_id),
@@ -2872,9 +3312,10 @@ const ExplanationBuilder = struct {
             .yield_value,
             .fail,
             => {},
-            else => if (contracts.containsEffect(
+            else => if (try contracts.containsEffectWithWork(
                 image.functions[key.a].effects,
                 key.b,
+                self.stored.work,
             )) try self.leaf(inputs, .scoped_input, location, true),
         }
         // Implicit disposal is intentionally wider than declared rows.
@@ -2890,6 +3331,7 @@ const ExplanationBuilder = struct {
         block: ir.Block,
         block_id: usize,
     ) Error!void {
+        try admission.spend(self.stored.work, 1);
         const flow = (if (key.relative) self.stored.relative else self.stored.values).?;
         const v = block.terminator.call;
         if (flow.suspensions[@intCast(v.function)][key.b] != empty) {
@@ -2907,17 +3349,20 @@ const ExplanationBuilder = struct {
                     @intCast(v.function)
                 ][key.b],
             );
-            while (iterator.next()) |origin| if (origin == .input) {
-                try self.push(
-                    inputs,
-                    try self.slot(
-                        true,
-                        block_id,
-                        block.instructions.len,
-                        v.arguments[origin.input],
-                    ),
-                );
-            };
+            while (iterator.next()) |origin| {
+                try admission.spend(self.stored.work, 1);
+                if (origin == .input) {
+                    try self.push(
+                        inputs,
+                        try self.slot(
+                            true,
+                            block_id,
+                            block.instructions.len,
+                            v.arguments[origin.input],
+                        ),
+                    );
+                }
+            }
         }
     }
 
@@ -2928,15 +3373,23 @@ const ExplanationBuilder = struct {
         predecessor: usize,
         edge_: ir.Edge,
     ) Error!void {
+        try admission.spend(self.stored.work, 1);
         if (edge_.block != key.a) return;
         const block = self.stored.image.blocks[predecessor];
         var source: ir.Source = .{ .slot = key.c };
-        for (edge_.assignments) |assignment| if (assignment.destination == key.c) {
-            source = assignment.source;
-            break;
-        };
+        for (edge_.assignments) |assignment| {
+            try admission.spend(self.stored.work, 1);
+            if (assignment.destination == key.c) {
+                source = assignment.source;
+                break;
+            }
+        }
         switch (source) {
             .slot => |slot_id| {
+                if (block.terminator == .unpack_product) try admission.spend(
+                    self.stored.work,
+                    block.terminator.unpack_product.destinations.len,
+                );
                 const actual = if (block.terminator == .unpack_product and std.mem.indexOfScalar(
                     p.Id,
                     block.terminator.unpack_product.destinations,
@@ -2947,47 +3400,57 @@ const ExplanationBuilder = struct {
                     try self.slot(key.relative, predecessor, block.instructions.len, actual),
                 );
             },
-            .returned => {
-                if (block.terminator == .call) {
-                    const call = block.terminator.call;
-                    try self.push(
-                        inputs,
-                        try self.fact(.{
-                            .kind = .returned,
-                            .relative = key.relative,
-                            .a = @intCast(call.function),
-                        }),
-                    );
-                    if (key.relative) {
-                        var iterator = self.stored.relative.?.origins.iterator(
-                            self.stored.relative.?.returns[
-                                @intCast(call.function)
-                            ],
-                        );
-                        while (iterator.next()) |origin| if (origin == .input) {
-                            try self.push(
-                                inputs,
-                                try self.slot(
-                                    true,
-                                    predecessor,
-                                    block.instructions.len,
-                                    call.arguments[origin.input],
-                                ),
-                            );
-                        };
-                    }
-                } else try self.leaf(
-                    inputs,
-                    .opaque_cell,
-                    .{
-                        .function = block.function,
-                        .block = predecessor,
-                        .position = block.instructions.len,
-                    },
-                    true,
-                );
-            },
+            .returned => try self.returnedEdge(inputs, key, predecessor, block),
         }
+    }
+
+    fn returnedEdge(
+        self: *ExplanationBuilder,
+        inputs: *List,
+        key: Key,
+        predecessor: usize,
+        block: ir.Block,
+    ) Error!void {
+        if (block.terminator == .call) {
+            const call = block.terminator.call;
+            try self.push(
+                inputs,
+                try self.fact(.{
+                    .kind = .returned,
+                    .relative = key.relative,
+                    .a = @intCast(call.function),
+                }),
+            );
+            if (key.relative) {
+                const relative = self.stored.relative.?;
+                var iterator = relative.origins.iterator(
+                    relative.returns[@intCast(call.function)],
+                );
+                while (iterator.next()) |origin| {
+                    try admission.spend(self.stored.work, 1);
+                    if (origin == .input) {
+                        try self.push(
+                            inputs,
+                            try self.slot(
+                                true,
+                                predecessor,
+                                block.instructions.len,
+                                call.arguments[origin.input],
+                            ),
+                        );
+                    }
+                }
+            }
+        } else try self.leaf(
+            inputs,
+            .opaque_cell,
+            .{
+                .function = block.function,
+                .block = predecessor,
+                .position = block.instructions.len,
+            },
+            true,
+        );
     }
 
     fn bodyInput(
@@ -2997,6 +3460,7 @@ const ExplanationBuilder = struct {
         function: p.Id,
         index: usize,
     ) Error!void {
+        try admission.spend(self.stored.work, 1);
         const block = self.stored.image.blocks[block_id];
         switch (block.terminator) {
             .apply => |v| try self.boundInput(
@@ -3041,6 +3505,7 @@ const ExplanationBuilder = struct {
                 null,
             ),
             .perform => |v| for (v.bodies) |body_slot| {
+                try admission.spend(self.stored.work, 1);
                 try self.boundInput(
                     inputs,
                     block_id,
@@ -3063,6 +3528,7 @@ const ExplanationBuilder = struct {
         index: usize,
         v: @FieldType(ir.Terminator, "protect"),
     ) Error!void {
+        try admission.spend(self.stored.work, 1);
         try self.boundInput(
             inputs,
             block_id,
@@ -3085,6 +3551,7 @@ const ExplanationBuilder = struct {
         );
     }
     fn suppliedBodyCount(self: *ExplanationBuilder, function: p.Id, slot_id: p.Id) Error!usize {
+        try admission.spend(self.stored.work, 1);
         const image = self.stored.image;
         const schema = image.functions[@intCast(function)].layout.slots[@intCast(slot_id)];
         return (try contracts.computation(image, schema)).parameters.len;
@@ -3100,12 +3567,14 @@ const ExplanationBuilder = struct {
         supplied: usize,
         handler: ?p.Id,
     ) Error!void {
+        try admission.spend(self.stored.work, 1);
         const flow = self.stored.values.?;
         const image = self.stored.image;
         const block = image.blocks[block_id];
         const origins = flow.exits[block_id].get(@intCast(slot_id));
         const schema = image.functions[@intCast(block.function)].layout.slots[@intCast(slot_id)];
         for (image.constructors, 0..) |constructor, constructor_id| {
+            try admission.spend(self.stored.work, 1);
             if (constructor.function != function or constructor.schema != schema) continue;
             const unknown = flow.origins.contains(origins, .unknown);
             if (!unknown and !flow.origins.contains(
@@ -3154,6 +3623,7 @@ const ExplanationBuilder = struct {
         block_id: usize,
         effect: usize,
     ) Error!void {
+        try admission.spend(self.stored.work, 1);
         const block = self.stored.image.blocks[block_id];
         switch (block.terminator) {
             .apply => |v| try self.implicitClosure(inputs, block_id, v.computation, effect),
@@ -3174,6 +3644,7 @@ const ExplanationBuilder = struct {
             ),
             .resume_with => |v| try self.implicitHandler(inputs, block_id, v.handler, effect),
             .perform => |v| for (v.bodies) |slot_id| {
+                try admission.spend(self.stored.work, 1);
                 try self.implicitClosure(inputs, block_id, slot_id, effect);
             },
             else => {},
@@ -3186,14 +3657,17 @@ const ExplanationBuilder = struct {
         slot_id: p.Id,
         effect: usize,
     ) Error!void {
+        try admission.spend(self.stored.work, 1);
         const image = self.stored.image;
         const block = image.blocks[block_id];
         const schema = image.functions[@intCast(block.function)].layout.slots[@intCast(slot_id)];
-        if (contracts.containsEffect(
+        if (try contracts.containsEffectWithWork(
             (try contracts.computation(image, schema)).effects,
             effect,
+            self.stored.work,
         )) return;
         for (image.constructors) |constructor| {
+            try admission.spend(self.stored.work, 1);
             if (constructor.schema != schema or self.stored.relative.?.suspensions[
                 @intCast(constructor.function)
             ][effect] == empty) continue;
@@ -3225,8 +3699,9 @@ const ExplanationBuilder = struct {
         handler_id: p.Id,
         effect: usize,
     ) Error!void {
+        try admission.spend(self.stored.work, 1);
         const handler = self.stored.image.handlers[@intCast(handler_id)];
-        if (contracts.containsEffect(handler.effects, effect)) return;
+        if (try contracts.containsEffectWithWork(handler.effects, effect, self.stored.work)) return;
         var dependencies: List = .empty;
         if (self.stored.relative.?.suspensions[@intCast(handler.return_function)][effect] != empty)
             try self.push(
@@ -3239,6 +3714,7 @@ const ExplanationBuilder = struct {
                 }),
             );
         for (handler.clauses) |clause| {
+            try admission.spend(self.stored.work, 1);
             if (self.stored.relative.?.suspensions[@intCast(clause.function)][effect] != empty)
                 try self.push(
                     &dependencies,
@@ -3271,6 +3747,7 @@ const ExplanationBuilder = struct {
         inputs: *List,
         block_id: usize,
     ) Error!void {
+        try admission.spend(self.stored.work, 1);
         const block = self.stored.image.blocks[block_id];
         const call = block.terminator.call;
         try self.push(
@@ -3289,17 +3766,20 @@ const ExplanationBuilder = struct {
                 @intCast(selected.effect())
             ],
         );
-        while (iterator.next()) |origin| if (origin == .input) {
-            try self.push(
-                inputs,
-                try self.slot(
-                    false,
-                    block_id,
-                    block.instructions.len,
-                    call.arguments[origin.input],
-                ),
-            );
-        };
+        while (iterator.next()) |origin| {
+            try admission.spend(self.stored.work, 1);
+            if (origin == .input) {
+                try self.push(
+                    inputs,
+                    try self.slot(
+                        false,
+                        block_id,
+                        block.instructions.len,
+                        call.arguments[origin.input],
+                    ),
+                );
+            }
+        }
     }
     fn selectionClosure(
         self: *ExplanationBuilder,
@@ -3307,6 +3787,7 @@ const ExplanationBuilder = struct {
         inputs: *List,
         location: Explanation.Location,
     ) Error!void {
+        try admission.spend(self.stored.work, 1);
         const boundary = selected.boundary();
         const block_id: usize = @intCast(boundary.block);
         const block = self.stored.image.blocks[block_id];
@@ -3325,6 +3806,7 @@ const ExplanationBuilder = struct {
             const flow = self.stored.values.?;
             const origins = flow.exits[block_id].get(@intCast(value));
             for (self.stored.image.constructors, 0..) |constructor, id| {
+                try admission.spend(self.stored.work, 1);
                 if (!flow.origins.contains(origins, .{ .constructor = id })) continue;
                 try self.push(
                     inputs,
@@ -3338,10 +3820,13 @@ const ExplanationBuilder = struct {
                 for (
                     flow.captures[id],
                     0..,
-                ) |_, index| try self.push(
-                    inputs,
-                    try self.fact(.{ .kind = .capture, .a = id, .b = index }),
-                );
+                ) |_, index| {
+                    try admission.spend(self.stored.work, 1);
+                    try self.push(
+                        inputs,
+                        try self.fact(.{ .kind = .capture, .a = id, .b = index }),
+                    );
+                }
             }
         } else try self.leaf(
             inputs,
@@ -3360,37 +3845,45 @@ const ExplanationBuilder = struct {
         selected: *const Selection,
         inputs: *List,
     ) Error!void {
+        try admission.spend(self.stored.work, 1);
         // Show the may-rebind edges that can contribute recipients. These are
         // alternatives, never a claim that branches execute together.
-        if (self.stored.values) |flow| for (self.stored.image.blocks, 0..) |candidate, id| {
-            if (candidate.terminator != .resume_with) continue;
-            const operation = candidate.terminator.resume_with;
-            var relevant = false;
-            for (selected.targets()) |target| relevant = relevant or flow.bindings[
-                @intCast(operation.handler)
-            ][
-                @intCast(target.handler)
-            ];
-            if (!relevant) continue;
-            const source = try self.slot(
-                false,
-                id,
-                candidate.instructions.len,
-                operation.resumption,
-            );
-            try self.push(
-                inputs,
-                try self.add(.{
-                    .rule = .successor_binding,
-                    .location = .{ .function = candidate.function, .block = id },
-                    .handler = operation.handler,
-                    .inputs = try self.stored.allocator.dupe(usize, &.{source}),
-                    .approximation = true,
-                }),
-            );
-        };
+        if (self.stored.values) |flow| {
+            for (self.stored.image.blocks, 0..) |candidate, id| {
+                try admission.spend(self.stored.work, 1);
+                if (candidate.terminator != .resume_with) continue;
+                const operation = candidate.terminator.resume_with;
+                var relevant = false;
+                for (selected.targets()) |target| {
+                    try admission.spend(self.stored.work, 1);
+                    relevant = relevant or flow.bindings[
+                        @intCast(operation.handler)
+                    ][
+                        @intCast(target.handler)
+                    ];
+                }
+                if (!relevant) continue;
+                const source = try self.slot(
+                    false,
+                    id,
+                    candidate.instructions.len,
+                    operation.resumption,
+                );
+                try self.push(
+                    inputs,
+                    try self.add(.{
+                        .rule = .successor_binding,
+                        .location = .{ .function = candidate.function, .block = id },
+                        .handler = operation.handler,
+                        .inputs = try self.stored.allocator.dupe(usize, &.{source}),
+                        .approximation = true,
+                    }),
+                );
+            }
+        }
     }
     fn selection(self: *ExplanationBuilder, selected: *const Selection) Error!usize {
+        try admission.spend(self.stored.work, 1);
         const boundary = selected.boundary();
         const block_id: usize = @intCast(boundary.block);
         const block = self.stored.image.blocks[block_id];

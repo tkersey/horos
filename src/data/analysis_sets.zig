@@ -10,7 +10,7 @@ pub const Member = u64;
 // before publishing a root and does not narrow the represented member domain.
 pub const Root = u32;
 pub const empty: Root = 0;
-pub const Error = std.mem.Allocator.Error || error{InvalidReference};
+pub const Error = std.mem.Allocator.Error || error{ InvalidReference, RelationLimit };
 
 const Node = struct {
     low: Member,
@@ -159,6 +159,7 @@ test "canonical equality distinguishes runs from sparse sets with the same bound
 }
 
 pub const Pool = struct {
+    work: ?*u64 = null,
     allocator: std.mem.Allocator,
     limit: Member,
     // Native compaction is qualified independently; wasm32 keeps its untagged array.
@@ -176,6 +177,10 @@ pub const Pool = struct {
 
     /// The owner must keep this root pool immutable and alive while borrowed.
     /// Only one base is permitted; lookup never walks a version chain.
+    fn spend(self: *const Pool, count_: usize) Error!void {
+        @import("admission.zig").spend(self.work, count_) catch return error.RelationLimit;
+    }
+
     pub fn readOnly(self: *const Pool) Error!*const ReadOnly {
         if (self.base != null) return error.InvalidReference;
         return @ptrCast(self);
@@ -302,6 +307,7 @@ pub const Pool = struct {
     }
 
     fn intern(self: *Pool, value: Node) Error!Root {
+        try self.spend(1);
         const hash = NodeContext.hash(.{}, value);
         if (self.base) |base| if (base.pool().interned.getKeyAdapted(
             value,
@@ -321,6 +327,8 @@ pub const Pool = struct {
         if (self.nodeCount() == self.nodeCapacity() or self.interned.available == 0) {
             // Existing roots never require allocation, including at capacity.
             if (self.interned.getKeyAdapted(value, lookup)) |root| return root;
+            try self.spend(std.math.add(usize, self.nodeCount(), 1) catch
+                return error.RelationLimit);
             try self.ensureNodeCapacity();
             try self.interned.ensureUnusedCapacityContext(
                 self.bufferAllocator(),
@@ -409,6 +417,33 @@ pub const Pool = struct {
         return result;
     }
 
+    fn countWithWork(self: *const Pool, root: Root) Error!Member {
+        if (root == empty) return 0;
+        var pending: [@bitSizeOf(Member) + 1]Root = undefined;
+        pending[0] = root;
+        var length: usize = 1;
+        var result: Member = 0;
+        while (length != 0) {
+            try self.spend(1);
+            length -= 1;
+            const value = self.node(pending[length]);
+            if (value.isRun())
+                result +=
+                    value.high -
+                    value.low
+            else if (value.isWord())
+                result +=
+                    @popCount(value.payload.word)
+            else {
+                std.debug.assert(length + 2 <= pending.len);
+                pending[length] = value.payload.tree.right;
+                pending[length + 1] = value.payload.tree.left;
+                length += 2;
+            }
+        }
+        return result;
+    }
+
     pub fn first(self: *const Pool, root: Root) ?Member {
         return if (root == empty) null else self.node(root).low;
     }
@@ -457,9 +492,11 @@ pub const Pool = struct {
         var length: usize = 1;
         var result: Root = empty;
         while (length != 0) {
+            try self.spend(1);
             const frame = &pending[length - 1];
             switch (frame.phase) {
                 .enter => {
+                    try self.spend(1);
                     self.visits +|= 1;
                     const leaf = try switch (operation) {
                         .unite => self.uniteLeaf(frame.left[0], frame.left[1]),
@@ -586,6 +623,7 @@ pub const Pool = struct {
         var current = root;
         var result: Root = empty;
         for (0..pending.len + 1) |_| {
+            try self.spend(1);
             self.visits +|= 1;
             const leaf = try switch (operation) {
                 .insert => self.insertedLeaf(current, member),
@@ -608,6 +646,7 @@ pub const Pool = struct {
             current = children[selected];
         } else unreachable;
         while (length != 0) {
+            try self.spend(1);
             length -= 1;
             var frame = pending[length];
             if (operation == .insert and frame.children[frame.selected] == result) {
@@ -669,7 +708,9 @@ pub const Pool = struct {
     /// Materialize only when an actual consumer needs the individual members.
     /// Caller owns the slice; no slice into reallocating pool storage escapes.
     pub fn materialize(self: *const Pool, allocator: std.mem.Allocator, root: Root) Error![]Member {
-        const length = std.math.cast(usize, self.count(root)) orelse return error.OutOfMemory;
+        const length = std.math.cast(usize, try self.countWithWork(root)) orelse
+            return error.OutOfMemory;
+        try self.spend(length);
         const result = try allocator.alloc(Member, length);
         var traversal = self.iterator(root);
         for (result) |*member| member.* = traversal.next().?;

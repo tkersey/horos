@@ -1,0 +1,105 @@
+# Source relations and callable slices
+
+Horos 6.1 exposes `source.relation` and `source.slice` over the existing
+`source.Module`. These operations neither execute a submitted producer nor
+establish arbitrary program equivalence. BMO1, BPI3, PST3 and ABI 3 retain their
+existing grammars. Runtime selection and environmental authority remain with
+the consuming system.
+
+## Checked transformations
+
+`source.relation.validate` checks an immutable predecessor, an ordered chain of
+steps, and the actual final module. Every step accounts for the whole successor;
+an unexplained change in an unused declaration or branch is rejected. Ordinary
+source and target admission remain mandatory.
+
+The finite rules are identity and exact relocation, scalar and product
+simplification, one-level closed pure inlining, independently checked
+specialization, and private product-coordinate bijections. Inlining preserves
+argument evaluation order and multiplicity, and excludes captured callees,
+nominal resource roles, internal state and protected recovery functions.
+Specialization uses owner-approved immutable static scopes. A private product
+change transports affected schemas, literals, constructors, projections and
+unpack bindings, while fixed interfaces and authority identities remain fixed.
+Stateful operand occurrences retain their order even when they name the same
+source expression. Interchangeable projections require an independently derived
+shared, cacheable origin.
+Unsupported transport is an error, not evidence of equivalence.
+
+The caller supplies private schemas, fixed schemas and protected function roots
+through `relation.Policy`. A consuming runtime must derive those facts from its
+own approved source. Submitted evidence cannot authorize its own root or scope.
+Successful source checking does not replace final lowering correspondence or
+the consumer's recovery and observation requirements.
+
+Raw `.computation` values refer to the constructor catalog actually generated
+during source emission. Matching signatures alone do not identify a callable.
+Validation retains each constructor's function, schema and ordered capture
+origins. A relocation may supply `Maps.constructors` to transport those indices;
+it must preserve each supplied operand's capture association and evaluation
+order. A rewrite that silently rebinds a raw constructor is rejected.
+
+Raw `.constant` instructions and primitive failure values refer to the emitted
+constant catalog. Relocation materializes compiler-generated literals from
+ordinary admission, transporting their schemas and references alongside source
+constants. Their contents come from the source compiler's observed output;
+relocation does not reconstruct lowering decisions. `Maps.constants` still maps
+only the original source constants. Reference traversal uses emitted constant
+IDs and source schema IDs; `visitReferences` can follow generated constants into
+their schemas. Internal bounded traversals reuse the admitted constant catalog
+in their module projection rather than repeating admission for each reference.
+
+`Policy.work` is shared across record traversal, source analysis and emission,
+mandatory target admission, and relation checking. Expanded structures reserve
+work before materialization. `relocateWithWork` also reserves the complete nested
+records of generated functions, values and terms before copying them. Exhaustion
+returns `RelationLimit`. Optional compiler optimization is outside this admission
+operation; ordinary compilation
+continues to run its existing optimizations. `decodeRecordStep` separately
+charges all owned rule and successor allocations against its caller's byte
+allowance. Exhaustion returns `Capacity`; underlying allocation failure remains
+`OutOfMemory`. Decoded records must be retained in caller-owned storage.
+
+Specialization's request policy separately limits argument normalization and
+derivation checking. Standalone specialization performs ordinary admission
+outside that local allowance. Inside a relation, admission and envelope analysis
+consume the relation allowance; normalization and derivation checking consume
+both allowances. Neither allowance replenishes the other.
+Enumeration folding reserves the normative scalar membership scans before
+evaluation. Completed value and term subproofs share checked facts only within
+their exact immutable environment; reuse still checks the incoming edge and
+the remaining depth allowance. Lowering retires expression-sharing maps at
+eager binding boundaries, so clearing work cannot repeatedly scan capacity
+retained from an earlier large expression.
+
+## Executable source slices
+
+`source.slice.extract` first admits the complete original module, computes the
+selected entry's transitive dependencies, relocates retained declarations and
+admits the result. `require_pure` requires an empty entry effect row and no
+retained external effects. Malformed declarations cannot be hidden by pruning.
+The returned owner contains the exact selected entry signature, schemas,
+constants and mappings; call `deinit` when finished. `Output.emitted_constants`
+maps the complete originally emitted constant catalog into the retained source,
+including literals whose generating declarations were pruned.
+`Output.maps.constants` remains the mapping for original source constants.
+Disposal also retains its implicitly selected unit literal, or the selected unit
+schema when traversing source without such a literal. The shared checker and
+lowering selector defines this dependency; preserving catalog order during
+pruning preserves the selection.
+
+A raw closure can depend on a constructor whose original registration function
+also contains an unreachable bridge. Extraction replaces that registration with
+an ordinary, closed helper that constructs the same closure. The target body and
+explicitly supplied captures remain unchanged under relocation. Helpers occupy
+the function prefix reported by `Output.generated_functions`. When that prefix
+is nonempty, `Output.maps.functions` maps original declarations into the final
+module containing the generated helpers; it is not a dense relocation by itself.
+`Output.module()` is the complete executable module. A page or redacted source
+projection is not a substitute for it.
+
+The native source tests exercise scalar mutants, protected roots, recursive
+literal transport, constructor-index permutations, capture ordering, bridge
+removal, work exhaustion and allocation failure. Consumer qualification must
+also execute exported slices and preserve its own private and speculative
+authority checks.

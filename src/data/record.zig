@@ -97,7 +97,7 @@ fn RecordOps(comptime T: type, comptime ancestors: []const type) type {
                     writer.expected ==
                         null and
                     writer.hasher ==
-                        null)
+                        null and writer.remaining == null)
                 {
                     writer.position = std.math.add(
                         usize,

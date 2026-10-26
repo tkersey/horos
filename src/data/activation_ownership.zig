@@ -2,6 +2,7 @@
 //! Compose independently derived stable-slot facts with use/capture contracts.
 //! Borrow provenance and dynamic State admission remain separate obligations.
 const std = @import("std");
+const admission = @import("admission.zig");
 const p = @import("program.zig");
 const ir = @import("activation.zig");
 const flow = @import("activation_flow.zig");
@@ -41,7 +42,18 @@ pub fn analyzeObserved(
     diagnostic: ?*@import("admission.zig").Diagnostic,
     observer: ?CaptureObserver,
 ) Error!flow.Facts {
-    return analyzeInternal(allocator, image, &.{}, false, &.{}, diagnostic, observer);
+    return analyzeObservedWithWork(allocator, image, diagnostic, observer, null);
+}
+
+pub fn analyzeObservedWithWork(
+    allocator: std.mem.Allocator,
+    image: ir.Program,
+    diagnostic: ?*@import("admission.zig").Diagnostic,
+    observer: ?CaptureObserver,
+    work: ?*u64,
+) Error!flow.Facts {
+    try admission.spend(work, 1);
+    return analyzeInternal(allocator, image, &.{}, false, &.{}, diagnostic, observer, work);
 }
 
 pub fn analyzeDiagnosed(
@@ -49,7 +61,7 @@ pub fn analyzeDiagnosed(
     image: ir.Program,
     diagnostic: ?*@import("admission.zig").Diagnostic,
 ) Error!flow.Facts {
-    return analyzeInternal(allocator, image, &.{}, false, &.{}, diagnostic, null);
+    return analyzeInternal(allocator, image, &.{}, false, &.{}, diagnostic, null, null);
 }
 
 pub fn analyzeComponent(
@@ -58,7 +70,7 @@ pub fn analyzeComponent(
     imports: []const p.Id,
     borrows: []const @import("borrow_contract.zig").Summary,
 ) Error!flow.Facts {
-    return analyzeInternal(allocator, image, imports, true, borrows, null, null);
+    return analyzeInternal(allocator, image, imports, true, borrows, null, null, null);
 }
 
 fn analyzeInternal(
@@ -69,11 +81,12 @@ fn analyzeInternal(
     borrows: []const @import("borrow_contract.zig").Summary,
     diagnostic: ?*@import("admission.zig").Diagnostic,
     observer: ?CaptureObserver,
+    work: ?*u64,
 ) Error!flow.Facts {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
-    const contextual = try types.validateWithObservedFacts(
+    const contextual = try types.validateWithObservedFactsAndWork(
         scratch,
         image,
         imports,
@@ -81,11 +94,15 @@ fn analyzeInternal(
         borrows,
         diagnostic,
         if (observer) |o| o.explanation != null else false,
+        work,
     );
-    var facts = try flow.analyzeComponent(allocator, image, imports);
+    var facts = try flow.analyzeComponentWithWork(allocator, image, imports, work);
     errdefer facts.deinit();
+    facts.pool.work = work;
+    defer facts.pool.work = null;
     var checker: Check = .{
         .image = image,
+        .work = work,
         .observer = observer,
         .diagnostic = diagnostic,
         .facts = &facts,
@@ -94,6 +111,7 @@ fn analyzeInternal(
         .provenance = contextual.control,
     };
     for (image.blocks, 0..) |block, id| {
+        try admission.spend(work, 1);
         if (facts.entries[id] == null) continue;
         if (diagnostic) |d| d.* = .{
             .phase = .block,
@@ -114,6 +132,7 @@ fn analyzeInternal(
 }
 
 const Check = struct {
+    work: ?*u64 = null,
     image: ir.Program,
     observer: ?CaptureObserver = null,
     function: p.Id = 0,
@@ -125,14 +144,17 @@ const Check = struct {
     boundary: provenance.Boundary = undefined,
 
     fn computation(self: Check, slots: []const p.Id, slot: p.Id) Error!p.ComputationType {
+        try admission.spend(self.work, 1);
         return contracts.computation(self.image, slots[@intCast(slot)]);
     }
 
     fn resumption(self: Check, slots: []const p.Id, slot: p.Id) Error!p.ResumptionType {
+        try admission.spend(self.work, 1);
         return contracts.resumption(self.image, slots[@intCast(slot)]);
     }
 
     fn block(self: *Check, code: ir.Block) Error!void {
+        try admission.spend(self.work, 1);
         self.function = code.function;
         const slots = self.image.functions[@intCast(code.function)].layout.slots;
         switch (code.terminator) {
@@ -201,6 +223,7 @@ const Check = struct {
     }
 
     fn checkHandler(self: *Check, slots: []const p.Id, operation: anytype) Error!void {
+        try admission.spend(self.work, 1);
         const handler = self.image.handlers[@intCast(operation.handler)];
         const signature = try self.computation(slots, operation.body);
         const body_effects = try self.provenance.effectRow(
@@ -208,20 +231,32 @@ const Check = struct {
             signature.effects,
         );
         for (body_effects) |effect| {
-            if (contracts.containsEffect(signature.effects, effect) and
-                effect_scope.discharged(self.image, self.effects, handler, signature, effect))
+            try admission.spend(self.work, 1);
+            if (try contracts.containsEffectWithWork(signature.effects, effect, self.work) and
+                try effect_scope.dischargedWithWork(
+                    self.image,
+                    self.effects,
+                    handler,
+                    signature,
+                    effect,
+                    self.work,
+                ))
                 continue;
             try self.controlEffects(slots, &.{effect}, operation.next, .body);
             const selected = try self.provenance.select(
                 .{ .block = self.boundary.block, .role = .body },
                 effect,
             );
-            for (operation.state) |slot| try self.capture(slots, selected, slot);
+            for (operation.state) |slot| {
+                try admission.spend(self.work, 1);
+                try self.capture(slots, selected, slot);
+            }
         }
         try self.control(slots, handler.effects, operation.next, .handler);
     }
 
     fn resumeWith(self: *Check, slots: []const p.Id, operation: anytype) Error!void {
+        try admission.spend(self.work, 1);
         const signature = try self.resumption(slots, operation.resumption);
         const successor = self.image.handlers[@intCast(operation.handler)];
         const effects = try self.provenance.effectRow(
@@ -229,26 +264,42 @@ const Check = struct {
             signature.effects,
         );
         for (effects) |effect| {
-            const escapes = !contracts.containsEffect(signature.handled, effect) or
-                contracts.containsEffect(signature.escaping, effect);
-            if (contracts.containsEffect(signature.effects, effect) and !escapes) continue;
+            try admission.spend(self.work, 1);
+            const escapes = !try contracts.containsEffectWithWork(
+                signature.handled,
+                effect,
+                self.work,
+            ) or
+                try contracts.containsEffectWithWork(signature.escaping, effect, self.work);
+            if (try contracts.containsEffectWithWork(
+                signature.effects,
+                effect,
+                self.work,
+            ) and !escapes) continue;
             try self.controlEffects(slots, &.{effect}, operation.next, .resumed);
             const selected = try self.provenance.select(
                 .{ .block = self.boundary.block, .role = .resumed },
                 effect,
             );
-            for (operation.state) |slot| try self.capture(slots, selected, slot);
+            for (operation.state) |slot| {
+                try admission.spend(self.work, 1);
+                try self.capture(slots, selected, slot);
+            }
         }
         try self.control(slots, successor.effects, operation.next, .handler);
     }
 
     fn retained(self: *Check, next: ir.Edge) Error!sets.Root {
+        try admission.spend(self.work, 1);
         const pool = self.facts.pool;
         const after = self.facts.live[@intCast(next.block)][0];
         var result = after;
-        for (next.assignments) |assignment|
-            result = try pool.remove(result, assignment.destination);
         for (next.assignments) |assignment| {
+            try admission.spend(self.work, 1);
+            result = try pool.remove(result, assignment.destination);
+        }
+        for (next.assignments) |assignment| {
+            try admission.spend(self.work, 1);
             if (assignment.source == .slot and pool.contains(after, assignment.destination))
                 result = try pool.insert(result, assignment.source.slot);
         }
@@ -262,6 +313,7 @@ const Check = struct {
         next: ir.Edge,
         role: provenance.Role,
     ) Error!void {
+        try admission.spend(self.work, 1);
         const qualified = try self.provenance.effectRow(
             .{ .block = self.boundary.block, .role = role },
             effects,
@@ -276,15 +328,20 @@ const Check = struct {
         next: ir.Edge,
         role: provenance.Role,
     ) Error!void {
+        try admission.spend(self.work, 1);
         if (effects.len == 0) return;
         const root = try self.retained(next);
         for (effects) |effect| {
+            try admission.spend(self.work, 1);
             const selected = try self.provenance.select(
                 .{ .block = self.boundary.block, .role = role },
                 effect,
             );
             var live = self.facts.pool.iterator(root);
-            while (live.next()) |slot| try self.capture(slots, selected, slot);
+            while (live.next()) |slot| {
+                try admission.spend(self.work, 1);
+                try self.capture(slots, selected, slot);
+            }
         }
     }
 
@@ -294,6 +351,7 @@ const Check = struct {
         selected: *const CaptureSite,
         slot: p.Id,
     ) Error!void {
+        try admission.spend(self.work, 1);
         if (self.diagnostic) |d| {
             d.slot = slot;
             d.effect = selected.effect();
@@ -304,7 +362,10 @@ const Check = struct {
             if (observer.explanation) |explain| {
                 var presentation: ?CaptureExplanation = self.provenance.explain(
                     selected,
-                ) catch null;
+                ) catch |err| switch (err) {
+                    error.RelationLimit => return err,
+                    else => null,
+                };
                 if (presentation) |*value| value.capture_constraint = .{
                     .slot = slot,
                     .schema = slots[@intCast(slot)],

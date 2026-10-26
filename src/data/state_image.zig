@@ -7,6 +7,16 @@ const record = @import("record.zig");
 const order = @import("graph_order.zig");
 pub const Error = order.Error;
 pub const Owned = order.Owned(s.State);
+pub const Borrowed = struct {
+    arena: std.heap.ArenaAllocator,
+    input: []const u8,
+    state: s.State,
+
+    pub fn deinit(self: *Borrowed) void {
+        self.arena.deinit();
+        self.* = undefined;
+    }
+};
 /// Native defaults follow the allocator; finite budgets are caller policy.
 pub const Limits = struct { max_decoded_bytes: usize = std.math.maxInt(usize) };
 pub const magic = "ABL_PST3";
@@ -140,18 +150,41 @@ pub fn decodeGraphLimited(
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
     const owned = try arena.allocator().dupe(u8, input);
-    var reader: wire.Reader = .{ .input = owned };
+    const state = try readGraph(allocator, arena.allocator(), owned, limits);
+    return .{ .arena = arena, .state = state };
+}
+
+pub fn decodeGraphBorrowed(
+    allocator: std.mem.Allocator,
+    input: []const u8,
+    limits: Limits,
+) Error!Borrowed {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    const state = try readGraph(allocator, arena.allocator(), input, limits);
+    return .{ .arena = arena, .input = input, .state = state };
+}
+
+fn readGraph(
+    scratch: std.mem.Allocator,
+    storage: std.mem.Allocator,
+    input: []const u8,
+    limits: Limits,
+) Error!s.State {
+    if (input.len < wire.header_length) return error.Truncated;
+    if (input.len > limits.max_decoded_bytes) return error.Capacity;
+    var reader: wire.Reader = .{ .input = input };
     if (!std.mem.eql(u8, try reader.take(8), magic)) return error.InvalidFamily;
     if (try reader.fixed(u16) != 3) return error.UnsupportedVersion;
     if (try reader.fixed(u16) != 0) return error.InvalidFlags;
-    if (try reader.fixed(u64) != owned.len - wire.header_length) return error.InvalidLength;
-    var remaining = limits.max_decoded_bytes - owned.len;
-    const state = try record.readBounded(s.State, &reader, arena.allocator(), &remaining);
+    if (try reader.fixed(u64) != input.len - wire.header_length) return error.InvalidLength;
+    var remaining = limits.max_decoded_bytes - input.len;
+    const state = try record.readBounded(s.State, &reader, storage, &remaining);
     try reader.finish();
-    try order.checkCanonical(allocator, state);
-    try shape(state, allocator);
-    var comparison: wire.Writer = .{ .expected = owned };
-    try write(state, owned.len, &comparison);
-    if (comparison.position != owned.len) return error.NonCanonical;
-    return .{ .arena = arena, .state = state };
+    try order.checkCanonical(scratch, state);
+    try shape(state, scratch);
+    var comparison: wire.Writer = .{ .expected = input };
+    try write(state, input.len, &comparison);
+    if (comparison.position != input.len) return error.NonCanonical;
+    return state;
 }

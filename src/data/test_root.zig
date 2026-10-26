@@ -61,6 +61,8 @@ test {
 }
 
 test {
+    _ = @import("effect_scope.zig");
+    _ = @import("borrow_flow.zig");
     _ = @import("evidence_forwarding_tests.zig");
 }
 

@@ -6,7 +6,8 @@
 const std = @import("std");
 const ir = @import("activation.zig");
 const p = @import("program.zig");
-pub const Error = std.mem.Allocator.Error || error{
+const a = @import("admission.zig");
+pub const Error = a.Error || error{
     InvalidReference,
     TypeMismatch,
     DuplicateDestination,
@@ -14,22 +15,25 @@ pub const Error = std.mem.Allocator.Error || error{
 };
 
 pub fn validate(allocator: std.mem.Allocator, image: ir.Program) Error!void {
-    return validateComponent(allocator, image, &.{});
+    return validateComponentWithWork(allocator, image, &.{}, null);
 }
 
 /// Imports are bodyless declarations, never executable entry points.
-pub fn validateComponent(
+pub fn validateComponentWithWork(
     allocator: std.mem.Allocator,
     image: ir.Program,
     imports: []const p.Id,
+    work: ?*u64,
 ) Error!void {
-    var checker: Checker = .{ .allocator = allocator, .image = image };
+    try a.spend(work, 1);
+    var checker: Checker = .{ .allocator = allocator, .image = image, .work = work };
     for (imports, 0..) |id, at| {
-        if (id >= image.functions.len or std.mem.indexOfScalar(
-            p.Id,
+        try a.spend(work, 1);
+        if (id >= image.functions.len or try @import("contracts.zig").containsEffectWithWork(
             imports[0..at],
             id,
-        ) != null) return error.InvalidReference;
+            work,
+        )) return error.InvalidReference;
     }
     defer checker.destinations.deinit(allocator);
     if (image.roots.profile != 1) return error.InvalidProgram;
@@ -38,41 +42,14 @@ pub fn validateComponent(
     try checker.schema(image.roots.failure);
     if (image.functions[@intCast(image.roots.entry)].result != image.roots.result)
         return error.TypeMismatch;
-    for (image.functions, 0..) |function, id| {
-        const imported = std.mem.indexOfScalar(p.Id, imports, id) != null;
-        if (imported) {
-            if (function.entry != @import("relocation.zig").missing or
-                function.inputs.len != function.layout.slots.len)
-                return error.InvalidProgram;
-        } else {
-            try checker.target(id, function.entry);
-            if (image.blocks[@intCast(function.entry)].custody != 0) return error.InvalidProgram;
-        }
-        if (function.custody.len == 0 or
-            function.custody[0].parent != null)
-            return error.InvalidProgram;
-        for (function.custody[1..], 1..) |scope, scope_id| {
-            const parent = scope.parent orelse return error.InvalidProgram;
-            if (parent >= scope_id) return error.InvalidReference;
-        }
-        try checker.schema(function.result);
-        for (function.layout.slots) |schema| try checker.schema(schema);
-        for (function.effects) |effect| if (effect >= image.effects.len)
-            return error.InvalidReference;
-        for (function.regions) |region| if (region >= image.scopes.region_count)
-            return error.InvalidReference;
-        checker.destinations.clearRetainingCapacity();
-        for (function.inputs) |input| {
-            _ = try checker.slot(id, input);
-            try checker.destination(input);
-        }
-    }
+    for (image.functions, 0..) |function, id| try checker.validateFunction(function, id, imports);
     for (image.blocks) |block| {
-        if (std.mem.indexOfScalar(
-            p.Id,
+        try a.spend(work, 1);
+        if (try @import("contracts.zig").containsEffectWithWork(
             imports,
             block.function,
-        ) != null) return error.InvalidProgram;
+            work,
+        )) return error.InvalidProgram;
         try checker.block(block);
     }
 }
@@ -80,13 +57,69 @@ pub fn validateComponent(
 const Checker = struct {
     allocator: std.mem.Allocator,
     image: ir.Program,
+    work: ?*u64,
     destinations: std.AutoHashMapUnmanaged(p.Id, void) = .empty,
 
+    fn validateFunction(
+        self: *Checker,
+        declaration: anytype,
+        id: usize,
+        imports: []const p.Id,
+    ) Error!void {
+        try a.spend(self.work, 1);
+        const imported = try @import("contracts.zig").containsEffectWithWork(
+            imports,
+            id,
+            self.work,
+        );
+        if (imported) {
+            if (declaration.entry != @import("relocation.zig").missing or
+                declaration.inputs.len != declaration.layout.slots.len)
+                return error.InvalidProgram;
+        } else {
+            try self.target(id, declaration.entry);
+            if (self.image.blocks[
+                @intCast(declaration.entry)
+            ].custody != 0) return error.InvalidProgram;
+        }
+        if (declaration.custody.len == 0 or
+            declaration.custody[0].parent != null)
+            return error.InvalidProgram;
+        for (declaration.custody[1..], 1..) |scope, scope_id| {
+            try a.spend(self.work, 1);
+            const parent = scope.parent orelse return error.InvalidProgram;
+            if (parent >= scope_id) return error.InvalidReference;
+        }
+        try self.schema(declaration.result);
+        for (declaration.layout.slots) |shape_id| {
+            try a.spend(self.work, 1);
+            try self.schema(shape_id);
+        }
+        for (declaration.effects) |effect| {
+            try a.spend(self.work, 1);
+            if (effect >= self.image.effects.len)
+                return error.InvalidReference;
+        }
+        for (declaration.regions) |region| {
+            try a.spend(self.work, 1);
+            if (region >= self.image.scopes.region_count)
+                return error.InvalidReference;
+        }
+        try self.clearDestinations();
+        for (declaration.inputs) |input| {
+            try a.spend(self.work, 1);
+            _ = try self.slot(id, input);
+            try self.destination(input);
+        }
+    }
+
     fn schema(self: Checker, id: p.Id) Error!void {
+        try a.spend(self.work, 1);
         if (id >= self.image.schemas.len) return error.InvalidReference;
     }
 
     fn slot(self: Checker, function: p.Id, id: p.Id) Error!p.Id {
+        try a.spend(self.work, 1);
         if (function >= self.image.functions.len) return error.InvalidReference;
         const layout = self.image.functions[@intCast(function)].layout.slots;
         if (id >= layout.len) return error.InvalidReference;
@@ -96,17 +129,27 @@ const Checker = struct {
     }
 
     fn target(self: Checker, owner: p.Id, id: p.Id) Error!void {
+        try a.spend(self.work, 1);
         if (id >= self.image.blocks.len) return error.InvalidReference;
         if (self.image.blocks[@intCast(id)].function != owner) return error.InvalidReference;
     }
 
+    fn clearDestinations(self: *Checker) Error!void {
+        try a.spend(self.work, self.destinations.capacity());
+        self.destinations.clearRetainingCapacity();
+    }
+
     fn destination(self: *Checker, id: p.Id) Error!void {
+        try a.spend(self.work, 1);
         const result = try self.destinations.getOrPut(self.allocator, id);
         if (result.found_existing) return error.DuplicateDestination;
     }
 
     fn slots(self: Checker, function: p.Id, values: []const p.Id) Error!void {
-        for (values) |value| _ = try self.slot(function, value);
+        for (values) |value| {
+            try a.spend(self.work, 1);
+            _ = try self.slot(function, value);
+        }
     }
 
     fn arguments(
@@ -117,14 +160,16 @@ const Checker = struct {
     ) Error!void {
         if (supplied.len != expected.len) return error.TypeMismatch;
         for (supplied, expected) |value, shape| {
+            try a.spend(self.work, 1);
             if (try self.slot(function, value) != shape) return error.TypeMismatch;
         }
     }
 
     fn edge(self: *Checker, owner: p.Id, next: ir.Edge, returned: ?p.Id) Error!void {
         try self.target(owner, next.block);
-        self.destinations.clearRetainingCapacity();
+        try self.clearDestinations();
         for (next.assignments) |assignment| {
+            try a.spend(self.work, 1);
             try self.destination(assignment.destination);
             const expected = try self.slot(owner, assignment.destination);
             const actual = switch (assignment.source) {
@@ -136,12 +181,14 @@ const Checker = struct {
     }
 
     fn computation(self: Checker, owner: p.Id, value: p.Id) Error!p.ComputationType {
+        try a.spend(self.work, 1);
         const shape = self.image.schemas[@intCast(try self.slot(owner, value))];
         if (shape != .internal or shape.internal != .computation) return error.TypeMismatch;
         return shape.internal.computation;
     }
 
     fn resumption(self: Checker, owner: p.Id, value: p.Id) Error!p.ResumptionType {
+        try a.spend(self.work, 1);
         const shape = self.image.schemas[@intCast(try self.slot(owner, value))];
         if (shape != .internal or shape.internal != .resumption) return error.TypeMismatch;
         return shape.internal.resumption;
@@ -153,9 +200,11 @@ const Checker = struct {
         if (code.custody >= self.image.functions[@intCast(owner)].custody.len)
             return error.InvalidReference;
         for (code.instructions) |instruction| {
+            try a.spend(self.work, 1);
             _ = try self.slot(owner, instruction.destination);
             try self.slots(owner, instruction.operands);
             for (instruction.failures) |failure| {
+                try a.spend(self.work, 1);
                 if (failure.value >= self.image.constants.len) return error.InvalidReference;
             }
         }
@@ -179,7 +228,10 @@ const Checker = struct {
                 const shape = self.image.schemas[@intCast(try self.slot(owner, selected.value))];
                 if (shape != .sum or shape.sum.len != selected.cases.len)
                     return error.TypeMismatch;
-                for (selected.cases, shape.sum) |next, result| try self.edge(owner, next, result);
+                for (selected.cases, shape.sum) |next, result| {
+                    try a.spend(self.work, 1);
+                    try self.edge(owner, next, result);
+                }
             },
             .unpack_product => |unpack| try self.checkUnpack(owner, unpack),
             .call => |call| try self.checkCall(owner, call),
@@ -203,8 +255,9 @@ const Checker = struct {
         const shape = self.image.schemas[@intCast(try self.slot(owner, operation.value))];
         if (shape != .product or shape.product.len != operation.destinations.len)
             return error.TypeMismatch;
-        self.destinations.clearRetainingCapacity();
+        try self.clearDestinations();
         for (operation.destinations, shape.product) |id, expected| {
+            try a.spend(self.work, 1);
             try self.destination(id);
             if (try self.slot(owner, id) != expected) return error.TypeMismatch;
         }
@@ -217,6 +270,7 @@ const Checker = struct {
         const callee = self.image.functions[@intCast(operation.function)];
         if (operation.arguments.len != callee.inputs.len) return error.TypeMismatch;
         for (operation.arguments, callee.inputs) |value, input| {
+            try a.spend(self.work, 1);
             if (try self.slot(owner, value) != try self.slot(operation.function, input))
                 return error.TypeMismatch;
         }
@@ -293,3 +347,11 @@ const Checker = struct {
         }
     }
 };
+
+pub fn validateComponent(
+    allocator: std.mem.Allocator,
+    image: ir.Program,
+    imports: []const p.Id,
+) Error!void {
+    return validateComponentWithWork(allocator, image, imports, null);
+}

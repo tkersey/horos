@@ -5,65 +5,82 @@ const p = @import("program.zig");
 const a = @import("admission.zig");
 const contracts = @import("contracts.zig");
 
-pub fn catalog(image: anytype, regions: []const p.Id) a.Error!void {
+pub fn catalogWithWork(image: anytype, regions: []const p.Id, work: ?*u64) a.Error!void {
+    try a.spend(work, 1);
     for (regions, 0..) |id, index| {
+        try a.spend(work, 1);
         if (id >= image.scopes.region_count) return error.InvalidReference;
         if (index > 0 and regions[index - 1] >= id) return error.NonCanonical;
     }
 }
 
 pub const Dependencies = struct {
+    work: ?*u64 = null,
     regions: []const p.Id,
     values: []bool,
     fn of(self: Dependencies, schema: p.Id) []bool {
         const width = self.regions.len;
         return self.values[@as(usize, @intCast(schema)) * width ..][0..width];
     }
-    fn contains(self: Dependencies, schema: p.Id, region: p.Id) bool {
-        const index = std.mem.indexOfScalar(p.Id, self.regions, region) orelse return false;
-        return self.of(schema)[index];
+    fn contains(self: Dependencies, schema: p.Id, region: p.Id) a.Error!bool {
+        for (self.regions, 0..) |id, index| {
+            try a.spend(self.work, 1);
+            if (id == region) return self.of(schema)[index];
+        }
+        return false;
     }
 };
 
 /// Only referenced nominal regions occupy columns. An ordinal upper bound is
 /// not a request to allocate one entry for every unused name below that bound.
-pub fn dependencies(allocator: std.mem.Allocator, image: anytype) a.Error!Dependencies {
+pub fn dependenciesWithWork(
+    allocator: std.mem.Allocator,
+    image: anytype,
+    work: ?*u64,
+) a.Error!Dependencies {
+    try a.spend(work, 1);
     var regions: std.ArrayList(p.Id) = .empty;
     var indices: std.AutoHashMapUnmanaged(p.Id, usize) = .empty;
-    for (image.schemas) |shape| if (shape == .internal) {
-        const id = switch (shape.internal) {
-            .region => |id| id,
-            .cell => |cell| cell.region,
-            .borrowed => |borrow| borrow.region,
-            else => continue,
-        };
-        if (id >= image.scopes.region_count) return error.InvalidReference;
-        const entry = try indices.getOrPut(allocator, id);
-        if (!entry.found_existing) {
-            entry.value_ptr.* = regions.items.len;
-            try regions.append(allocator, id);
+    for (image.schemas) |shape| {
+        try a.spend(work, 1);
+        if (shape == .internal) {
+            const id = switch (shape.internal) {
+                .region => |id| id,
+                .cell => |cell| cell.region,
+                .borrowed => |borrow| borrow.region,
+                else => continue,
+            };
+            if (id >= image.scopes.region_count) return error.InvalidReference;
+            const entry = try indices.getOrPut(allocator, id);
+            if (!entry.found_existing) {
+                entry.value_ptr.* = regions.items.len;
+                try regions.append(allocator, id);
+            }
         }
-    };
+    }
     const width = regions.items.len;
-    const result = try allocator.alloc(
-        bool,
-        std.math.mul(usize, image.schemas.len, width) catch return error.InvalidLength,
-    );
+    const length = std.math.mul(usize, image.schemas.len, width) catch
+        return error.InvalidLength;
+    try a.spend(work, length);
+    const result = try allocator.alloc(bool, length);
     @memset(result, false);
     var changed = true;
     while (changed) {
+        try a.spend(work, 1);
         changed = false;
         for (image.schemas, 0..) |shape, schema| {
+            try a.spend(work, 1);
             changed = try propagateDependencies(
                 shape,
                 result[schema * width ..][0..width],
                 result,
                 regions.items,
                 indices,
+                work,
             ) or changed;
         }
     }
-    return .{ .regions = regions.items, .values = result };
+    return .{ .regions = regions.items, .values = result, .work = work };
 }
 
 fn propagateDependencies(
@@ -72,7 +89,9 @@ fn propagateDependencies(
     result: []const bool,
     regions: []const p.Id,
     indices: std.AutoHashMapUnmanaged(p.Id, usize),
+    work: ?*u64,
 ) a.Error!bool {
+    try a.spend(work, 1);
     const width = regions.len;
     var changed = false;
     const fields: []const p.Id = switch (shape) {
@@ -106,45 +125,59 @@ fn propagateDependencies(
         },
         else => &.{},
     };
-    for (fields) |child| for (
-        target,
-        result[@as(usize, @intCast(child)) * width ..][0..width],
-        0..,
-    ) |*to, from, region_id| {
-        if (shape == .internal and shape.internal == .resumption and std.mem.indexOfScalar(
-            p.Id,
-            shape.internal.resumption.owned_regions,
-            regions[region_id],
-        ) != null) continue;
-        if (from and !to.*) {
-            to.* = true;
-            changed = true;
+    for (fields) |child| {
+        try a.spend(work, 1);
+        for (
+            target,
+            result[@as(usize, @intCast(child)) * width ..][0..width],
+            0..,
+        ) |*to, from, region_id| {
+            try a.spend(work, 1);
+            if (shape == .internal and shape.internal == .resumption and
+                try contracts.containsEffectWithWork(
+                    shape.internal.resumption.owned_regions,
+                    regions[region_id],
+                    work,
+                )) continue;
+            if (from and !to.*) {
+                to.* = true;
+                changed = true;
+            }
         }
-    };
+    }
     return changed;
 }
 
 pub fn validate(allocator: std.mem.Allocator, image: anytype) a.Error!void {
-    return validateDiagnosed(allocator, image, null);
+    return validateDiagnosedWithWork(allocator, image, null, null);
 }
 
-pub fn validateDiagnosed(
+pub fn validateDiagnosedWithWork(
     allocator: std.mem.Allocator,
     image: anytype,
     diagnostic: ?*a.Diagnostic,
+    work: ?*u64,
 ) a.Error!void {
+    try a.spend(work, 1);
     if (diagnostic) |d| d.* = .{ .phase = .region };
-    const deps = try dependencies(allocator, image);
+    const deps = try dependenciesWithWork(allocator, image, work);
     for (image.functions, 0..) |function, index| {
+        try a.spend(work, 1);
         if (diagnostic) |d| d.* = .{ .phase = .region, .function = index };
-        try catalog(image, function.regions);
+        try catalogWithWork(image, function.regions, work);
         const parameters = @import("function_inputs.zig").of(function);
-        for (0..parameters.len) |parameter|
-            try allowed(deps, parameters.at(parameter), function.regions);
-        for (function.layout.slots) |schema| try allowed(deps, schema, function.regions);
-        try allowed(deps, function.result, function.regions);
+        for (0..parameters.len) |parameter| {
+            try a.spend(work, 1);
+            try allowed(deps, parameters.at(parameter), function.regions, work);
+        }
+        for (function.layout.slots) |schema| {
+            try a.spend(work, 1);
+            try allowed(deps, schema, function.regions, work);
+        }
+        try allowed(deps, function.result, function.regions, work);
     }
     for (image.blocks, 0..) |block, index| {
+        try a.spend(work, 1);
         if (diagnostic) |d| d.* = .{
             .phase = .region,
             .function = block.function,
@@ -152,47 +185,62 @@ pub fn validateDiagnosed(
             .terminator = std.meta.activeTag(block.terminator),
             .callee = if (block.terminator == .call) block.terminator.call.function else null,
         };
-        const regions = image.functions[@intCast(block.function)].regions;
+        try validateBlock(image, block, deps, work);
+    }
+}
 
-        switch (block.terminator) {
-            .call => |call| try contracts.subset(
-                image.functions[@intCast(call.function)].regions,
+fn validateBlock(image: anytype, block: anytype, deps: Dependencies, work: ?*u64) a.Error!void {
+    const regions = image.functions[@intCast(block.function)].regions;
+
+    switch (block.terminator) {
+        .call => |call| try contracts.subsetWithWork(
+            image.functions[@intCast(call.function)].regions,
+            regions,
+            work,
+        ),
+        .handle => |handle| {
+            const handler = image.handlers[@intCast(handle.handler)];
+            try contracts.subsetWithWork(
+                image.functions[@intCast(handler.return_function)].regions,
                 regions,
-            ),
-            .handle => |handle| {
-                const handler = image.handlers[@intCast(handle.handler)];
-                try contracts.subset(
-                    image.functions[@intCast(handler.return_function)].regions,
-                    regions,
-                );
-                for (handler.clauses) |clause| try contracts.subset(
+                work,
+            );
+            for (handler.clauses) |clause| {
+                try a.spend(work, 1);
+                try contracts.subsetWithWork(
                     image.functions[@intCast(clause.function)].regions,
                     regions,
+                    work,
                 );
-            },
-            .with_region => |scope| {
-                const body_schema = try codeSlot(image, block, scope.body);
-                const body = try contracts.computation(image, body_schema);
-                if (deps.contains(body.result, scope.region)) return error.InvalidOwnership;
-            },
-            .protect => |protection| if (protection.loan_region) |region| {
-                const schema = try codeSlot(image, block, protection.body);
-                const body = try contracts.computation(image, schema);
-                if (deps.contains(body.result, region)) return error.InvalidOwnership;
-            },
-            .resume_with => |resuming| {
-                const successor = image.handlers[@intCast(resuming.handler)];
-                try contracts.subset(
-                    image.functions[@intCast(successor.return_function)].regions,
-                    regions,
-                );
-                for (successor.clauses) |clause| try contracts.subset(
+            }
+        },
+        .with_region => |scope| {
+            const body_schema = try codeSlot(image, block, scope.body);
+            const body = try contracts.computation(image, body_schema);
+            if (try deps.contains(body.result, scope.region)) return error.InvalidOwnership;
+        },
+        .protect => |protection| if (protection.loan_region) |region| {
+            const schema = try codeSlot(image, block, protection.body);
+            const body = try contracts.computation(image, schema);
+            if (try deps.contains(body.result, region)) return error.InvalidOwnership;
+        },
+        .resume_with => |resuming| {
+            const successor = image.handlers[@intCast(resuming.handler)];
+            try contracts.subsetWithWork(
+                image.functions[@intCast(successor.return_function)].regions,
+                regions,
+                work,
+            );
+            for (successor.clauses) |clause| {
+                try a.spend(work, 1);
+                try contracts.subsetWithWork(
                     image.functions[@intCast(clause.function)].regions,
                     regions,
+                    work,
                 );
-            },
-            else => {},
-        }
+            }
+        },
+        else => {},
     }
 }
 
@@ -200,22 +248,26 @@ fn codeSlot(image: anytype, block: anytype, slot: p.Id) a.Error!p.Id {
     return a.slotType(image.functions[@intCast(block.function)].layout.slots, slot);
 }
 
-fn allowed(deps: Dependencies, schema: p.Id, regions: []const p.Id) a.Error!void {
+fn allowed(deps: Dependencies, schema: p.Id, regions: []const p.Id, work: ?*u64) a.Error!void {
+    try a.spend(work, 1);
     for (deps.of(schema), deps.regions) |needed, id| {
-        if (needed and std.mem.indexOfScalar(
-            p.Id,
+        try a.spend(work, 1);
+        if (needed and !(try contracts.containsEffectWithWork(
             regions,
             id,
-        ) == null) return error.InvalidOwnership;
+            work,
+        ))) return error.InvalidOwnership;
     }
 }
 
-pub fn instruction(
+pub fn instructionWithWork(
     image: anytype,
     op: anytype,
     slots: []const p.Id,
     uses: @import("traits.zig").Facts,
+    work: ?*u64,
 ) a.Error!void {
+    try a.spend(work, 1);
     if (op.immediate != 0) return error.InvalidProgram;
     const operands = op.operands;
     if (op.opcode == .cell_new) {
@@ -248,4 +300,29 @@ pub fn instruction(
             @intCast(op.result_type)
         ] != .unit) return error.TypeMismatch;
     }
+}
+
+pub fn catalog(image: anytype, regions: []const p.Id) a.Error!void {
+    return catalogWithWork(image, regions, null);
+}
+
+pub fn dependencies(allocator: std.mem.Allocator, image: anytype) a.Error!Dependencies {
+    return dependenciesWithWork(allocator, image, null);
+}
+
+pub fn validateDiagnosed(
+    allocator: std.mem.Allocator,
+    image: anytype,
+    diagnostic: ?*a.Diagnostic,
+) a.Error!void {
+    return validateDiagnosedWithWork(allocator, image, diagnostic, null);
+}
+
+pub fn instruction(
+    image: anytype,
+    op: anytype,
+    slots: []const p.Id,
+    uses: @import("traits.zig").Facts,
+) a.Error!void {
+    return instructionWithWork(image, op, slots, uses, null);
 }
