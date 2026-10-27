@@ -3,7 +3,7 @@
 //! its definition-site capability remains independently meaningful.
 const source = @import("../source.zig");
 const p = @import("horos_data").program;
-const cleanup = @import("../library/cleanup.zig");
+const cleanup = @import("library/cleanup.zig");
 const Error = source.Error;
 const Context = struct {
     b: *source.Builder,

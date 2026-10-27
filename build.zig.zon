@@ -1,6 +1,6 @@
 .{
     .name = .horos,
-    .version = "7.0.0",
+    .version = "8.0.0",
     .dependencies = .{},
     .minimum_zig_version = "0.17.0",
     .paths = .{

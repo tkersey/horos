@@ -959,8 +959,11 @@ test "library specializations share declarations at one eight and sixty-four ins
             try author.schema(u64),
             .{ .captures = .{ .continuation = &.{} }, .residual = &.{} },
         );
-        _ = try scheduler.fifo(author, tasks, &.{}, &.{});
-        _ = try scheduler.awaiting(author, tasks, joined, &.{region});
+        _ = try scheduler.fifo(author, tasks, .{
+            .residual = &.{},
+            .borrowed_regions = &.{},
+        });
+        _ = try scheduler.awaiting(author, tasks, joined, .{ .borrowed_regions = &.{region} });
         if (index == 0) {
             declarations = b.functions.items.len;
             handlers = b.handlers.items.len;

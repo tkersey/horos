@@ -1,5 +1,31 @@
 const std = @import("std");
 const b = @import("horos");
+test "ordinary libraries exclude raw constructors from the exported package" {
+    try std.testing.expect(!@hasDecl(b.library, "cleanup"));
+    inline for (.{
+        "Generator", "Scope", "defineExchange", "next", "close", "start", "offer", "exchange",
+    }) |name| try std.testing.expect(!@hasDecl(b.library.generator, name));
+    try std.testing.expect(!@hasDecl(b.source.library.generator, "Scope"));
+    try std.testing.expect(!@hasDecl(b.source.library.generator, "next"));
+    try std.testing.expect(!@hasDecl(b.source.library.generator, "create"));
+    var raw = b.source.Builder.init(std.testing.allocator);
+    defer raw.deinit();
+    const unit = try raw.scalar(void);
+    const exchange = try b.source.library.generator.defineExchange(
+        &raw,
+        "package/source-exchange",
+        unit,
+        unit,
+        unit,
+        &.{},
+        &.{},
+        &.{},
+        .{ .effects = &.{} },
+    );
+    try std.testing.expect(exchange.package < raw.schemas.items.len);
+    try std.testing.expect(try b.source.library.cleanup.exitInfo(&raw, unit) < raw.schemas.items.len);
+}
+
 test "foreign effect rejects in public package while local binding succeeds" {
     var first = b.source.Builder.init(std.testing.allocator);
     defer first.deinit();

@@ -673,7 +673,7 @@ test "review named cleanup descriptors retain both supplied failure layouts" {
     try testing.expect(try (try info.fields()).@"2".resultSchema() == failure);
     try testing.expect((try (try other_info.fields()).@"0".fields()).@"1" == other);
     try testing.expect((try (try info.fields()).@"0".fields()).@"1" == failure);
-    const raw_info = try @import("library/cleanup.zig").exitInfo(
+    const raw_info = try @import("source/library/cleanup.zig").exitInfo(
         &raw,
         try a.interop.schemaId(c, failure),
     );
@@ -2019,38 +2019,24 @@ fn librarySharing(allocator: std.mem.Allocator) !void {
     const region = try c.region();
     const logs = try writer.family(c, "sharing/log", integer);
     const failures = try raise.family(c, "sharing/raise", integer);
-    const first_writer = try writer.interpret(
-        c,
-        logs,
-        left,
-        region,
-        .{ .continuation = &.{} },
-        &.{},
-    );
-    const second_writer = try writer.interpret(
-        c,
-        logs,
-        right,
-        region,
-        .{ .continuation = &.{} },
-        &.{},
-    );
-    const first_raise = try raise.catching(
-        c,
-        failures,
-        left,
-        .{ .continuation = &.{} },
-        &.{},
-        &.{},
-    );
-    const second_raise = try raise.catching(
-        c,
-        failures,
-        right,
-        .{ .continuation = &.{} },
-        &.{},
-        &.{},
-    );
+    const first_writer = try writer.interpret(c, logs, left, region, .{
+        .captures = .{ .continuation = &.{} },
+        .residual = &.{},
+    });
+    const second_writer = try writer.interpret(c, logs, right, region, .{
+        .captures = .{ .continuation = &.{} },
+        .residual = &.{},
+    });
+    const first_raise = try raise.catching(c, failures, left, .{
+        .captures = .{ .continuation = &.{} },
+        .residual = &.{},
+        .borrowed_regions = &.{},
+    });
+    const second_raise = try raise.catching(c, failures, right, .{
+        .captures = .{ .continuation = &.{} },
+        .residual = &.{},
+        .borrowed_regions = &.{},
+    });
     try testing.expect(
         a.interop.erase(first_writer.handler) != a.interop.erase(second_writer.handler),
     );
@@ -2061,11 +2047,18 @@ fn librarySharing(allocator: std.mem.Allocator) !void {
     const other = try a.Context.init(&raw);
     try testing.expectError(
         error.ForeignHandle,
-        writer.interpret(other, logs, left, region, .{ .continuation = &.{} }, &.{}),
+        writer.interpret(other, logs, left, region, .{
+            .captures = .{ .continuation = &.{} },
+            .residual = &.{},
+        }),
     );
     try testing.expectError(
         error.ForeignHandle,
-        raise.catching(other, failures, left, .{ .continuation = &.{} }, &.{}, &.{}),
+        raise.catching(other, failures, left, .{
+            .captures = .{ .continuation = &.{} },
+            .residual = &.{},
+            .borrowed_regions = &.{},
+        }),
     );
 }
 test "typed Writer and Raise preserve named contracts and share 64 installations" {
@@ -2153,25 +2146,21 @@ fn stateSharing(allocator: std.mem.Allocator) !void {
         family.getCapability(),
         family.putCapability(),
     } };
-    const value = (try state.interpret(c, family, integer, region, bound, &.{}, .value)).value;
-    const optional = (try state.interpret(
-        c,
-        family,
-        integer,
-        region,
-        bound,
-        &.{},
-        .optional,
-    )).optional;
-    const paired = (try state.interpret(
-        c,
-        family,
-        integer,
-        region,
-        bound,
-        &.{},
-        .with_state,
-    )).with_state;
+    const value = try state.interpret(c, family, integer, region, .{
+        .captures = bound,
+        .residual = &.{},
+        .answer = .value,
+    });
+    const optional = try state.interpret(c, family, integer, region, .{
+        .captures = bound,
+        .residual = &.{},
+        .answer = .optional,
+    });
+    const paired = try state.interpret(c, family, integer, region, .{
+        .captures = bound,
+        .residual = &.{},
+        .answer = .with_state,
+    });
     try testing.expect(
         a.interop.erase(value.handler) != a.interop.erase(optional.handler) and a.interop.erase(
             optional.handler,
@@ -2185,7 +2174,11 @@ fn stateSharing(allocator: std.mem.Allocator) !void {
     const other = try a.Context.init(&raw);
     try testing.expectError(
         error.ForeignHandle,
-        state.interpret(other, family, integer, region, bound, &.{}, .value),
+        state.interpret(other, family, integer, region, .{
+            .captures = bound,
+            .residual = &.{},
+            .answer = .value,
+        }),
     );
 }
 test "typed State shares each answer policy through 64 installations" {
@@ -2432,20 +2425,24 @@ fn readerConstruction(allocator: std.mem.Allocator, sharing: bool) !void {
     const c = try a.Context.init(&raw);
     const unit = try c.schema(void);
     const integer = try c.schema(u64);
-    const family = try reader.family(c, "typed/reader", integer, integer, &.{}, &.{}, &.{});
+    const family = try reader.family(c, "typed/reader", integer, integer, .{
+        .inside_captures = &.{},
+        .residual = &.{},
+        .borrowed_regions = &.{},
+    });
     const bound = .{ .continuation = &.{ unit, integer } };
-    const interpretation = try reader.interpret(c, family, integer, bound);
+    const interpretation = try reader.interpret(c, family, integer, .{ .captures = bound });
     if (sharing) {
         const count = raw.functions.items.len;
         for (0..64) |_| try testing.expectEqual(
             interpretation.handler,
-            (try reader.interpret(c, family, integer, bound)).handler,
+            (try reader.interpret(c, family, integer, .{ .captures = bound })).handler,
         );
         try testing.expectEqual(count, raw.functions.items.len);
         const foreign = try a.Context.init(&raw);
         try testing.expectError(
             error.ForeignHandle,
-            reader.interpret(foreign, family, integer, bound),
+            reader.interpret(foreign, family, integer, .{ .captures = bound }),
         );
     }
     const inside_fn = try c.functionFor("local read", family.inside());
@@ -2501,13 +2498,14 @@ test "recursive Reader retains distinct named answers with equal wire layouts" {
     const inner = try c.record(.{ .inner = integer });
     const outer = try c.record(.{ .outer = integer });
     try testing.expectEqual(try a.interop.schemaId(c, inner), try a.interop.schemaId(c, outer));
-    const family = try reader.family(c, "reader/names", integer, inner, &.{}, &.{}, &.{});
-    const interpreted = try reader.interpret(
-        c,
-        family,
-        outer,
-        .{ .continuation = &.{ integer, inner, outer } },
-    );
+    const family = try reader.family(c, "reader/names", integer, inner, .{
+        .inside_captures = &.{},
+        .residual = &.{},
+        .borrowed_regions = &.{},
+    });
+    const interpreted = try reader.interpret(c, family, outer, .{
+        .captures = .{ .continuation = &.{ integer, inner, outer } },
+    });
     const outside_token = try c.resumptionSchemaFor(interpreted.handler, family.ask());
     const inside_token = try c.resumptionSchemaFor(interpreted.inside_handler, family.ask());
     try testing.expectEqual(outer, try outside_token.resultSchema());
@@ -3535,25 +3533,18 @@ fn expectWriterRaiseSharing(
     for (0..64) |_| {
         try testing.expectEqual(
             first_writer.handler,
-            (try writer.interpret(
-                c,
-                logs,
-                left,
-                region,
-                .{ .continuation = &.{} },
-                &.{},
-            )).handler,
+            (try writer.interpret(c, logs, left, region, .{
+                .captures = .{ .continuation = &.{} },
+                .residual = &.{},
+            })).handler,
         );
         try testing.expectEqual(
             first_raise.handler,
-            (try raise.catching(
-                c,
-                failures,
-                left,
-                .{ .continuation = &.{} },
-                &.{},
-                &.{},
-            )).handler,
+            (try raise.catching(c, failures, left, .{
+                .captures = .{ .continuation = &.{} },
+                .residual = &.{},
+                .borrowed_regions = &.{},
+            })).handler,
         );
     }
     try testing.expectEqual(count, raw.functions.items.len);
@@ -3606,39 +3597,27 @@ fn expectStateSharing(
     for (0..64) |_| {
         try testing.expectEqual(
             value.handler,
-            ((try state.interpret(
-                c,
-                family,
-                integer,
-                region,
-                bound,
-                &.{},
-                .value,
-            )).value).handler,
+            (try state.interpret(c, family, integer, region, .{
+                .captures = bound,
+                .residual = &.{},
+                .answer = .value,
+            })).handler,
         );
         try testing.expectEqual(
             optional.handler,
-            ((try state.interpret(
-                c,
-                family,
-                integer,
-                region,
-                bound,
-                &.{},
-                .optional,
-            )).optional).handler,
+            (try state.interpret(c, family, integer, region, .{
+                .captures = bound,
+                .residual = &.{},
+                .answer = .optional,
+            })).handler,
         );
         try testing.expectEqual(
             paired.handler,
-            ((try state.interpret(
-                c,
-                family,
-                integer,
-                region,
-                bound,
-                &.{},
-                .with_state,
-            )).with_state).handler,
+            (try state.interpret(c, family, integer, region, .{
+                .captures = bound,
+                .residual = &.{},
+                .answer = .with_state,
+            })).handler,
         );
     }
     try testing.expectEqual(count, raw.functions.items.len);
@@ -3692,4 +3671,158 @@ fn expectPackageCategories(
         body.resumePackage(a.interop.erase(ordinary), ordinary),
     );
     try testing.expectError(error.InvalidCategory, body.disposePackage(ordinary));
+}
+
+fn statePolicyAgreement(
+    comptime policy: @import("library/state.zig").Answer,
+    selected_answer: @import("library/state.zig").Answer,
+) !void {
+    const state = @import("library/state.zig");
+    var raw = source.Builder.init(testing.allocator);
+    defer raw.deinit();
+    const c = try a.Context.init(&raw);
+    const integer = try c.schema(u64);
+    const result = try c.record(.{ .count = integer });
+    const region = try c.region();
+    const family = try state.family(c, "state/policy", integer);
+    const Options = struct {
+        captures: @TypeOf(.{ .continuation = .{} }),
+        residual: @TypeOf(.{}),
+        comptime answer: state.Answer = policy,
+    };
+    const exact = try state.interpret(c, family, result, region, Options{
+        .captures = .{ .continuation = .{} },
+        .residual = .{},
+    });
+    const S = a.ShapeOf(@TypeOf(integer));
+    const R = a.ShapeOf(@TypeOf(result));
+    try testing.expect(@TypeOf(exact) == state.Interpretation(S, R, policy));
+    const functions = raw.functions.items.len;
+    const selected_value = try state.interpret(c, family, result, region, .{
+        .captures = .{ .continuation = .{} },
+        .residual = .{},
+        .answer = selected_answer,
+    });
+    try testing.expect(@TypeOf(selected_value) == state.Selected(S, R));
+    try testing.expectEqual(policy, std.meta.activeTag(selected_value));
+    const dynamic = @field(selected_value, @tagName(policy));
+    try testing.expect(@TypeOf(dynamic) == @TypeOf(exact));
+    try testing.expectEqual(exact.handler, dynamic.handler);
+    try testing.expectEqual(exact.answer, dynamic.answer);
+    try testing.expectEqual(exact.cell, dynamic.cell);
+    try testing.expectEqual(functions, raw.functions.items.len);
+}
+
+test "State static answers retain exact types and dynamic answers share semantic objects" {
+    inline for (std.enums.values(@import("library/state.zig").Answer)) |policy|
+        try statePolicyAgreement(policy, policy);
+}
+
+fn statePolicyImage(
+    allocator: std.mem.Allocator,
+    comptime static: bool,
+    comptime policy: @import("library/state.zig").Answer,
+    selected_answer: @import("library/state.zig").Answer,
+) ![]u8 {
+    const state = @import("library/state.zig");
+    var raw = source.Builder.init(allocator);
+    defer raw.deinit();
+    const c = try a.Context.init(&raw);
+    const integer = try c.schema(u64);
+    const region = try c.region();
+    const family = try state.family(c, "state/policy", integer);
+    const bounds = .{ .continuation = .{
+        integer, family.getCapability(), family.putCapability(),
+    } };
+    const Options = struct {
+        captures: @TypeOf(bounds),
+        residual: @TypeOf(.{}),
+        comptime answer: state.Answer = policy,
+    };
+    if (static) {
+        const exact = try state.interpret(c, family, integer, region, Options{
+            .captures = bounds,
+            .residual = .{},
+        });
+        return stateInterpretationImage(allocator, c, family, region, exact);
+    }
+    const selected_value = try state.interpret(c, family, integer, region, .{
+        .captures = bounds,
+        .residual = .{},
+        .answer = selected_answer,
+    });
+    return switch (selected_value) {
+        inline else => |interpreted| stateInterpretationImage(
+            allocator,
+            c,
+            family,
+            region,
+            interpreted,
+        ),
+    };
+}
+
+fn stateInterpretationImage(
+    allocator: std.mem.Allocator,
+    c: *a.Context,
+    family: anytype,
+    region: *const a.Region,
+    interpreted: anytype,
+) ![]u8 {
+    const body_type = try c.handledSchema(interpreted.handler);
+    const body_fn = try c.functionFor("state work", body_type);
+    const body = try c.body(body_fn);
+    _ = try body.performLocal(
+        family.put(),
+        try body.parameter("put"),
+        try body.constant(u64, 42),
+    );
+    try c.define(body_fn, try body.ret(try body.performLocal(
+        family.get(),
+        try body.parameter("get"),
+        try body.constant(void, {}),
+    )));
+    const inside_type = try c.regionBodySchema(region, .{}, interpreted.answer, .{}, .{
+        .use = .linear,
+        .captures = .{},
+    });
+    const inside_fn = try c.functionFor("state region", inside_type);
+    const inside = try c.body(inside_fn);
+    const cell = try inside.newCell(
+        interpreted.cell,
+        try inside.parameter("region"),
+        try inside.constant(u64, 9),
+    );
+    try c.define(inside_fn, try inside.ret(try inside.handleWith(
+        interpreted.handler,
+        try inside.lambda(body_fn, body_type),
+        .{ .state = cell },
+    )));
+    const main = try c.function("entry", .{}, interpreted.answer, .{});
+    const entry = try c.body(main);
+    try c.define(main, try entry.ret(try entry.withRegion(
+        region,
+        try entry.lambda(inside_fn, inside_type),
+        .{},
+    )));
+    var compiled = try c.compile(allocator, main, try c.schema(void));
+    defer compiled.deinit();
+    const bytes = try allocator.alloc(
+        u8,
+        try @import("horos_data").program_image.encodedLength(compiled.program),
+    );
+    errdefer allocator.free(bytes);
+    _ = try compiled.encode(allocator, bytes);
+    return bytes;
+}
+
+test "State static and runtime answer selection emit identical program images" {
+    const allocator = testing.allocator;
+    inline for (std.enums.values(@import("library/state.zig").Answer)) |policy| {
+        const static = try statePolicyImage(allocator, true, policy, policy);
+        defer allocator.free(static);
+        const dynamic = try statePolicyImage(allocator, false, policy, policy);
+        defer allocator.free(dynamic);
+        try testing.expectEqualSlices(u8, static, dynamic);
+    }
 }

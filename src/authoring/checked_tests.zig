@@ -879,15 +879,11 @@ test "replacement State runtime policies expose distinct typed answers" {
     const state = try State.family(c, "state", try c.schema(u64));
     const region = try c.region();
     for ([_]State.Answer{ .value, .with_state, .optional }) |policy| {
-        const selected = try State.interpret(
-            c,
-            state,
-            try c.schema(bool),
-            region,
-            .{ .continuation = .{} },
-            .{},
-            policy,
-        );
+        const selected = try State.interpret(c, state, try c.schema(bool), region, .{
+            .captures = .{ .continuation = .{} },
+            .residual = .{},
+            .answer = policy,
+        });
         switch (selected) {
             .value => |v| try std.testing.expect(
                 @TypeOf(v.answer) == *const a.Schema(a.Shape(bool)),
@@ -948,8 +944,6 @@ test "replacement recursive library results preserve known schemas" {
     const Writer = @import("../library/writer.zig");
     const Raise = @import("../library/raise.zig");
     const Search = @import("../library/search.zig");
-    const Generator = @import("../library/generator.zig");
-    const Scheduler = @import("../library/scheduler.zig");
     var raw = source.Builder.init(std.testing.allocator);
     defer raw.deinit();
     const c = try a.Context.init(&raw);
@@ -957,8 +951,14 @@ test "replacement recursive library results preserve known schemas" {
     const integer = try c.schema(u64);
     const boolean = try c.schema(bool);
     const region = try c.region();
-    const reader = try Reader.family(c, "reader", integer, boolean, .{}, .{}, .{});
-    const reading = try Reader.interpret(c, reader, integer, .{ .continuation = .{} });
+    const reader = try Reader.family(c, "reader", integer, boolean, .{
+        .inside_captures = .{},
+        .residual = .{},
+        .borrowed_regions = .{},
+    });
+    const reading = try Reader.interpret(c, reader, integer, .{
+        .captures = .{ .continuation = .{} },
+    });
     const inside = try c.functionFor("inside type", reader.inside());
     const inside_body = try c.body(inside);
     const cap = try inside_body.parameter("local");
@@ -969,13 +969,20 @@ test "replacement recursive library results preserve known schemas" {
     const read_return = try c.returnFunction(reading.handler);
     try std.testing.expect(a.ShapeOf(@TypeOf(read_return)).result == a.Shape(u64));
     const writer = try Writer.family(c, "writer", boolean);
-    const writing = try Writer.interpret(c, writer, integer, region, .{ .continuation = .{} }, .{});
+    const writing = try Writer.interpret(c, writer, integer, region, .{
+        .captures = .{ .continuation = .{} },
+        .residual = .{},
+    });
     try std.testing.expect(@TypeOf((try writing.answer.fields()).value) == @TypeOf(integer));
     try std.testing.expect(
         @TypeOf(try (try writing.answer.fields()).log.resultSchema()) == @TypeOf(boolean),
     );
     const raised = try Raise.family(c, "raise", boolean);
-    const catching = try Raise.catching(c, raised, integer, .{ .continuation = .{} }, .{}, .{});
+    const catching = try Raise.catching(c, raised, integer, .{
+        .captures = .{ .continuation = .{} },
+        .residual = .{},
+        .borrowed_regions = .{},
+    });
     try std.testing.expect(@TypeOf((try catching.answer.fields()).failure) == @TypeOf(boolean));
     const search = try Search.family(c, "search");
     const searching = try Search.interpret(
@@ -988,6 +995,18 @@ test "replacement recursive library results preserve known schemas" {
     try std.testing.expect(
         @TypeOf(try searching.resumption.resultSchema()) == @TypeOf(searching.step),
     );
+    try checkGeneratorSchedulerResults(c, unit, integer, boolean, region);
+}
+
+fn checkGeneratorSchedulerResults(
+    c: *a.Context,
+    unit: anytype,
+    integer: anytype,
+    boolean: anytype,
+    region: *const a.Region,
+) !void {
+    const Generator = @import("../library/generator.zig");
+    const Scheduler = @import("../library/scheduler.zig");
     const options = .{ .captures = .{ .continuation = .{integer} } };
     const left = try Generator.create(c, "left", integer, boolean, unit, options);
     const right = try Generator.create(c, "right", boolean, integer, unit, options);
@@ -1003,10 +1022,13 @@ test "replacement recursive library results preserve known schemas" {
         ),
     );
     const tasks = try Generator.create(c, "tasks", unit, unit, unit, options);
-    const fifo = try Scheduler.fifo(c, tasks, .{}, .{region});
+    const fifo = try Scheduler.fifo(c, tasks, .{
+        .residual = .{},
+        .borrowed_regions = .{region},
+    });
     try std.testing.expect(@TypeOf(try fifo.queue.resultSchema()) == @TypeOf(tasks.package()));
     const join = try Scheduler.joinType(c, integer, region);
-    const awaiting = try Scheduler.awaiting(c, tasks, join, .{region});
+    const awaiting = try Scheduler.awaiting(c, tasks, join, .{ .borrowed_regions = .{region} });
     try std.testing.expect(a.ShapeOf(@TypeOf(awaiting)).result == a.Shape(u64));
 }
 

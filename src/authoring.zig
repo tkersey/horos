@@ -893,14 +893,8 @@ fn joinFields(comptime A: type, comptime B: type) type {
     return native.Fields(a.field_names ++ b.field_names, a.field_types ++ b.field_types);
 }
 fn knownMode(comptime T: type) ?p.Mode {
-    const f = fieldsInfo(T, "handler options");
-    for (f.field_names, f.field_types, f.field_attrs) |name, Field, attributes| {
-        if (std.mem.eql(u8, name, "mode") and attributes.@"comptime") return @as(
-            p.Mode,
-            attributes.defaultValue(Field).?,
-        );
-    }
-    return null;
+    _ = fieldsInfo(T, "handler options");
+    return option_contract.knownEnum(T, "mode", p.Mode);
 }
 pub fn HandlerShape(
     comptime Ops: type,

@@ -6,7 +6,7 @@ Horos checks staged Zig computations and handlers and compiles them into
 portable BPI3 program data. Kosmos executes that data with one generic native/WASM
 interpreter. Horos contains no production evaluator.
 
-Horos `7.0.0` requires Zig `0.17.0`. The public modules are `horos` for
+Horos `8.0.0` requires Zig `0.17.0`. The public modules are `horos` for
 authoring and `horos_data` for data-only admission and linking. This version
 uses BMO1 components, BPI3 programs, PST3 states and ABI 3; the major package
 version does not introduce another wire format. See the
@@ -85,7 +85,7 @@ representation introducers and eliminators. `Body.packResource` and
 `unpackResource` emit accesses checked by that authority. `Body.bracket` transfers
 the owner to cleanup and gives its body a scoped loan. The
 [resource example](src/source/resource_example.zig) runs one typed client against
-scalar and structured representations. `library.cleanup.exitInfo` remains a
+scalar and structured representations. `source.library.cleanup.exitInfo` remains a
 schema helper for explicit source-IR construction; typed code uses `cleanupInfo`.
 
 Recursive interfaces use `declareSchema` and typed definitions. A declaration is

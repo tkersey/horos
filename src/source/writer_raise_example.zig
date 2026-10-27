@@ -14,22 +14,18 @@ fn authored(b: *source.Builder) a.Error!source.Module {
     const region = try c.region();
     const w = try writer.family(c, "example/writer", integer);
     const r = try raise.family(c, "example/raise", integer);
-    const caught = try raise.catching(
-        c,
-        r,
-        integer,
-        .{ .continuation = &.{ unit, integer, w.capability() }, .body = &.{w.capability()} },
-        &.{w.effect()},
-        &.{region},
-    );
-    const written = try writer.interpret(
-        c,
-        w,
-        caught.answer,
-        region,
-        .{ .continuation = &.{ unit, integer, caught.answer, r.capability() } },
-        &.{},
-    );
+    const caught = try raise.catching(c, r, integer, .{
+        .captures = .{
+            .continuation = &.{ unit, integer, w.capability() },
+            .body = &.{w.capability()},
+        },
+        .residual = &.{w.effect()},
+        .borrowed_regions = &.{region},
+    });
+    const written = try writer.interpret(c, w, caught.answer, region, .{
+        .captures = .{ .continuation = &.{ unit, integer, caught.answer, r.capability() } },
+        .residual = &.{},
+    });
     return declareProtectedWork(.{
         .c = c,
         .unit = unit,

@@ -2,7 +2,7 @@
 //! Nested cleanup keeps its primary exit, records both failures, and continues
 //! to an outer effect with the complete accumulated ExitInfo.
 const source = @import("../source.zig");
-const cleanup = @import("../library/cleanup.zig");
+const cleanup = @import("library/cleanup.zig");
 
 pub fn build(b: *source.Builder) source.Error!source.Module {
     return buildWithYield(b, false);

@@ -1,4 +1,5 @@
 //! FIFO and join interfaces preserve their exchange and completion contracts.
+const option_contract = @import("../authoring/option_contract.zig");
 const bridge = @import("bridge.zig");
 const a = bridge.a;
 const native = bridge.native;
@@ -26,14 +27,18 @@ pub fn Scheduler(comptime S: type) type {
 pub fn fifo(
     c: *a.Context,
     tasks: anytype,
-    residual: anytype,
-    regions: anytype,
+    options: anytype,
 ) a.Error!Scheduler(generator.ExchangeShape(@TypeOf(tasks))) {
+    comptime option_contract.required(
+        "scheduler.fifo",
+        @TypeOf(options),
+        &.{ "residual", "borrowed_regions" },
+    );
     const unit = try c.schema(void);
     _ = try a.interop.refineSchema(c, tasks.input(), unit);
     _ = try a.interop.refineSchema(c, tasks.result(), unit);
-    const effects = bridge.list(.operation, residual);
-    const borrowed = bridge.list(.region, regions);
+    const effects = bridge.list(.operation, options.residual);
+    const borrowed = bridge.list(.region, options.borrowed_regions);
     const value = try runtime.fifo(
         bridge.context(c),
         @ptrCast(tasks),
@@ -96,13 +101,18 @@ pub fn awaiting(
     c: *a.Context,
     tasks: anytype,
     join: anytype,
-    regions: anytype,
+    options: anytype,
 ) a.Error!*const a.Function(AwaitSignature(
     generator.ExchangeShape(@TypeOf(tasks)),
     joinShape(@TypeOf(join)),
 )) {
+    comptime option_contract.required(
+        "scheduler.awaiting",
+        @TypeOf(options),
+        &.{"borrowed_regions"},
+    );
     _ = try a.interop.refineSchema(c, tasks.element(), try c.schema(void));
-    const borrowed = bridge.list(.region, regions);
+    const borrowed = bridge.list(.region, options.borrowed_regions);
     return @ptrCast(try runtime.awaiting(
         bridge.context(c),
         @ptrCast(tasks),

@@ -5,15 +5,6 @@ const a = bridge.a;
 const native = bridge.native;
 const runtime = @import("runtime/generator.zig");
 const p = @import("horos_data").program;
-// Deliberate raw component construction remains a distinct compiler boundary.
-pub const Generator = runtime.Generator;
-pub const Scope = runtime.Scope;
-pub const defineExchange = runtime.defineExchange;
-pub const next = runtime.next;
-pub const close = runtime.close;
-pub const start = runtime.start;
-pub const offer = runtime.offer;
-pub const exchange = runtime.exchange;
 
 pub fn Signature(comptime I: type, comptime E: type, comptime R: type, comptime P: type) type {
     return struct {

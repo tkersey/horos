@@ -78,7 +78,7 @@ fn protectedControl(
         .value = owned,
         .region = loan,
     } } });
-    const info = try @import("../library/cleanup.zig").exitInfo(b, unit);
+    const info = try @import("library/cleanup.zig").exitInfo(b, unit);
     const body = try b.declare(&.{ borrowed, unit }, integer, &.{}, &.{loan});
     const cleanup = try b.declare(&.{ info, owned }, unit, &.{}, &.{});
     try b.resourceAuthority(owned, &.{inside}, &.{ body, cleanup });

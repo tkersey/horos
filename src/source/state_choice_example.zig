@@ -76,28 +76,30 @@ fn interpretState(
     comptime recursive: bool,
     ctx: anytype,
 ) a.Error!source.Module {
-    const interpreted = (try state.interpret(
+    const interpreted = try state.interpret(
         ctx.c,
         ctx.counter,
         if (choice_outside) ctx.integer else ctx.sequence,
         ctx.region,
         .{
-            .continuation = &.{
-                ctx.unit,
-                ctx.boolean,
-                ctx.integer,
-                ctx.sequence,
-                ctx.cell_schema,
-                ctx.counter.getCapability(),
-                ctx.counter.putCapability(),
-                ctx.branch.capability(),
-                ctx.all.resumption,
+            .captures = .{
+                .continuation = &.{
+                    ctx.unit,
+                    ctx.boolean,
+                    ctx.integer,
+                    ctx.sequence,
+                    ctx.cell_schema,
+                    ctx.counter.getCapability(),
+                    ctx.counter.putCapability(),
+                    ctx.branch.capability(),
+                    ctx.all.resumption,
+                },
+                .body = if (choice_outside) &.{ctx.branch.capability()} else &.{},
             },
-            .body = if (choice_outside) &.{ctx.branch.capability()} else &.{},
+            .residual = if (choice_outside) &.{ctx.branch.effect()} else &.{},
+            .answer = .value,
         },
-        if (choice_outside) &.{ctx.branch.effect()} else &.{},
-        .value,
-    )).value;
+    );
     return declareScopes(choice_outside, recursive, .{
         .c = ctx.c,
         .unit = ctx.unit,

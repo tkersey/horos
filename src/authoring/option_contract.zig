@@ -40,3 +40,28 @@ pub const handler = &.{
     "state",
 };
 pub const choice = &.{ "captures", "residual", "owned_regions", "borrowed_regions" };
+
+pub fn required(
+    comptime operation: []const u8,
+    comptime Options: type,
+    comptime names: []const []const u8,
+) void {
+    check(operation, Options, names);
+    for (names) |name| if (!@hasField(Options, name))
+        @compileError("Horos " ++ operation ++ ": missing option " ++ name);
+}
+
+pub fn captureBounds(comptime operation: []const u8, comptime Bounds: type) void {
+    check(operation ++ ".captures", Bounds, &.{ "continuation", "body" });
+    if (!@hasField(Bounds, "continuation"))
+        @compileError("Horos " ++ operation ++ ": missing option captures.continuation");
+}
+
+pub fn knownEnum(comptime T: type, comptime field: []const u8, comptime E: type) ?E {
+    const fields = @typeInfo(T).@"struct";
+    for (fields.field_names, fields.field_types, fields.field_attrs) |name, Field, attributes| {
+        if (std.mem.eql(u8, name, field) and attributes.@"comptime")
+            return @as(E, attributes.defaultValue(Field).?);
+    }
+    return null;
+}

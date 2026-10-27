@@ -224,7 +224,8 @@ Deep resumptions return the handler answer; shallow resumptions return the handl
 body's input. `resumeWith` supplies the successor for shallow work. A statically
 known mode yields the corresponding handler type. An actual runtime mode yields
 `.deep` or `.shallow` typed alternatives; switch on that result before using its
-derived interfaces. `state.interpret` similarly returns a tagged answer policy.
+derived interfaces. `state.interpret` returns the precise interpretation when its `answer` field is
+retained at comptime, or a tagged answer policy when selected at authoring runtime.
 Runtime choices remain runtime choices.
 
 Multi-shot resumptions retain their original continuation; resuming them does
