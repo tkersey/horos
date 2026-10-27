@@ -2,6 +2,239 @@ const std = @import("std");
 const a = @import("../authoring.zig");
 const source = @import("../source.zig");
 
+test "checked schema projections preserve partial knowledge and actual metadata" {
+    var raw = source.Builder.init(std.testing.allocator);
+    defer raw.deinit();
+    const c = try a.Context.init(&raw);
+    const integer = try c.schema(u64);
+    const known = try c.callable(.{ .peer = integer }, integer, .{}, .{ .use = .reusable });
+    try std.testing.expect(@TypeOf(try known.fieldSchema("peer")) == @TypeOf(integer));
+    try std.testing.expect(@TypeOf(try known.requiredResultSchema()) == @TypeOf(integer));
+    const names = try a.interop.RuntimeNamed(.schema).init(c, &.{
+        .{ .name = "peer", .handle = a.interop.erase(integer) },
+    });
+    const partial = try c.callable(names, integer, .{}, .{ .use = .reusable });
+    const field = try partial.fieldSchema("peer");
+    const result = try partial.requiredResultSchema();
+    try std.testing.expect(@TypeOf(field) == *const a.Schema(a.Dynamic));
+    try std.testing.expect(@TypeOf(result) == @TypeOf(integer));
+    try std.testing.expectEqual(
+        try a.interop.schemaId(c, integer),
+        try a.interop.schemaId(c, field),
+    );
+    try std.testing.expectEqual(integer, result);
+    try std.testing.expectError(error.UnknownName, partial.fieldSchema("missing"));
+    const erased = a.interop.erase(known);
+    try std.testing.expectEqual(a.interop.erase(integer), try erased.requiredResultSchema());
+    try std.testing.expectEqual(a.interop.erase(integer), (try erased.resultSchema()).?);
+    try std.testing.expectError(
+        error.InvalidSchema,
+        a.interop.erase(integer).requiredResultSchema(),
+    );
+}
+
+test "checked schema projections reject unfinished declarations" {
+    var raw = source.Builder.init(std.testing.allocator);
+    defer raw.deinit();
+    const c = try a.Context.init(&raw);
+    const declaration = try c.declareSchema(.callable, a.Dynamic);
+    try std.testing.expectError(error.UndefinedSchema, declaration.schema().fieldSchema("peer"));
+    try std.testing.expectError(error.UndefinedSchema, declaration.schema().requiredResultSchema());
+    const integer = try c.schema(u64);
+    try c.defineCallable(declaration, .{ .peer = integer }, integer, .{}, .{ .use = .reusable });
+    try std.testing.expectEqual(
+        a.interop.erase(integer),
+        try declaration.schema().fieldSchema("peer"),
+    );
+    try std.testing.expectEqual(
+        a.interop.erase(integer),
+        try declaration.schema().requiredResultSchema(),
+    );
+}
+
+test "checked component imports retain actual signatures and publish only declared imports" {
+    var raw = source.Builder.init(std.testing.allocator);
+    defer raw.deinit();
+    const c = try a.Context.init(&raw);
+    const integer = try c.schema(u64);
+    const id = try a.interop.schemaId(c, integer);
+    const imported_id = try raw.declare(&.{id}, id, &.{}, &.{});
+    const expected = try c.callable(.{ .input = integer }, integer, .{}, .{ .use = .reusable });
+    const imported = try a.interop.importFunction(c, imported_id, expected);
+    try std.testing.expectEqual(imported, try a.interop.importFunction(c, imported_id, expected));
+    const entry = try c.function("entry", .{}, integer, .{});
+    const body = try c.body(entry);
+    try c.define(entry, try body.ret(try body.call(imported, .{
+        .input = try body.constant(u64, 42),
+    })));
+    const unit = try c.schema(void);
+    try std.testing.expectError(error.UndefinedBody, c.module(entry, unit));
+    const interface: source.component.Interface = .{
+        .imports = &.{.{ .name = "imported", .reference = .{
+            .kind = .function,
+            .id = imported_id,
+        } }},
+        .exports = &.{.{ .name = "entry", .reference = .{
+            .kind = .function,
+            .id = try a.interop.functionId(c, entry),
+        } }},
+        .borrows = &.{.{ .function = imported_id }},
+    };
+    _ = try a.interop.componentModule(c, entry, unit, interface);
+    _ = try c.declareSchema(.callable, a.Dynamic);
+    try std.testing.expectError(error.UndefinedSchema, a.interop.componentModule(
+        c,
+        entry,
+        unit,
+        interface,
+    ));
+}
+
+test "component publication retains ordinary admission diagnostics with and without imports" {
+    for ([_]bool{ false, true }) |with_import| {
+        var raw = source.Builder.init(std.testing.allocator);
+        defer raw.deinit();
+        const c = try a.Context.init(&raw);
+        const unit = try c.schema(void);
+        const unit_id = try a.interop.schemaId(c, unit);
+        const effect = try c.external("undeclared", unit, unit);
+        const imported_id = if (with_import) try raw.declare(&.{}, unit_id, &.{}, &.{}) else null;
+        const entry = try c.function("component entry", .{}, unit, .{});
+        const body = try c.body(entry);
+        if (imported_id) |id| {
+            const signature = try c.callable(.{}, unit, .{}, .{ .use = .reusable });
+            const imported = try a.interop.importFunction(c, id, signature);
+            _ = try body.call(imported, .{});
+        }
+        try c.define(entry, try body.ret(try body.perform(effect, try body.constant(void, {}))));
+        const entry_id = try a.interop.functionId(c, entry);
+        const interface: source.component.Interface = .{
+            .imports = if (imported_id) |id| &.{.{ .name = "import", .reference = .{
+                .kind = .function,
+                .id = id,
+            } }} else &.{},
+            .exports = &.{.{ .name = "entry", .reference = .{
+                .kind = .function,
+                .id = entry_id,
+            } }},
+            .borrows = if (imported_id) |id| &.{.{ .function = id }} else &.{},
+        };
+        try std.testing.expectError(error.InvalidEffect, a.interop.componentModule(
+            c,
+            entry,
+            unit,
+            interface,
+        ));
+        const diagnostic = c.lastDiagnostic();
+        var expected: source.Diagnostic = .{};
+        try std.testing.expectError(error.InvalidEffect, source.component.compileObserved(
+            std.testing.allocator,
+            raw.module(entry_id, unit_id),
+            interface,
+            .{ .diagnostic = &expected },
+        ));
+        try std.testing.expectEqual(error.InvalidEffect, diagnostic.code.?);
+        try std.testing.expectEqualDeep(expected, diagnostic.source.?);
+        const rendered = try diagnostic.renderAlloc(std.testing.allocator);
+        defer std.testing.allocator.free(rendered);
+        try std.testing.expectEqualStrings(
+            "InvalidEffect: compiled source: effect exceeds declared residual allowance",
+            rendered,
+        );
+    }
+}
+
+test "component publication retains component interface rejection diagnostics" {
+    var raw = source.Builder.init(std.testing.allocator);
+    defer raw.deinit();
+    const c = try a.Context.init(&raw);
+    const unit = try c.schema(void);
+    const entry = try c.function("entry", .{}, unit, .{});
+    const body = try c.body(entry);
+    try c.define(entry, try body.ret(try body.constant(void, {})));
+    try std.testing.expectError(error.InvalidSymbol, a.interop.componentModule(c, entry, unit, .{
+        .exports = &.{.{ .name = "", .reference = .{
+            .kind = .function,
+            .id = try a.interop.functionId(c, entry),
+        } }},
+    }));
+    const diagnostic = c.lastDiagnostic();
+    try std.testing.expectEqual(error.InvalidSymbol, diagnostic.code.?);
+    try std.testing.expectEqual(error.InvalidSymbol, diagnostic.source.?.code.?);
+    try std.testing.expectEqualStrings(
+        "authoritative source or target admission rejected the construction",
+        diagnostic.relationship,
+    );
+}
+
+test "component publication preserves capture observer rejection and valid captures" {
+    for ([_]bool{ false, true }) |permitted| {
+        var raw = source.Builder.init(std.testing.allocator);
+        defer raw.deinit();
+        const c = try a.Context.init(&raw);
+        const integer = try c.schema(u64);
+        const captures: []const *const a.Schema(a.Dynamic) = if (permitted)
+            &.{a.interop.erase(integer)}
+        else
+            &.{};
+        const schema = try c.callable(.{}, integer, .{}, .{
+            .use = .reusable,
+            .captures = captures,
+        });
+        const entry = try c.function("entry", .{ .seed = integer }, integer, .{});
+        const body = try c.body(entry);
+        const closure = try c.functionFor("capturing closure", schema);
+        const nested = try body.closureBody(closure);
+        try c.define(closure, try nested.ret(try body.parameter("seed")));
+        try c.define(entry, try body.ret(try body.apply(try body.lambda(closure, schema), .{})));
+        const result = a.interop.componentModule(c, entry, try c.schema(void), .{
+            .exports = &.{.{ .name = "entry", .reference = .{
+                .kind = .function,
+                .id = try a.interop.functionId(c, entry),
+            } }},
+        });
+        if (permitted) {
+            _ = try result;
+        } else {
+            try std.testing.expectError(error.SchemaMismatch, result);
+            try std.testing.expectEqual(error.SchemaMismatch, c.lastDiagnostic().code.?);
+            try std.testing.expectEqualStrings("capture", c.lastDiagnostic().entity);
+            try std.testing.expectEqualStrings(
+                "retained named value is outside its declared capture allowance",
+                c.lastDiagnostic().relationship,
+            );
+        }
+    }
+}
+
+test "checked component function imports reject counterfeit effects and parameter contracts" {
+    var raw = source.Builder.init(std.testing.allocator);
+    defer raw.deinit();
+    const c = try a.Context.init(&raw);
+    const integer = try c.schema(u64);
+    const boolean = try c.schema(bool);
+    const effect = try c.external("imported effect", integer, integer);
+    const id = try a.interop.schemaId(c, integer);
+    const effect_id = try a.interop.operationId(c, effect);
+    const imported_id = try raw.declare(&.{id}, id, &.{effect_id}, &.{});
+    const pure = try c.callable(.{ .input = integer }, integer, .{}, .{ .use = .reusable });
+    try std.testing.expectError(error.SchemaMismatch, a.interop.importFunction(
+        c,
+        imported_id,
+        pure,
+    ));
+    const wrong = try c.callable(.{ .input = boolean }, integer, .{effect}, .{ .use = .reusable });
+    try std.testing.expectError(error.SchemaMismatch, a.interop.importFunction(
+        c,
+        imported_id,
+        wrong,
+    ));
+    const correct = try c.callable(.{ .input = integer }, integer, .{effect}, .{
+        .use = .reusable,
+    });
+    _ = try a.interop.importFunction(c, imported_id, correct);
+}
+
 test "checked environmental operation imports and sites retain validated contracts" {
     var raw = source.Builder.init(std.testing.allocator);
     defer raw.deinit();

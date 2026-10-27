@@ -847,6 +847,20 @@ pub fn Schema(comptime S: type) type {
                 @field(out, name) = @ptrCast(stored[i].schema);
             return out;
         }
+        pub fn fieldSchema(
+            self: *const Self,
+            comptime name: []const u8,
+        ) Error!*const Schema(child(reflectedFields(S), name, "schema field")) {
+            const stored = try erased(.schema, self).checkedFields();
+            for (stored) |field| {
+                if (std.mem.eql(u8, field.name, name)) return @ptrCast(field.schema);
+            }
+            return error.UnknownName;
+        }
+        pub fn requiredResultSchema(self: *const Self) Error!*const Schema(reflectedResult(S)) {
+            return @ptrCast((try erased(.schema, self).checkedResult()) orelse
+                return error.InvalidSchema);
+        }
         pub fn resultSchema(self: *const Self) Error!(if (S == Dynamic) ?*const Schema(
             Dynamic,
         ) else *const Schema(reflectedResult(S))) {
@@ -1691,6 +1705,15 @@ pub fn Body(comptime Parameters: type) type {
         pub const horos_handle: Metadata = .{ .family = .body, .shape = Parameters };
         fn raw(self: *Self) *runtime.Body {
             return @ptrCast(self);
+        }
+        pub fn context(self: *Self) Error!*Context {
+            return @ptrCast(try self.raw().context());
+        }
+        pub fn schemaOf(
+            self: *Self,
+            value: anytype,
+        ) Error!*const Schema(index(.value, @TypeOf(value))) {
+            return @ptrCast(try self.raw().schemaOf(erased(.value, value)));
         }
         pub fn parameter(
             self: *Self,
@@ -2685,6 +2708,27 @@ pub fn Body(comptime Parameters: type) type {
 }
 
 pub const interop = struct {
+    pub fn requireCompatibleShapes(
+        comptime Expected: type,
+        comptime Actual: type,
+        comptime path: []const u8,
+    ) void {
+        comptime compatible(Expected, Actual, path);
+    }
+
+    pub fn componentModule(
+        c: *Context,
+        entry: anytype,
+        failure: anytype,
+        interface: source.component.Interface,
+    ) !source.Module {
+        return runtime.interop.componentModule(
+            rawContext(c),
+            erased(.function, entry),
+            erased(.schema, failure),
+            interface,
+        );
+    }
     pub fn NamedEntry(comptime family: Family) type {
         return struct { name: []const u8, handle: *const canonical(family, Dynamic) };
     }
@@ -2879,6 +2923,20 @@ pub const interop = struct {
     }
     pub fn declaredFunction(c: *Context, id: p.Id) Error!*const Function(Dynamic) {
         return @ptrCast(try runtime.interop.declaredFunction(rawContext(c), id));
+    }
+    pub fn importFunction(
+        c: *Context,
+        id: p.Id,
+        expected: anytype,
+    ) Error!*const Function(callableSignature(
+        index(.schema, @TypeOf(expected)),
+        "importFunction",
+    )) {
+        return @ptrCast(try runtime.interop.importFunction(
+            rawContext(c),
+            id,
+            erased(.schema, expected),
+        ));
     }
     pub fn externalOperation(
         c: *Context,

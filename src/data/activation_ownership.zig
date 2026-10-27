@@ -70,7 +70,17 @@ pub fn analyzeComponent(
     imports: []const p.Id,
     borrows: []const @import("borrow_contract.zig").Summary,
 ) Error!flow.Facts {
-    return analyzeInternal(allocator, image, imports, true, borrows, null, null, null);
+    return analyzeComponentObserved(allocator, image, imports, borrows, null);
+}
+
+pub fn analyzeComponentObserved(
+    allocator: std.mem.Allocator,
+    image: ir.Program,
+    imports: []const p.Id,
+    borrows: []const @import("borrow_contract.zig").Summary,
+    observer: ?CaptureObserver,
+) Error!flow.Facts {
+    return analyzeInternal(allocator, image, imports, true, borrows, null, observer, null);
 }
 
 fn analyzeInternal(
