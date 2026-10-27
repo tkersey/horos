@@ -1,5 +1,51 @@
 const std = @import("std");
 const b = @import("horos");
+test "imported callable contracts preserve use effects regions and capture allowances" {
+    var raw = b.source.Builder.init(std.testing.allocator);
+    defer raw.deinit();
+    const c = try b.authoring.Context.init(&raw);
+    const integer = try c.schema(u64);
+    const boolean = try c.schema(bool);
+    const effect = try c.external("imported/effect", integer, integer);
+    const region = try c.region();
+    const other_region = try c.region();
+    const expected = try c.callable(.{ .input = integer }, integer, .{effect}, .{
+        .use = .linear,
+        .captures = .{integer},
+        .regions = .{region},
+    });
+    const id = try b.authoring.interop.schemaId(c, expected);
+    const imported = try b.authoring.interop.schema(c, id);
+    try std.testing.expectEqual(id, try b.authoring.interop.schemaId(c, imported));
+    try std.testing.expectEqual(expected, try b.authoring.interop.mapSchema(c, imported, expected));
+    const changed = .{
+        try c.callable(.{ .input = integer }, integer, .{effect}, .{
+            .use = .reusable,
+            .captures = .{integer},
+            .regions = .{region},
+        }),
+        try c.callable(.{ .input = integer }, integer, .{}, .{
+            .use = .linear,
+            .captures = .{integer},
+            .regions = .{region},
+        }),
+        try c.callable(.{ .input = integer }, integer, .{effect}, .{
+            .use = .linear,
+            .captures = .{integer},
+            .regions = .{other_region},
+        }),
+        try c.callable(.{ .input = integer }, integer, .{effect}, .{
+            .use = .linear,
+            .captures = .{boolean},
+            .regions = .{region},
+        }),
+    };
+    inline for (changed) |wrong| try std.testing.expectError(
+        error.SchemaMismatch,
+        b.authoring.interop.mapSchema(c, imported, wrong),
+    );
+}
+
 test "ordinary libraries exclude raw constructors from the exported package" {
     try std.testing.expect(!@hasDecl(b.library, "cleanup"));
     inline for (.{
