@@ -94,8 +94,8 @@ for (const kind of ["obtain", "resume", "repeated", "dispose"]) {
   }
 }
 const capturedLocal = parseExactJson(execFileSync(emitter, ["hyper_captured_local", "json"], {encoding: "utf8"}));
-assert.deepEqual(execute(capturedLocal, [], [word(5)]), {
-  trace: [{kind: "Requested", identity: "hyper/captured", payload: word(7)}],
+assert.deepEqual(execute(capturedLocal, [], [word(5), word(5)]), {
+  trace: [7, 7].map(value => ({kind: "Requested", identity: "hyper/captured", payload: word(value)})),
   kind: "Completed", value: word(13),
 });
 const composition = parseExactJson(execFileSync(emitter, ["hyper_composition", "json"], {encoding: "utf8"}));
