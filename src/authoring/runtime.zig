@@ -2113,7 +2113,11 @@ pub const Context = opaque {
         }
         return result;
     }
-    fn rejectSource(self: *Context, err: Error, diagnostic: source.Diagnostic) Error {
+    fn rejectSource(
+        self: *Context,
+        err: anytype,
+        diagnostic: source.Diagnostic,
+    ) (Error || @TypeOf(err)) {
         if (contextData(self).capture_failure) |failure| return failure;
         var failure = diagnostic;
         failure.code = err;
@@ -4920,16 +4924,20 @@ pub const interop = struct {
         interface: source.component.Interface,
     ) !source.Module {
         const module = try c.publishImports(entry, failure, false, interface.imports);
+        var diagnostic: source.Diagnostic = .{};
         var checked = source.component.compileObserved(
             contextData(c).raw.arena.child_allocator,
             module,
             interface,
-            .{ .captures = .{
-                .context = c,
-                .capture = Context.observeCapture,
-                .closure = Context.observeClosure,
-            } },
-        ) catch |err| return contextData(c).capture_failure orelse err;
+            .{
+                .diagnostic = &diagnostic,
+                .captures = .{
+                    .context = c,
+                    .capture = Context.observeCapture,
+                    .closure = Context.observeClosure,
+                },
+            },
+        ) catch |err| return c.rejectSource(err, diagnostic);
         defer checked.deinit();
         if (contextData(c).capture_failure) |err| return err;
         return module;

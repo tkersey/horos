@@ -90,6 +90,123 @@ test "checked component imports retain actual signatures and publish only declar
     ));
 }
 
+test "component publication retains ordinary admission diagnostics with and without imports" {
+    for ([_]bool{ false, true }) |with_import| {
+        var raw = source.Builder.init(std.testing.allocator);
+        defer raw.deinit();
+        const c = try a.Context.init(&raw);
+        const unit = try c.schema(void);
+        const unit_id = try a.interop.schemaId(c, unit);
+        const effect = try c.external("undeclared", unit, unit);
+        const imported_id = if (with_import) try raw.declare(&.{}, unit_id, &.{}, &.{}) else null;
+        const entry = try c.function("component entry", .{}, unit, .{});
+        const body = try c.body(entry);
+        if (imported_id) |id| {
+            const signature = try c.callable(.{}, unit, .{}, .{ .use = .reusable });
+            const imported = try a.interop.importFunction(c, id, signature);
+            _ = try body.call(imported, .{});
+        }
+        try c.define(entry, try body.ret(try body.perform(effect, try body.constant(void, {}))));
+        const entry_id = try a.interop.functionId(c, entry);
+        const interface: source.component.Interface = .{
+            .imports = if (imported_id) |id| &.{.{ .name = "import", .reference = .{
+                .kind = .function,
+                .id = id,
+            } }} else &.{},
+            .exports = &.{.{ .name = "entry", .reference = .{
+                .kind = .function,
+                .id = entry_id,
+            } }},
+            .borrows = if (imported_id) |id| &.{.{ .function = id }} else &.{},
+        };
+        try std.testing.expectError(error.InvalidEffect, a.interop.componentModule(
+            c,
+            entry,
+            unit,
+            interface,
+        ));
+        const diagnostic = c.lastDiagnostic();
+        var expected: source.Diagnostic = .{};
+        try std.testing.expectError(error.InvalidEffect, source.component.compileObserved(
+            std.testing.allocator,
+            raw.module(entry_id, unit_id),
+            interface,
+            .{ .diagnostic = &expected },
+        ));
+        try std.testing.expectEqual(error.InvalidEffect, diagnostic.code.?);
+        try std.testing.expectEqualDeep(expected, diagnostic.source.?);
+        const rendered = try diagnostic.renderAlloc(std.testing.allocator);
+        defer std.testing.allocator.free(rendered);
+        try std.testing.expectEqualStrings(
+            "InvalidEffect: compiled source: effect exceeds declared residual allowance",
+            rendered,
+        );
+    }
+}
+
+test "component publication retains component interface rejection diagnostics" {
+    var raw = source.Builder.init(std.testing.allocator);
+    defer raw.deinit();
+    const c = try a.Context.init(&raw);
+    const unit = try c.schema(void);
+    const entry = try c.function("entry", .{}, unit, .{});
+    const body = try c.body(entry);
+    try c.define(entry, try body.ret(try body.constant(void, {})));
+    try std.testing.expectError(error.InvalidSymbol, a.interop.componentModule(c, entry, unit, .{
+        .exports = &.{.{ .name = "", .reference = .{
+            .kind = .function,
+            .id = try a.interop.functionId(c, entry),
+        } }},
+    }));
+    const diagnostic = c.lastDiagnostic();
+    try std.testing.expectEqual(error.InvalidSymbol, diagnostic.code.?);
+    try std.testing.expectEqual(error.InvalidSymbol, diagnostic.source.?.code.?);
+    try std.testing.expectEqualStrings(
+        "authoritative source or target admission rejected the construction",
+        diagnostic.relationship,
+    );
+}
+
+test "component publication preserves capture observer rejection and valid captures" {
+    for ([_]bool{ false, true }) |permitted| {
+        var raw = source.Builder.init(std.testing.allocator);
+        defer raw.deinit();
+        const c = try a.Context.init(&raw);
+        const integer = try c.schema(u64);
+        const captures: []const *const a.Schema(a.Dynamic) = if (permitted)
+            &.{a.interop.erase(integer)}
+        else
+            &.{};
+        const schema = try c.callable(.{}, integer, .{}, .{
+            .use = .reusable,
+            .captures = captures,
+        });
+        const entry = try c.function("entry", .{ .seed = integer }, integer, .{});
+        const body = try c.body(entry);
+        const closure = try c.functionFor("capturing closure", schema);
+        const nested = try body.closureBody(closure);
+        try c.define(closure, try nested.ret(try body.parameter("seed")));
+        try c.define(entry, try body.ret(try body.apply(try body.lambda(closure, schema), .{})));
+        const result = a.interop.componentModule(c, entry, try c.schema(void), .{
+            .exports = &.{.{ .name = "entry", .reference = .{
+                .kind = .function,
+                .id = try a.interop.functionId(c, entry),
+            } }},
+        });
+        if (permitted) {
+            _ = try result;
+        } else {
+            try std.testing.expectError(error.SchemaMismatch, result);
+            try std.testing.expectEqual(error.SchemaMismatch, c.lastDiagnostic().code.?);
+            try std.testing.expectEqualStrings("capture", c.lastDiagnostic().entity);
+            try std.testing.expectEqualStrings(
+                "retained named value is outside its declared capture allowance",
+                c.lastDiagnostic().relationship,
+            );
+        }
+    }
+}
+
 test "checked component function imports reject counterfeit effects and parameter contracts" {
     var raw = source.Builder.init(std.testing.allocator);
     defer raw.deinit();
