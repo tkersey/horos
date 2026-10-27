@@ -33,6 +33,11 @@ Cache upload starts only in the workflow's first eight minutes and has a
 one-minute step limit, reserving time for cleanup and the final gate.
 Linux x86-64 build-host programs use a reproducible baseline target, retaining
 native execution while avoiding runner-specific CPU and OS target cache inputs.
+Extracted-package consumers inherit the exported module target, including Debug
+rejection tests. Zig 0.17.0 native x86-64 code generation can emit an aligned
+32-byte AVX load from a stack frame aligned only to 16 bytes. The consistent
+baseline target avoids that compiler defect without selecting LLVM or changing
+the package fixtures, assertions, or optimization modes.
 
 Rerun only the affected check after a change. Results apply to their actual
 candidate and selected inputs; prior release qualification is not new-head proof.

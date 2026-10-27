@@ -130,120 +130,38 @@ jobs:
           test "$SOURCE" = success
           test "$QUALIFICATION" = success
   native-backend-diagnostic:
-    name: Native backend crash diagnosis
+    name: Native backend stack alignment witness
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
-        with:
-          version: '0.17.0'
-          use-cache: false
-      - name: Inspect UTF-8 validation without LLVM
+      - name: Replay retained native executable with alternate stack alignment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         shell: bash
         run: |
-          set -uo pipefail
+          set -euo pipefail
           command -v gdb || sudo apt-get install --yes gdb
-          lscpu
-          cat > "$RUNNER_TEMP/probe.zig" <<'ZIG'
-          const std = @import("std");
-          noinline fn valid(bytes: []const u8) bool {
-              return std.unicode.utf8ValidateSlice(bytes);
-          }
-          test "unicode aligned and unaligned bytes" {
-              var bytes: [160]u8 align(64) = @splat('a');
-              std.mem.doNotOptimizeAway(&bytes);
-              std.debug.print("vector width={?d}\n", .{std.simd.suggestVectorLength(u8)});
-              for (0..64) |offset| {
-                  for ([_]usize{ 15, 16, 17, 31, 32, 33, 64 }) |len| {
-                      std.debug.print("offset={d} length={d} pointer=0x{x}\n", .{ offset, len, @intFromPtr(&bytes[offset]) });
-                      try std.testing.expect(valid(bytes[offset..][0..len]));
-                  }
-              }
-          }
-          test "stringify static array pointer" {
-              const text = try std.json.Stringify.valueAlloc(std.testing.allocator, .{
-                  .template = "boundary.library.exchange/v1",
-                  .result = "library.runtime.generator.Generator",
-                  .evidence_type = "struct { []const u8, u32, u32, u32, []const u32 }",
-              }, .{});
-              defer std.testing.allocator.free(text);
-              try std.testing.expect(text.len != 0);
-          }
-          ZIG
-          cat > "$RUNNER_TEMP/diagnose.gdb" <<'GDB'
+          gh run download 40566247173 -n native-backend-diagnostic -D "$RUNNER_TEMP/diagnostic"
+          binary="$RUNNER_TEMP/diagnostic/native-unicode"
+          chmod +x "$binary"
+          cat > "$RUNNER_TEMP/stack.gdb" <<'GDB'
           set pagination off
+          break *0x124ed75
+          commands
+          silent
+          set $rsp = $rsp - 0x10
+          continue
+          end
           run
+          x/i $pc
+          info registers rsp rbp
+          bt
           python
-          if gdb.selected_inferior().pid:
-              for command in ('x/i $pc', 'x/12i $pc-16', 'info registers', 'bt', 'frame 0', 'info args'):
-                  gdb.execute(command)
+          if int(gdb.parse_and_eval('$pc')) != 0x124fab1:
+              raise gdb.GdbError('expected retained UTF-8 aligned-load fault')
+          if int(gdb.parse_and_eval('$rsp')) % 32 != 16:
+              raise gdb.GdbError('expected 16-byte but not 32-byte aligned stack')
           end
           GDB
-          cat > "$RUNNER_TEMP/peer.zig" <<'ZIG'
-          const std = @import("std");
-          const Result = struct { input: u64, element: u64, result: u64, package: u64 };
-          const Row = struct { effects: []const u64 };
-          pub noinline fn construct(allocator: std.mem.Allocator) ![]u8 {
-              const ids: []const u64 = &.{};
-              const identity: []const u8 = "package/source-exchange";
-              const evidence = .{ identity, @as(u64, 0), @as(u64, 0), @as(u64, 0), ids, ids, ids, Row{ .effects = ids } };
-              const template: []const u8 = "boundary.library.exchange/v1";
-              return std.json.Stringify.valueAlloc(allocator, .{
-                  .template = template,
-                  .result = @typeName(Result),
-                  .evidence_type = @typeName(@TypeOf(evidence)),
-                  .evidence = evidence,
-              }, .{});
-          }
-          ZIG
-          cat > "$RUNNER_TEMP/root.zig" <<'ZIG'
-          const std = @import("std");
-          const peer = @import("peer");
-          test "mixed module specialization evidence" {
-              const text = try peer.construct(std.testing.allocator);
-              defer std.testing.allocator.free(text);
-              try std.testing.expect(text.len != 0);
-          }
-          ZIG
-          for cpu in native baseline; do
-            for probe in unicode stringify; do
-              binary="$RUNNER_TEMP/$cpu-$probe"
-              zig test "$RUNNER_TEMP/probe.zig" -fno-llvm -O debug -mcpu="$cpu" \
-                --test-filter "$probe" --test-no-exec -femit-bin="$binary" || exit 1
-              gdb --batch -x "$RUNNER_TEMP/diagnose.gdb" "$binary" 2>&1 \
-                | tee "$RUNNER_TEMP/$cpu-$probe.log"
-            done
-            binary="$RUNNER_TEMP/$cpu-mixed"
-            zig test -fno-llvm -O debug -mcpu=native --dep peer -Mroot="$RUNNER_TEMP/root.zig" \
-              -O safe -mcpu="$cpu" -Mpeer="$RUNNER_TEMP/peer.zig" \
-              --test-no-exec -femit-bin="$binary" || exit 1
-            gdb --batch -x "$RUNNER_TEMP/diagnose.gdb" "$binary" 2>&1 \
-              | tee "$RUNNER_TEMP/$cpu-mixed.log"
-          done
-          binary="$RUNNER_TEMP/actual-package"
-          zig test -fno-llvm -O debug --dep horos -Mroot=test/package_authoring/rejection.zig \
-            -O safe -target x86_64-linux-gnu --dep horos_data -Mhoros=src/root.zig \
-            -O safe -target x86_64-linux-gnu -Mhoros_data=src/data/root.zig \
-            --test-no-exec -femit-bin="$binary" || exit 1
-          gdb --batch -x "$RUNNER_TEMP/diagnose.gdb" "$binary" 2>&1 \
-            | tee "$RUNNER_TEMP/actual-package.log"
-      - name: Retain native diagnostic binaries and traces
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: native-backend-diagnostic
-          path: |
-            ${{ runner.temp }}/probe.zig
-            ${{ runner.temp }}/peer.zig
-            ${{ runner.temp }}/root.zig
-            ${{ runner.temp }}/*-mixed*
-            ${{ runner.temp }}/actual-package*
-            ${{ runner.temp }}/native-unicode*
-            ${{ runner.temp }}/native-stringify*
-            ${{ runner.temp }}/baseline-unicode*
-            ${{ runner.temp }}/baseline-stringify*
-          retention-days: 7
+          gdb --batch -x "$RUNNER_TEMP/stack.gdb" "$binary"
