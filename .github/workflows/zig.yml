@@ -82,23 +82,6 @@ jobs:
           else
             zig build check -Doptimize=safe --summary all --verbose
           fi
-      - name: Inspect failed native package executable
-        if: ${{ failure() && matrix.lane == 'installation' }}
-        shell: bash
-        run: |
-          command -v gdb || sudo apt-get install --yes gdb
-          cat > "$RUNNER_TEMP/package-diagnose.gdb" <<'GDB'
-          set pagination off
-          run
-          python
-          if gdb.selected_inferior().pid:
-              for command in ('x/12i $pc-16', 'info registers', 'bt', 'frame 0', 'info args'):
-                  gdb.execute(command)
-          end
-          GDB
-          while IFS= read -r executable; do
-            timeout 30s gdb --batch -x "$RUNNER_TEMP/package-diagnose.gdb" "$executable"
-          done < <(find .zig-cache -path '*/package/*/local/o/*/test' -type f)
       - name: Admit complete bounded compiler cache
         id: cache_size
         if: ${{ !cancelled() && matrix.lane == 'contracts' }}
@@ -151,6 +134,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
         with:
           version: '0.17.0'
@@ -192,7 +179,7 @@ jobs:
           run
           python
           if gdb.selected_inferior().pid:
-              for command in ('x/12i $pc-16', 'info registers', 'bt', 'frame 0', 'info args'):
+              for command in ('x/i $pc', 'x/12i $pc-16', 'info registers', 'bt', 'frame 0', 'info args'):
                   gdb.execute(command)
           end
           GDB
@@ -237,6 +224,13 @@ jobs:
             gdb --batch -x "$RUNNER_TEMP/diagnose.gdb" "$binary" 2>&1 \
               | tee "$RUNNER_TEMP/$cpu-mixed.log"
           done
+          binary="$RUNNER_TEMP/actual-package"
+          zig test -fno-llvm -O debug --dep horos -Mroot=test/package_authoring/rejection.zig \
+            -O safe -target x86_64-linux-gnu --dep horos_data -Mhoros=src/root.zig \
+            -O safe -target x86_64-linux-gnu -Mhoros_data=src/data/root.zig \
+            --test-no-exec -femit-bin="$binary" || exit 1
+          gdb --batch -x "$RUNNER_TEMP/diagnose.gdb" "$binary" 2>&1 \
+            | tee "$RUNNER_TEMP/actual-package.log"
       - name: Retain native diagnostic binaries and traces
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -247,6 +241,7 @@ jobs:
             ${{ runner.temp }}/peer.zig
             ${{ runner.temp }}/root.zig
             ${{ runner.temp }}/*-mixed*
+            ${{ runner.temp }}/actual-package*
             ${{ runner.temp }}/native-unicode*
             ${{ runner.temp }}/native-stringify*
             ${{ runner.temp }}/baseline-unicode*
