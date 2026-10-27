@@ -23,7 +23,8 @@ test "ordinary libraries exclude raw constructors from the exported package" {
         .{ .effects = &.{} },
     );
     try std.testing.expect(exchange.package < raw.schemas.items.len);
-    try std.testing.expect(try b.source.library.cleanup.exitInfo(&raw, unit) < raw.schemas.items.len);
+    const cleanup = try b.source.library.cleanup.exitInfo(&raw, unit);
+    try std.testing.expect(cleanup < raw.schemas.items.len);
 }
 
 test "foreign effect rejects in public package while local binding succeeds" {
