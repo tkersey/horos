@@ -98,8 +98,6 @@ pub fn pair(
     captures: []const *const a.Schema,
 ) a.Error!*const Pair {
     const count = std.math.add(usize, captures.len, 8) catch return error.Capacity;
-    const references = std.math.mul(usize, 6, count) catch return error.Capacity;
-    if (references > @import("horos_data").component.max_catalog_entries) return error.Capacity;
     _ = try a.interop.schemaId(c, input);
     _ = try a.interop.schemaId(c, output);
     const allocator = a.interop.builder(c).allocator();
@@ -160,6 +158,7 @@ pub fn invoke(
 ) a.Error!*const a.Value {
     const c = try body.context();
     const interface = try body.schemaOf(participant);
+    try pureDelay(c, try body.schemaOf(peer));
     const answer = (try interface.checkedResult()) orelse return error.InvalidSchema;
     try pureDelay(c, answer);
     const function = try c.functionFor("hyper.invoke", answer);

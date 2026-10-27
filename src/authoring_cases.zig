@@ -4,6 +4,7 @@ const source = @import("source.zig");
 const a = @import("authoring.zig");
 const data = @import("horos_data");
 const p = data.program;
+const captured_need = @import("library/hyper_need_capture_tests.zig");
 pub const Kind = enum {
     deep,
     shallow,
@@ -49,6 +50,11 @@ pub const Kind = enum {
     hyper_task_repeated,
     hyper_task_adaptive,
     hyper_task_dispose,
+    hyper_captured_obtain,
+    hyper_captured_resume,
+    hyper_captured_repeated,
+    hyper_captured_dispose,
+    hyper_captured_local,
     hyper_lazy_product,
     hyper_lazy_sum,
     hyper_lazy_stream,
@@ -111,6 +117,11 @@ pub fn build(raw: *source.Builder, kind: Kind) !source.Module {
         .hyper_task_repeated => @import("hyper_task_cases.zig").build(raw, .repeated),
         .hyper_task_adaptive => @import("hyper_task_cases.zig").build(raw, .adaptive),
         .hyper_task_dispose => @import("hyper_task_cases.zig").build(raw, .dispose),
+        .hyper_captured_obtain => captured_need.build(raw, .obtain),
+        .hyper_captured_resume => captured_need.build(raw, .resume_once),
+        .hyper_captured_repeated => captured_need.build(raw, .repeated),
+        .hyper_captured_dispose => captured_need.build(raw, .dispose),
+        .hyper_captured_local => captured_need.buildTaskLocal(raw, true),
         .hyper_lazy_product => @import("hyper_cases.zig").build(raw, .lazy_product),
         .hyper_lazy_sum => @import("hyper_cases.zig").build(raw, .lazy_sum),
         .hyper_lazy_stream => @import("hyper_cases.zig").build(raw, .lazy_stream),

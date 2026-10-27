@@ -61,6 +61,16 @@ pub const Schema = opaque {
         );
         return item.result;
     }
+    pub fn checkedCaptures(self: *const Schema) Error![]const *const Schema {
+        const item = data(SchemaData, self);
+        try item.owner.ready();
+        if (item.pending != null or item.pending_captures != null) return item.owner.reject(
+            error.UndefinedSchema,
+            "schema captures",
+            "declaration is not complete",
+        );
+        return item.captures;
+    }
     pub fn describe(self: *const Schema, writer: *std.Io.Writer) !void {
         const item = data(SchemaData, self);
         if (item.pending) |kind| return writer.print("unresolved {s}", .{@tagName(kind)});
@@ -244,7 +254,12 @@ const SchemaData = struct {
     result: ?*const Schema = null,
     captures: []const *const Schema = &.{},
     pending: ?SchemaKind = null,
+    pending_captures: ?*PendingCaptures = null,
     positional_import: bool = false,
+};
+const PendingCaptures = struct {
+    allowed: []const *const Schema,
+    function: ?*const Function = null,
 };
 const SchemaDeclarationData = struct { schema: *const Schema };
 const OperationData = struct {
@@ -343,6 +358,7 @@ const ContextData = struct {
     handlers: std.ArrayList(*const Handler) = .empty,
     library_storage: std.StringHashMapUnmanaged(*anyopaque) = .empty,
     capture_failure: ?Error = null,
+    capture_declarations: std.ArrayList(*const Schema) = .empty,
 };
 fn contextData(c: *const Context) *ContextData {
     return @ptrCast(@alignCast(@constCast(c)));
@@ -691,6 +707,35 @@ pub const Context = opaque {
         );
         return item;
     }
+    pub fn inferCallableCaptures(
+        self: *Context,
+        declaration: *const SchemaDeclaration,
+        allowed: []const *const Schema,
+    ) Error!void {
+        const item = try self.declarationSlot(declaration, .callable);
+        if (item.pending_captures != null) return self.reject(
+            error.SchemaAlreadyDefined,
+            "callable captures",
+            "capture inference is already registered",
+        );
+        if (contextData(self).imported.contains(item.id)) return self.reject(
+            error.InvalidSchema,
+            "callable captures",
+            "declaration already has imported metadata",
+        );
+        var returned_error: anyerror = undefined;
+        errdefer self.poison(returned_error);
+        _ = try captureError(&returned_error, self.schemaIds(allowed));
+        const allocator = contextData(self).raw.allocator();
+        const pending = try captureError(&returned_error, self.save(PendingCaptures, .{
+            .allowed = try captureError(&returned_error, allocator.dupe(*const Schema, allowed)),
+        }));
+        try captureError(
+            &returned_error,
+            contextData(self).capture_declarations.append(allocator, declaration.schema()),
+        );
+        item.pending_captures = pending;
+    }
     fn bindSchema(
         self: *Context,
         declaration: *const SchemaDeclaration,
@@ -747,7 +792,12 @@ pub const Context = opaque {
         allowed: []const *const Operation,
         options: CallableOptions,
     ) Error!void {
-        _ = try self.declarationSlot(declaration, .callable);
+        const item = try self.declarationSlot(declaration, .callable);
+        if (item.pending_captures != null and options.captures.len != 0) return self.reject(
+            error.InvalidSchema,
+            "callable captures",
+            "inferred captures cannot have a completed bound",
+        );
         const description = try self.callableDescription(parameters, result, allowed, options);
         _ = try self.bindSchema(
             declaration,
@@ -1306,11 +1356,35 @@ pub const Context = opaque {
         );
         const id = try captureError(
             &returned_error,
-            contextData(self).raw.schema(description.shape),
+            self.callableSchema(description.shape),
         );
         return captureError(
             &returned_error,
             self.internComplete(id, description.fields, result, options.captures),
+        );
+    }
+    fn callableSchema(self: *Context, shape: p.Schema) Error!p.Id {
+        const allocator = contextData(self).raw.arena.child_allocator;
+        var excluded: std.ArrayList(p.Id) = .empty;
+        defer excluded.deinit(allocator);
+        for (contextData(self).capture_declarations.items) |schema| {
+            const item = data(SchemaData, schema);
+            if (item.pending_captures != null) try excluded.append(allocator, item.id);
+        }
+        return contextData(self).raw.schemaExcept(shape, excluded.items);
+    }
+    fn pendingCapture(self: *Context, id: p.Id) bool {
+        for (contextData(self).capture_declarations.items) |schema| {
+            const item = data(SchemaData, schema);
+            if (item.id == id and item.pending_captures != null) return true;
+        }
+        return false;
+    }
+    fn captureMetadataReady(self: *Context, id: p.Id) Error!void {
+        if (self.pendingCapture(id)) return self.reject(
+            error.UndefinedSchema,
+            "schema import",
+            "capture metadata is not complete",
         );
     }
     const CallableDescription = struct { shape: p.Schema, fields: []const Field };
@@ -1384,10 +1458,15 @@ pub const Context = opaque {
             "function declaration",
             "callable metadata lacks its result",
         );
+        if (info.pending_captures) |pending| if (pending.function != null) return self.reject(
+            error.SchemaAlreadyDefined,
+            "callable captures",
+            "capture inference already has its function",
+        );
         var returned_error: anyerror = undefined;
         errdefer self.poison(returned_error);
         const signature = shape.internal.computation;
-        return captureError(&returned_error, try captureError(&returned_error, self.saveFunction(.{
+        const function_handle = try captureError(&returned_error, self.saveFunction(.{
             .owner = self,
             .id = try captureError(
                 &returned_error,
@@ -1402,7 +1481,9 @@ pub const Context = opaque {
             .parameters = info.fields,
             .result = result,
             .callable_schema = schema,
-        })));
+        }));
+        if (info.pending_captures) |pending| pending.function = function_handle;
+        return function_handle;
     }
     pub fn twice(self: *Context, schema: *const Schema) Error!*const Function {
         var returned_error: anyerror = undefined;
@@ -2224,6 +2305,84 @@ pub const Context = opaque {
     ) Error!source.Module {
         return self.publishImports(entry, failure, check_captures, &.{});
     }
+    fn inferCaptures(
+        self: *Context,
+        module_value: source.Module,
+        imports: []const @import("horos_data").component.Symbol,
+    ) Error!void {
+        const declarations = contextData(self).capture_declarations.items;
+        var remaining: usize = 0;
+        for (declarations) |schema| if (data(SchemaData, schema).pending_captures != null) {
+            remaining += 1;
+        };
+        if (remaining == 0) return;
+        var scratch = std.heap.ArenaAllocator.init(contextData(self).raw.arena.child_allocator);
+        defer scratch.deinit();
+        const allocator = scratch.allocator();
+        var functions: std.ArrayList(p.Id) = .empty;
+        for (imports) |symbol| if (symbol.reference.kind == .function) {
+            try functions.append(allocator, symbol.reference.id);
+        };
+        const facts = try @import("../source/check.zig").analyzeComponent(
+            allocator,
+            module_value,
+            functions.items,
+            null,
+        );
+        for (declarations) |schema| {
+            const item = @constCast(data(SchemaData, schema));
+            const pending = item.pending_captures orelse continue;
+            const function_handle = pending.function orelse return self.reject(
+                error.UndefinedBody,
+                "callable captures",
+                "capture inference has no function",
+            );
+            const function_id = data(FunctionData, function_handle).id;
+            if (module_value.functions[@intCast(function_id)].body == null) return self.reject(
+                error.UndefinedBody,
+                "callable captures",
+                "capture inference requires a defined body",
+            );
+            try self.bindInferredCaptures(
+                item,
+                pending,
+                facts.functions[@intCast(function_id)].items,
+            );
+        }
+    }
+    fn bindInferredCaptures(
+        self: *Context,
+        item: *SchemaData,
+        pending: *const PendingCaptures,
+        variables: []const p.Id,
+    ) Error!void {
+        const allocator = contextData(self).raw.allocator();
+        const captures = try allocator.alloc(*const Schema, variables.len);
+        const ids = try allocator.alloc(p.Id, variables.len);
+        for (variables, captures, ids) |variable, *capture, *id| {
+            try self.checkCapture(pending.allowed, variable);
+            capture.* = try self.inferredCapture(pending.allowed, variable);
+            id.* = data(SchemaData, capture.*).id;
+        }
+        const shape = &contextData(self).raw.schemas.items[@intCast(item.id)];
+        shape.internal.computation.capture_bound = ids;
+        item.captures = captures;
+        item.pending_captures = null;
+    }
+    fn inferredCapture(
+        self: *Context,
+        allowed: []const *const Schema,
+        variable: p.Id,
+    ) Error!*const Schema {
+        if (contextData(self).variable_schemas.get(variable)) |schema| return schema;
+        const id = contextData(self).raw.variables.items[@intCast(variable)];
+        for (allowed) |schema| if (data(SchemaData, schema).id == id) return schema;
+        return self.reject(
+            error.SchemaMismatch,
+            "capture",
+            "retained raw value is outside its declared capture allowance",
+        );
+    }
     fn publishImports(
         self: *Context,
         entry: *const Function,
@@ -2259,6 +2418,7 @@ pub const Context = opaque {
         errdefer self.poison(returned_error);
         try captureError(&returned_error, self.publication(failure));
         const result = contextData(self).raw.module(f.id, failure_id);
+        try captureError(&returned_error, self.inferCaptures(result, imports));
         if (check_captures) try captureError(&returned_error, self.capturePublication(result));
         return captureError(
             &returned_error,
@@ -4859,7 +5019,7 @@ pub const interop = struct {
         while (pending.pop()) |current| {
             const item = data(SchemaData, current);
             try c.origin(item.owner);
-            if (item.pending != null) return c.reject(
+            if (item.pending != null or item.pending_captures != null) return c.reject(
                 error.UndefinedSchema,
                 "refinement",
                 "reachable declaration is not complete",
@@ -5098,9 +5258,10 @@ pub const interop = struct {
     pub fn schema(c: *Context, id: p.Id) Error!*const Schema {
         try c.ready();
         if (id >= contextData(c).raw.schemas.items.len) return error.InvalidSchema;
-        if (contextData(c).imported.get(id)) |present| return present;
         var returned_error: anyerror = undefined;
         errdefer c.poison(returned_error);
+        try captureError(&returned_error, c.captureMetadataReady(id));
+        if (contextData(c).imported.get(id)) |present| return present;
         var importer: SchemaImport = .{ .context = c };
         defer importer.pending.deinit(contextData(c).raw.allocator());
         const result = try captureError(&returned_error, importer.begin(id));
@@ -5127,6 +5288,7 @@ pub const interop = struct {
             const c = self.context;
             try c.ready();
             if (id >= contextData(c).raw.schemas.items.len) return error.InvalidSchema;
+            try c.captureMetadataReady(id);
             if (contextData(c).imported.get(id)) |present| return present;
             const shape = contextData(c).raw.schemas.items[@intCast(id)];
             if (!hasChildren(shape)) return c.intern(id, &.{});
@@ -5569,4 +5731,382 @@ fn callableCompletionAllocation(allocator: std.mem.Allocator) !void {
     try std.testing.expectEqual(schema, fields[0].schema);
     try std.testing.expectEqual(integer, (try schema.checkedResult()).?);
     try std.testing.expectEqual(schema, data(SchemaData, schema).captures[0]);
+}
+
+test "capture inference binds only open owned callable declarations" {
+    var raw = source.Builder.init(std.testing.allocator);
+    defer raw.deinit();
+    var foreign_raw = source.Builder.init(std.testing.allocator);
+    defer foreign_raw.deinit();
+    const c = try Context.init(&raw);
+    const foreign = try Context.init(&foreign_raw);
+    const integer = try c.scalar(u64);
+    const wrong_kind = try c.declareSchema(.alternatives);
+    try std.testing.expectError(error.InvalidCategory, c.inferCallableCaptures(wrong_kind, &.{}));
+    const declaration = try c.declareSchema(.callable);
+    try std.testing.expectError(error.ForeignHandle, foreign.inferCallableCaptures(
+        declaration,
+        &.{},
+    ));
+    try c.inferCallableCaptures(declaration, &.{integer});
+    try std.testing.expectError(error.SchemaAlreadyDefined, c.inferCallableCaptures(
+        declaration,
+        &.{integer},
+    ));
+    const schema = declaration.schema();
+    try std.testing.expectError(error.UndefinedSchema, schema.checkedCaptures());
+    try std.testing.expectError(error.InvalidSchema, c.defineCallable(
+        declaration,
+        &.{},
+        integer,
+        &.{},
+        .{ .use = .reusable, .captures = &.{integer} },
+    ));
+    try c.defineCallable(declaration, &.{}, integer, &.{}, .{
+        .use = .reusable,
+        .captures = &.{},
+    });
+    try std.testing.expectEqual(integer, (try schema.checkedResult()).?);
+    try std.testing.expectEqual(@as(usize, 0), (try schema.checkedFields()).len);
+    try std.testing.expectError(error.UndefinedSchema, schema.checkedCaptures());
+    try std.testing.expectError(error.UndefinedSchema, interop.refineSchema(
+        c,
+        schema,
+        schema,
+        false,
+    ));
+    try std.testing.expectError(error.SchemaAlreadyDefined, c.inferCallableCaptures(
+        declaration,
+        &.{integer},
+    ));
+    _ = try c.functionFor("inferred", schema);
+    try std.testing.expectError(error.SchemaAlreadyDefined, c.functionFor("second", schema));
+    const complete = try c.declareSchema(.callable);
+    try c.defineCallable(complete, &.{}, integer, &.{}, .{
+        .use = .reusable,
+        .captures = &.{integer},
+    });
+    try std.testing.expectError(error.SchemaAlreadyDefined, c.inferCallableCaptures(
+        complete,
+        &.{integer},
+    ));
+}
+
+test "capture inference metadata cannot be imported through a provisional graph" {
+    const Path = enum { direct, sequence, parameter, capture };
+    for ([_]Path{ .direct, .sequence, .parameter, .capture }) |path| {
+        var raw = source.Builder.init(std.testing.allocator);
+        defer raw.deinit();
+        const c = try Context.init(&raw);
+        const integer = try c.scalar(u64);
+        const declaration = try c.declareSchema(.callable);
+        try c.inferCallableCaptures(declaration, &.{integer});
+        try c.defineCallable(declaration, &.{}, integer, &.{}, .{
+            .use = .reusable,
+            .captures = &.{},
+        });
+        const schema = declaration.schema();
+        const selected = switch (path) {
+            .direct => schema,
+            .sequence => try c.sequence(schema),
+            .parameter => try c.callable(
+                &.{.{ .name = "input", .schema = schema }},
+                integer,
+                &.{},
+                .{ .use = .reusable, .captures = &.{} },
+            ),
+            .capture => try c.callable(&.{}, integer, &.{}, .{
+                .use = .reusable,
+                .captures = &.{schema},
+            }),
+        };
+        try std.testing.expectError(error.UndefinedSchema, interop.schema(
+            c,
+            try c.schemaId(selected),
+        ));
+        try std.testing.expectError(error.PoisonedAuthoring, c.ready());
+    }
+}
+
+test "capture inference requires its completed function before publication" {
+    var raw = source.Builder.init(std.testing.allocator);
+    defer raw.deinit();
+    const c = try Context.init(&raw);
+    const integer = try c.scalar(u64);
+    const declaration = try c.declareSchema(.callable);
+    try c.inferCallableCaptures(declaration, &.{integer});
+    try c.defineCallable(declaration, &.{}, integer, &.{}, .{
+        .use = .reusable,
+        .captures = &.{},
+    });
+    const entry = try c.function("entry", &.{}, integer, &.{});
+    const body = try c.body(entry);
+    try c.define(entry, try body.ret(try body.constant(u64, 1)));
+    try std.testing.expectError(error.UndefinedBody, c.module(entry, try c.scalar(void)));
+    try std.testing.expectError(error.PoisonedAuthoring, c.ready());
+}
+
+const CaptureFixture = struct {
+    declaration: *const SchemaDeclaration,
+    entry: *const Function,
+    nested: *const Function,
+    body: *Body,
+};
+
+fn captureFixture(c: *Context, permitted: bool) !CaptureFixture {
+    const integer = try c.scalar(u64);
+    const unused = try c.callable(&.{}, integer, &.{}, .{ .use = .linear, .captures = &.{} });
+    const allowed: []const *const Schema = if (permitted) &.{ integer, unused } else &.{unused};
+    const declaration = try c.declareSchema(.callable);
+    try c.inferCallableCaptures(declaration, allowed);
+    try c.defineCallable(declaration, &.{}, integer, &.{}, .{
+        .use = .reusable,
+        .captures = &.{},
+    });
+    const entry = try c.function(
+        "inferred entry",
+        &.{.{ .name = "seed", .schema = integer }},
+        integer,
+        &.{},
+    );
+    const body = try c.body(entry);
+    const nested = try c.functionFor("inferred response", declaration.schema());
+    const nested_body = try body.closureBody(nested);
+    try c.define(nested, try nested_body.ret(try body.parameter("seed")));
+    const callable_value = try body.lambda(nested, declaration.schema());
+    try c.define(entry, try body.ret(try body.apply(callable_value, &.{})));
+    return .{ .declaration = declaration, .entry = entry, .nested = nested, .body = nested_body };
+}
+
+test "capture inference rejects actual values outside the named allowance" {
+    var raw = source.Builder.init(std.testing.allocator);
+    defer raw.deinit();
+    const c = try Context.init(&raw);
+    const fixture = try captureFixture(c, false);
+    try std.testing.expectError(error.SchemaMismatch, c.module(fixture.entry, try c.scalar(void)));
+    try std.testing.expectError(error.PoisonedAuthoring, c.ready());
+}
+
+test "capture inference freezes actual bounds and preserves published snapshots" {
+    var raw = source.Builder.init(std.testing.allocator);
+    defer raw.deinit();
+    const c = try Context.init(&raw);
+    const fixture = try captureFixture(c, true);
+    const failure = try c.scalar(void);
+    const first = try c.module(fixture.entry, failure);
+    const schema = fixture.declaration.schema();
+    const captures = try schema.checkedCaptures();
+    const integer = try c.scalar(u64);
+    try std.testing.expectEqual(@as(usize, 1), captures.len);
+    try std.testing.expectEqual(integer, captures[0]);
+    try std.testing.expectError(error.SchemaAlreadyDefined, c.inferCallableCaptures(
+        fixture.declaration,
+        &.{},
+    ));
+    try std.testing.expectError(error.ClosedBody, c.body(fixture.nested));
+    try std.testing.expectError(error.ClosedBody, fixture.body.constant(u64, 9));
+    const next = try captureFixture(c, true);
+    const second = try c.module(next.entry, failure);
+    const id = try c.schemaId(schema);
+    const expected = [_]p.Id{try c.schemaId(integer)};
+    try std.testing.expect(first.schemas.len < second.schemas.len);
+    try std.testing.expectEqualSlices(
+        p.Id,
+        &expected,
+        first.schemas[@intCast(id)].internal.computation.capture_bound,
+    );
+    try std.testing.expectEqualSlices(
+        p.Id,
+        &expected,
+        second.schemas[@intCast(id)].internal.computation.capture_bound,
+    );
+    try std.testing.expectEqual(captures.ptr, (try schema.checkedCaptures()).ptr);
+    var compiled = try source.lower(std.testing.allocator, first);
+    defer compiled.deinit();
+}
+
+test "capture inference publication handles allocation failures" {
+    try @import("../allocation_testing.zig").check(
+        std.testing.allocator,
+        capturePublicationAllocation,
+        .{},
+    );
+}
+
+fn capturePublicationAllocation(allocator: std.mem.Allocator) !void {
+    var raw = source.Builder.init(allocator);
+    defer raw.deinit();
+    const c = try Context.init(&raw);
+    const fixture = try captureFixture(c, true);
+    const failure = try c.scalar(void);
+    _ = c.publish(fixture.entry, failure, false) catch |err| {
+        try std.testing.expectEqual(error.OutOfMemory, err);
+        try std.testing.expectError(error.PoisonedAuthoring, c.ready());
+        return err;
+    };
+    const captures = try fixture.declaration.schema().checkedCaptures();
+    try std.testing.expectEqual(@as(usize, 1), captures.len);
+}
+
+test "capture inference does not intern ordinary callables into provisional bounds" {
+    var raw = source.Builder.init(std.testing.allocator);
+    defer raw.deinit();
+    const c = try Context.init(&raw);
+    const fixture = try captureFixture(c, true);
+    const integer = try c.scalar(u64);
+    const options: CallableOptions = .{ .use = .reusable, .captures = &.{} };
+    const first = try c.callable(&.{}, integer, &.{}, options);
+    const second = try c.callable(&.{}, integer, &.{}, options);
+    try std.testing.expectEqual(try c.schemaId(first), try c.schemaId(second));
+    try std.testing.expect(try c.schemaId(first) != try c.schemaId(fixture.declaration.schema()));
+    _ = try c.module(fixture.entry, try c.scalar(void));
+    try std.testing.expectEqual(@as(usize, 0), (try first.checkedCaptures()).len);
+    try std.testing.expectEqual(@as(usize, 0), raw.schemas.items[
+        @intCast(try c.schemaId(first))
+    ].internal.computation.capture_bound.len);
+    const finalized = try c.callable(&.{}, integer, &.{}, .{
+        .use = .reusable,
+        .captures = &.{integer},
+    });
+    try std.testing.expectEqual(
+        try c.schemaId(fixture.declaration.schema()),
+        try c.schemaId(finalized),
+    );
+    const after = try c.callable(&.{}, integer, &.{}, options);
+    try std.testing.expectEqual(try c.schemaId(first), try c.schemaId(after));
+}
+
+test "capture inference preserves named allowance distinctions with equal raw schemas" {
+    var raw = source.Builder.init(std.testing.allocator);
+    defer raw.deinit();
+    const c = try Context.init(&raw);
+    const integer = try c.scalar(u64);
+    const actual = try c.record(&.{.{ .name = "actual", .schema = integer }});
+    const allowed = try c.record(&.{.{ .name = "allowed", .schema = integer }});
+    try std.testing.expectEqual(try c.schemaId(actual), try c.schemaId(allowed));
+    const declaration = try c.declareSchema(.callable);
+    try c.inferCallableCaptures(declaration, &.{allowed});
+    try c.defineCallable(declaration, &.{}, integer, &.{}, .{
+        .use = .reusable,
+        .captures = &.{},
+    });
+    const entry = try c.function(
+        "named entry",
+        &.{.{ .name = "seed", .schema = actual }},
+        integer,
+        &.{},
+    );
+    const body = try c.body(entry);
+    const nested = try c.functionFor("named capture", declaration.schema());
+    const nested_body = try body.closureBody(nested);
+    const field = try nested_body.field(try body.parameter("seed"), "actual");
+    try c.define(nested, try nested_body.ret(field));
+    const result = try body.apply(try body.lambda(nested, declaration.schema()), &.{});
+    try c.define(entry, try body.ret(result));
+    try std.testing.expectError(error.SchemaMismatch, c.module(entry, try c.scalar(void)));
+}
+
+test "capture inference retains actual noncopy captures for authoritative rejection" {
+    var raw = source.Builder.init(std.testing.allocator);
+    defer raw.deinit();
+    const c = try Context.init(&raw);
+    const integer = try c.scalar(u64);
+    const linear = try c.callable(&.{}, integer, &.{}, .{ .use = .linear, .captures = &.{} });
+    const declaration = try c.declareSchema(.callable);
+    try c.inferCallableCaptures(declaration, &.{linear});
+    try c.defineCallable(declaration, &.{}, integer, &.{}, .{
+        .use = .reusable,
+        .captures = &.{},
+    });
+    const entry = try c.function("linear entry", &.{}, integer, &.{});
+    const body = try c.body(entry);
+    const task_function = try c.functionFor("linear task", linear);
+    const task_body = try body.closureBody(task_function);
+    try c.define(task_function, try task_body.ret(try task_body.constant(u64, 5)));
+    const task = try body.lambda(task_function, linear);
+    const nested = try c.functionFor("linear capture", declaration.schema());
+    const nested_body = try body.closureBody(nested);
+    try c.define(nested, try nested_body.ret(try nested_body.apply(
+        task,
+        &.{},
+    )));
+    const result = try body.apply(try body.lambda(nested, declaration.schema()), &.{});
+    try c.define(entry, try body.ret(result));
+    try std.testing.expectError(error.InvalidOwnership, c.module(entry, try c.scalar(void)));
+}
+
+test "capture inference cannot finalize an imported body placeholder" {
+    var raw = source.Builder.init(std.testing.allocator);
+    defer raw.deinit();
+    const c = try Context.init(&raw);
+    const integer = try c.scalar(u64);
+    const declaration = try c.declareSchema(.callable);
+    try c.inferCallableCaptures(declaration, &.{integer});
+    try c.defineCallable(declaration, &.{}, integer, &.{}, .{
+        .use = .reusable,
+        .captures = &.{},
+    });
+    const imported = try c.functionFor("inferred import", declaration.schema());
+    const imported_id = try interop.functionId(c, imported);
+    const entry = try c.function("entry", &.{}, integer, &.{});
+    const body = try c.body(entry);
+    try c.define(entry, try body.ret(try body.constant(u64, 3)));
+    try std.testing.expectError(error.UndefinedBody, interop.componentModule(
+        c,
+        entry,
+        try c.scalar(void),
+        .{
+            .imports = &.{.{ .name = "imported", .reference = .{
+                .kind = .function,
+                .id = imported_id,
+            } }},
+            .exports = &.{.{ .name = "entry", .reference = .{
+                .kind = .function,
+                .id = try interop.functionId(c, entry),
+            } }},
+            .borrows = &.{.{ .function = imported_id }},
+        },
+    ));
+    try std.testing.expectError(error.PoisonedAuthoring, c.ready());
+}
+
+test "capture inference preserves unrelated component imports in its source facts" {
+    var raw = source.Builder.init(std.testing.allocator);
+    defer raw.deinit();
+    const c = try Context.init(&raw);
+    const integer = try c.scalar(u64);
+    const parameters = [_]Field{.{ .name = "seed", .schema = integer }};
+    const imported = try c.function("imported", &parameters, integer, &.{});
+    const imported_id = try interop.functionId(c, imported);
+    const declaration = try c.declareSchema(.callable);
+    try c.inferCallableCaptures(declaration, &.{integer});
+    try c.defineCallable(declaration, &.{}, integer, &.{}, .{
+        .use = .reusable,
+        .captures = &.{},
+    });
+    const entry = try c.function("entry", &parameters, integer, &.{});
+    const body = try c.body(entry);
+    const response = try c.functionFor("response", declaration.schema());
+    const nested = try body.closureBody(response);
+    const value = try nested.call(imported, &.{.{
+        .name = "seed",
+        .value = try body.parameter("seed"),
+    }});
+    try c.define(response, try nested.ret(value));
+    const result = try body.apply(try body.lambda(response, declaration.schema()), &.{});
+    try c.define(entry, try body.ret(result));
+    const module_value = try interop.componentModule(c, entry, try c.scalar(void), .{
+        .imports = &.{.{ .name = "imported", .reference = .{
+            .kind = .function,
+            .id = imported_id,
+        } }},
+        .exports = &.{.{ .name = "entry", .reference = .{
+            .kind = .function,
+            .id = try interop.functionId(c, entry),
+        } }},
+        .borrows = &.{.{ .function = imported_id }},
+    });
+    const captures = try declaration.schema().checkedCaptures();
+    try std.testing.expectEqualSlices(*const Schema, &.{integer}, captures);
+    try std.testing.expect(module_value.functions[@intCast(imported_id)].body == null);
 }

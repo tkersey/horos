@@ -89,7 +89,13 @@ pub const Builder = struct {
         return .{ .key = key, .cached = null };
     }
     pub fn schema(self: *Builder, shape: p.Schema) Error!p.Id {
-        for (self.schemas.items, 0..) |present, id| if (equal(p.Schema, present, shape)) return id;
+        return self.schemaExcept(shape, &.{});
+    }
+    pub fn schemaExcept(self: *Builder, shape: p.Schema, excluded: []const p.Id) Error!p.Id {
+        for (self.schemas.items, 0..) |present, id| {
+            if (std.mem.indexOfScalar(p.Id, excluded, id) != null) continue;
+            if (equal(p.Schema, present, shape)) return id;
+        }
         const id = self.schemas.items.len;
         try self.schemas.append(self.allocator(), try own(p.Schema, self.allocator(), shape));
         return id;

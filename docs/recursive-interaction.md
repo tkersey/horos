@@ -148,7 +148,8 @@ const contribution = try body.apply(task_value, .{});
 
 Obtaining the task does not perform its effects. Use `body.apply` to execute it;
 `hyper.force` rejects effectful callables even if their static result shape is
-identical to a pure delay.
+identical to a pure delay. `hyper.invoke` checks the actual peer delay's purity
+even when the participant ignores it.
 
 `demand.family(c, name, state_schema, contribution_schema)` creates a nominal
 local operation and capability. Its `state()`, `contribution()`, `effect()` and
@@ -159,7 +160,15 @@ adapts the request; that construction retains its existing capture checks.
 In a step, construct
 `demand.interpret(body, query, need, result_schema, options)`, author work using
 `interpretation.body()`, and call `demand.handle(body, interpretation, work)`.
-The interpretation retains its lexical peer internally. Each
+The interpretation retains an ordinary response function that captures its
+lexical peer and the actual step and completion values. `handle` constructs its
+closure in the active task body and passes it through ordinary handler state;
+the closed clause calls it with the payload and actual owned resumption. Each
+response schema remains pending until the Context's ordinary source analysis
+derives its actual free variables and checks them against the participant and
+interpretation capture allowances. Publication completes that private bound;
+unused entries in the allowance do not become closure captures. This also
+supports completion values created inside the running task's region. Each
 `demand.request(body, need, capability, state)` is an ordinary local operation:
 the handler asks the counterpart, obtains its task, applies it and resumes the
 requester with the contribution. `interpretWith` accepts a typed completion
@@ -301,6 +310,37 @@ graph counts, allocation calls, requested bytes and BPI3 identities were unchang
 The obtain/run/repeated/adaptive/dispose images remained 1,200/1,201/1,221/1,265/1,218
 bytes. Median authoring times moved in both directions within 3%; no speedup is
 claimed. The obtain fixture's peak requested storage decreased by twelve bytes.
+
+The captured-Need construction adds one ordinary response schema and function
+per interpretation, with a closure created at each `handle`. Against `2c9811c2`,
+the five task fixtures each grow from 25 to 27 source functions, 17 to 19 source
+schemas and 80 to 84 source capture references. Their compiled graphs grow from
+20 to 23 functions, 14 to 16 constructors and reachable schemas, 31 to 35 schema
+capture references, and 11 to 12 environment capture references. This replaces
+the unbound lexical dependencies in a closed handler clause with explicit state;
+it adds no runtime value category or special execution path.
+
+Measurements on October 26 used the same machine, toolchain, requested-byte meter
+and eleven-sample method described above, with fresh owners and the baseline run
+before the candidate. Existing compiler optimization was enabled in both runs.
+
+| Task fixture | Authoring µs | Allocation calls | Requested bytes | Peak live bytes | Subsequent lowering µs | BPI3 bytes |
+|---|---:|---:|---:|---:|---:|---:|
+| obtain | 1,955.54 → 2,312.17 | 297 → 296 | 1,730,742 → 2,067,694 | 932,136 → 989,686 | 1,828.62 → 1,952.21 | 1,200 → 1,325 |
+| run | 1,925.50 → 2,248.79 | 295 → 298 | 1,703,398 → 2,182,068 | 913,738 → 989,888 | 1,888.58 → 2,065.17 | 1,201 → 1,326 |
+| repeated | 1,997.88 → 2,351.29 | 306 → 303 | 1,901,086 → 2,153,714 | 1,018,704 → 973,748 | 1,888.21 → 2,151.21 | 1,221 → 1,346 |
+| adaptive | 2,059.12 → 2,518.92 | 310 → 304 | 2,148,152 → 2,095,344 | 1,029,204 → 993,050 | 2,272.58 → 2,266.38 | 1,265 → 1,390 |
+| dispose | 2,027.62 → 2,303.38 | 301 → 303 | 1,639,092 → 2,213,394 | 924,318 → 951,882 | 2,009.12 → 2,064.50 | 1,218 → 1,343 |
+
+The response closure and shared capture analysis cost about 14–22% authoring time
+in this local sample and 125 image bytes per fixture. All pending response
+bounds share one source-analysis pass per publication; only actual free-variable
+schemas enter those bounds. Removing the old query rebinding reduces some
+allocations, but does not eliminate the helper's graph and analysis costs.
+All measured owners released their storage. The new captured-state fixtures use
+two distinct entry arguments and independently check exact effects and results
+for obtaining a task, resuming, repeated requests and disposal. A separate fixture
+checks a completion using a cell allocated inside the running task's region.
 
 Completing a reserved callable directly avoids generating a second copy of its
 schema. On the three-endpoint composition fixture this reduced the initial typed

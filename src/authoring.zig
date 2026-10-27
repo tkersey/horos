@@ -2708,6 +2708,14 @@ pub fn Body(comptime Parameters: type) type {
 }
 
 pub const interop = struct {
+    pub fn requireCompatibleShapes(
+        comptime Expected: type,
+        comptime Actual: type,
+        comptime path: []const u8,
+    ) void {
+        comptime compatible(Expected, Actual, path);
+    }
+
     pub fn componentModule(
         c: *Context,
         entry: anytype,

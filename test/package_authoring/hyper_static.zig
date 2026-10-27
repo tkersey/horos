@@ -48,6 +48,10 @@ fn rejectValues(
     const types = try hyper.pair(c, integer, boolean, .{});
     if (comptime selected("hyper_invoke_scalar")) {
         _ = try hyper.invoke(body, value, value);
+    } else if (comptime selected("hyper_invoke_strict_peer") or
+        selected("hyper_invoke_nonreciprocal"))
+    {
+        try rejectParticipant(c, body, integer, boolean);
     } else if (comptime selected("hyper_invoke_schema")) {
         _ = try hyper.invoke(body, integer, value);
     } else if (comptime selected("hyper_force_body") or selected("hyper_invoke_body")) {
@@ -83,6 +87,46 @@ fn rejectValues(
         const wrong_peer = try hyper.deferValue(body, types.peerForward(), participant);
         _ = try hyper.invoke(body, participant, wrong_peer);
     } else try rejectComposition(c, integer, boolean, body, value);
+}
+
+fn rejectParticipant(c: *a.Context, body: anytype, integer: anytype, boolean: anytype) !void {
+    const types = try hyper.pair(c, boolean, boolean, .{});
+    const peer_schema = if (comptime selected("hyper_invoke_strict_peer"))
+        integer
+    else
+        types.peerBackward();
+    const delayed = try c.declareSchema(.callable, hyper.Delayed(a.Shape(u64)));
+    const schema = try c.callable(.{ .peer = peer_schema }, delayed.schema(), .{}, .{
+        .use = .reusable,
+        .captures = .{delayed.schema()},
+    });
+    try c.defineCallable(delayed, .{}, integer, .{}, .{
+        .use = .reusable,
+        .captures = .{ schema, peer_schema, integer },
+    });
+    const function = try c.functionFor("participant", schema);
+    const nested = try body.closureBody(function);
+    try c.define(function, try nested.ret(try hyper.deferValue(
+        nested,
+        delayed.schema(),
+        try nested.constant(u64, 42),
+    )));
+    const participant = try body.lambda(function, schema);
+    const peer = if (comptime selected("hyper_invoke_strict_peer"))
+        try body.constant(u64, 7)
+    else blk: {
+        const answer = try hyper.deferValue(
+            body,
+            types.answerBackward(),
+            try body.constant(bool, true),
+        );
+        break :blk try hyper.deferValue(
+            body,
+            peer_schema,
+            try hyper.base(body, types.swap(), answer),
+        );
+    };
+    _ = try hyper.invoke(body, participant, peer);
 }
 
 fn BodyWrapper(comptime B: type) type {

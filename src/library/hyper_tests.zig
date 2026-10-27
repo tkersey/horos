@@ -4,6 +4,75 @@ const a = @import("../authoring.zig");
 const hyper = @import("hyper.zig");
 const native = @import("horos_data").schema.native;
 
+test "typed hyper pair capture references retain their separate catalog meaning" {
+    var raw = source.Builder.init(std.testing.allocator);
+    defer raw.deinit();
+    const c = try a.Context.init(&raw);
+    const integer = try c.schema(u64);
+    const count = @import("horos_data").component.max_catalog_entries / 6 + 1;
+    const captures = try std.testing.allocator.alloc(*const a.Schema(a.Dynamic), count);
+    defer std.testing.allocator.free(captures);
+    @memset(captures, a.interop.erase(integer));
+    const types = try hyper.pair(c, integer, integer, .{ .captures = captures });
+    try std.testing.expect(types.swap().swap() == types);
+    try std.testing.expectEqual(types, try hyper.pair(
+        c,
+        integer,
+        integer,
+        .{ .captures = captures },
+    ));
+}
+
+test "typed hyper invoke checks actual peer delay effects even when the peer is ignored" {
+    inline for (.{ false, true }) |effectful| try ignoredPeerDelay(effectful);
+}
+
+fn ignoredPeerDelay(comptime effectful: bool) !void {
+    var raw = source.Builder.init(std.testing.allocator);
+    defer raw.deinit();
+    const c = try a.Context.init(&raw);
+    const integer = try c.schema(u64);
+    const types = try hyper.pair(c, integer, integer, .{});
+    const effect = try c.external("peer", integer, integer);
+    const peer_schema = try c.callable(.{}, types.backward(), if (effectful) .{effect} else .{}, .{
+        .use = .reusable,
+        .captures = .{types.backward()},
+    });
+    const delayed = try c.declareSchema(.callable, hyper.Delayed(a.Shape(u64)));
+    const participant_schema = try c.callable(.{ .peer = peer_schema }, delayed.schema(), .{}, .{
+        .use = .reusable,
+        .captures = .{delayed.schema()},
+    });
+    try c.defineCallable(delayed, .{}, integer, .{}, .{
+        .use = .reusable,
+        .captures = .{ participant_schema, peer_schema, integer },
+    });
+    const entry = try c.function("ignored peer", .{}, integer, .{});
+    const body = try c.body(entry);
+    const function = try c.functionFor("participant", participant_schema);
+    const nested = try body.closureBody(function);
+    try c.define(function, try nested.ret(try hyper.deferValue(
+        nested,
+        delayed.schema(),
+        try nested.constant(u64, 42),
+    )));
+    const participant = try body.lambda(function, participant_schema);
+    const answer = try hyper.deferValue(body, types.answerBackward(), try body.constant(u64, 23));
+    const counterpart = try hyper.base(body, types.swap(), answer);
+    const peer_function = try c.functionFor("peer", peer_schema);
+    const peer_body = try body.closureBody(peer_function);
+    try c.define(peer_function, try peer_body.ret(counterpart));
+    const peer = try body.lambda(peer_function, peer_schema);
+    if (effectful) return std.testing.expectError(
+        error.SchemaMismatch,
+        hyper.invoke(body, participant, peer),
+    );
+    const invoked = try hyper.invoke(body, participant, peer);
+    try c.define(entry, try body.ret(try hyper.force(body, invoked)));
+    var compiled = try c.compile(std.testing.allocator, entry, try c.schema(void));
+    defer compiled.deinit();
+}
+
 test "typed hyper lazy products admit the canonical empty record" {
     var raw = source.Builder.init(std.testing.allocator);
     defer raw.deinit();

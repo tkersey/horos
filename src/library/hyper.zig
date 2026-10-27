@@ -165,6 +165,11 @@ pub fn invoke(
     participant: anytype,
     peer: anytype,
 ) @TypeOf(@as(*a.Body(a.Dynamic), undefined).apply(participant, .{ .peer = peer })) {
+    comptime a.interop.requireCompatibleShapes(
+        Hyper(participantInput(@TypeOf(participant)), participantAnswer(@TypeOf(participant))),
+        a.ShapeOf(@TypeOf(participant)),
+        "hyper.invoke participant",
+    );
     const interface = try body.schemaOf(participant);
     const reciprocal = try a.interop.refineValue(body, peer, try interface.fieldSchema("peer"));
     return @ptrCast(try runtime.invoke(
@@ -238,6 +243,13 @@ fn participantAnswer(comptime T: type) type {
     return delayedResult(S.internal.callable.result);
 }
 
+fn participantInput(comptime T: type) type {
+    const Schema = a.Schema(a.ShapeOf(T));
+    const Peer = @typeInfo(@TypeOf(@as(*const Schema, undefined).fieldSchema("peer")))
+        .error_union.payload;
+    return participantAnswer(*const a.Value(delayedResult(a.ShapeOf(Peer))));
+}
+
 fn observationParticipant(
     body: anytype,
     types: anytype,
@@ -275,7 +287,7 @@ pub fn run(
     const peer = try c.functionFor("hyper.run.peer", types.peerBackward());
     const nested = try body.closureBody(peer);
     try c.define(peer, try nested.ret(try identity(nested, types.swap())));
-    return invoke(body, checked, try body.lambda(peer, types.peerBackward()));
+    return @ptrCast(try invoke(body, checked, try body.lambda(peer, types.peerBackward())));
 }
 
 pub fn project(
@@ -296,7 +308,7 @@ pub fn project(
     const peer = try c.functionFor("hyper.project.peer", types.peerBackward());
     const nested = try body.closureBody(peer);
     try c.define(peer, try nested.ret(try base(nested, types.swap(), argument)));
-    return invoke(body, checked, try body.lambda(peer, types.peerBackward()));
+    return @ptrCast(try invoke(body, checked, try body.lambda(peer, types.peerBackward())));
 }
 
 fn AnaData(comptime S: type, comptime A: type, comptime B: type) type {
@@ -400,29 +412,6 @@ const QueryAccess = struct {
     ) *const a.Value(Delayed(Hyper(Shape(@TypeOf(query)).Output, Shape(@TypeOf(query)).Input))) {
         return query.data().peer;
     }
-
-    pub fn rebind(
-        query: anytype,
-        body: anytype,
-        state: anytype,
-        counterpart: anytype,
-    ) a.Error!@TypeOf(query) {
-        const Q = Shape(@TypeOf(query));
-        const stored = try bridge.raw.interop.namedStorage(
-            bridge.context(try body.context()),
-            QueryData(Q.State, Q.Input, Q.Output),
-            .{
-                .definition = query.data().definition,
-                .state = try a.interop.refineValue(
-                    body,
-                    state,
-                    query.data().definition.stateSchema(),
-                ),
-                .peer = try a.interop.refineValue(body, counterpart, query.types().peerBackward()),
-            },
-        );
-        return @ptrCast(stored);
-    }
 };
 
 pub fn ana(body: anytype, types: anytype, state: anytype, emitter: anytype) a.Error!*const Ana(
@@ -472,5 +461,6 @@ pub fn start(
 test {
     _ = @import("hyper_tests.zig");
     _ = @import("hyper_partial_tests.zig");
+    _ = @import("hyper_need_capture_tests.zig");
     _ = @import("hyper_group.zig");
 }

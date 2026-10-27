@@ -616,6 +616,8 @@ fn hyperFixtures(
         "hyper_lazy_product",      "hyper_lazy_sum",           "hyper_lazy_stream",
         "hyper_stream_head",       "hyper_identity_project",   "hyper_run_constant",
         "hyper_composition",       "hyper_nested_need",        "hyper_task_adaptive",
+        "hyper_captured_obtain",   "hyper_captured_resume",    "hyper_captured_repeated",
+        "hyper_captured_dispose",  "hyper_captured_local",
     }) |name| {
         for ([_][]const u8{ "json", "bpi3" }) |format| {
             const run = b.addRunArtifact(emitter);

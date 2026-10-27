@@ -76,6 +76,28 @@ assert.deepEqual(execute(adaptive, [], [5, 5, 3, 5, 5].map(word)), {
   trace: [20, 10, 21, 203, 213].map(value => ({kind: "Requested", identity: "hyper/task", payload: word(value)})),
   kind: "Completed", value: word(33),
 });
+for (const kind of ["obtain", "resume", "repeated", "dispose"]) {
+  const source = parseExactJson(execFileSync(emitter, [`hyper_captured_${kind}`, "json"], {encoding: "utf8"}));
+  for (const [producer, consumer] of [[10, 20], [3, 40]]) {
+    const produced = [producer, consumer, producer, producer + 5, producer + 100];
+    const payloads = kind === "obtain" ? [] : kind === "dispose"
+      ? [consumer, ...produced, consumer, consumer + 100] : kind === "repeated"
+        ? [consumer, ...produced, consumer, ...produced, consumer,
+          consumer + 2 * (producer + 5), consumer + 100, consumer + 100]
+        : [consumer, ...produced, consumer, consumer + producer + 5, consumer + 100];
+    const value = kind === "obtain" ? 7 : kind === "dispose" ? consumer
+      : consumer + (kind === "repeated" ? 2 : 1) * (producer + 5);
+    assert.deepEqual(execute(source, [...word(producer), ...word(consumer)], payloads.map(() => word(5))), {
+      trace: payloads.map(value => ({kind: "Requested", identity: "hyper/captured", payload: word(value)})),
+      kind: "Completed", value: word(value),
+    }, `captured ${kind} producer=${producer} consumer=${consumer}`);
+  }
+}
+const capturedLocal = parseExactJson(execFileSync(emitter, ["hyper_captured_local", "json"], {encoding: "utf8"}));
+assert.deepEqual(execute(capturedLocal, [], [word(5)]), {
+  trace: [{kind: "Requested", identity: "hyper/captured", payload: word(7)}],
+  kind: "Completed", value: word(13),
+});
 const composition = parseExactJson(execFileSync(emitter, ["hyper_composition", "json"], {encoding: "utf8"}));
 for (let input = 0; input < 256; input += 1) {
   assert.deepEqual(execute(composition, [input], []), {

@@ -227,6 +227,7 @@ src/library/hyper_data.zig
 src/library/hyper_group.zig
 src/library/hyper_group_tests.zig
 src/library/hyper_need.zig
+src/library/hyper_need_capture_tests.zig
 src/library/hyper_partial_tests.zig
 src/library/hyper_tests.zig
 src/library/raise.zig

@@ -3,6 +3,8 @@ pub const cases = .{
     .{ "hyper_invoke_body", "Horos authoring: expected a canonical handle pointer" },
     .{ "hyper_invoke_scalar", "Horos apply: expected callable shape" },
     .{ "hyper_invoke_schema", "Horos authoring: wrong handle family; expected value" },
+    .{ "hyper_invoke_strict_peer", "Horos hyper: expected a delayed shape" },
+    .{ "hyper_invoke_nonreciprocal", "Horos hyper.invoke participant" },
     .{ "hyper_selected_run", "Horos refineSchema: incompatible schema shape" },
     .{ "hyper_selected_project", "Horos refineSchema.result: incompatible schema shape" },
     .{ "hyper_partial_project", "Horos refineSchema.result: incompatible schema shape" },

@@ -2,8 +2,91 @@ const std = @import("std");
 const source = @import("../source.zig");
 const a = @import("../authoring.zig");
 const hyper = @import("hyper.zig");
+const native = @import("horos_data").schema.native;
 
 const Knowledge = enum { known, peer, row, answer, row_answer, endpoint, erased };
+
+const NamedDelay = struct {
+    pub const internal: a.InternalInfo = .{
+        .callable = a.Signature(native.Fields(&.{}, &.{}), a.Shape(u64)),
+    };
+};
+
+test "typed hyper observations normalize admitted partial answer delays" {
+    var raw = source.Builder.init(std.testing.allocator);
+    defer raw.deinit();
+    const c = try a.Context.init(&raw);
+    const integer = try c.schema(u64);
+    const types = try hyper.pair(c, integer, integer, .{});
+    const options = .{
+        .use = .reusable,
+        .captures = .{
+            types.forward(),
+            types.backward(),
+            types.peerForward(),
+            types.peerBackward(),
+            types.answerForward(),
+            types.answerBackward(),
+            integer,
+            integer,
+        },
+    };
+    const answer_schema = try c.callable(
+        try a.interop.RuntimeNamed(.schema).init(c, &.{}),
+        integer,
+        .{},
+        options,
+    );
+    const schema = try c.callable(.{ .peer = types.peerBackward() }, answer_schema, .{}, options);
+    const entry = try c.function("partial answer", .{}, integer, .{});
+    const body = try c.body(entry);
+    const answer = try hyper.deferValue(body, types.answerForward(), try body.constant(u64, 42));
+    const participant = try a.interop.refineValue(
+        body,
+        try hyper.base(body, types, answer),
+        schema,
+    );
+    const projected = try exerciseOperations(
+        a.ShapeOf(@TypeOf(answer_schema)),
+        body,
+        types,
+        participant,
+    );
+    try c.define(entry, try body.ret(try hyper.force(body, projected)));
+    var compiled = try c.compile(std.testing.allocator, entry, try c.schema(void));
+    defer compiled.deinit();
+}
+
+test "typed hyper observations normalize structurally compatible named answer delays" {
+    var raw = source.Builder.init(std.testing.allocator);
+    defer raw.deinit();
+    const c = try a.Context.init(&raw);
+    const integer = try c.schema(u64);
+    const types = try hyper.pair(c, integer, integer, .{});
+    const delayed = try c.declareSchema(.callable, NamedDelay);
+    const schema = try c.callable(.{ .peer = types.peerBackward() }, delayed.schema(), .{}, .{
+        .use = .reusable,
+        .captures = .{delayed.schema()},
+    });
+    try c.defineCallable(delayed, .{}, integer, .{}, .{
+        .use = .reusable,
+        .captures = .{ schema, types.peerBackward(), integer },
+    });
+    const entry = try c.function("named answer", .{}, integer, .{});
+    const body = try c.body(entry);
+    const function = try c.functionFor("participant", schema);
+    const nested = try body.closureBody(function);
+    try c.define(function, try nested.ret(try hyper.deferValue(
+        nested,
+        delayed.schema(),
+        try nested.constant(u64, 42),
+    )));
+    const participant = try body.lambda(function, schema);
+    const projected = try exerciseOperations(NamedDelay, body, types, participant);
+    try c.define(entry, try body.ret(try hyper.force(body, projected)));
+    var compiled = try c.compile(std.testing.allocator, entry, try c.schema(void));
+    defer compiled.deinit();
+}
 
 test "typed hyper partial callable knowledge preserves checked operations" {
     inline for (comptime std.meta.tags(Knowledge)) |knowledge| {
