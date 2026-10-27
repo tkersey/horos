@@ -41,8 +41,8 @@ pub fn build(b: *std.Build) void {
         "comptime-reject",
         "Reject incompatible shapes through the public package",
     );
-    staticCases(b, target, horos, static, "static.zig", @import("static_cases.zig").cases);
-    staticCases(b, target, horos, static, "hyper_static.zig", @import("hyper_static_cases.zig").cases);
+    staticCases(b, horos, static, "static.zig", @import("static_cases.zig").cases);
+    staticCases(b, horos, static, "hyper_static.zig", @import("hyper_static_cases.zig").cases);
     inline for (.{ "category", "failure_literal_category", "lifecycle" }) |mode| {
         if (b.option(bool, mode, "Build a deliberate public API error") orelse false) {
             const wrong = b.addExecutable(.{ .name = mode, .root_module = b.createModule(.{
@@ -57,7 +57,6 @@ pub fn build(b: *std.Build) void {
 
 fn staticCases(
     b: *std.Build,
-    target: std.Build.ResolvedTarget,
     horos: *std.Build.Module,
     step: *std.Build.Step,
     comptime path: []const u8,
@@ -68,7 +67,7 @@ fn staticCases(
         options.addOption([]const u8, "value", case[0]);
         const wrong = b.addExecutable(.{ .name = case[0], .root_module = b.createModule(.{
             .root_source_file = b.path(path),
-            .target = target,
+            .target = horos.resolved_target.?,
             .imports = &.{.{ .name = "horos", .module = horos }},
         }) });
         wrong.root_module.addOptions("rejection_mode", options);
