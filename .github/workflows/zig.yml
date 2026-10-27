@@ -129,39 +129,3 @@ jobs:
         run: |
           test "$SOURCE" = success
           test "$QUALIFICATION" = success
-  native-backend-diagnostic:
-    name: Native backend stack alignment witness
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    steps:
-      - name: Replay retained native executable with alternate stack alignment
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          command -v gdb || sudo apt-get install --yes gdb
-          gh run download 40566247173 -n native-backend-diagnostic -D "$RUNNER_TEMP/diagnostic"
-          binary="$RUNNER_TEMP/diagnostic/native-unicode"
-          chmod +x "$binary"
-          cat > "$RUNNER_TEMP/stack.gdb" <<'GDB'
-          set pagination off
-          break *0x124ed75
-          commands
-          silent
-          set $rsp = $rsp - 0x10
-          continue
-          end
-          run
-          x/i $pc
-          info registers rsp rbp
-          bt
-          python
-          if int(gdb.parse_and_eval('$pc')) != 0x124fab1:
-              raise gdb.GdbError('expected retained UTF-8 aligned-load fault')
-          if int(gdb.parse_and_eval('$rsp')) % 32 != 16:
-              raise gdb.GdbError('expected 16-byte but not 32-byte aligned stack')
-          end
-          GDB
-          gdb --batch -x "$RUNNER_TEMP/stack.gdb" "$binary"
