@@ -31,7 +31,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("rejection.zig"),
         .target = b.graph.host,
         .imports = &.{.{ .name = "horos", .module = horos }},
-    }) });
+    }), .use_llvm = true });
     b.step(
         "reject",
         "Check rejected public-package neighbor",

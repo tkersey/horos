@@ -19,6 +19,13 @@ authoring and data-only APIs in a fresh consumer. Native category/owner/lifecycl
 rejections and actual linker CLI behavior remain checked. There is no Node/Python
 setup or source/package checker in the native path.
 
+The runtime package-rejection root explicitly uses LLVM while retaining its
+Debug optimization mode and every owner/category/namespace assertion. The
+Linux Zig 0.17.0 default backend aborted in the SIMD UTF-8 validator reached by
+the raw generator specialization witness. Selecting the backend leaves that
+construction, its inputs and its checks intact; the native installation lane
+must still execute the complete exported-package witness.
+
 `check-native` is the interpreter-free subset. `check` additionally selects the
 independent source oracle and wasm32 ABI byte/identity observations. The oracle
 has only its exact-value helper and actual semantic cases; optional historical
