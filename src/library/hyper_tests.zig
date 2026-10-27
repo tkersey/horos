@@ -87,6 +87,255 @@ test "typed hyper lazy products admit the canonical empty record" {
     defer compiled.deinit();
 }
 
+test "typed hyper runtime lazy rows preserve static emitted programs" {
+    inline for (.{ false, true }) |sum| {
+        const known = try lazyAggregateImage(false, sum);
+        defer std.testing.allocator.free(known);
+        const dynamic = try lazyAggregateImage(true, sum);
+        defer std.testing.allocator.free(dynamic);
+        try std.testing.expectEqualSlices(u8, known, dynamic);
+    }
+}
+
+fn lazyAggregateImage(comptime runtime_rows: bool, comptime sum: bool) ![]u8 {
+    var raw = source.Builder.init(std.testing.allocator);
+    defer raw.deinit();
+    const c = try a.Context.init(&raw);
+    const integer = try c.schema(u64);
+    const delay = try hyper.delayed(c, integer, .{});
+    const entry = try c.function("lazy aggregate", .{}, integer, .{});
+    const body = try c.body(entry);
+    const good = try hyper.deferValue(body, delay, try body.constant(u64, 23));
+    const failing = try c.functionFor("unforced", delay);
+    const nested = try body.closureBody(failing);
+    try c.define(failing, try nested.fail(integer, try nested.constant(void, {})));
+    const bad = try body.lambda(failing, delay);
+    const answer = if (sum) result: {
+        const fields = if (runtime_rows) try a.interop.RuntimeNamed(.schema).init(c, &.{
+            .{ .name = "good", .handle = a.interop.erase(delay) },
+            .{ .name = "bad", .handle = a.interop.erase(delay) },
+        }) else .{ .good = delay, .bad = delay };
+        const value = try hyper.lazySum(body, try c.alternatives(fields), "bad", bad);
+        try std.testing.expect((a.ShapeOf(@TypeOf(value)) == a.Dynamic) == runtime_rows);
+        break :result try body.variantTag(value);
+    } else result: {
+        const fields = if (runtime_rows) try a.interop.RuntimeNamed(.value).init(c, &.{
+            .{ .name = "good", .handle = a.interop.erase(good) },
+            .{ .name = "bad", .handle = a.interop.erase(bad) },
+        }) else .{ .good = good, .bad = bad };
+        const value = try hyper.lazyProduct(body, fields);
+        try std.testing.expect((a.ShapeOf(@TypeOf(value)) == a.Dynamic) == runtime_rows);
+        break :result try hyper.force(body, try body.field(value, "good"));
+    };
+    try c.define(entry, try body.ret(answer));
+    var compiled = try c.compile(std.testing.allocator, entry, try c.schema(void));
+    defer compiled.deinit();
+    const image = @import("horos_data").program_image;
+    const bytes = try std.testing.allocator.alloc(u8, try image.encodedLength(compiled.program));
+    errdefer std.testing.allocator.free(bytes);
+    _ = try compiled.encode(std.testing.allocator, bytes);
+    return bytes;
+}
+
+test "typed hyper lazy rows reject effectful unobserved members" {
+    inline for (.{ false, true }) |runtime_rows| {
+        inline for (.{ false, true }) |sum| try lazyAggregateEffects(runtime_rows, sum);
+    }
+}
+
+fn lazyAggregateEffects(comptime runtime_rows: bool, comptime sum: bool) !void {
+    var raw = source.Builder.init(std.testing.allocator);
+    defer raw.deinit();
+    const c = try a.Context.init(&raw);
+    const integer = try c.schema(u64);
+    const effect = try c.external("effectful member", integer, integer);
+    const task = try c.callable(.{}, integer, .{effect}, .{ .use = .reusable });
+    const delay = try hyper.delayed(c, integer, .{});
+    const entry = try c.function("entry", .{}, integer, .{});
+    const body = try c.body(entry);
+    const good = try hyper.deferValue(body, delay, try body.constant(u64, 23));
+    if (sum) {
+        const fields = if (runtime_rows) try a.interop.RuntimeNamed(.schema).init(c, &.{
+            .{ .name = "good", .handle = a.interop.erase(delay) },
+            .{ .name = "bad", .handle = a.interop.erase(task) },
+        }) else .{ .good = delay, .bad = task };
+        const choices = try c.alternatives(fields);
+        _ = try body.variant(choices, "good", good);
+        try std.testing.expectError(
+            error.SchemaMismatch,
+            hyper.lazySum(body, choices, "good", good),
+        );
+    } else {
+        const action = try c.functionFor("unobserved effect", task);
+        const nested = try body.closureBody(action);
+        try c.define(action, try nested.ret(try nested.constant(u64, 42)));
+        const bad = try body.lambda(action, task);
+        const fields = if (runtime_rows) try a.interop.RuntimeNamed(.value).init(c, &.{
+            .{ .name = "good", .handle = a.interop.erase(good) },
+            .{ .name = "bad", .handle = a.interop.erase(bad) },
+        }) else .{ .good = good, .bad = bad };
+        try std.testing.expectError(error.SchemaMismatch, hyper.lazyProduct(body, fields));
+    }
+}
+
+test "typed hyper runtime lazy rows reject strict members" {
+    var raw = source.Builder.init(std.testing.allocator);
+    defer raw.deinit();
+    const c = try a.Context.init(&raw);
+    const integer = try c.schema(u64);
+    const delay = try hyper.delayed(c, integer, .{});
+    const entry = try c.function("entry", .{}, integer, .{});
+    const body = try c.body(entry);
+    const strict = try body.constant(u64, 23);
+    const values = try a.interop.RuntimeNamed(.value).init(c, &.{
+        .{ .name = "strict", .handle = a.interop.erase(strict) },
+    });
+    try std.testing.expectError(error.InvalidCategory, hyper.lazyProduct(body, values));
+    const schemas = try a.interop.RuntimeNamed(.schema).init(c, &.{
+        .{ .name = "good", .handle = a.interop.erase(delay) },
+        .{ .name = "strict", .handle = a.interop.erase(integer) },
+    });
+    const good = try hyper.deferValue(body, delay, strict);
+    try std.testing.expectError(error.InvalidCategory, hyper.lazySum(
+        body,
+        try c.alternatives(schemas),
+        "good",
+        good,
+    ));
+    try std.testing.expectError(
+        error.InvalidCategory,
+        hyper.lazySum(body, a.interop.erase(integer), "good", good),
+    );
+    const choices = try c.alternatives(try a.interop.RuntimeNamed(.schema).init(c, &.{
+        .{ .name = "good", .handle = a.interop.erase(delay) },
+    }));
+    try std.testing.expectError(error.SchemaMismatch, hyper.lazySum(body, choices, "good", strict));
+    try std.testing.expectError(error.UnknownName, hyper.lazySum(body, choices, "missing", good));
+}
+
+test "typed hyper runtime lazy rows preserve scope and lifecycle rejection" {
+    var raw = source.Builder.init(std.testing.allocator);
+    defer raw.deinit();
+    const c = try a.Context.init(&raw);
+    const integer = try c.schema(u64);
+    const delay = try hyper.delayed(c, integer, .{});
+    const entry = try c.function("entry", .{}, integer, .{});
+    const body = try c.body(entry);
+    const child = try c.function("child", .{}, delay, .{});
+    const nested = try body.closureBody(child);
+    const escaped = try hyper.deferValue(nested, delay, try nested.constant(u64, 23));
+    const fields = try a.interop.RuntimeNamed(.value).init(c, &.{
+        .{ .name = "escaped", .handle = a.interop.erase(escaped) },
+    });
+    try c.define(child, try nested.ret(escaped));
+    try std.testing.expectError(error.OutOfScope, hyper.lazyProduct(body, fields));
+    const schemas = try a.interop.RuntimeNamed(.schema).init(c, &.{
+        .{ .name = "escaped", .handle = a.interop.erase(delay) },
+    });
+    const choices = try c.alternatives(schemas);
+    try std.testing.expectError(error.OutOfScope, hyper.lazySum(body, choices, "escaped", escaped));
+    const good = try hyper.deferValue(body, delay, try body.constant(u64, 42));
+    const available = try a.interop.RuntimeNamed(.value).init(c, &.{
+        .{ .name = "good", .handle = a.interop.erase(good) },
+    });
+    try c.define(entry, try body.ret(try body.constant(u64, 42)));
+    try std.testing.expectError(error.ClosedBody, hyper.lazyProduct(body, available));
+    try std.testing.expectError(error.ClosedBody, hyper.lazySum(body, choices, "escaped", good));
+}
+
+test "typed hyper runtime lazy products preserve empty rows and allocation failure cleanup" {
+    try @import("../allocation_testing.zig").check(
+        std.testing.allocator,
+        runtimeLazyProductAllocation,
+        .{},
+    );
+}
+
+fn runtimeLazyProductAllocation(allocator: std.mem.Allocator) !void {
+    var raw = source.Builder.init(allocator);
+    defer raw.deinit();
+    const c = try a.Context.init(&raw);
+    const empty = try c.schema(struct {});
+    const entry = try c.function("empty", .{}, empty, .{});
+    const body = try c.body(entry);
+    const integer = try c.schema(u64);
+    const delay = try hyper.delayed(c, integer, .{});
+    const payload = try hyper.deferValue(body, delay, try body.constant(u64, 42));
+    const populated = try a.interop.RuntimeNamed(.value).init(c, &.{
+        .{ .name = "payload", .handle = a.interop.erase(payload) },
+    });
+    _ = try hyper.lazyProduct(body, populated);
+    const fields = try a.interop.RuntimeNamed(.value).init(c, &.{});
+    const value = try hyper.lazyProduct(body, fields);
+    try std.testing.expect(@TypeOf(value) == *const a.Value(a.Dynamic));
+    try c.define(entry, try body.ret(value));
+}
+
+test "typed hyper runtime lazy rows retain foreign and pending schema checks" {
+    var raw = source.Builder.init(std.testing.allocator);
+    defer raw.deinit();
+    const c = try a.Context.init(&raw);
+    const integer = try c.schema(u64);
+    const delay = try hyper.delayed(c, integer, .{});
+    const entry = try c.function("foreign", .{}, integer, .{});
+    const body = try c.body(entry);
+    const payload = try hyper.deferValue(body, delay, try body.constant(u64, 42));
+    const values = try a.interop.RuntimeNamed(.value).init(c, &.{
+        .{ .name = "payload", .handle = a.interop.erase(payload) },
+    });
+    const schemas = try a.interop.RuntimeNamed(.schema).init(c, &.{
+        .{ .name = "payload", .handle = a.interop.erase(delay) },
+    });
+    const choices = try c.alternatives(schemas);
+    var other_raw = source.Builder.init(std.testing.allocator);
+    defer other_raw.deinit();
+    const other = try a.Context.init(&other_raw);
+    const other_entry = try other.function("entry", .{}, try other.schema(u64), .{});
+    const other_body = try other.body(other_entry);
+    try std.testing.expectError(error.ForeignHandle, hyper.lazyProduct(other_body, values));
+    try std.testing.expectError(
+        error.ForeignHandle,
+        hyper.lazySum(other_body, choices, "payload", payload),
+    );
+    const pending = try c.declareSchema(.alternatives, a.Dynamic);
+    try std.testing.expectError(
+        error.UndefinedSchema,
+        hyper.lazySum(body, pending.schema(), "payload", payload),
+    );
+}
+
+test "typed hyper runtime lazy rows retain pure delays returning effectful tasks" {
+    var raw = source.Builder.init(std.testing.allocator);
+    defer raw.deinit();
+    const c = try a.Context.init(&raw);
+    const integer = try c.schema(u64);
+    const effect = try c.external("task effect", integer, integer);
+    const task = try c.callable(.{}, integer, .{effect}, .{ .use = .reusable });
+    const delay = try hyper.delayed(c, task, .{ .captures = .{task} });
+    const entry = try c.function("entry", .{}, integer, .{});
+    const body = try c.body(entry);
+    const action = try c.functionFor("effectful task", task);
+    const nested = try body.closureBody(action);
+    try c.define(action, try nested.ret(try nested.perform(
+        effect,
+        try nested.constant(u64, 42),
+    )));
+    const payload = try hyper.deferValue(body, delay, try body.lambda(action, task));
+    const fields = try a.interop.RuntimeNamed(.value).init(c, &.{
+        .{ .name = "task", .handle = a.interop.erase(payload) },
+    });
+    const product = try hyper.lazyProduct(body, fields);
+    const schemas = try a.interop.RuntimeNamed(.schema).init(c, &.{
+        .{ .name = "task", .handle = a.interop.erase(delay) },
+    });
+    _ = try hyper.lazySum(body, try c.alternatives(schemas), "task", payload);
+    const obtained = try hyper.force(body, try body.field(product, "task"));
+    _ = try a.interop.refineValue(body, obtained, task);
+    try c.define(entry, try body.ret(try body.constant(u64, 23)));
+    var compiled = try c.compile(std.testing.allocator, entry, try c.schema(void));
+    defer compiled.deinit();
+}
+
 test "typed hyper observations retain known answers through runtime pair selection" {
     var raw = source.Builder.init(std.testing.allocator);
     defer raw.deinit();

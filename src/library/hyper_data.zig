@@ -85,6 +85,7 @@ pub fn cons(
 }
 
 fn ProductShape(comptime T: type) type {
+    if (T == *const a.interop.RuntimeNamed(.value)) return a.Dynamic;
     if (@typeInfo(T) != .@"struct" or
         (@typeInfo(T).@"struct".is_tuple and @typeInfo(T).@"struct".field_types.len != 0))
         @compileError("Horos hyper.lazyProduct: expected named delayed values");
@@ -119,6 +120,19 @@ pub fn lazyProduct(
     fields: anytype,
 ) a.Error!*const a.Value(ProductShape(@TypeOf(fields))) {
     const c = try body.context();
+    if (comptime @TypeOf(fields) == *const a.interop.RuntimeNamed(.value)) {
+        const allocator = a.interop.builder(c).arena.child_allocator;
+        const schemas = try allocator.alloc(a.interop.NamedEntry(.schema), fields.len());
+        defer allocator.free(schemas);
+        for (schemas, 0..) |*schema, i| {
+            const field = fields.at(i).?;
+            const actual = try body.schemaOf(field.handle);
+            try @import("runtime/hyper.zig").pureDelay(bridge.context(c), bridge.schema(actual));
+            schema.* = .{ .name = field.name, .handle = actual };
+        }
+        const row = try a.interop.RuntimeNamed(.schema).init(c, schemas);
+        return body.product(try c.record(row), fields);
+    }
     var schemas: SchemaRow(@TypeOf(fields)) = undefined;
     inline for (@typeInfo(@TypeOf(fields)).@"struct".field_names) |name| {
         const schema = try body.schemaOf(@field(fields, name));
@@ -135,14 +149,22 @@ pub fn lazySum(
     payload: anytype,
 ) a.Error!*const a.Value(bridge.schemaShape(@TypeOf(alternatives))) {
     const S = bridge.schemaShape(@TypeOf(alternatives));
-    if (!@hasDecl(S, "contract") or S.contract != .sum)
+    if (S != a.Dynamic and (!@hasDecl(S, "contract") or S.contract != .sum))
         @compileError("Horos hyper.lazySum: expected a sum of delayed shapes");
     const c = try body.context();
-    const fields = try alternatives.fields();
-    inline for (@typeInfo(@TypeOf(fields)).@"struct".field_names) |field| {
-        const schema = @field(fields, field);
-        comptime requireDelay(bridge.schemaShape(@TypeOf(schema)));
-        try @import("runtime/hyper.zig").pureDelay(bridge.context(c), bridge.schema(schema));
+    if (comptime S == a.Dynamic) {
+        const fields = try a.interop.fields(c, alternatives);
+        for (0..fields.len()) |i| {
+            const schema = fields.at(i).?.handle;
+            try @import("runtime/hyper.zig").pureDelay(bridge.context(c), bridge.schema(schema));
+        }
+    } else {
+        const fields = try alternatives.fields();
+        inline for (@typeInfo(@TypeOf(fields)).@"struct".field_names) |field| {
+            const schema = @field(fields, field);
+            comptime requireDelay(bridge.schemaShape(@TypeOf(schema)));
+            try @import("runtime/hyper.zig").pureDelay(bridge.context(c), bridge.schema(schema));
+        }
     }
     return body.variant(alternatives, name, payload);
 }

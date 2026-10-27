@@ -60,6 +60,12 @@ of ordinary hyperfunction authoring. `run` requires equal endpoint contracts;
 checked endpoint adaptation. The complete public
 [`hyper_client.zig`](../examples/hyper_client.zig) emits an ordinary BPI3 image.
 
+Lazy products accept named typed fields or `interop.RuntimeNamed(.value)` rows.
+Lazy sums accept both known schemas and schemas built from runtime named rows.
+Known rows retain their field shapes; unknown rows retain `Dynamic` and checked
+actual metadata. Every member must be a pure delay, including unselected sum
+alternatives. A pure delay may return an effectful task without executing it.
+
 ## Delayed transforms and successor state
 
 `push` and `lift` take an ordinary typed Function with named parameter

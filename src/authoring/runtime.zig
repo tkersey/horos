@@ -2106,34 +2106,37 @@ pub const Context = opaque {
                     .closure = observeClosure,
                 } else null,
             },
-        ) catch |err| {
-            if (contextData(self).capture_failure) |failure| return failure;
-            const name = if (diagnostic.function) |id|
-                self.functionName(id) orelse "compiled source"
-            else
-                "compiled source";
-            contextData(self).diagnostic = .{
-                .code = err,
-                .entity = name,
-                .source = diagnostic,
-                .relationship = switch (err) {
-                    error.InvalidOwnership,
-                    error.OverwrittenOwner,
-                    error.UnavailableSlot,
-                    => "capture, borrow or use obligation failed authoritative admission",
-                    error.InvalidEffect => "effect exceeds declared residual allowance",
-                    error.TypeMismatch => "argument, result or handler answer relationship differs",
-                    error.UnboundVariable => "value is unavailable at this lexical use",
-                    else => "authoritative source or target admission rejected the construction",
-                },
-            };
-            return err;
-        };
+        ) catch |err| return self.rejectSource(err, diagnostic);
         if (contextData(self).capture_failure) |err| {
             result.deinit();
             return err;
         }
         return result;
+    }
+    fn rejectSource(self: *Context, err: Error, diagnostic: source.Diagnostic) Error {
+        if (contextData(self).capture_failure) |failure| return failure;
+        var failure = diagnostic;
+        failure.code = err;
+        const name = if (failure.function) |id|
+            self.functionName(id) orelse "compiled source"
+        else
+            "compiled source";
+        contextData(self).diagnostic = .{
+            .code = err,
+            .entity = name,
+            .source = failure,
+            .relationship = switch (err) {
+                error.InvalidOwnership,
+                error.OverwrittenOwner,
+                error.UnavailableSlot,
+                => "capture, borrow or use obligation failed authoritative admission",
+                error.InvalidEffect => "effect exceeds declared residual allowance",
+                error.TypeMismatch => "argument, result or handler answer relationship differs",
+                error.UnboundVariable => "value is unavailable at this lexical use",
+                else => "authoritative source or target admission rejected the construction",
+            },
+        };
+        return err;
     }
     fn functionName(self: *const Context, id: p.Id) ?[]const u8 {
         for (contextData(self).functions.items) |function_handle| {
@@ -2323,12 +2326,13 @@ pub const Context = opaque {
         for (imports) |symbol| if (symbol.reference.kind == .function) {
             try functions.append(allocator, symbol.reference.id);
         };
-        const facts = try @import("../source/check.zig").analyzeComponent(
+        var diagnostic: source.Diagnostic = .{ .phase = .source_check };
+        const facts = @import("../source/check.zig").analyzeComponent(
             allocator,
             module_value,
             functions.items,
-            null,
-        );
+            &diagnostic,
+        ) catch |err| return self.rejectSource(err, diagnostic);
         for (declarations) |schema| {
             const item = @constCast(data(SchemaData, schema));
             const pending = item.pending_captures orelse continue;
@@ -5876,6 +5880,61 @@ fn captureFixture(c: *Context, permitted: bool) !CaptureFixture {
     const callable_value = try body.lambda(nested, declaration.schema());
     try c.define(entry, try body.ret(try body.apply(callable_value, &.{})));
     return .{ .declaration = declaration, .entry = entry, .nested = nested, .body = nested_body };
+}
+
+test "capture inference preserves source rejection diagnostics across publication paths" {
+    const Path = enum { compile, module, component };
+    for ([_]Path{ .compile, .module, .component }) |path| {
+        var raw = source.Builder.init(std.testing.allocator);
+        defer raw.deinit();
+        const c = try Context.init(&raw);
+        const fixture = try captureFixture(c, true);
+        const failure = try c.scalar(void);
+        const nested_id = try interop.functionId(c, fixture.nested);
+        const entry_id = try interop.functionId(c, fixture.entry);
+        switch (path) {
+            .compile => try std.testing.expectError(error.UnboundVariable, c.compile(
+                std.testing.allocator,
+                fixture.nested,
+                failure,
+            )),
+            .module => try std.testing.expectError(
+                error.UnboundVariable,
+                c.module(fixture.nested, failure),
+            ),
+            .component => try std.testing.expectError(
+                error.UnboundVariable,
+                interop.componentModule(c, fixture.nested, failure, .{
+                    .exports = &.{.{ .name = "entry", .reference = .{
+                        .kind = .function,
+                        .id = nested_id,
+                    } }},
+                }),
+            ),
+        }
+        const diagnostic = c.lastDiagnostic();
+        try std.testing.expectEqual(error.UnboundVariable, diagnostic.code.?);
+        try std.testing.expectEqualStrings("inferred response", diagnostic.entity);
+        try std.testing.expectEqual(error.UnboundVariable, diagnostic.source.?.code.?);
+        try std.testing.expectEqual(.source_check, diagnostic.source.?.phase);
+        try std.testing.expectEqual(nested_id, diagnostic.source.?.function.?);
+        try std.testing.expectEqual(
+            raw.functions.items[@intCast(nested_id)].body.?,
+            diagnostic.source.?.term.?,
+        );
+        try std.testing.expectEqual(
+            raw.functions.items[@intCast(entry_id)].parameters[0],
+            diagnostic.source.?.variable.?,
+        );
+        const rendered = try diagnostic.renderAlloc(std.testing.allocator);
+        defer std.testing.allocator.free(rendered);
+        try std.testing.expectEqualStrings(
+            "UnboundVariable: inferred response: value is unavailable at this lexical use",
+            rendered,
+        );
+        try std.testing.expectError(error.PoisonedAuthoring, c.ready());
+        try std.testing.expectEqualDeep(diagnostic, c.lastDiagnostic());
+    }
 }
 
 test "capture inference rejects actual values outside the named allowance" {
