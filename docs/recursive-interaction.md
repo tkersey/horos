@@ -209,10 +209,12 @@ name)` retains A in `Pair(A, Dynamic)`, `to(group, name, known_to)` retains B in
 checked group members; it does not expose a second raw constructor API.
 
 `run` and `project` retain a participant's known answer shape when the selected
-pair has a Dynamic output. When the participant's answer is Dynamic, checked
-refinement uses the pair's output shape. Projection still checks the participant's
-known input, and `run` requires matching input and output endpoints. Actual
-reciprocal interfaces and capture contracts remain checked in both cases.
+pair has a Dynamic output. An unknown or explicitly erased participant answer
+remains Dynamic; the pair constructs the counterpart without establishing the
+participant's answer type. Both observations retain the actual answer schema,
+including its capture contract, and return a checked pure delay. Projection still
+checks the participant's actual input, and `run` requires matching input and output
+endpoints. Actual peer interfaces and capture contracts remain checked.
 
 Each pair has ordinary callable and delay schemas. Composition uses three
 mutually referring maker functions, declared before their bodies are defined.

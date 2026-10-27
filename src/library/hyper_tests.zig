@@ -109,11 +109,12 @@ test "typed hyper observations retain known answers through runtime pair selecti
     try std.testing.expect(@TypeOf(try hyper.run(body, from, participant)) == Answer);
     try std.testing.expect(@TypeOf(try hyper.run(body, selected, participant)) == Answer);
     const erased = a.interop.erase(participant);
-    try std.testing.expect(@TypeOf(try hyper.project(body, types, erased, answer)) == Answer);
-    try std.testing.expect(@TypeOf(try hyper.run(body, types, erased)) == Answer);
+    const UnknownAnswer = *const a.Value(hyper.Delayed(a.Dynamic));
+    try std.testing.expect(@TypeOf(try hyper.project(body, types, erased, answer)) == UnknownAnswer);
+    try std.testing.expect(@TypeOf(try hyper.run(body, types, erased)) == UnknownAnswer);
     const partial = try a.interop.refineValue(body, participant, from.forward());
-    try std.testing.expect(@TypeOf(try hyper.project(body, types, partial, answer)) == Answer);
-    try std.testing.expect(@TypeOf(try hyper.run(body, types, partial)) == Answer);
+    try std.testing.expect(@TypeOf(try hyper.project(body, types, partial, answer)) == UnknownAnswer);
+    try std.testing.expect(@TypeOf(try hyper.run(body, types, partial)) == UnknownAnswer);
     try c.define(entry, try body.ret(try hyper.force(body, projected)));
     var compiled = try c.compile(std.testing.allocator, entry, try c.schema(void));
     defer compiled.deinit();

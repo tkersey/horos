@@ -48,6 +48,7 @@ test "typed hyper observations normalize admitted partial answer delays" {
     );
     const projected = try exerciseOperations(
         a.ShapeOf(@TypeOf(answer_schema)),
+        hyper.Delayed(a.Shape(u64)),
         body,
         types,
         participant,
@@ -58,6 +59,10 @@ test "typed hyper observations normalize admitted partial answer delays" {
 }
 
 test "typed hyper observations normalize structurally compatible named answer delays" {
+    inline for (.{ false, true }) |erased| try namedAnswer(erased);
+}
+
+fn namedAnswer(comptime erased: bool) !void {
     var raw = source.Builder.init(std.testing.allocator);
     defer raw.deinit();
     const c = try a.Context.init(&raw);
@@ -81,8 +86,11 @@ test "typed hyper observations normalize structurally compatible named answer de
         delayed.schema(),
         try nested.constant(u64, 42),
     )));
-    const participant = try body.lambda(function, schema);
-    const projected = try exerciseOperations(NamedDelay, body, types, participant);
+    const known = try body.lambda(function, schema);
+    const participant = if (erased) a.interop.erase(known) else known;
+    const Invoked = if (erased) a.Dynamic else NamedDelay;
+    const Observed = hyper.Delayed(if (erased) a.Dynamic else a.Shape(u64));
+    const projected = try exerciseOperations(Invoked, Observed, body, types, participant);
     try c.define(entry, try body.ret(try hyper.force(body, projected)));
     var compiled = try c.compile(std.testing.allocator, entry, try c.schema(void));
     defer compiled.deinit();
@@ -95,6 +103,49 @@ test "typed hyper partial callable knowledge preserves checked operations" {
             return err;
         };
     }
+}
+
+test "typed hyper erased observations retain the actual answer instead of the pair output" {
+    var raw = source.Builder.init(std.testing.allocator);
+    defer raw.deinit();
+    const c = try a.Context.init(&raw);
+    const integer = try c.schema(u64);
+    const boolean = try c.schema(bool);
+    const types = try hyper.pair(c, integer, integer, .{});
+    const delayed = try c.declareSchema(.callable, hyper.Delayed(a.Shape(bool)));
+    const schema = try c.callable(.{ .peer = types.peerBackward() }, delayed.schema(), .{}, .{
+        .use = .reusable,
+        .captures = .{delayed.schema()},
+    });
+    try c.defineCallable(delayed, .{}, boolean, .{}, .{
+        .use = .reusable,
+        .captures = .{ schema, types.peerBackward(), boolean },
+    });
+    const entry = try c.function("erased answer", .{}, boolean, .{});
+    const body = try c.body(entry);
+    const function = try c.functionFor("participant", schema);
+    const nested = try body.closureBody(function);
+    try c.define(function, try nested.ret(try hyper.deferValue(
+        nested,
+        delayed.schema(),
+        try nested.constant(bool, true),
+    )));
+    const participant = a.interop.erase(try body.lambda(function, schema));
+    const argument = try hyper.deferValue(
+        body,
+        types.answerBackward(),
+        try body.constant(u64, 23),
+    );
+    try std.testing.expectError(error.SchemaMismatch, hyper.run(body, types, participant));
+    const projected = try hyper.project(body, types, participant, argument);
+    try std.testing.expect(@TypeOf(projected) == *const a.Value(hyper.Delayed(a.Dynamic)));
+    const forced = try hyper.force(body, projected);
+    try std.testing.expect(@TypeOf(forced) == *const a.Value(a.Dynamic));
+    try std.testing.expectError(error.SchemaMismatch, a.interop.refineValue(body, forced, integer));
+    const result = try a.interop.refineValue(body, forced, boolean);
+    try c.define(entry, try body.ret(result));
+    var compiled = try c.compile(std.testing.allocator, entry, try c.schema(void));
+    defer compiled.deinit();
 }
 
 fn partialOperations(comptime knowledge: Knowledge) !void {
@@ -150,7 +201,11 @@ fn partialOperations(comptime knowledge: Knowledge) !void {
         .endpoint => hyper.Delayed(a.Dynamic),
         else => hyper.Delayed(a.Shape(u64)),
     };
-    const projected = try exerciseOperations(Invoked, body, types, participant);
+    const Observed = switch (knowledge) {
+        .answer, .row_answer, .endpoint, .erased => hyper.Delayed(a.Dynamic),
+        else => hyper.Delayed(a.Shape(u64)),
+    };
+    const projected = try exerciseOperations(Invoked, Observed, body, types, participant);
     try c.define(entry, try body.ret(try hyper.force(body, projected)));
     var compiled = try c.compile(std.testing.allocator, entry, try c.schema(void));
     defer compiled.deinit();
@@ -158,10 +213,11 @@ fn partialOperations(comptime knowledge: Knowledge) !void {
 
 fn exerciseOperations(
     comptime Invoked: type,
+    comptime Observed: type,
     body: anytype,
     types: anytype,
     participant: anytype,
-) !*const a.Value(hyper.Delayed(a.Shape(u64))) {
+) !*const a.Value(Observed) {
     const c = try body.context();
     const argument = try hyper.deferValue(
         body,
@@ -172,7 +228,7 @@ fn exerciseOperations(
     const peer = try hyper.deferValue(body, types.peerBackward(), counterpart);
     const invoked = try hyper.invoke(body, participant, peer);
     try std.testing.expect(@TypeOf(invoked) == *const a.Value(Invoked));
-    const Answer = *const a.Value(hyper.Delayed(a.Shape(u64)));
+    const Answer = *const a.Value(Observed);
     const run = try hyper.run(body, types, participant);
     const projected = try hyper.project(body, types, participant, argument);
     try std.testing.expect(@TypeOf(run) == Answer);
