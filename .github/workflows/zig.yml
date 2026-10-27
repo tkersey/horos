@@ -82,6 +82,23 @@ jobs:
           else
             zig build check -Doptimize=safe --summary all --verbose
           fi
+      - name: Inspect failed native package executable
+        if: ${{ failure() && matrix.lane == 'installation' }}
+        shell: bash
+        run: |
+          command -v gdb || sudo apt-get install --yes gdb
+          cat > "$RUNNER_TEMP/package-diagnose.gdb" <<'GDB'
+          set pagination off
+          run
+          python
+          if gdb.selected_inferior().pid:
+              for command in ('x/12i $pc-16', 'info registers', 'bt', 'frame 0', 'info args'):
+                  gdb.execute(command)
+          end
+          GDB
+          while IFS= read -r executable; do
+            timeout 30s gdb --batch -x "$RUNNER_TEMP/package-diagnose.gdb" "$executable"
+          done < <(find .zig-cache -path '*/package/*/local/o/*/test' -type f)
       - name: Admit complete bounded compiler cache
         id: cache_size
         if: ${{ !cancelled() && matrix.lane == 'contracts' }}
@@ -170,16 +187,55 @@ jobs:
               try std.testing.expect(text.len != 0);
           }
           ZIG
+          cat > "$RUNNER_TEMP/diagnose.gdb" <<'GDB'
+          set pagination off
+          run
+          python
+          if gdb.selected_inferior().pid:
+              for command in ('x/12i $pc-16', 'info registers', 'bt', 'frame 0', 'info args'):
+                  gdb.execute(command)
+          end
+          GDB
+          cat > "$RUNNER_TEMP/peer.zig" <<'ZIG'
+          const std = @import("std");
+          const Result = struct { input: u64, element: u64, result: u64, package: u64 };
+          const Row = struct { effects: []const u64 };
+          pub noinline fn construct(allocator: std.mem.Allocator) ![]u8 {
+              const ids: []const u64 = &.{};
+              const identity: []const u8 = "package/source-exchange";
+              const evidence = .{ identity, @as(u64, 0), @as(u64, 0), @as(u64, 0), ids, ids, ids, Row{ .effects = ids } };
+              const template: []const u8 = "boundary.library.exchange/v1";
+              return std.json.Stringify.valueAlloc(allocator, .{
+                  .template = template,
+                  .result = @typeName(Result),
+                  .evidence_type = @typeName(@TypeOf(evidence)),
+                  .evidence = evidence,
+              }, .{});
+          }
+          ZIG
+          cat > "$RUNNER_TEMP/root.zig" <<'ZIG'
+          const std = @import("std");
+          const peer = @import("peer");
+          test "mixed module specialization evidence" {
+              const text = try peer.construct(std.testing.allocator);
+              defer std.testing.allocator.free(text);
+              try std.testing.expect(text.len != 0);
+          }
+          ZIG
           for cpu in native baseline; do
             for probe in unicode stringify; do
               binary="$RUNNER_TEMP/$cpu-$probe"
-              zig test "$RUNNER_TEMP/probe.zig" -fno-llvm -O Debug -mcpu="$cpu" \
+              zig test "$RUNNER_TEMP/probe.zig" -fno-llvm -O debug -mcpu="$cpu" \
                 --test-filter "$probe" --test-no-exec -femit-bin="$binary" || exit 1
-              gdb --batch -ex 'set pagination off' -ex 'run' \
-                -ex 'x/12i $pc-16' -ex 'info registers' -ex 'bt' \
-                -ex 'frame 0' -ex 'info args' "$binary" 2>&1 \
+              gdb --batch -x "$RUNNER_TEMP/diagnose.gdb" "$binary" 2>&1 \
                 | tee "$RUNNER_TEMP/$cpu-$probe.log"
             done
+            binary="$RUNNER_TEMP/$cpu-mixed"
+            zig test -fno-llvm -O debug -mcpu=native --dep peer -Mroot="$RUNNER_TEMP/root.zig" \
+              -O safe -mcpu="$cpu" -Mpeer="$RUNNER_TEMP/peer.zig" \
+              --test-no-exec -femit-bin="$binary" || exit 1
+            gdb --batch -x "$RUNNER_TEMP/diagnose.gdb" "$binary" 2>&1 \
+              | tee "$RUNNER_TEMP/$cpu-mixed.log"
           done
       - name: Retain native diagnostic binaries and traces
         if: always()
@@ -188,6 +244,9 @@ jobs:
           name: native-backend-diagnostic
           path: |
             ${{ runner.temp }}/probe.zig
+            ${{ runner.temp }}/peer.zig
+            ${{ runner.temp }}/root.zig
+            ${{ runner.temp }}/*-mixed*
             ${{ runner.temp }}/native-unicode*
             ${{ runner.temp }}/native-stringify*
             ${{ runner.temp }}/baseline-unicode*
