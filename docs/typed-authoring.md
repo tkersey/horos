@@ -54,8 +54,35 @@ zig build emit-structured-branch -Doptimize=safe > branch.bpi3
 zig build emit-authoring-client -Doptimize=safe > client.bpi3
 ```
 
-The latter emits two interpreted questions, residual environmental lookups, named
-records, branches and checked arithmetic. All that work executes in Kosmos.
+The latter carries a record containing Search's generated `explore` callable and
+`payload = { numbers = { input, offset }, samples = Vector(u8, 4) }` through
+Reader's handler. Its handled computation retains the record across a scoped
+`local` operation whose inside computation calls `ask`, then returns the record
+to the ordinary caller. The scoped operations carry unit values, preserving the
+requirement that operation replies be exportable; the callable stays in the
+handled computation's declared capture. The caller projects and applies `explore`
+to a direct solution, then projects the nested numbers from its result before continuing with two interpreted questions, residual environmental
+lookups, branches and checked arithmetic. Compile-time assertions retain the
+record, callable result, nested field names, and sample element/bound contracts.
+This uses one direct Search solution; owned packages and multi-shot alternatives
+retain their separate examples and qualification cases. All authored work
+executes in Kosmos.
+
+The client crosses the source boundary only to accept the Builder that owns its
+Context and return its final `source.Module` for `program.lower`. Its library
+composition uses typed handles throughout; it does not extract IDs, erase known
+shapes, or create a second Context. The callable schema supplied to `lambda`
+states the generated function's interface and is checked against that function.
+The existing exported-package check copies this same client into its fresh
+consumer, compiles it against the extracted package, and admits its emitted
+BPI3 image. `emit-authoring-client` exercises construction and lowering locally;
+neither command alone claims execution observations.
+
+The added authored path constructs one payload, performs one scoped read, and
+collects one direct solution with an empty pending queue. Its collection work
+and retained payload storage are constant for this fixture; the sample sequence
+retains its explicit four-element bound. The path introduces no new application
+quota or host-side execution loop.
 
 ## Native contracts and opaque handles
 
