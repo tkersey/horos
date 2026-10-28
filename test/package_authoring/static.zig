@@ -11,6 +11,7 @@ pub fn main(init: std.process.Init) !void {
     var raw = horos.source.Builder.init(init.gpa);
     defer raw.deinit();
     const c = try a.Context.init(&raw);
+    if (comptime std.mem.startsWith(u8, mode, "policy_")) return rejectPolicies(c);
     const integer = try c.schema(u64);
     const f = try c.function("caller", .{}, integer, .{});
     const b = try c.body(f);
@@ -315,4 +316,154 @@ fn rejectCallableOptions(
             .{ .overflow = try c.literalFailure(void, {}), .division_by_zerro = null },
         );
     } else return rejectLibraryOptions(c, integer, b, value);
+}
+
+fn rejectPolicies(c: *a.Context) !void {
+    const integer = try c.schema(u64);
+    if (comptime std.mem.startsWith(u8, mode, "policy_state_interpret_"))
+        return reject_state_interpret(c, integer);
+    if (comptime std.mem.startsWith(u8, mode, "policy_reader_family_"))
+        return reject_reader_family(c, integer);
+    if (comptime std.mem.startsWith(u8, mode, "policy_reader_interpret_"))
+        return reject_reader_interpret(c, integer);
+    if (comptime std.mem.startsWith(u8, mode, "policy_writer_interpret_"))
+        return reject_writer_interpret(c, integer);
+    if (comptime std.mem.startsWith(u8, mode, "policy_raise_catching_"))
+        return reject_raise_catching(c, integer);
+    if (comptime std.mem.startsWith(u8, mode, "policy_scheduler_fifo_"))
+        return reject_scheduler_fifo(c, integer);
+    if (comptime std.mem.startsWith(u8, mode, "policy_scheduler_awaiting_"))
+        return reject_scheduler_awaiting(c, integer);
+}
+
+fn reject_state_interpret(c: *a.Context, integer: anytype) !void {
+    const lib = horos.library.state;
+    const family = try lib.family(c, "policy", integer);
+    const region = try c.region();
+    const options = if (comptime selected("policy_state_interpret_unknown"))
+        .{
+            .captures = .{ .continuation = .{} },
+            .residual = .{},
+            .answer = .value,
+            .unknown = .{},
+        }
+    else if (comptime selected("policy_state_interpret_missing_captures"))
+        .{ .residual = .{}, .answer = .value }
+    else if (comptime selected("policy_state_interpret_missing_residual"))
+        .{ .captures = .{ .continuation = .{} }, .answer = .value }
+    else if (comptime selected("policy_state_interpret_missing_answer"))
+        .{ .captures = .{ .continuation = .{} }, .residual = .{} }
+    else if (comptime selected("policy_state_interpret_nested"))
+        .{
+            .captures = .{ .continuation = .{}, .unknown = .{} },
+            .residual = .{},
+            .answer = .value,
+        }
+    else
+        .{ .captures = .{ .body = .{} }, .residual = .{}, .answer = .value };
+    _ = try lib.interpret(c, family, a.interop.erase(integer), region, options);
+}
+
+fn reject_reader_family(c: *a.Context, integer: anytype) !void {
+    const lib = horos.library.reader;
+    const options = if (comptime selected("policy_reader_family_unknown"))
+        .{ .inside_captures = .{}, .residual = .{}, .borrowed_regions = .{}, .unknown = .{} }
+    else if (comptime selected("policy_reader_family_missing_inside_captures"))
+        .{ .residual = .{}, .borrowed_regions = .{} }
+    else if (comptime selected("policy_reader_family_missing_residual"))
+        .{ .inside_captures = .{}, .borrowed_regions = .{} }
+    else
+        .{ .inside_captures = .{}, .residual = .{} };
+    _ = try lib.family(c, "policy", a.interop.erase(integer), integer, options);
+}
+
+fn reject_reader_interpret(c: *a.Context, integer: anytype) !void {
+    const lib = horos.library.reader;
+    const family = try lib.family(c, "policy", integer, integer, .{
+        .inside_captures = .{},
+        .residual = .{},
+        .borrowed_regions = .{},
+    });
+    const options = if (comptime selected("policy_reader_interpret_unknown"))
+        .{ .captures = .{ .continuation = .{} }, .unknown = .{} }
+    else if (comptime selected("policy_reader_interpret_missing_captures"))
+        .{}
+    else if (comptime selected("policy_reader_interpret_nested"))
+        .{ .captures = .{ .continuation = .{}, .unknown = .{} } }
+    else
+        .{ .captures = .{ .body = .{} } };
+    _ = try lib.interpret(c, family, a.interop.erase(integer), options);
+}
+
+fn reject_writer_interpret(c: *a.Context, integer: anytype) !void {
+    const lib = horos.library.writer;
+    const family = try lib.family(c, "policy", integer);
+    const region = try c.region();
+    const options = if (comptime selected("policy_writer_interpret_unknown"))
+        .{ .captures = .{ .continuation = .{} }, .residual = .{}, .unknown = .{} }
+    else if (comptime selected("policy_writer_interpret_missing_captures"))
+        .{ .residual = .{} }
+    else if (comptime selected("policy_writer_interpret_missing_residual"))
+        .{ .captures = .{ .continuation = .{} } }
+    else if (comptime selected("policy_writer_interpret_nested"))
+        .{ .captures = .{ .continuation = .{}, .unknown = .{} }, .residual = .{} }
+    else
+        .{ .captures = .{ .body = .{} }, .residual = .{} };
+    _ = try lib.interpret(c, family, a.interop.erase(integer), region, options);
+}
+
+fn reject_raise_catching(c: *a.Context, integer: anytype) !void {
+    const lib = horos.library.raise;
+    const family = try lib.family(c, "policy", integer);
+    const options = if (comptime selected("policy_raise_catching_unknown"))
+        .{
+            .captures = .{ .continuation = .{} },
+            .residual = .{},
+            .borrowed_regions = .{},
+            .unknown = .{},
+        }
+    else if (comptime selected("policy_raise_catching_missing_captures"))
+        .{ .residual = .{}, .borrowed_regions = .{} }
+    else if (comptime selected("policy_raise_catching_missing_residual"))
+        .{ .captures = .{ .continuation = .{} }, .borrowed_regions = .{} }
+    else if (comptime selected("policy_raise_catching_missing_borrowed_regions"))
+        .{ .captures = .{ .continuation = .{} }, .residual = .{} }
+    else if (comptime selected("policy_raise_catching_nested"))
+        .{
+            .captures = .{ .continuation = .{}, .unknown = .{} },
+            .residual = .{},
+            .borrowed_regions = .{},
+        }
+    else
+        .{ .captures = .{ .body = .{} }, .residual = .{}, .borrowed_regions = .{} };
+    _ = try lib.catching(c, family, a.interop.erase(integer), options);
+}
+
+fn reject_scheduler_fifo(c: *a.Context, integer: anytype) !void {
+    const lib = horos.library.scheduler;
+    const unit = try c.schema(void);
+    const tasks = try horos.library.generator.create(c, "policy", unit, unit, unit, .{
+        .captures = .{ .continuation = .{} },
+    });
+    const options = if (comptime selected("policy_scheduler_fifo_unknown"))
+        .{ .residual = .{}, .borrowed_regions = .{}, .unknown = .{} }
+    else if (comptime selected("policy_scheduler_fifo_missing_residual"))
+        .{ .borrowed_regions = .{} }
+    else
+        .{ .residual = .{} };
+    _ = try lib.fifo(c, tasks, options);
+}
+
+fn reject_scheduler_awaiting(c: *a.Context, integer: anytype) !void {
+    const lib = horos.library.scheduler;
+    const unit = try c.schema(void);
+    const tasks = try horos.library.generator.create(c, "policy", unit, unit, unit, .{
+        .captures = .{ .continuation = .{} },
+    });
+    const join = try lib.joinType(c, a.interop.erase(integer), try c.region());
+    const options = if (comptime selected("policy_scheduler_awaiting_unknown"))
+        .{ .borrowed_regions = .{}, .unknown = .{} }
+    else
+        .{};
+    _ = try lib.awaiting(c, tasks, join, options);
 }

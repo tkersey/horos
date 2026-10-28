@@ -1,4 +1,4 @@
-//! State interpretations retain the selected answer policy in their result tag.
+const option_contract = @import("../authoring/option_contract.zig");
 const bridge = @import("bridge.zig");
 const a = bridge.a;
 const native = bridge.native;
@@ -82,17 +82,30 @@ pub fn family(
 ) a.Error!*const Family(bridge.schemaShape(@TypeOf(element))) {
     return @ptrCast(try runtime.family(bridge.context(c), identity, bridge.schema(element)));
 }
+fn InterpretationResult(comptime S: type, comptime R: type, comptime Options: type) type {
+    option_contract.required(
+        "state.interpret",
+        Options,
+        &.{ "captures", "residual", "answer" },
+    );
+    option_contract.captureBounds("state.interpret", @FieldType(Options, "captures"));
+    if (option_contract.knownEnum(Options, "answer", Answer)) |policy|
+        return Interpretation(S, R, policy);
+    return Selected(S, R);
+}
 pub fn interpret(
     c: *a.Context,
     state: anytype,
     result: anytype,
     region: *const a.Region,
-    capture_bounds: anytype,
-    residual: anytype,
-    disposition: Answer,
-) a.Error!Selected(familyShape(@TypeOf(state)), bridge.schemaShape(@TypeOf(result))) {
-    const bounds = bridge.captures(capture_bounds);
-    const effects = bridge.list(.operation, residual);
+    options: anytype,
+) a.Error!InterpretationResult(
+    familyShape(@TypeOf(state)),
+    bridge.schemaShape(@TypeOf(result)),
+    @TypeOf(options),
+) {
+    const bounds = bridge.captures(options.captures);
+    const effects = bridge.list(.operation, options.residual);
     const raw = try runtime.interpret(
         bridge.context(c),
         @ptrCast(state),
@@ -100,9 +113,15 @@ pub fn interpret(
         region,
         bounds.value(),
         effects.slice(),
-        disposition,
+        options.answer,
     );
-    return switch (disposition) {
+    if (comptime option_contract.knownEnum(@TypeOf(options), "answer", Answer) != null)
+        return .{
+            .handler = @ptrCast(raw.handler),
+            .answer = @ptrCast(raw.answer),
+            .cell = @ptrCast(raw.cell),
+        };
+    return switch (options.answer) {
         inline else => |policy| @unionInit(
             Selected(familyShape(@TypeOf(state)), bridge.schemaShape(@TypeOf(result))),
             @tagName(policy),

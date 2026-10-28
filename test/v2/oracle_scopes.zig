@@ -74,7 +74,7 @@ fn scenario(b: *Builder, mode: Mode) !horos.source.Module {
         } }),
     };
     try b.define(body, position);
-    const info = try horos.library.cleanup.exitInfo(b, unit);
+    const info = try horos.source.library.cleanup.exitInfo(b, unit);
     const cleanup = try b.declare(&.{info}, unit, &.{effect}, &.{});
     try b.define(cleanup, try b.term(.{ .perform = .{
         .effect = effect,

@@ -237,7 +237,7 @@ pub fn branchingTailProtected(b: *source.Builder) Error!source.Module {
         .effects = old.effects,
         .capture_bound = &.{ boolean, capability },
     } } });
-    const exit_info = try @import("../library/cleanup.zig").exitInfo(b, unit);
+    const exit_info = try @import("library/cleanup.zig").exitInfo(b, unit);
     const cleanup = try b.declare(&.{exit_info}, unit, &.{cleanup_effect}, &.{});
     try b.define(
         cleanup,

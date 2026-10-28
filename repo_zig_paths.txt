@@ -220,7 +220,6 @@ src/hyper_need_cases.zig
 src/hyper_task_cases.zig
 src/library/bridge.zig
 src/library/choice.zig
-src/library/cleanup.zig
 src/library/generator.zig
 src/library/hyper.zig
 src/library/hyper_data.zig
@@ -277,6 +276,8 @@ src/source/fixture_inspection.zig
 src/source/generator_example.zig
 src/source/indexed_example.zig
 src/source/injection_example.zig
+src/source/library/cleanup.zig
+src/source/library/generator.zig
 src/source/operand_failure_example.zig
 src/source/operand_order_example.zig
 src/source/ownership_example.zig

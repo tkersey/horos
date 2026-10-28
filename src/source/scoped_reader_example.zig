@@ -33,11 +33,15 @@ fn authored(b: *source.Builder) a.Error!source.Module {
         "example/scoped-reader",
         integer,
         integer,
-        &.{},
-        &.{log},
-        &.{},
+        .{
+            .inside_captures = &.{},
+            .residual = &.{log},
+            .borrowed_regions = &.{},
+        },
     );
-    const reader = try reader_library.interpret(c, family, pair, .{ .continuation = captures });
+    const reader = try reader_library.interpret(c, family, pair, .{
+        .captures = .{ .continuation = captures },
+    });
     return declareForwarders(b, .{
         .c = c,
         .unit = unit,

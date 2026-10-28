@@ -383,8 +383,7 @@ const CleanupDisposal = struct {
             logging_family,
             try c.schema(u64),
             try a.interop.region(c, region),
-            .{ .continuation = &captures },
-            &.{},
+            .{ .captures = .{ .continuation = &captures }, .residual = &.{} },
         );
         return .{
             .answer = try a.interop.schemaId(c, logging_handler.answer),
@@ -408,7 +407,7 @@ const CleanupDisposal = struct {
         const inside = try b.declare(&.{region_type}, written.answer, &.{}, &.{region});
         const written_body = try b.declare(&.{w.capability}, integer, &.{w.effect}, &.{region});
         const write_capability = try b.reference(b.parameter(written_body, 0));
-        const info = try horos.library.cleanup.exitInfo(b, unit);
+        const info = try horos.source.library.cleanup.exitInfo(b, unit);
         const start = try b.declare(&.{g.capability}, unit, &.{ w.effect, g.effect }, &.{region});
         const generated_body = try b.declare(&.{}, unit, &.{g.effect}, &.{region});
         const generated_cleanup = try b.declare(&.{info}, unit, &.{w.effect}, &.{region});

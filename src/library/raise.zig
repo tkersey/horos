@@ -1,4 +1,5 @@
 //! Shape-preserving interface over the shared checked library implementation.
+const option_contract = @import("../authoring/option_contract.zig");
 const bridge = @import("bridge.zig");
 const a = bridge.a;
 const native = bridge.native;
@@ -56,13 +57,17 @@ pub fn catching(
     c: *a.Context,
     raised: anytype,
     result: anytype,
-    capture_bounds: anytype,
-    residual: anytype,
-    regions: anytype,
+    options: anytype,
 ) a.Error!Raise(familyShape(@TypeOf(raised)), bridge.schemaShape(@TypeOf(result))) {
-    const bounds = bridge.captures(capture_bounds);
-    const effects = bridge.list(.operation, residual);
-    const borrowed = bridge.list(.region, regions);
+    comptime option_contract.required(
+        "raise.catching",
+        @TypeOf(options),
+        &.{ "captures", "residual", "borrowed_regions" },
+    );
+    comptime option_contract.captureBounds("raise.catching", @TypeOf(options.captures));
+    const bounds = bridge.captures(options.captures);
+    const effects = bridge.list(.operation, options.residual);
+    const borrowed = bridge.list(.region, options.borrowed_regions);
     const value = try runtime.catching(
         bridge.context(c),
         @ptrCast(raised),

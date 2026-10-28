@@ -1,4 +1,5 @@
 //! Shape-preserving interface over the shared checked library implementation.
+const option_contract = @import("../authoring/option_contract.zig");
 const bridge = @import("bridge.zig");
 const a = bridge.a;
 const native = bridge.native;
@@ -64,11 +65,16 @@ pub fn interpret(
     writer: anytype,
     result: anytype,
     region: *const a.Region,
-    capture_bounds: anytype,
-    residual: anytype,
+    options: anytype,
 ) a.Error!Writer(familyShape(@TypeOf(writer)), bridge.schemaShape(@TypeOf(result))) {
-    const bounds = bridge.captures(capture_bounds);
-    const effects = bridge.list(.operation, residual);
+    comptime option_contract.required(
+        "writer.interpret",
+        @TypeOf(options),
+        &.{ "captures", "residual" },
+    );
+    comptime option_contract.captureBounds("writer.interpret", @TypeOf(options.captures));
+    const bounds = bridge.captures(options.captures);
+    const effects = bridge.list(.operation, options.residual);
     const value = try runtime.interpret(
         bridge.context(c),
         @ptrCast(writer),

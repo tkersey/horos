@@ -1,5 +1,97 @@
 # Horos authoring migration
 
+## Horos 8 canonical library boundary
+
+Ordinary `horos.library` constructors retain typed handles. Deliberate IR
+construction uses `horos.source.library`; relocation is a breaking source API
+change, without aliases at the old locations.
+
+| Previous API | Horos 8 |
+|---|---|
+| `library.generator.Generator`, `defineExchange`, `start`, `offer`, `exchange`, `close` | Same names under `source.library.generator` for component and malformed-source fixtures |
+| `library.generator.Scope`, `next` | Removed unused conveniences; ordinary clients use typed exchange handles and `Body.resumePackage` |
+| `library.cleanup.exitInfo` | `source.library.cleanup.exitInfo`; ordinary clients use `Context.cleanupInfo` and `Body.protect`/`bracket` |
+| Positional policy arguments to State, Reader, Writer, Raise and Scheduler | Required operation-specific named fields below |
+
+The raw Generator functions share the existing private construction owner with
+typed generators. No checked runtime implementation module is re-exported.
+The prerequisite already removed raw Hyper/Need constructors from the public
+surface; its source witnesses use typed `library.hyper` and deliberate interop.
+There is no retained raw Hyper API requiring another public facade.
+
+| Operation | Policy record after semantic operands |
+|---|---|
+| `state.interpret(c, family, result, region, options)` | `.{ .captures = bounds, .residual = effects, .answer = policy }` |
+| `reader.family(c, identity, environment, inside_result, options)` | `.{ .inside_captures = captures, .residual = effects, .borrowed_regions = regions }` |
+| `reader.interpret(c, family, result, options)` | `.{ .captures = bounds }` |
+| `writer.interpret(c, family, result, region, options)` | `.{ .captures = bounds, .residual = effects }` |
+| `raise.catching(c, family, result, options)` | `.{ .captures = bounds, .residual = effects, .borrowed_regions = regions }` |
+| `scheduler.fifo(c, tasks, options)` | `.{ .residual = effects, .borrowed_regions = regions }` |
+| `scheduler.awaiting(c, tasks, join, options)` | `.{ .borrowed_regions = regions }` |
+
+Previously required allowances remain required fields. Empty rows retain their
+meaning; neither omitted fields nor actual inferred effects grant permission.
+Capture bounds retain separate `continuation` and `body` rows. Unknown outer
+and nested fields reject.
+
+For State, `.{ .answer = .with_state, ... }` retains the policy at comptime and
+returns `Interpretation(State, Result, .with_state)` directly. Supplying a runtime
+`Answer` returns `Selected(State, Result)`; switch on `.value`, `.with_state` or
+`.optional` before using the interpretation. Both select the same checked
+construction and retain each policy's semantics. Search's DFS/BFS order remains
+a runtime behavior choice with one result interface.
+
+Use ordinary typed functions and Body operations for sequential work and loops;
+effects and handlers for interpreted requests; owned generators and suspension
+packages for a retained process that advances or closes; typed hyperfunctions
+for reciprocal demand-driven participants; and Choice/Search for alternatives
+from a retained multi-shot continuation. These compose without backend modes.
+Constructing delayed work does not execute it, and demand removes only the
+selected layer. Native `try` reports construction errors, native `defer` releases
+authoring resources, and portable failure and cleanup remain authored behavior.
+
+`examples/authoring_client.zig` is the exported-package ordinary client: named
+record fields pass through closures and a scoped effect handler. Its only source
+crossings allocate the Builder and publish the final module. The reciprocal
+client, `examples/hyper_client.zig`, retains its endpoint contracts and explicit
+successor suspension. Both publish program images during package qualification;
+source-oracle and execution checks establish the corresponding behavior.
+
+### Consolidation qualification baseline
+
+The accepted October 15 adaptive-only consolidation specification is being
+implemented against these merged trees. Final candidate qualification remains
+outstanding until the coordinated checks below have completed.
+
+| Repository | Qualified prerequisite commit | Merged commit with identical tree | CI evidence |
+|---|---|---|---|
+| Horos | `13cef77f2f0ab8db3bc95362ad9bc7ebfed8b07a` | `79946248e26cc7e53962c87e36f035f56b0db603` | [run 40474783580](https://github.com/tkersey/horos/actions/runs/40474783580) |
+| Kosmos | `5d2e5e14d5349479cd50bf7d6f939f30175e0246` | `d1d7c1e9290088a2cc3a2c0d4378bbb2f22a0bef` | [run 40481861691](https://github.com/tkersey/kosmos/actions/runs/40481861691) |
+| Protean | `1e8a9fd9324c3cd492aabd1c08f46eeaf8148d6c` | `77c88b95bd1171f24cc411156313d2682f13f3d9` | [run 40513895462](https://github.com/tkersey/protean/actions/runs/40513895462) |
+
+All listed CI jobs succeeded. The consuming Protean source lock authenticates
+Horos tree `ac31c28cbc51564a60a5e83ee6ea127c24e9dc5d` and Kosmos tree
+`2aecd1c9d01381a4047ffd51e6eb85bc120a2189`; the Horos Zig package is
+`horos-7.0.0-flclaJp5VACo90Ose04kg77D0f_5F0RwEhgqpMNXqT1T`.
+Keep the baseline lock with its executable/assets/runtime tuple for existing
+tasks. A new authoring version does not permit relabeling old image or state
+identities. Rollback restores the complete old tuple; new tasks remain associated
+with their new tuple and separate namespace.
+
+Local baseline on native macOS arm64, Zig 0.17.0, safe optimization:
+`zig build check -Doptimize=safe --summary all` passed 322 steps and 1,055 tests
+in 108.19 seconds; `zig build check-package -Doptimize=safe --summary all` passed
+in 147.69 seconds, including the independently exported/extracted package.
+These are first worktree invocations with the existing global compiler cache,
+not cold-cache measurements. They are baseline evidence, not final-candidate proof.
+
+The initial consolidation candidate passed `check-authoring check-authoring-bytes`
+with 290 steps and 420 tests, then `check` with 382 steps and 1,057 tests in
+58.92 seconds using the retained compiler cache. These runs include 30 new
+compile-rejection cases and static/dynamic State type, shared-construction and
+image-agreement witnesses. The exported candidate package, committed whole-tree
+audit and coordinated downstream checks are still separate obligations.
+
 Horos 7.0.0 replaces the ordinary raw-ID hyperfunction signatures with the typed
 `library.hyper` surface described below. Existing typed authoring, portable
 formats and runtime authority remain in place.

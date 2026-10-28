@@ -25,21 +25,29 @@ fn authored(b: *source.Builder) a.Error!source.Module {
         .residual = &.{logging.effect()},
         .body_use = .reusable,
     });
-    const fifo = try scheduler.fifo(c, tasks, &.{logging.effect()}, &.{region});
-    const await_join = try scheduler.awaiting(c, tasks, join, &.{region});
+    const fifo = try scheduler.fifo(c, tasks, .{
+        .residual = &.{logging.effect()},
+        .borrowed_regions = &.{region},
+    });
+    const await_join = try scheduler.awaiting(c, tasks, join, .{
+        .borrowed_regions = &.{region},
+    });
     const written = try writer.interpret(c, logging, integer, region, .{
-        .continuation = &.{
-            unit,
-            integer,
-            join.cell(),
-            tasks.capability(),
-            tasks.package(),
-            tasks.answer(),
-            tasks.yielded(),
-            fifo.queue,
+        .captures = .{
+            .continuation = &.{
+                unit,
+                integer,
+                join.cell(),
+                tasks.capability(),
+                tasks.package(),
+                tasks.answer(),
+                tasks.yielded(),
+                fifo.queue,
+            },
+            .body = &.{try c.regionSchema(region)},
         },
-        .body = &.{try c.regionSchema(region)},
-    }, &.{});
+        .residual = &.{},
+    });
     return declareScheduledWork(.{
         .c = c,
         .unit = unit,

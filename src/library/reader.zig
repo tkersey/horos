@@ -1,4 +1,5 @@
 //! Reader retains finite recursive callable relationships without expanding them.
+const option_contract = @import("../authoring/option_contract.zig");
 const bridge = @import("bridge.zig");
 const a = bridge.a;
 const native = bridge.native;
@@ -83,16 +84,19 @@ pub fn family(
     identity: []const u8,
     environment: anytype,
     inside_result: anytype,
-    inside_captures: anytype,
-    residual: anytype,
-    regions: anytype,
+    options: anytype,
 ) a.Error!*const Family(
     bridge.schemaShape(@TypeOf(environment)),
     bridge.schemaShape(@TypeOf(inside_result)),
 ) {
-    const captures = bridge.list(.schema, inside_captures);
-    const effects = bridge.list(.operation, residual);
-    const borrowed = bridge.list(.region, regions);
+    comptime option_contract.required(
+        "reader.family",
+        @TypeOf(options),
+        &.{ "inside_captures", "residual", "borrowed_regions" },
+    );
+    const captures = bridge.list(.schema, options.inside_captures);
+    const effects = bridge.list(.operation, options.residual);
+    const borrowed = bridge.list(.region, options.borrowed_regions);
     return @ptrCast(try runtime.family(
         bridge.context(c),
         identity,
@@ -107,9 +111,15 @@ pub fn interpret(
     c: *a.Context,
     reader: anytype,
     result: anytype,
-    capture_bounds: anytype,
+    options: anytype,
 ) a.Error!Reader(familyShape(@TypeOf(reader)), bridge.schemaShape(@TypeOf(result))) {
-    const captures = bridge.captures(capture_bounds);
+    comptime option_contract.required(
+        "reader.interpret",
+        @TypeOf(options),
+        &.{"captures"},
+    );
+    comptime option_contract.captureBounds("reader.interpret", @TypeOf(options.captures));
+    const captures = bridge.captures(options.captures);
     const value = try runtime.interpret(
         bridge.context(c),
         @ptrCast(reader),

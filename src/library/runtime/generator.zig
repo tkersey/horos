@@ -17,12 +17,6 @@ pub const Generator = struct {
     resumption: p.Id,
     handler: p.Id,
 };
-pub const Scope = struct {
-    captures: []const p.Id = &.{},
-    owned_regions: []const p.Id = &.{},
-    borrowed_regions: []const p.Id = &.{},
-    residual: source.Row = .{ .effects = &.{} },
-};
 
 /// Bidirectional owned exchange: supplied input advances to the next offered
 /// output or completion. It never returns the preceding output again.
@@ -261,12 +255,6 @@ fn makeExchange(
     return @ptrCast(saved);
 }
 
-pub fn next(builder: *source.Builder, generator: Generator, package: p.Id) Error!p.Id {
-    return builder.term(.{ .resume_value = .{
-        .resumption = try builder.primitive(generator.resumption, .unpack, &.{package}, 0),
-        .argument = try builder.constant(void, {}),
-    } });
-}
 pub fn close(builder: *source.Builder, generator: Generator, package: p.Id) Error!p.Id {
     return builder.term(.{ .dispose = try builder.primitive(
         generator.resumption,

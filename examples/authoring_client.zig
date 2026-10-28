@@ -45,7 +45,7 @@ pub const Application = struct {
             &.{lookup},
         );
         const body = try c.body(entry);
-        const numbers = try body.parameter("numbers");
+        const numbers = try mixedNumbers(c, body, try body.parameter("numbers"), input);
         const x = try body.field(numbers, "input");
         const offset = try body.field(numbers, "offset");
         const yes = try body.branch();
@@ -74,6 +74,105 @@ pub const Application = struct {
         return c.module(entry, unit);
     }
 };
+fn mixedNumbers(
+    c: *a.Context,
+    body: anytype,
+    numbers: anytype,
+    input: anytype,
+) !*const a.Value(a.ShapeOf(@TypeOf(input))) {
+    const search = horos.library.search;
+    const samples = try c.schema(horos.data.schema.native.Vector(u8, 4));
+    const payload = try c.record(.{ .numbers = input, .samples = samples });
+    const family = try search.family(c, "client/search");
+    const searching = try search.interpret(c, family, payload, .{
+        .captures = .{ .continuation = .{} },
+        .order = .depth_first,
+    });
+    const callable = try c.callable(.{
+        .step = searching.step,
+        .queue = searching.queue,
+        .found = searching.solutions,
+    }, searching.solutions, .{}, .{ .use = .reusable, .captures = .{} });
+    const record = try c.record(.{ .explore = callable, .payload = payload });
+    const supplied = try body.product(record, .{
+        .explore = try body.lambda(searching.explore, callable),
+        .payload = try body.product(payload, .{
+            .numbers = numbers,
+            .samples = try body.sequenceValue(samples, .{try body.constant(u8, 7)}),
+        }),
+    });
+    const returned = try scopedRecord(c, body, supplied, record);
+    comptime if (@TypeOf(returned) != @TypeOf(supplied))
+        @compileError("client: scoped record lost its named callable or payload shape");
+    const solutions = try body.apply(try body.field(returned, "explore"), .{
+        .step = try body.variant(searching.step, "solution", try body.field(returned, "payload")),
+        .queue = try body.sequenceValue(searching.queue, .{}),
+        .found = try body.sequenceValue(searching.solutions, .{}),
+    });
+    comptime if (a.ShapeOf(@TypeOf(solutions)) != a.ShapeOf(@TypeOf(searching.solutions)))
+        @compileError("client: returned library callable lost its result shape");
+    return firstNumbers(body, solutions, input);
+}
+
+fn scopedRecord(
+    c: *a.Context,
+    body: anytype,
+    supplied: anytype,
+    record: anytype,
+) !*const a.Value(a.ShapeOf(@TypeOf(record))) {
+    const reader = horos.library.reader;
+    const unit = try c.schema(void);
+    const family = try reader.family(c, "client/scoped-record", unit, unit, .{
+        .inside_captures = .{},
+        .residual = .{},
+        .borrowed_regions = .{},
+    });
+    const interpreted = try reader.interpret(c, family, record, .{
+        .captures = .{ .continuation = .{record}, .body = .{record} },
+    });
+    const inside_fn = try c.functionFor("read scoped record", family.inside());
+    const inside = try c.body(inside_fn);
+    try c.define(inside_fn, try inside.ret(try inside.performLocal(
+        family.ask(),
+        try inside.parameter("ask"),
+        try inside.constant(void, {}),
+    )));
+    const handled = try c.handledSchema(interpreted.handler);
+    const work_fn = try c.functionFor("return scoped record", handled);
+    const work = try body.closureBody(work_fn);
+    _ = try work.performScoped(
+        family.local(),
+        try work.parameter("local"),
+        try work.constant(void, {}),
+        .{ .inside = try work.lambda(inside_fn, family.inside()) },
+    );
+    try c.define(work_fn, try work.ret(supplied));
+    return body.handleWith(interpreted.handler, try body.lambda(work_fn, handled), .{
+        .environment = try body.constant(void, {}),
+    });
+}
+
+fn firstNumbers(
+    body: anytype,
+    solutions: anytype,
+    input: anytype,
+) !*const a.Value(a.ShapeOf(@TypeOf(input))) {
+    const first = try body.sequenceGet(solutions, try body.constant(u64, 0));
+    const some = try body.caseOf(first, "some");
+    const none = try body.caseOf(first, "none");
+    const payload = some.payload();
+    const samples = try some.body().field(payload, "samples");
+    comptime if (a.ShapeOf(@TypeOf(samples)) != a.Shape(horos.data.schema.native.Vector(u8, 4)))
+        @compileError("client: scoped payload lost its element type or bound");
+    const numbers = try some.body().field(payload, "numbers");
+    comptime if (a.ShapeOf(@TypeOf(numbers)) != a.ShapeOf(@TypeOf(input)))
+        @compileError("client: scoped payload lost its nested named fields");
+    return body.match(first, .{
+        .some = try some.ret(numbers),
+        .none = try none.fail(input, try none.body().constant(void, {})),
+    });
+}
+
 pub fn main(init: std.process.Init) !void {
     var compiled = try horos.program.lower(init.gpa, Application);
     defer compiled.deinit();

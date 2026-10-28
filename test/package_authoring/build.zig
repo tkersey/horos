@@ -2,10 +2,11 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const dependency = b.dependency("horos", .{ .optimize = .safe });
     const horos = dependency.module("horos");
+    const target = horos.resolved_target.?;
     const pure = b.dependency("horos", .{ .@"data-only" = true });
     const pure_test = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("data.zig"),
-        .target = b.graph.host,
+        .target = target,
         .imports = &.{.{ .name = "horos_data", .module = pure.module("horos_data") }},
     }) });
     b.step(
@@ -14,14 +15,14 @@ pub fn build(b: *std.Build) void {
     ).dependOn(&b.addRunArtifact(pure_test).step);
     const client = b.addExecutable(.{ .name = "client", .root_module = b.createModule(.{
         .root_source_file = b.path("client.zig"),
-        .target = b.graph.host,
+        .target = target,
         .optimize = .safe,
         .imports = &.{.{ .name = "horos", .module = horos }},
     }) });
     b.step("emit", "Emit public-package client").dependOn(&b.addRunArtifact(client).step);
     const hyper = b.addExecutable(.{ .name = "hyper-client", .root_module = b.createModule(.{
         .root_source_file = b.path("hyper_client.zig"),
-        .target = b.graph.host,
+        .target = target,
         .optimize = .safe,
         .imports = &.{.{ .name = "horos", .module = horos }},
     }) });
@@ -29,7 +30,7 @@ pub fn build(b: *std.Build) void {
         .dependOn(&b.addRunArtifact(hyper).step);
     const rejection = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("rejection.zig"),
-        .target = b.graph.host,
+        .target = target,
         .imports = &.{.{ .name = "horos", .module = horos }},
     }) });
     b.step(
@@ -46,7 +47,7 @@ pub fn build(b: *std.Build) void {
         if (b.option(bool, mode, "Build a deliberate public API error") orelse false) {
             const wrong = b.addExecutable(.{ .name = mode, .root_module = b.createModule(.{
                 .root_source_file = b.path(mode ++ ".zig"),
-                .target = b.graph.host,
+                .target = target,
                 .imports = &.{.{ .name = "horos", .module = horos }},
             }) });
             b.getInstallStep().dependOn(&b.addInstallArtifact(wrong, .{}).step);
@@ -66,7 +67,7 @@ fn staticCases(
         options.addOption([]const u8, "value", case[0]);
         const wrong = b.addExecutable(.{ .name = case[0], .root_module = b.createModule(.{
             .root_source_file = b.path(path),
-            .target = b.graph.host,
+            .target = horos.resolved_target.?,
             .imports = &.{.{ .name = "horos", .module = horos }},
         }) });
         wrong.root_module.addOptions("rejection_mode", options);

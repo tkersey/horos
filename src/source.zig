@@ -3,6 +3,10 @@
 //! their native bodies are never inspected or translated.
 const std = @import("std");
 pub const component = @import("source/component.zig");
+pub const library = struct {
+    pub const generator = @import("source/library/generator.zig");
+    pub const cleanup = @import("source/library/cleanup.zig");
+};
 pub const component_examples = @import("source/component_examples.zig");
 const data = @import("horos_data");
 const p = data.program;

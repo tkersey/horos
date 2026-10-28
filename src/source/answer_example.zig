@@ -13,24 +13,16 @@ fn authored(b: *source.Builder) a.Error!source.Module {
     const region = try c.region();
     const family = try state.family(c, "example/answers", integer);
     const captures = &.{ integer, family.getCapability(), family.putCapability() };
-    const optional = (try state.interpret(
-        c,
-        family,
-        integer,
-        region,
-        .{ .continuation = captures },
-        &.{},
-        .optional,
-    )).optional;
-    const paired = (try state.interpret(
-        c,
-        family,
-        integer,
-        region,
-        .{ .continuation = captures },
-        &.{},
-        .with_state,
-    )).with_state;
+    const optional = try state.interpret(c, family, integer, region, .{
+        .captures = .{ .continuation = captures },
+        .residual = &.{},
+        .answer = .optional,
+    });
+    const paired = try state.interpret(c, family, integer, region, .{
+        .captures = .{ .continuation = captures },
+        .residual = &.{},
+        .answer = .with_state,
+    });
     const result = try c.record(.{ .optional = optional.answer, .paired = paired.answer });
     const body_type = try c.handledSchema(optional.handler);
     const body_fn = try c.functionFor("increment read", body_type);

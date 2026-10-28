@@ -4,7 +4,7 @@ const std = @import("std");
 const source = @import("../source.zig");
 const p = @import("horos_data").program;
 const Fixtures = @import("custody_order_example.zig").Fixtures;
-const cleanup = @import("../library/cleanup.zig");
+const cleanup = @import("library/cleanup.zig");
 const Kind = enum {
     call_arguments,
     instruction_order,
