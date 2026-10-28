@@ -194,6 +194,98 @@ test "consumer composition rejects changed values argument duplication and same 
     }
 }
 
+test "consumer composition cannot inherit another equal signature consumer identity" {
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    var module = try source.examples.consumerComposition(&b);
+    const site = (try compositionSites(module))[0];
+    var inspection = try source.consumer.inspect(a, module, site, .{});
+    defer inspection.deinit();
+    const boundary = inspection.outcome.boundary;
+    const original = module.functions[@intCast(boundary.consumer)];
+    const parameters = try b.allocator().alloc(u64, original.parameters.len);
+    for (original.parameters, parameters) |variable, *schema|
+        schema.* = module.variables[@intCast(variable)];
+    const replacement = try b.declare(parameters, original.result, &.{}, &.{});
+    try b.define(replacement, try b.pure(try b.constant(bool, true)));
+    module = b.module(module.entry, module.failure);
+    var candidate = try source.consumer.compose(a, module, site, .{});
+    defer candidate.deinit();
+    const changed = try source.own(source.Module, b.allocator(), module);
+    @constCast(changed.terms)[@intCast(boundary.consumer_call)].call.function = replacement;
+    var work: u64 = 1_000_000;
+    try source.admitWithWork(a, changed, &work);
+    try std.testing.expectError(error.InvalidRelation, source.relation.validate(
+        a,
+        changed,
+        candidate.module,
+        candidate.steps,
+        .{},
+    ));
+}
+
+fn capturedCapabilitySubstitution(
+    a: std.mem.Allocator,
+    module: source.Module,
+) !struct { term: u64, local: u64 } {
+    const facts = try @import("check.zig").analyze(a, module);
+    for (module.functions, facts.functions) |function, captures| {
+        for (captures.items) |captured| {
+            const schema = module.variables[@intCast(captured)];
+            const shape = module.schemas[@intCast(schema)];
+            if (shape != .internal or shape.internal != .capability) continue;
+            for (function.parameters) |local| {
+                if (module.variables[@intCast(local)] != schema) continue;
+                var next = function.body orelse continue;
+                for (0..module.terms.len) |_| {
+                    const term = module.terms[@intCast(next)];
+                    const operation_id = if (term == .bind) term.bind.value else next;
+                    const operation = module.terms[@intCast(operation_id)];
+                    if (operation == .perform) {
+                        if (operation.perform.capability) |capability| {
+                            const value = module.values[@intCast(capability)];
+                            if (value.expression == .variable and
+                                value.expression.variable == captured)
+                                return .{ .term = operation_id, .local = local };
+                        }
+                    }
+                    if (term != .bind) break;
+                    next = term.bind.next;
+                }
+            }
+        }
+    }
+    return error.MissingCapabilitySubstitution;
+}
+
+test "logical context relocation rejects same schema local capability substitution" {
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    var module = try source.examples.logicalContext(&b);
+    const substitution = try capturedCapabilitySubstitution(b.allocator(), module);
+    const local = try b.reference(substitution.local);
+    module = b.module(module.entry, module.failure);
+    const maps = try identitySourceMaps(b.allocator(), module);
+    const original = try source.relation.Relocation.relocate(b.allocator(), module, maps);
+    try source.relation.validate(a, module, original, &.{.{
+        .successor = original,
+        .rule = .{ .relocation = maps },
+    }}, .{});
+    const changed = try source.own(source.Module, b.allocator(), original);
+    @constCast(changed.terms)[@intCast(substitution.term)].perform.capability = local;
+    var work: u64 = 1_000_000;
+    try source.admitWithWork(a, changed, &work);
+    try std.testing.expectError(error.InvalidRelation, source.relation.validate(
+        a,
+        module,
+        changed,
+        &.{.{ .successor = changed, .rule = .{ .relocation = maps } }},
+        .{},
+    ));
+}
+
 test "consumer composition retains dynamic faults and explicit yields" {
     const a = std.testing.allocator;
     var b = source.Builder.init(a);
