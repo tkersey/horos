@@ -219,7 +219,7 @@ pub fn transportFunctions(
 pub fn identity(module: ast.Module) Error![32]u8 {
     return identityWithWork(module, null);
 }
-fn identityWithWork(module: ast.Module, work: ?*u64) Error![32]u8 {
+pub fn identityWithWork(module: ast.Module, work: ?*u64) Error![32]u8 {
     var digest = std.crypto.hash.sha2.Sha256.init(.{});
     var writer: data.wire.Writer = .{ .hasher = &digest, .remaining = work };
     try writer.put("horos.source-relation/1\x00");

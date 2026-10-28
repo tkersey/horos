@@ -88,6 +88,165 @@ test "consumer composition derives two dynamic sites and survives alpha relocati
     try checkComposition(renamed);
 }
 
+fn sharedComposition(b: *source.Builder) !source.Module {
+    const word = try b.scalar(u64);
+    const unit = try b.scalar(void);
+    const increment = try b.declare(&.{word}, word, &.{}, &.{});
+    const failure = try b.failureLiteral(try b.constant(void, {}));
+    const addition = try b.value(.{ .schema = word, .expression = .{ .primitive = .{
+        .opcode = .integer_add,
+        .operands = &.{ try b.reference(b.parameter(increment, 0)), try b.constant(u64, 1) },
+        .failures = &.{.{ .kind = .arithmetic_overflow, .value = failure }},
+    } } });
+    try b.define(increment, try b.pure(addition));
+    const entry = try b.declare(&.{word}, word, &.{}, &.{});
+    const variable = b.parameter(entry, 0);
+    const call = try b.term(.{ .call = .{
+        .function = increment,
+        .arguments = &.{try b.reference(variable)},
+    } });
+    try b.define(entry, try b.bind(variable, call, call));
+    return b.module(entry, unit);
+}
+
+test "consumer composition rewrites a shared call once with lexical shadowing" {
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const module = try sharedComposition(&b);
+    const site: source.consumer.Site = .{
+        .function = module.entry,
+        .binding = module.functions[@intCast(module.entry)].body.?,
+    };
+    var inspection = try source.consumer.inspect(a, module, site, .{});
+    defer inspection.deinit();
+    const boundary = inspection.outcome.boundary;
+    try std.testing.expectEqual(boundary.producer_call, boundary.consumer_call);
+    try std.testing.expect(boundary.blocker == null);
+    var candidate = try source.consumer.compose(a, module, site, .{});
+    defer candidate.deinit();
+    try std.testing.expectEqual(@as(usize, 1), candidate.steps.len);
+    try std.testing.expectEqual(boundary.producer_call, candidate.steps[0].rule.inline_call);
+    try std.testing.expectEqual(try source.relation.identity(module), candidate.predecessor);
+    try source.relation.validate(a, module, candidate.module, candidate.steps, .{});
+    var compiled = try source.lowerObserved(a, candidate.module, .{ .recovery = true });
+    defer compiled.deinit();
+    try source.recovery.validate(a, candidate.module, &compiled);
+}
+
+test "consumer inspection counts callable references using admitted constructor identity" {
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const initial = try sharedComposition(&b);
+    const entry = initial.entry;
+    const failure = initial.failure;
+    const binding = initial.functions[@intCast(entry)].body.?;
+    const call = initial.terms[@intCast(binding)].bind.value;
+    const producer = initial.terms[@intCast(call)].call.function;
+    const word = initial.functions[@intCast(producer)].result;
+    const other = try b.declare(&.{word}, word, &.{}, &.{});
+    try b.define(other, try b.pure(try b.reference(b.parameter(other, 0))));
+    const schema = try b.schema(.{ .internal = .{ .computation = .{
+        .parameters = &.{word},
+        .result = word,
+    } } });
+    for ([_]u64{ producer, other }) |function| {
+        const getter = try b.declare(&.{}, schema, &.{}, &.{});
+        try b.define(getter, try b.pure(try b.lambda(function, schema)));
+    }
+    var work: u64 = 1_000_000;
+    const constructors = try source.constructor_bindings.admit(
+        a,
+        b.allocator(),
+        b.module(entry, failure),
+        &work,
+    );
+    for (constructors, 0..) |constructor, id| {
+        if (constructor.function != producer and constructor.function != other) continue;
+        const getter = try b.declare(&.{}, schema, &.{}, &.{});
+        const raw = try b.primitive(schema, .computation, &.{}, id);
+        try b.define(getter, try b.pure(raw));
+    }
+    const module = b.module(entry, failure);
+    const site: source.consumer.Site = .{ .function = entry, .binding = binding };
+    var inspection = try source.consumer.inspect(a, module, site, .{});
+    defer inspection.deinit();
+    try std.testing.expectEqual(@as(u64, 2), inspection.outcome.boundary.producer_value_references);
+    var candidate = try source.consumer.compose(a, module, site, .{});
+    defer candidate.deinit();
+    try source.relation.validate(a, module, candidate.module, candidate.steps, .{});
+}
+
+const ConsumerWork = enum { inspect, validate };
+
+fn consumerFitsWork(
+    module: source.Module,
+    site: source.consumer.Site,
+    candidate: source.consumer.Candidate,
+    operation: ConsumerWork,
+    work: u64,
+) !bool {
+    const a = std.testing.allocator;
+    switch (operation) {
+        .inspect => {
+            var inspection = source.consumer.inspect(a, module, site, .{ .work = work }) catch |err| {
+                if (err == error.RelationLimit) return false;
+                return err;
+            };
+            inspection.deinit();
+        },
+        .validate => source.relation.validate(
+            a,
+            module,
+            candidate.module,
+            candidate.steps,
+            .{ .work = work },
+        ) catch |err| {
+            if (err == error.RelationLimit) return false;
+            return err;
+        },
+    }
+    return true;
+}
+
+fn consumerMinimumWork(
+    module: source.Module,
+    site: source.consumer.Site,
+    candidate: source.consumer.Candidate,
+    operation: ConsumerWork,
+) !u64 {
+    var low: u64 = 0;
+    var high: u64 = 1_000_000;
+    while (low < high) {
+        const middle = low + (high - low) / 2;
+        if (try consumerFitsWork(module, site, candidate, operation, middle))
+            high = middle
+        else
+            low = middle + 1;
+    }
+    return low;
+}
+
+test "consumer composition shares inspection construction and validation work" {
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const module = try source.examples.consumerComposition(&b);
+    const site = (try compositionSites(module))[0];
+    var candidate = try source.consumer.compose(a, module, site, .{});
+    defer candidate.deinit();
+    const inspection = try consumerMinimumWork(module, site, candidate, .inspect);
+    const validation = try consumerMinimumWork(module, site, candidate, .validate);
+    const insufficient = try std.math.add(u64, inspection, validation) - 1;
+    try std.testing.expectError(error.RelationLimit, source.consumer.compose(
+        a,
+        module,
+        site,
+        .{ .work = insufficient },
+    ));
+}
+
 test "consumer composition reports protected roots and rejects stale identities" {
     const a = std.testing.allocator;
     var b = source.Builder.init(a);
@@ -428,18 +587,27 @@ test "consumer composition releases partial construction after allocation failur
     defer b.deinit();
     const module = try source.examples.consumerComposition(&b);
     const site = (try compositionSites(module))[0];
-    var counter = std.testing.FailingAllocator.init(a, .{});
+    var counter = std.testing.FailingAllocator.init(a, .{ .resize_fail_index = 0 });
     var complete = try source.consumer.compose(counter.allocator(), module, site, .{});
     complete.deinit();
     const count = counter.alloc_index;
     for ([_]usize{ 0, 1, count / 4, count / 2, count - 1 }) |index| {
-        var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = index });
-        try std.testing.expectError(error.OutOfMemory, source.consumer.compose(
+        var failing = std.testing.FailingAllocator.init(a, .{
+            .fail_index = index,
+            .resize_fail_index = 0,
+        });
+        if (source.consumer.compose(
             failing.allocator(),
             module,
             site,
             .{},
-        ));
+        )) |value| {
+            var unexpected = value;
+            defer unexpected.deinit();
+            return error.TestUnexpectedResult;
+        } else |err| try std.testing.expectEqual(error.OutOfMemory, err);
+        try std.testing.expect(failing.has_induced_failure);
+        try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
     }
 }
 

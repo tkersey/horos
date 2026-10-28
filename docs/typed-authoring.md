@@ -395,14 +395,18 @@ IDs, producer result, consumer input, enclosing answer, retained variables, othe
 producer uses, and a precise blocker when existing inline restrictions apply.
 Destroy the inspection with `deinit`; its facts do not borrow the caller's module.
 
-`source.consumer.compose` constructs two finite `inline_call` steps and checks
-the resulting program through `source.relation.validate`. Both calls must satisfy
+`source.consumer.compose` constructs one `inline_call` step per distinct call
+node and checks the resulting program through `source.relation.validate`.
+Shared source nodes retain their separate runtime executions. Both calls must satisfy
 the existing closed pure inlining rule. Strict argument evaluation is retained
 through explicit binds, including computations whose values are unused. Empty
 effect rows do not authorize dropping faults, recursion, yields or cleanup.
 Fresh lexical bindings prevent capture; nominal owners and protected functions
 remain excluded where their relationships cannot be transported. Other callers
 and declarations remain covered by complete successor equality.
+Inspection, source identity hashing, construction and validation share the caller's
+work allowance. Callable-reference counts use the admitted constructor catalog
+for raw computation values as well as direct lambda references.
 
 `source.examples.consumerComposition` supplies a dynamic product-producing
 function and two Boolean consumers. Kosmos's authored

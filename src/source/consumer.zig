@@ -70,17 +70,29 @@ pub fn inspect(
     var left = policy.work;
     const storage = arena.allocator();
     const owned = try snapshot(storage, module, &left);
-    _ = try source.constructor_bindings.admit(a, storage, owned, &left);
+    const outcome = try inspectOwned(a, storage, owned, site, policy, &left);
+    const subject = try relation.identityWithWork(owned, &left);
+    return .{ .arena = arena, .subject = subject, .outcome = outcome };
+}
+
+fn inspectOwned(
+    a: std.mem.Allocator,
+    storage: std.mem.Allocator,
+    module: source.Module,
+    site: Site,
+    policy: relation.Policy,
+    left: *u64,
+) Error!@FieldType(Inspection, "outcome") {
+    const constructors = try source.constructor_bindings.admit(a, storage, module, left);
     var ctx: relation.Context = .{
         .a = storage,
-        .before = owned,
-        .expected = owned,
+        .before = module,
+        .expected = module,
         .policy = policy,
-        .left = &left,
+        .left = left,
+        .constructors = constructors,
     };
-    const subject = try relation.identity(owned);
-    const outcome = try derive(&ctx, site);
-    return .{ .arena = arena, .subject = subject, .outcome = outcome };
+    return derive(&ctx, site);
 }
 
 fn snapshot(a: std.mem.Allocator, module: source.Module, work: *u64) Error!source.Module {
@@ -160,7 +172,12 @@ fn describe(
     for (module.values) |value| {
         try ctx.spend(1);
         if (value.expression == .lambda and value.expression.lambda == producer.function)
-            value_references += 1;
+            value_references += 1
+        else if (source.constructor_bindings.raw(value)) |constructor| {
+            try relation.Context.require(constructor < ctx.constructors.len);
+            if (ctx.constructors[@intCast(constructor)].function == producer.function)
+                value_references += 1;
+        }
     }
     const retained = try facts.sets.remove(facts.terms[@intCast(binding.next)], binding.variable);
     try ctx.spend(@intCast(facts.sets.count(retained)));
@@ -196,21 +213,27 @@ pub fn compose(
     const storage = arena.allocator();
     var left = policy.work;
     const original = try snapshot(storage, module, &left);
-    var inspection = try inspect(a, original, site, policy);
-    defer inspection.deinit();
-    if (inspection.outcome != .boundary) return error.UnsupportedRelation;
-    const boundary = inspection.outcome.boundary;
+    const outcome = try inspectOwned(a, storage, original, site, policy, &left);
+    if (outcome != .boundary) return error.UnsupportedRelation;
+    const boundary = outcome.boundary;
     if (boundary.blocker != null) return error.UnsupportedRelation;
-    const steps = try storage.alloc(relation.Step, 2);
+    const predecessor = try relation.identityWithWork(original, &left);
     const first = @max(boundary.producer_call, boundary.consumer_call);
     const second = @min(boundary.producer_call, boundary.consumer_call);
-    steps[0] = try inlineStep(storage, original, first, policy, &left);
-    steps[1] = try inlineStep(storage, steps[0].successor, second, policy, &left);
-    try relation.validate(a, original, steps[1].successor, steps, policy);
+    const calls = [_]Id{ first, second };
+    const steps = try storage.alloc(relation.Step, if (first == second) 1 else 2);
+    var current = original;
+    for (steps, calls[0..steps.len]) |*step, call| {
+        step.* = try inlineStep(storage, current, call, policy, &left);
+        current = step.successor;
+    }
+    var remaining_policy = policy;
+    remaining_policy.work = left;
+    try relation.validate(a, original, current, steps, remaining_policy);
     return .{
         .arena = arena,
-        .predecessor = inspection.subject,
-        .module = steps[1].successor,
+        .predecessor = predecessor,
+        .module = current,
         .steps = steps,
     };
 }
