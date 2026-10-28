@@ -17,6 +17,7 @@ pub const Compiled = @import("source/activation_lower.zig").Construction;
 pub const RecoveryBinding = @import("source/activation_lower.zig").RecoveryBinding;
 pub const recovery = @import("source/recovery.zig");
 pub const relation = @import("source/relation.zig");
+pub const consumer = @import("source/consumer.zig");
 pub const slice = @import("source/slice.zig");
 pub const constructor_bindings = @import("source/constructor_bindings.zig");
 pub const examples = @import("source/examples.zig");

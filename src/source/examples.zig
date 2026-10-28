@@ -34,6 +34,10 @@ pub const resourceScalar = @import("resource_example.zig").scalar;
 pub const resourcePair = @import("resource_example.zig").pair;
 pub const answers = @import("answer_example.zig").build;
 pub const scopedReader = @import("scoped_reader_example.zig").build;
+pub const logicalContext = @import("scoped_reader_example.zig").logicalContext;
+pub const logicalRetention = @import("scoped_reader_example.zig").logicalRetention;
+pub const logicalBranching = @import("scoped_reader_example.zig").logicalBranching;
+pub const logicalQuery = @import("scoped_reader_example.zig").logicalQuery;
 pub const retainedScope = @import("retained_scope_example.zig").build;
 pub const writerRaise = @import("writer_raise_example.zig").build;
 pub const schedulerFifo = @import("scheduler_example.zig").build;
@@ -43,6 +47,7 @@ pub const swappedServiceReplies = @import("service_example.zig").swappedReplies;
 pub const scalarContracts = @import("scalar_contract_example.zig").build;
 pub const yieldingCleanup = @import("unwind_example.zig").yielding;
 pub const productProjection = @import("projection_example.zig").build;
+pub const consumerComposition = @import("projection_example.zig").composition;
 
 pub const borrowOperands = @import("borrow_operand_example.zig").build;
 

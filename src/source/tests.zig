@@ -3,6 +3,168 @@ const source = @import("../source.zig");
 const examples = @import("examples.zig");
 const data = @import("horos_data");
 
+const AnswerContract = struct {
+    module: source.Module,
+    token: source.Id,
+    owned: source.Id,
+    resume_term: source.Id,
+    clause: source.Id,
+    pair: source.Id,
+    boolean: source.Id,
+};
+
+fn answerContract(b: *source.Builder) !AnswerContract {
+    const unit = try b.scalar(void);
+    const integer = try b.scalar(u64);
+    const boolean = try b.scalar(bool);
+    const pair = try b.schema(.{ .product = &.{ integer, integer } });
+    const effect = try b.effect(.{
+        .identity = "contract/product-answer",
+        .payload = pair,
+        .result = pair,
+        .external = false,
+    });
+    const cap = try b.schema(.{ .internal = .{ .capability = effect } });
+    const token = try b.schema(.{ .internal = .{ .resumption = .{
+        .effect = effect,
+        .input = pair,
+        .answer = boolean,
+        .handled = &.{effect},
+        .mode = .deep,
+        .use = .linear,
+    } } });
+    const owned = try b.schema(.{ .internal = .{ .resumption = .{
+        .effect = effect,
+        .input = pair,
+        .answer = boolean,
+        .handled = &.{effect},
+        .mode = .deep,
+        .use = .affine,
+    } } });
+    const returns = try b.declare(&.{pair}, boolean, &.{}, &.{});
+    const product = try b.reference(b.parameter(returns, 0));
+    const left = try b.primitive(integer, .field, &.{product}, 0);
+    const right = try b.primitive(integer, .field, &.{product}, 1);
+    try b.define(returns, try b.pure(try b.primitive(boolean, .less, &.{ left, right }, 0)));
+    const clause = try b.declare(&.{ pair, token }, boolean, &.{}, &.{});
+    const resume_term = try b.term(.{ .resume_value = .{
+        .resumption = try b.reference(b.parameter(clause, 1)),
+        .argument = try b.reference(b.parameter(clause, 0)),
+    } });
+    try b.define(clause, resume_term);
+    const handler = try b.handler(.{
+        .mode = .deep,
+        .input = pair,
+        .answer = boolean,
+        .return_function = returns,
+        .clauses = &.{.{ .effect = effect, .function = clause, .resumption = token }},
+    });
+    return .{
+        .module = try answerContractEntry(b, unit, pair, boolean, effect, cap, handler),
+        .token = token,
+        .owned = owned,
+        .resume_term = resume_term,
+        .clause = clause,
+        .pair = pair,
+        .boolean = boolean,
+    };
+}
+
+fn answerContractEntry(
+    b: *source.Builder,
+    unit: source.Id,
+    pair: source.Id,
+    boolean: source.Id,
+    effect: source.Id,
+    cap: source.Id,
+    handler: source.Id,
+) !source.Module {
+    const entry = try b.declare(&.{pair}, boolean, &.{}, &.{});
+    const body = try b.declare(&.{cap}, pair, &.{effect}, &.{});
+    const signature = try b.schema(.{ .internal = .{ .computation = .{
+        .parameters = &.{cap},
+        .result = pair,
+        .effects = &.{effect},
+        .capture_bound = &.{pair},
+    } } });
+    try b.define(body, try b.term(.{ .perform = .{
+        .effect = effect,
+        .capability = try b.reference(b.parameter(body, 0)),
+        .payload = try b.reference(b.parameter(entry, 0)),
+    } }));
+    try b.define(entry, try b.term(.{ .handle = .{
+        .handler = handler,
+        .body = try b.lambda(body, signature),
+    } }));
+    return b.module(entry, unit);
+}
+
+test "continuation diagnostics preserve distinct product input and Boolean answer" {
+    var b = source.Builder.init(std.testing.allocator);
+    defer b.deinit();
+    const fixture = try answerContract(&b);
+    var diagnostic: source.Diagnostic = .{};
+    var plain = try source.lower(std.testing.allocator, fixture.module);
+    defer plain.deinit();
+    var observed = try source.lowerObserved(
+        std.testing.allocator,
+        fixture.module,
+        .{ .diagnostic = &diagnostic },
+    );
+    defer observed.deinit();
+    try std.testing.expectEqualDeep(plain.program, observed.program);
+    try std.testing.expect(diagnostic.continuation == null);
+    try std.testing.expect(diagnostic.target.continuation == null);
+    const signature = b.schemas.items[@intCast(fixture.token)].internal.resumption;
+    try std.testing.expectEqual(fixture.pair, signature.input);
+    try std.testing.expectEqual(fixture.boolean, signature.answer);
+}
+
+test "continuation diagnostics distinguish input answer use and capture rejection" {
+    const dimensions = [_]@FieldType(data.admission.ContinuationDiagnostic, "dimension"){
+        .input, .answer, .use, .capture,
+    };
+    for (dimensions) |dimension| {
+        var b = source.Builder.init(std.testing.allocator);
+        defer b.deinit();
+        const fixture = try answerContract(&b);
+        switch (dimension) {
+            .input => b.terms.items[@intCast(fixture.resume_term)].resume_value.argument =
+                try b.constant(bool, true),
+            .answer => b.functions.items[@intCast(fixture.clause)].result = fixture.pair,
+            .use, .capture => {
+                const signature = &b.schemas.items[@intCast(fixture.token)].internal.resumption;
+                signature.use = .multi;
+                if (dimension == .capture) {
+                    b.effects.items[@intCast(signature.effect)].control_use = .multi;
+                    signature.capture_bound = try b.allocator().dupe(source.Id, &.{fixture.owned});
+                }
+            },
+            else => unreachable,
+        }
+        var diagnostic: source.Diagnostic = .{};
+        const failure = if (dimension == .input or dimension == .answer)
+            error.TypeMismatch
+        else
+            error.InvalidOwnership;
+        const module = b.module(fixture.module.entry, fixture.module.failure);
+        try std.testing.expectError(failure, source.lower(std.testing.allocator, module));
+        try std.testing.expectError(failure, source.lowerObserved(
+            std.testing.allocator,
+            module,
+            .{ .diagnostic = &diagnostic },
+        ));
+        const detail = diagnostic.continuation orelse diagnostic.target.continuation.?;
+        try std.testing.expectEqual(dimension, detail.dimension);
+        if (dimension == .input or dimension == .answer) {
+            try std.testing.expectEqual(fixture.pair, detail.expected.?);
+            try std.testing.expectEqual(fixture.boolean, detail.actual.?);
+        }
+        try std.testing.expect(diagnostic.term != null or diagnostic.target.block != null or
+            diagnostic.target.schema != null);
+    }
+}
+
 fn requireAdmitted(program: data.activation.Program) !void {
     var facts = try data.activation_ownership.analyze(std.testing.allocator, program);
     facts.deinit();
@@ -2402,4 +2564,26 @@ test "initial and successor installations preserve resumption effect bounds" {
             );
         }
     };
+}
+
+test "logical context construction admits scoped immutable snapshots" {
+    var builder = source.Builder.init(std.testing.allocator);
+    defer builder.deinit();
+    var compiled = try source.lower(std.testing.allocator, try examples.logicalContext(&builder));
+    defer compiled.deinit();
+    try requireAdmitted(compiled.program);
+}
+
+test "logical context construction admits branching and retention" {
+    for (0..4) |variant| {
+        var builder = source.Builder.init(std.testing.allocator);
+        defer builder.deinit();
+        const module = if (variant == 0) try examples.logicalBranching(&builder) else if (variant == 3)
+            try examples.logicalQuery(&builder)
+        else
+            try examples.logicalRetention(&builder, variant == 2);
+        var compiled = try source.lower(std.testing.allocator, module);
+        defer compiled.deinit();
+        try requireAdmitted(compiled.program);
+    }
 }

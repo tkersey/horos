@@ -384,6 +384,12 @@ const Check = struct {
                 explain(observer.context, self.function, selected, slot, presentation);
             }
         }
-        if (!allowed) return error.InvalidOwnership;
+        if (!allowed) {
+            if (self.diagnostic) |d| d.continuation = .{
+                .dimension = .capture,
+                .actual = slots[@intCast(slot)],
+            };
+            return error.InvalidOwnership;
+        }
     }
 };

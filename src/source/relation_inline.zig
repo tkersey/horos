@@ -7,6 +7,39 @@ const Id = ast.Id;
 const absent = std.math.maxInt(Id);
 const Kind = enum { function, term, value, schema };
 const Item = struct { kind: Kind, id: Id };
+pub const Blocker = enum {
+    effects,
+    regions,
+    missing_body,
+    capture,
+    protected_function,
+    resource_owner,
+    handler_function,
+    control_operation,
+    closure_value,
+    nominal_operation,
+    internal_schema,
+};
+
+pub fn eligibility(ctx: *relation.Context, function: Id) Error!?Blocker {
+    var pure = try analysis(ctx);
+    pure.run(function) catch |err| {
+        if (err == error.UnsupportedRelation) return pure.blocker.?;
+        return err;
+    };
+    return null;
+}
+
+fn analysis(ctx: *relation.Context) Error!Pure {
+    return .{
+        .ctx = ctx,
+        .facts = try check.analyzeWithWork(ctx.a, ctx.before, ctx.left),
+        .seen = .{
+            try flags(ctx, ctx.before.functions.len), try flags(ctx, ctx.before.terms.len),
+            try flags(ctx, ctx.before.values.len),    try flags(ctx, ctx.before.schemas.len),
+        },
+    };
+}
 
 fn flags(ctx: *relation.Context, n: usize) Error![]bool {
     try ctx.spend(n);
@@ -134,6 +167,12 @@ const Pure = struct {
     facts: check.Facts,
     seen: [4][]bool,
     pending: std.ArrayList(Item) = .empty,
+    blocker: ?Blocker = null,
+
+    fn decline(self: *Pure, blocker: Blocker) Error {
+        self.blocker = blocker;
+        return error.UnsupportedRelation;
+    }
 
     fn push(self: *Pure, kind: Kind, id: Id) Error!void {
         try self.ctx.spend(1);
@@ -157,28 +196,29 @@ const Pure = struct {
     fn checkFunction(self: *Pure, id: Id) Error!void {
         const ctx = self.ctx;
         const f = ctx.before.functions[@intCast(id)];
-        if (f.effects.len != 0 or f.regions.len != 0 or f.body == null or
-            self.facts.functions[@intCast(id)].items.len != 0)
-            return error.UnsupportedRelation;
+        if (f.effects.len != 0) return self.decline(.effects);
+        if (f.regions.len != 0) return self.decline(.regions);
+        if (f.body == null) return self.decline(.missing_body);
+        if (self.facts.functions[@intCast(id)].items.len != 0) return self.decline(.capture);
         for (ctx.policy.protected_functions) |root| {
             try ctx.spend(1);
-            if (root == id) return error.UnsupportedRelation;
+            if (root == id) return self.decline(.protected_function);
         }
         for (ctx.before.resources) |resource| {
             try ctx.spend(1);
             for ([_][]const Id{ resource.introducers, resource.eliminators }) |owners| {
                 for (owners) |owner| {
                     try ctx.spend(1);
-                    if (owner == id) return error.UnsupportedRelation;
+                    if (owner == id) return self.decline(.resource_owner);
                 }
             }
         }
         for (ctx.before.handlers) |handler| {
             try ctx.spend(1);
-            if (handler.return_function == id) return error.UnsupportedRelation;
+            if (handler.return_function == id) return self.decline(.handler_function);
             for (handler.clauses) |clause| {
                 try ctx.spend(1);
-                if (clause.function == id) return error.UnsupportedRelation;
+                if (clause.function == id) return self.decline(.handler_function);
             }
         }
         try self.push(.schema, f.result);
@@ -194,7 +234,7 @@ const Pure = struct {
         switch (term) {
             .value, .bind, .conditional, .fail, .match_sum, .unpack_product, .yield_then => {},
             .call => |call| try self.push(.function, call.function),
-            else => return error.UnsupportedRelation,
+            else => return self.decline(.control_operation),
         }
         var refs: check.References = .{ .allocator = self.ctx.a, .work = self.ctx.left };
         try refs.collect(term);
@@ -211,7 +251,7 @@ const Pure = struct {
         try self.push(.schema, value.schema);
         switch (value.expression) {
             .variable, .literal => {},
-            .lambda => return error.UnsupportedRelation,
+            .lambda => return self.decline(.closure_value),
             .primitive => |p| {
                 switch (p.opcode) {
                     .computation,
@@ -223,7 +263,7 @@ const Pure = struct {
                     .unpack,
                     .resource_pack,
                     .resource_unpack,
-                    => return error.UnsupportedRelation,
+                    => return self.decline(.nominal_operation),
                     else => {},
                 }
                 for (p.operands) |operand| try self.push(.value, operand);
@@ -233,7 +273,7 @@ const Pure = struct {
 
     fn schema(self: *Pure, id: Id) Error!void {
         switch (self.ctx.before.schemas[@intCast(id)]) {
-            .internal => return error.UnsupportedRelation,
+            .internal => return self.decline(.internal_schema),
             .product, .sum => |members| for (members) |member| try self.push(.schema, member),
             .seq => |member| try self.push(.schema, member),
             .vector => |v| try self.push(.schema, v.element),
@@ -397,14 +437,7 @@ pub fn apply(ctx: *relation.Context, call_term: u64) Error!void {
     const term = ctx.before.terms[@intCast(call_term)];
     if (term != .call) return error.InvalidRelation;
     const call = term.call;
-    var pure: Pure = .{
-        .ctx = ctx,
-        .facts = try check.analyzeWithWork(ctx.a, ctx.before, ctx.left),
-        .seen = .{
-            try flags(ctx, ctx.before.functions.len), try flags(ctx, ctx.before.terms.len),
-            try flags(ctx, ctx.before.values.len),    try flags(ctx, ctx.before.schemas.len),
-        },
-    };
+    var pure = try analysis(ctx);
     try pure.run(call.function);
     const function = ctx.before.functions[@intCast(call.function)];
     if (function.parameters.len != call.arguments.len) return error.InvalidRelation;

@@ -1,5 +1,10 @@
 //! Optional admission locations. These are observations, never wire evidence.
 const p = @import("program.zig");
+pub const Continuation = struct {
+    dimension: enum { input, answer, effects, capture, use, mode, region, cleanup, provenance },
+    expected: ?p.Id = null,
+    actual: ?p.Id = null,
+};
 pub const Diagnostic = struct {
     phase: enum {
         roots,
@@ -25,6 +30,7 @@ pub const Diagnostic = struct {
     handler: ?p.Id = null,
     slot: ?p.Id = null,
     effect: ?p.Id = null,
+    continuation: ?Continuation = null,
 };
 
 /// Bounded, caller-owned presentation; no compiler-arena slices survive failure.

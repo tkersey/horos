@@ -11,6 +11,380 @@ const context: pe.Context = .{
     .admission_profile = @splat(5),
     .compiler_policy = @splat(6),
 };
+
+fn compositionSites(module: source.Module) ![2]source.consumer.Site {
+    var result: [2]source.consumer.Site = undefined;
+    var count: usize = 0;
+    for (module.functions, 0..) |function, id| {
+        const body = function.body orelse continue;
+        if (module.terms[@intCast(body)] != .bind) continue;
+        const binding = module.terms[@intCast(body)].bind;
+        if (module.terms[@intCast(binding.value)] != .call or
+            module.terms[@intCast(binding.next)] != .call) continue;
+        try std.testing.expect(count < result.len);
+        result[count] = .{ .function = id, .binding = body };
+        count += 1;
+    }
+    try std.testing.expectEqual(result.len, count);
+    return result;
+}
+
+fn targetCalls(program: @import("horos_data").activation.Program) usize {
+    var count: usize = 0;
+    for (program.blocks) |block| {
+        if (block.terminator == .call) count += 1;
+    }
+    return count;
+}
+
+fn checkComposition(module: source.Module) !void {
+    const a = std.testing.allocator;
+    const sites = try compositionSites(module);
+    var baseline = try source.lowerObserved(a, module, .{ .recovery = true });
+    defer baseline.deinit();
+    for (sites, 0..) |site, index| {
+        var inspection = try source.consumer.inspect(a, module, site, .{});
+        defer inspection.deinit();
+        const boundary = inspection.outcome.boundary;
+        try std.testing.expect(boundary.blocker == null);
+        try std.testing.expectEqual(boundary.producer_result, boundary.consumer_input);
+        try std.testing.expect(boundary.answer != boundary.producer_result);
+        try std.testing.expectEqual(@as(u64, 1), boundary.other_producer_calls);
+        try std.testing.expectEqual(@as(usize, 1), boundary.retained_variables.len);
+        var candidate = try source.consumer.compose(a, module, site, .{});
+        defer candidate.deinit();
+        try std.testing.expectEqual(inspection.subject, candidate.predecessor);
+        try source.relation.validate(a, module, candidate.module, candidate.steps, .{});
+        var compiled = try source.lowerObserved(a, candidate.module, .{ .recovery = true });
+        defer compiled.deinit();
+        try source.recovery.validate(a, candidate.module, &compiled);
+        try std.testing.expect(targetCalls(compiled.program) < targetCalls(baseline.program));
+        const other = sites[1 - index].function;
+        var preserved = try source.consumer.inspect(a, candidate.module, .{
+            .function = other,
+            .binding = candidate.module.functions[@intCast(other)].body.?,
+        }, .{});
+        defer preserved.deinit();
+        try std.testing.expectEqual(boundary.producer, preserved.outcome.boundary.producer);
+        try std.testing.expectEqualSlices(u64, module.functions[
+            @intCast(boundary.producer)
+        ].parameters, candidate.module.functions[@intCast(boundary.producer)].parameters);
+    }
+}
+
+test "consumer composition derives two dynamic sites and survives alpha relocation" {
+    var b = source.Builder.init(std.testing.allocator);
+    defer b.deinit();
+    const module = try source.examples.consumerComposition(&b);
+    try checkComposition(module);
+    const maps = try identitySourceMaps(b.allocator(), module);
+    for (@constCast(maps.functions), 0..) |*id, index| id.* = maps.functions.len - index - 1;
+    for (@constCast(maps.variables), 0..) |*id, index| id.* = maps.variables.len - index - 1;
+    const renamed = try source.relation.Relocation.relocate(b.allocator(), module, maps);
+    try source.relation.validate(std.testing.allocator, module, renamed, &.{.{
+        .successor = renamed,
+        .rule = .{ .relocation = maps },
+    }}, .{});
+    try checkComposition(renamed);
+}
+
+test "consumer composition reports protected roots and rejects stale identities" {
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const module = try source.examples.consumerComposition(&b);
+    const site = (try compositionSites(module))[0];
+    var inspected = try source.consumer.inspect(a, module, site, .{});
+    defer inspected.deinit();
+    const producer = inspected.outcome.boundary.producer;
+    const policy: source.relation.Policy = .{ .protected_functions = &.{producer} };
+    var protected = try source.consumer.inspect(a, module, site, policy);
+    defer protected.deinit();
+    try std.testing.expectEqual(
+        .protected_function,
+        protected.outcome.boundary.blocker.?.producer,
+    );
+    try std.testing.expectError(error.UnsupportedRelation, source.consumer.compose(
+        a,
+        module,
+        site,
+        policy,
+    ));
+    var protected_caller = try source.consumer.inspect(a, module, site, .{
+        .protected_functions = &.{site.function},
+    });
+    defer protected_caller.deinit();
+    try std.testing.expectEqual(
+        .protected_enclosing_function,
+        std.meta.activeTag(protected_caller.outcome.boundary.blocker.?),
+    );
+    var candidate = try source.consumer.compose(a, module, site, .{});
+    defer candidate.deinit();
+    const changed = try source.own(source.Module, b.allocator(), module);
+    const call = inspected.outcome.boundary.producer_call;
+    const arguments = try b.allocator().dupe(u64, changed.terms[@intCast(call)].call.arguments);
+    std.mem.swap(u64, &arguments[0], &arguments[1]);
+    @constCast(changed.terms)[@intCast(call)].call.arguments = arguments;
+    try std.testing.expectError(error.InvalidRelation, source.relation.validate(
+        a,
+        changed,
+        candidate.module,
+        candidate.steps,
+        .{},
+    ));
+    try std.testing.expectError(error.RelationLimit, source.consumer.compose(
+        a,
+        module,
+        site,
+        .{ .work = 0 },
+    ));
+}
+
+fn rejectCompositionMutation(
+    module: source.Module,
+    candidate: source.consumer.Candidate,
+    mutated: source.Module,
+) !void {
+    const steps = [_]source.relation.Step{
+        candidate.steps[0],
+        .{ .successor = mutated, .rule = candidate.steps[1].rule },
+    };
+    try std.testing.expectError(error.InvalidRelation, source.relation.validate(
+        std.testing.allocator,
+        module,
+        mutated,
+        &steps,
+        .{},
+    ));
+}
+
+test "consumer composition rejects changed values argument duplication and same typed capture" {
+    var b = source.Builder.init(std.testing.allocator);
+    defer b.deinit();
+    const module = try source.examples.consumerComposition(&b);
+    const sites = try compositionSites(module);
+    var candidate = try source.consumer.compose(std.testing.allocator, module, sites[0], .{});
+    defer candidate.deinit();
+    for (0..3) |mutation| {
+        const changed = try source.own(source.Module, b.allocator(), candidate.module);
+        if (mutation == 0) {
+            for (@constCast(changed.values)) |*value| {
+                if (value.expression != .primitive or
+                    value.expression.primitive.opcode != .less) continue;
+                value.expression.primitive.opcode = .equal;
+                break;
+            }
+        } else {
+            const other = changed.functions[@intCast(sites[1].function)].body.?;
+            const binding = changed.terms[@intCast(other)].bind;
+            const call = &@constCast(changed.terms)[@intCast(binding.value)].call;
+            const arguments = try b.allocator().dupe(u64, call.arguments);
+            if (mutation == 1) {
+                arguments[1] = arguments[0];
+            } else {
+                const variable = changed.functions[@intCast(sites[1].function)].parameters[2];
+                const values = @constCast(changed.values);
+                values[@intCast(arguments[0])].expression = .{ .variable = variable };
+            }
+            call.arguments = arguments;
+        }
+        var work: u64 = 1_000_000;
+        try source.admitWithWork(std.testing.allocator, changed, &work);
+        try rejectCompositionMutation(module, candidate, changed);
+    }
+}
+
+test "consumer composition retains dynamic faults and explicit yields" {
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    var module = try source.examples.consumerComposition(&b);
+    const sites = try compositionSites(module);
+    var inspection = try source.consumer.inspect(a, module, sites[0], .{});
+    defer inspection.deinit();
+    const producer = inspection.outcome.boundary.producer;
+    const failure = try b.failureLiteral(try b.constant(void, {}));
+    for (b.values.items) |*value| {
+        if (value.expression != .primitive or
+            value.expression.primitive.opcode != .integer_bit_xor) continue;
+        value.expression.primitive.opcode = .integer_div;
+        value.expression.primitive.failures = &.{
+            .{ .kind = .arithmetic_overflow, .value = failure },
+            .{ .kind = .division_by_zero, .value = failure },
+        };
+    }
+    const body = b.functions.items[@intCast(producer)].body.?;
+    b.functions.items[@intCast(producer)].body = try b.term(.{ .yield_then = body });
+    module = b.module(module.entry, module.failure);
+    var candidate = try source.consumer.compose(a, module, sites[0], .{});
+    defer candidate.deinit();
+    for ([_]bool{ false, true }) |remove_yield| {
+        const changed = try source.own(source.Module, b.allocator(), candidate.module);
+        if (remove_yield) {
+            for (@constCast(changed.terms)) |*term| {
+                if (term.* != .yield_then) continue;
+                term.* = changed.terms[@intCast(term.yield_then)];
+                break;
+            }
+        } else {
+            for (@constCast(changed.values)) |*value| {
+                if (value.expression != .primitive or
+                    value.expression.primitive.opcode != .integer_div) continue;
+                value.* = changed.values[@intCast(value.expression.primitive.operands[0])];
+                break;
+            }
+        }
+        var work: u64 = 1_000_000;
+        try source.admitWithWork(a, changed, &work);
+        try rejectCompositionMutation(module, candidate, changed);
+    }
+}
+
+test "consumer composition rejects candidate only recursion without executing it" {
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const module = try source.examples.consumerComposition(&b);
+    const sites = try compositionSites(module);
+    var candidate = try source.consumer.compose(a, module, sites[0], .{});
+    defer candidate.deinit();
+    const changed = try source.own(source.Module, b.allocator(), candidate.module);
+    const entry = changed.functions[@intCast(changed.entry)].body.?;
+    const branch = changed.terms[@intCast(entry)].conditional;
+    const call = changed.terms[@intCast(branch.when_true)].call;
+    const function = &@constCast(changed.functions)[@intCast(call.function)];
+    const arguments = try b.allocator().alloc(u64, function.parameters.len);
+    for (function.parameters, arguments) |parameter, *argument| {
+        for (changed.values, 0..) |value, id| {
+            if (value.expression == .variable and value.expression.variable == parameter) {
+                argument.* = id;
+                break;
+            }
+        } else return error.TestUnexpectedResult;
+    }
+    @constCast(changed.terms)[@intCast(function.body.?)] = .{ .call = .{
+        .function = call.function,
+        .arguments = arguments,
+    } };
+    var work: u64 = 1_000_000;
+    try source.admitWithWork(a, changed, &work);
+    try rejectCompositionMutation(module, candidate, changed);
+}
+
+test "consumer composition never discards an unused pure recursive computation" {
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    var module = try source.examples.consumerComposition(&b);
+    const site = (try compositionSites(module))[0];
+    var inspection = try source.consumer.inspect(a, module, site, .{});
+    defer inspection.deinit();
+    const producer = inspection.outcome.boundary.producer;
+    const word = module.variables[@intCast(module.functions[@intCast(producer)].parameters[0])];
+    const recursive = try b.declare(&.{}, word, &.{}, &.{});
+    const call = try b.term(.{ .call = .{ .function = recursive, .arguments = &.{} } });
+    try b.define(recursive, call);
+    const retained = b.functions.items[@intCast(producer)].body.?;
+    b.functions.items[@intCast(producer)].body = try b.bind(try b.variable(word), call, retained);
+    module = b.module(module.entry, module.failure);
+    var candidate = try source.consumer.compose(a, module, site, .{});
+    defer candidate.deinit();
+    const changed = try source.own(source.Module, b.allocator(), candidate.module);
+    const reached = try b.allocator().alloc(bool, changed.terms.len);
+    @memset(reached, false);
+    reached[@intCast(changed.functions[@intCast(site.function)].body.?)] = true;
+    var cursor = changed.terms.len;
+    var deleted = false;
+    while (cursor > 0) {
+        cursor -= 1;
+        if (!reached[cursor] or changed.terms[cursor] != .bind) continue;
+        const binding = changed.terms[cursor].bind;
+        const value = changed.terms[@intCast(binding.value)];
+        if (value == .call and value.call.function == recursive) {
+            @constCast(changed.terms)[cursor] = changed.terms[@intCast(binding.next)];
+            deleted = true;
+            break;
+        }
+        reached[@intCast(binding.value)] = true;
+        reached[@intCast(binding.next)] = true;
+    }
+    try std.testing.expect(deleted);
+    var work: u64 = 1_000_000;
+    try source.admitWithWork(a, changed, &work);
+    try rejectCompositionMutation(module, candidate, changed);
+}
+
+test "consumer composition inspection and candidates own their source storage" {
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    const module = try source.examples.consumerComposition(&b);
+    const site = (try compositionSites(module))[0];
+    var inspection = try source.consumer.inspect(a, module, site, .{});
+    defer inspection.deinit();
+    var candidate = try source.consumer.compose(a, module, site, .{});
+    defer candidate.deinit();
+    b.deinit();
+    try std.testing.expectEqual(@as(usize, 2), inspection.outcome.boundary.producer_arguments.len);
+    try std.testing.expectEqual(@as(usize, 1), inspection.outcome.boundary.retained_variables.len);
+    var work: u64 = 1_000_000;
+    try source.admitWithWork(a, candidate.module, &work);
+}
+
+test "consumer composition releases partial construction after allocation failures" {
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const module = try source.examples.consumerComposition(&b);
+    const site = (try compositionSites(module))[0];
+    var counter = std.testing.FailingAllocator.init(a, .{});
+    var complete = try source.consumer.compose(counter.allocator(), module, site, .{});
+    complete.deinit();
+    const count = counter.alloc_index;
+    for ([_]usize{ 0, 1, count / 4, count / 2, count - 1 }) |index| {
+        var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = index });
+        try std.testing.expectError(error.OutOfMemory, source.consumer.compose(
+            failing.allocator(),
+            module,
+            site,
+            .{},
+        ));
+    }
+}
+
+test "consumer composition declines ambiguous or intervening consumer routes" {
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    var module = try source.examples.consumerComposition(&b);
+    const site = (try compositionSites(module))[0];
+    var inspection = try source.consumer.inspect(a, module, site, .{});
+    defer inspection.deinit();
+    const boundary = inspection.outcome.boundary;
+    const duplicate = try b.declare(
+        &.{ boundary.producer_result, boundary.producer_result },
+        boundary.answer,
+        &.{},
+        &.{},
+    );
+    try b.define(duplicate, try b.pure(try b.constant(bool, true)));
+    const value = boundary.consumer_arguments[@intCast(boundary.argument_position)];
+    b.terms.items[@intCast(boundary.consumer_call)] = .{ .call = .{
+        .function = duplicate,
+        .arguments = &.{ value, value },
+    } };
+    module = b.module(module.entry, module.failure);
+    var ambiguous = try source.consumer.inspect(a, module, site, .{});
+    defer ambiguous.deinit();
+    try std.testing.expectEqual(
+        .multiple_consumer_arguments,
+        std.meta.activeTag(ambiguous.outcome.blocked),
+    );
+    b.terms.items[@intCast(boundary.consumer_call)] = .{ .value = try b.constant(bool, true) };
+    module = b.module(module.entry, module.failure);
+    var indirect = try source.consumer.inspect(a, module, site, .{});
+    defer indirect.deinit();
+    try std.testing.expectEqual(.not_direct_consumer, std.meta.activeTag(indirect.outcome.blocked));
+}
 fn known(value: u64, storage: *[8]u8, schema: p.Id) pe.Knowledge {
     std.mem.writeInt(u64, storage, value, .little);
     return .{ .known = .{ .schema = schema, .bytes = storage } };

@@ -25,8 +25,23 @@ pub fn validateComponentWithWork(
     imports: []const p.Id,
     work: ?*u64,
 ) Error!void {
+    return validateComponentDiagnosedWithWork(allocator, image, imports, null, work);
+}
+
+pub fn validateComponentDiagnosedWithWork(
+    allocator: std.mem.Allocator,
+    image: ir.Program,
+    imports: []const p.Id,
+    diagnostic: ?*a.Diagnostic,
+    work: ?*u64,
+) Error!void {
     try a.spend(work, 1);
-    var checker: Checker = .{ .allocator = allocator, .image = image, .work = work };
+    var checker: Checker = .{
+        .allocator = allocator,
+        .image = image,
+        .work = work,
+        .diagnostic = diagnostic,
+    };
     for (imports, 0..) |id, at| {
         try a.spend(work, 1);
         if (id >= image.functions.len or try @import("contracts.zig").containsEffectWithWork(
@@ -43,8 +58,14 @@ pub fn validateComponentWithWork(
     if (image.functions[@intCast(image.roots.entry)].result != image.roots.result)
         return error.TypeMismatch;
     for (image.functions, 0..) |function, id| try checker.validateFunction(function, id, imports);
-    for (image.blocks) |block| {
+    for (image.blocks, 0..) |block, block_id| {
         try a.spend(work, 1);
+        if (diagnostic) |d| d.* = .{
+            .phase = .block,
+            .function = block.function,
+            .block = block_id,
+            .terminator = std.meta.activeTag(block.terminator),
+        };
         if (try @import("contracts.zig").containsEffectWithWork(
             imports,
             block.function,
@@ -58,6 +79,7 @@ const Checker = struct {
     allocator: std.mem.Allocator,
     image: ir.Program,
     work: ?*u64,
+    diagnostic: ?*a.Diagnostic,
     destinations: std.AutoHashMapUnmanaged(p.Id, void) = .empty,
 
     fn validateFunction(
@@ -176,7 +198,19 @@ const Checker = struct {
                 .slot => |value| try self.slot(owner, value),
                 .returned => returned orelse return error.TypeMismatch,
             };
-            if (actual != expected) return error.TypeMismatch;
+            if (actual != expected) {
+                if (assignment.source == .returned) if (self.diagnostic) |d| {
+                    switch (d.terminator orelse return error.TypeMismatch) {
+                        .resume_value, .resume_with, .resume_computation => d.continuation = .{
+                            .dimension = .answer,
+                            .expected = expected,
+                            .actual = actual,
+                        },
+                        else => {},
+                    }
+                };
+                return error.TypeMismatch;
+            }
         }
     }
 
@@ -301,15 +335,29 @@ const Checker = struct {
         switch (code.terminator) {
             inline .resume_value, .resume_with => |operation| {
                 const signature = try self.resumption(owner, operation.resumption);
-                if (try self.slot(owner, operation.argument) != signature.input)
+                const argument = try self.slot(owner, operation.argument);
+                if (argument != signature.input) {
+                    if (self.diagnostic) |d| d.continuation = .{
+                        .dimension = .input,
+                        .expected = signature.input,
+                        .actual = argument,
+                    };
                     return error.TypeMismatch;
+                }
                 var answer = signature.answer;
                 if (code.terminator == .resume_with) {
                     const successor = code.terminator.resume_with;
                     if (successor.handler >= self.image.handlers.len)
                         return error.InvalidReference;
                     const handler = self.image.handlers[@intCast(successor.handler)];
-                    if (handler.input != signature.answer) return error.TypeMismatch;
+                    if (handler.input != signature.answer) {
+                        if (self.diagnostic) |d| d.continuation = .{
+                            .dimension = .answer,
+                            .expected = handler.input,
+                            .actual = signature.answer,
+                        };
+                        return error.TypeMismatch;
+                    }
                     try self.arguments(owner, successor.state, handler.state);
                     answer = handler.answer;
                 }

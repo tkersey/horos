@@ -5,6 +5,7 @@ const wire = @import("wire.zig");
 const region_admission = @import("region_admission.zig");
 const resource_admission = @import("resource_admission.zig");
 pub const Diagnostic = @import("diagnostic.zig").Diagnostic;
+pub const ContinuationDiagnostic = @import("diagnostic.zig").Continuation;
 pub const Origins = @import("diagnostic.zig").Origins;
 
 pub const Error = wire.Error || std.mem.Allocator.Error || error{

@@ -19,6 +19,7 @@ pub const Diagnostic = struct {
     term: ?p.Id = null,
     value: ?p.Id = null,
     variable: ?p.Id = null,
+    continuation: ?data.admission.ContinuationDiagnostic = null,
     /// `function` is a representative when this summary is ambiguous.
     origins: Origins = .{},
     target: data.admission.Diagnostic = .{},

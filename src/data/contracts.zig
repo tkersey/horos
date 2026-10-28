@@ -254,7 +254,7 @@ pub fn validateDiagnosedWithWork(
     for (image.schemas, 0..) |schema, index| {
         try a.spend(work, 1);
         if (diagnostic) |d| d.* = .{ .phase = .schema, .schema = index };
-        try validateSchema(image, schema, facts, work);
+        try validateSchema(image, schema, facts, diagnostic, work);
     }
     for (image.scopes.captures, 0..) |capture, index| {
         try a.spend(work, 1);
@@ -284,7 +284,13 @@ pub fn validateDiagnosedWithWork(
     return facts;
 }
 
-fn validateSchema(image: anytype, schema: p.Schema, facts: traits.Facts, work: ?*u64) a.Error!void {
+fn validateSchema(
+    image: anytype,
+    schema: p.Schema,
+    facts: traits.Facts,
+    diagnostic: ?*a.Diagnostic,
+    work: ?*u64,
+) a.Error!void {
     try a.spend(work, 1);
     if (schema == .internal)
         switch (schema.internal) {
@@ -302,35 +308,13 @@ fn validateSchema(image: anytype, schema: p.Schema, facts: traits.Facts, work: ?
                     ]) return error.InvalidOwnership;
                 }
             },
-            .resumption => |signature| {
-                try row(image, signature.effects, work);
-                try evidence(image, signature.handled, work);
-                try row(image, signature.escaping, work);
-                try subsetWithWork(signature.escaping, signature.effects, work);
-                if (signature.mode == .deep and
-                    signature.escaping.len != 0)
-                    return error.InvalidEffect;
-                try @import("region_admission.zig").catalogWithWork(
-                    image,
-                    signature.owned_regions,
-                    work,
-                );
-                if (signature.effect >= image.effects.len or
-                    signature.use == .reusable)
-                    return error.InvalidEffect;
-                const effect = image.effects[@intCast(signature.effect)];
-                if (effect.result != signature.input) return error.TypeMismatch;
-                if (signature.use == .multi) {
-                    if (signature.obligations) return error.InvalidOwnership;
-                    if (effect.control_use != .multi) return error.InvalidOwnership;
-                    for (signature.capture_bound) |id| {
-                        try a.spend(work, 1);
-                        if (!facts.clone[
-                            @intCast(id)
-                        ]) return error.InvalidOwnership;
-                    }
-                }
-            },
+            .resumption => |signature| try validateResumption(
+                image,
+                signature,
+                facts,
+                diagnostic,
+                work,
+            ),
             .region => |id| if (id >= image.scopes.region_count) return error.InvalidReference,
             .cell => |cell| {
                 if (cell.region >= image.scopes.region_count) return error.InvalidReference;
@@ -347,6 +331,53 @@ fn validateSchema(image: anytype, schema: p.Schema, facts: traits.Facts, work: ?
                 _ = try @import("resource_admission.zig").descriptor(image, borrow.value);
             },
         };
+}
+
+fn continuationFailure(
+    diagnostic: ?*a.Diagnostic,
+    detail: a.ContinuationDiagnostic,
+    failure: a.Error,
+) a.Error {
+    if (diagnostic) |d| d.continuation = detail;
+    return failure;
+}
+
+fn validateResumption(
+    image: anytype,
+    signature: p.ResumptionType,
+    facts: traits.Facts,
+    diagnostic: ?*a.Diagnostic,
+    work: ?*u64,
+) a.Error!void {
+    try row(image, signature.effects, work);
+    try evidence(image, signature.handled, work);
+    try row(image, signature.escaping, work);
+    try subsetWithWork(signature.escaping, signature.effects, work);
+    if (signature.mode == .deep and signature.escaping.len != 0)
+        return continuationFailure(diagnostic, .{ .dimension = .effects }, error.InvalidEffect);
+    try @import("region_admission.zig").catalogWithWork(image, signature.owned_regions, work);
+    if (signature.effect >= image.effects.len) return error.InvalidEffect;
+    if (signature.use == .reusable)
+        return continuationFailure(diagnostic, .{ .dimension = .use }, error.InvalidEffect);
+    const effect = image.effects[@intCast(signature.effect)];
+    if (effect.result != signature.input) return continuationFailure(diagnostic, .{
+        .dimension = .input,
+        .expected = effect.result,
+        .actual = signature.input,
+    }, error.TypeMismatch);
+    if (signature.use == .multi) {
+        if (signature.obligations)
+            return continuationFailure(diagnostic, .{ .dimension = .cleanup }, error.InvalidOwnership);
+        if (effect.control_use != .multi)
+            return continuationFailure(diagnostic, .{ .dimension = .use }, error.InvalidOwnership);
+        for (signature.capture_bound) |id| {
+            try a.spend(work, 1);
+            if (!facts.clone[@intCast(id)]) return continuationFailure(diagnostic, .{
+                .dimension = .capture,
+                .actual = id,
+            }, error.InvalidOwnership);
+        }
+    }
 }
 
 fn validateHandlerClause(
@@ -374,13 +405,15 @@ fn validateHandlerClause(
             return error.InvalidEffect;
     }
     const continuation = try resumption(image, clause.resumption);
-    if (continuation.effect != clause.effect or
-        continuation.mode != handler.mode or
-        continuation.answer != (if (handler.mode == .deep)
-            handler.answer
-        else
-            handler.input))
-        return error.TypeMismatch;
+    if (continuation.effect != clause.effect) return error.TypeMismatch;
+    if (continuation.mode != handler.mode)
+        return continuationFailure(diagnostic, .{ .dimension = .mode }, error.TypeMismatch);
+    const answer = if (handler.mode == .deep) handler.answer else handler.input;
+    if (continuation.answer != answer) return continuationFailure(diagnostic, .{
+        .dimension = .answer,
+        .expected = answer,
+        .actual = continuation.answer,
+    }, error.TypeMismatch);
     if (continuation.handled.len != handler.clauses.len) return error.InvalidEffect;
     for (
         continuation.handled,
