@@ -190,7 +190,12 @@ fn consumerFitsWork(
     const a = std.testing.allocator;
     switch (operation) {
         .inspect => {
-            var inspection = source.consumer.inspect(a, module, site, .{ .work = work }) catch |err| {
+            var inspection = source.consumer.inspect(
+                a,
+                module,
+                site,
+                .{ .work = work },
+            ) catch |err| {
                 if (err == error.RelationLimit) return false;
                 return err;
             };
