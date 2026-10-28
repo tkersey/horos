@@ -585,7 +585,13 @@ fn checkFunctions(
             facts.results[@intCast(body)],
             function.result,
         ) catch |err| {
-            answerDiagnostic(source, body, function.result, facts.results[@intCast(body)], diagnostic);
+            answerDiagnostic(
+                source,
+                body,
+                function.result,
+                facts.results[@intCast(body)],
+                diagnostic,
+            );
             return err;
         };
     }

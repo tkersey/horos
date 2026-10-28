@@ -2578,7 +2578,9 @@ test "logical context construction admits branching and retention" {
     for (0..4) |variant| {
         var builder = source.Builder.init(std.testing.allocator);
         defer builder.deinit();
-        const module = if (variant == 0) try examples.logicalBranching(&builder) else if (variant == 3)
+        const module = if (variant == 0)
+            try examples.logicalBranching(&builder)
+        else if (variant == 3)
             try examples.logicalQuery(&builder)
         else
             try examples.logicalRetention(&builder, variant == 2);

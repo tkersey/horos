@@ -367,7 +367,11 @@ fn validateResumption(
     }, error.TypeMismatch);
     if (signature.use == .multi) {
         if (signature.obligations)
-            return continuationFailure(diagnostic, .{ .dimension = .cleanup }, error.InvalidOwnership);
+            return continuationFailure(
+                diagnostic,
+                .{ .dimension = .cleanup },
+                error.InvalidOwnership,
+            );
         if (effect.control_use != .multi)
             return continuationFailure(diagnostic, .{ .dimension = .use }, error.InvalidOwnership);
         for (signature.capture_bound) |id| {
