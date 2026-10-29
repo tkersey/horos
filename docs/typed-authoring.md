@@ -385,6 +385,98 @@ and refine after completion. Undefined, wrong-kind and repeated definitions rema
 checked. Raw terms and values do not acquire typed trust through an unchecked
 adoption assertion.
 
+## Consumer composition and continuation diagnostics
+
+`source.consumer.inspect(allocator, module, site, policy)` owns an immutable
+snapshot of the admitted source and describes a direct producer call bound into
+a direct consumer call at the selected function body. Its subject hash binds the
+facts to that exact source. The boundary includes actual argument and binding
+IDs, producer result, consumer input, enclosing answer, retained variables, other
+producer uses, and a precise blocker when existing inline restrictions apply.
+Destroy the inspection with `deinit`; its facts do not borrow the caller's module.
+
+`source.consumer.compose` constructs one `inline_call` step per distinct call
+node and checks the resulting program through `source.relation.validate`.
+Shared source nodes retain their separate runtime executions. Both calls must satisfy
+the existing closed pure inlining rule. Strict argument evaluation is retained
+through explicit binds, including computations whose values are unused. Empty
+effect rows do not authorize dropping faults, recursion, yields or cleanup.
+Fresh lexical bindings prevent capture; nominal owners and protected functions
+remain excluded where their relationships cannot be transported. Other callers
+and declarations remain covered by complete successor equality.
+Inspection, source identity hashing, construction and validation share the caller's
+work allowance. Callable-reference counts use the admitted constructor catalog
+for raw computation values as well as direct lambda references.
+
+`source.examples.consumerComposition` supplies a dynamic product-producing
+function and two Boolean consumers. Kosmos's authored
+`RuntimeTransformation.consumer` constructs ordinary record proposals for this
+fragment, using the same independent source relation. Under structural lowering,
+the selected example executes one call instead of three, with thirteen total
+transitions instead of eleven; the other caller stays unchanged. The existing
+semantic optimizer already removes calls in both versions. This is a new guest
+program construction, with a new identity: its image cannot resume an ancestor
+checkpoint. Introduced bindings are finite acyclic administrative work; candidate
+recursion, removed yields and unaccounted edits are rejected by the exact rule.
+
+Optional source and data admission diagnostics now carry a `continuation`
+detail with a contract dimension and optional expected/actual schema IDs. Input
+and answer remain distinct. Known use, capture, mode and cleanup failures retain
+their existing rejection categories while identifying the failed constraint.
+IDs belong to the reported source or target program; they are not portable
+evidence. Absence of detail means that the diagnostic route has no more specific
+explanation, not that a contract was proved. Observed and unobserved admission
+produce the same accepted program or rejection.
+
+## Logical execution context
+
+`source.examples.logicalContext` composes ordinary Reader/local with immutable
+`LogicalFrame { domain: u64, key: u64, metadata: u64 }` sequences. Its dynamic
+`seed` argument supplies the outer annotation. The example enters a local scope
+with an appended annotation, snapshots the value, yields, reads through its
+captured capability under another interpretation of the same read operation,
+and returns the inner, outer and snapshotted values. Normal return restores the
+outer Reader value. A fresh Kosmos session can restore the suspension and
+continue these reads.
+
+The sequence is ordered oldest to newest. Establish context by passing it as
+Reader's `environment`; enter a scope by appending a frame and invoking `local`;
+read or enumerate it through `ask`. A snapshot is the immutable returned value,
+not a continuation. `source.examples.logicalQuery` accepts a frame sequence,
+`domain` and `key`, scans from newest to oldest, and returns `absent` or the
+matching metadata. Equal labels do not identify capabilities or grant authority.
+The nested interpretation's metadata is 999, but an explicit captured capability
+continues to read its original local context.
+
+`source.examples.logicalBranching` captures an immutable common prefix through
+ordinary multi-shot choice, adds metadata 202 and 101 in the existing false/true
+branch order, and installs Reader separately in each branch. Reader's linear
+scope tokens are never captured by the multi-shot operation. Existing owned and
+linear capture rejection remains authoritative.
+
+`source.examples.logicalRetention(builder, retain_history)` supplies an authored
+tail loop with a dynamic `count` argument. `sequenceSet` replaces the single
+current frame; passing that new value to the next iteration keeps its logical
+length one. The history variant explicitly appends each updated snapshot to a
+separate sequence, yielding exactly `count` snapshots. Neither operation creates
+an implicit Reader/local nesting. No universal nesting or history limit is added.
+
+Protection encloses the scoped computation and receives an explicit immutable
+snapshot at establishment. Normal completion and cancellation both emit that
+snapshot through `logical-context/cleanup`; cleanup does not consult an ambient
+Reader after its scope has unwound. This arrangement respects Reader's existing
+restriction against capturing cleanup obligations in its resumptions.
+
+Kosmos's existing session tests compare normal and cancelled fresh restoration,
+branch values, lookup shadowing, and small replacement/history executions. They
+report canonical graph/control counts, checkpoint bytes, and live/peak requested
+bytes in the session allocator domain separately. A finite sample does not prove
+asymptotic memory usage; constant control depth does not bound retained snapshots.
+Canonical serialized snapshots contain the retained information, and no claim of
+physical persistent sharing follows from source-level immutability. These are
+logical annotations authored by the application, not physical stack inspection,
+complete execution history, evidence provenance, or permissions.
+
 ## Verification
 
 `zig build check-authoring -Doptimize=safe` runs authoring and compile-rejection

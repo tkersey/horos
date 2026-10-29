@@ -441,7 +441,16 @@ fn checkTerms(
         for (references.bound.items) |variable|
             if (variable >= source.variables.len)
                 return error.InvalidReference;
-        facts.results[id] = try termResult(source, facts, term, unit);
+        facts.results[id] = termResult(source, facts, term, unit) catch |err| {
+            if (term == .bind and err == error.TypeMismatch) answerDiagnostic(
+                source,
+                term.bind.value,
+                source.variables[@intCast(term.bind.variable)],
+                facts.results[@intCast(term.bind.value)],
+                diagnostic,
+            );
+            return err;
+        };
     }
     return term_references;
 }
@@ -572,10 +581,45 @@ fn checkFunctions(
                 variable,
             ) != null) return error.InvalidSource;
         }
-        if (function.body) |body| _ = try compatible(
+        if (function.body) |body| _ = compatible(
             facts.results[@intCast(body)],
             function.result,
-        );
+        ) catch |err| {
+            answerDiagnostic(
+                source,
+                body,
+                function.result,
+                facts.results[@intCast(body)],
+                diagnostic,
+            );
+            return err;
+        };
+    }
+}
+
+fn answerDiagnostic(
+    source: ast.Module,
+    root: p.Id,
+    expected: p.Id,
+    actual: ?p.Id,
+    diagnostic: ?*@import("diagnostic.zig").Diagnostic,
+) void {
+    const d = diagnostic orelse return;
+    var cursor = root;
+    for (0..source.terms.len) |_| {
+        const term = source.terms[@intCast(cursor)];
+        const next = switch (term) {
+            .bind => |bind| bind.next,
+            .yield_then => |body| body,
+            .resume_value, .resume_with, .resume_computation => {
+                d.continuation = .{ .dimension = .answer, .expected = expected, .actual = actual };
+                d.term = cursor;
+                return;
+            },
+            else => return,
+        };
+        if (next >= cursor) return;
+        cursor = next;
     }
 }
 

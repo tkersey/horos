@@ -265,6 +265,7 @@ src/source/component.zig
 src/source/component_examples.zig
 src/source/component_tests.zig
 src/source/constructor_bindings.zig
+src/source/consumer.zig
 src/source/control_examples.zig
 src/source/custody_edge_example.zig
 src/source/custody_order_example.zig

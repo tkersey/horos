@@ -2,6 +2,95 @@
 //! Projection must retain evaluation of the whole constructed product.
 const source = @import("../source.zig");
 
+pub fn composition(b: *source.Builder) source.Error!source.Module {
+    const word = try b.scalar(u64);
+    const unit = try b.scalar(void);
+    const boolean = try b.scalar(bool);
+    const pair = try b.schema(.{ .product = &.{ word, word } });
+    const producer = try b.declare(&.{ word, word }, pair, &.{}, &.{});
+    const x = try b.reference(b.parameter(producer, 0));
+    const mask = try b.reference(b.parameter(producer, 1));
+    const first = try b.primitive(word, .integer_bit_and, &.{ x, mask }, 0);
+    const second = try b.primitive(word, .integer_bit_xor, &.{ x, mask }, 0);
+    try b.define(producer, try b.pure(try b.primitive(pair, .product, &.{ first, second }, 0)));
+    const consumers = [_]source.Id{
+        try compositionConsumer(b, word, pair, boolean, 0),
+        try compositionConsumer(b, word, pair, boolean, 1),
+    };
+    const callers = [_]source.Id{
+        try compositionCaller(b, word, pair, boolean, producer, consumers[0], 0),
+        try compositionCaller(b, word, pair, boolean, producer, consumers[1], 1),
+    };
+    const entry = try b.declare(&.{ word, word, word, boolean }, boolean, &.{}, &.{});
+    const arguments = [_]source.Id{
+        try b.reference(b.parameter(entry, 0)),
+        try b.reference(b.parameter(entry, 1)),
+        try b.reference(b.parameter(entry, 2)),
+    };
+    const left = try b.term(.{ .call = .{ .function = callers[0], .arguments = &arguments } });
+    const right = try b.term(.{ .call = .{ .function = callers[1], .arguments = &arguments } });
+    try b.define(entry, try b.term(.{ .conditional = .{
+        .condition = try b.reference(b.parameter(entry, 3)),
+        .when_true = left,
+        .when_false = right,
+    } }));
+    return b.module(entry, unit);
+}
+
+fn compositionConsumer(
+    b: *source.Builder,
+    word: source.Id,
+    pair: source.Id,
+    boolean: source.Id,
+    field: u1,
+) source.Error!source.Id {
+    const function = try b.declare(
+        if (field == 0) &.{ pair, word } else &.{ word, pair },
+        boolean,
+        &.{},
+        &.{},
+    );
+    const product = try b.reference(b.parameter(function, field));
+    const cutoff = try b.reference(b.parameter(function, 1 - @as(usize, field)));
+    const selected = try b.primitive(word, .field, &.{product}, field);
+    const result = try b.primitive(
+        boolean,
+        if (field == 0) .less else .equal,
+        &.{ selected, cutoff },
+        0,
+    );
+    try b.define(function, try b.pure(result));
+    return function;
+}
+
+fn compositionCaller(
+    b: *source.Builder,
+    word: source.Id,
+    pair: source.Id,
+    boolean: source.Id,
+    producer: source.Id,
+    consumer: source.Id,
+    position: u1,
+) source.Error!source.Id {
+    const function = try b.declare(&.{ word, word, word }, boolean, &.{}, &.{});
+    const product = try b.variable(pair);
+    const produced = try b.term(.{ .call = .{
+        .function = producer,
+        .arguments = &.{
+            try b.reference(b.parameter(function, 0)),
+            try b.reference(b.parameter(function, 1)),
+        },
+    } });
+    const value = try b.reference(product);
+    const cutoff = try b.reference(b.parameter(function, 2));
+    const consumed = try b.term(.{ .call = .{
+        .function = consumer,
+        .arguments = if (position == 0) &.{ value, cutoff } else &.{ cutoff, value },
+    } });
+    try b.define(function, try b.bind(product, produced, consumed));
+    return function;
+}
+
 pub fn build(b: *source.Builder) source.Error!source.Module {
     const integer = try b.scalar(u64);
     const unit = try b.scalar(void);

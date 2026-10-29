@@ -104,7 +104,7 @@ pub fn validateWithObservedFactsAndWork(
     work: ?*u64,
 ) Error!ContextualFacts {
     try a.spend(work, 1);
-    try structure.validateComponentWithWork(scratch, image, imports, work);
+    try structure.validateComponentDiagnosedWithWork(scratch, image, imports, diagnostic, work);
     const exportable = try catalogs(scratch, image, component, work);
     const uses = try contracts.validateDiagnosedWithWork(scratch, image, diagnostic, work);
     const effects = try effect_scope.deriveComponentWithWork(scratch, image, imports, work);
