@@ -43,4 +43,3 @@ export function sealFixture() {
   return {boundary, qualification, manifestBytes, admission: {path: '.github/workflows/repository-release.yml', commit: source.commit, sha256: 'f'.repeat(64)},
     node: {name: 'node', version: '26.9.0', platform: 'linux-x86_64', sha256: 'e'.repeat(64)}};
 }
-
