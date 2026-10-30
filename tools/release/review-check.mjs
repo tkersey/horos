@@ -47,6 +47,11 @@ function desiredCheck(result, subject, settings) {
     output: {title: 'Review pending', summary: 'The original qualified owner review has not completed.'}};
   if (result.status === 'absent') return desired;
   assert.ok(['running', 'pending', 'blocked', 'complete'].includes(result.status));
+  if (result.run && !result.bytes) {
+    assert.ok(Number.isSafeInteger(result.run.id) && result.run.id > 0);
+    desired.external_id = `repository-review/unresolved:${result.run.id}:${subject.base}:${subject.head}`;
+    desired.details_url = `https://github.com/${subject.repository}/actions/runs/${result.run.id}`;
+  }
   if (result.bytes) {
     const envelope = reviewEnvelope(result.bytes, subject);
     assert.equal(envelope.status, result.status);

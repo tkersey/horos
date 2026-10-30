@@ -1,0 +1,68 @@
+name: Repository automation
+on:
+  schedule:
+    - cron: '7 * * * *'
+  workflow_dispatch:
+  workflow_run:
+    workflows: ['Zig 0.17 qualification', 'Repository owner review']
+    types: [completed]
+concurrency:
+  group: repository-automation-writer
+  cancel-in-progress: false
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+  checks: read
+jobs:
+  automation:
+    name: Repository-local proposal and promotion
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: repository-automation
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '26.9.0'
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
+        with:
+          version: '0.17.0'
+          mirror: https://zigmirror.com
+          use-cache: false
+          use-tool-cache: true
+      - name: Compile trusted native manifest parser without write credentials
+        id: native
+        env:
+          ZIG_GLOBAL_CACHE_DIR: ${{ runner.temp }}/automation-zig-global
+          ZIG_LOCAL_CACHE_DIR: ${{ runner.temp }}/automation-zig-local
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git diff --quiet
+          zig build-exe tools/release_manifest.zig -O safe \
+            -femit-bin="$RUNNER_TEMP/horos-manifest"
+      - name: Mint repository-local writer authority
+        id: writer
+        if: vars.REPOSITORY_APP_CLIENT_ID != ''
+        env:
+          REPOSITORY_APP_CLIENT_ID: ${{ vars.REPOSITORY_APP_CLIENT_ID }}
+          REPOSITORY_APP_PRIVATE_KEY: ${{ secrets.REPOSITORY_APP_PRIVATE_KEY }}
+        run: node tools/release/app-token.mjs create tkersey/horos writer "$RUNNER_TEMP/automation-app.json"
+      - name: Observe controls and perform admitted repository-local work
+        if: always() && steps.native.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ steps.writer.outputs.token || github.token }}
+          APP_IDENTITY: ${{ steps.writer.outcome == 'success' && format('{0}/automation-app.json', runner.temp) || '' }}
+        run: |
+          args=("$GITHUB_WORKSPACE" "$RUNNER_TEMP/horos-manifest")
+          if [ -n "$APP_IDENTITY" ]; then args+=("$APP_IDENTITY"); fi
+          node tools/release/automation-runner.mjs "${args[@]}"
+      - name: Revoke repository-local writer credential
+        if: always() && steps.writer.outputs.token != ''
+        env:
+          GH_TOKEN: ${{ steps.writer.outputs.token }}
+        run: node tools/release/app-token.mjs revoke

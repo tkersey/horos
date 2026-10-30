@@ -83,7 +83,7 @@ async function admittedPublication(client, release, options) {
 }
 
 async function originalReview(subject, options, pull = null) {
-  const artifact = await options.authenticateReview(subject);
+  const artifact = await options.authenticateReview({...subject, purpose: pull === null ? 'bootstrap' : 'pull'});
   assert.ok(Buffer.isBuffer(artifact.bytes)); id(artifact.run.id); id(artifact.artifact.id);
   const envelope = reviewEnvelope(artifact.bytes, {repository, ...subject});
   assert.equal(envelope.status, 'complete', 'publication boundary review incomplete');
@@ -96,6 +96,7 @@ async function originalReview(subject, options, pull = null) {
   }
   if (impact.disposition === 'breaking') assert.equal(impact.impact, 'major', 'breaking public contracts require a major declaration');
   options.retainedReviews.set(sha256(artifact.bytes), Buffer.from(artifact.bytes));
+  options.retainedProvenance.set(sha256(artifact.bytes), artifact);
   return {context: envelope.context, impact, artifact: {runId: artifact.run.id,
     artifactId: artifact.artifact.id, sha256: sha256(artifact.bytes)}};
 }
@@ -160,7 +161,8 @@ export async function computeHorosPublicationBoundary({source: input, publicatio
   for (const name of ['admitPublishedRelease', 'authenticateReview', 'readVersion', 'classifyVersionPreparation']) {
     assert.equal(typeof inputOptions[name], 'function', `${name} trusted procedure required`);
   }
-  const options = {...inputOptions, retainedReviews: new Map(), client: inputOptions.client ?? new HorosProposalClient()}, client = options.client;
+  const options = {...inputOptions, retainedReviews: new Map(), retainedProvenance: new Map(),
+    client: inputOptions.client ?? new HorosProposalClient()}, client = options.client;
   const repo = await get(client, '');
   assert.equal(repo.full_name, repository); assert.equal(repo.id, repositoryId); assert.equal(repo.default_branch, 'main');
   const main = await get(client, '/git/ref/heads/main');
@@ -206,6 +208,7 @@ export async function computeHorosPublicationBoundary({source: input, publicatio
   }
   let stop, initialVersion, bootstrapEvidence = null;
   if (baseline === null) {
+    bootstrap ??= await options.findBootstrap?.(source);
     assert.ok(bootstrap, 'missing admitted publication requires an authenticated bootstrap review');
     const subject = {base: oid(bootstrap.base), head: oid(bootstrap.head), tree: oid(bootstrap.tree)};
     const actual = await commit(client, subject.head); assert.equal(actual.tree.sha, subject.tree);
@@ -255,5 +258,5 @@ export async function computeHorosPublicationBoundary({source: input, publicatio
   }
   const after = await get(client, '/git/ref/heads/main'); assert.deepEqual(after, main, 'publication source changed while computing boundary');
   return {...result(source, pending, version, !needed ? 'idle' : version === pending ? 'ready' : 'prepare', baseline, changes, bootstrapEvidence),
-    reviewArtifacts: options.retainedReviews};
+    reviewArtifacts: options.retainedReviews, reviewProvenance: options.retainedProvenance};
 }

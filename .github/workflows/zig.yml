@@ -32,7 +32,9 @@ jobs:
       - name: Verify native Linux review tool and sandbox interfaces
         run: |
           sudo apt-get update
-          sudo apt-get install --yes bubblewrap
+          sudo apt-get install --yes bubblewrap apparmor
+          sudo install -o root -g root -m 0644 tools/release/bwrap.apparmor /etc/apparmor.d/repository-review-bwrap
+          sudo apparmor_parser --replace /etc/apparmor.d/repository-review-bwrap
           bwrap --version
           node tools/release/review-tools-smoke.mjs "$RUNNER_TEMP/release-review-smoke"
   source:

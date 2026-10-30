@@ -282,6 +282,37 @@ async function successorProposal({client, candidate, actor, pull, timeline, bran
 
 function held(reason, pull) { return {status: 'held', reason, ...(pull ? {number: pull.number} : {})}; }
 
+export async function pauseHorosProposals({actor, client = new HorosProposalClient()}) {
+  await repository(client); identifier(actor.id);
+  const results = [];
+  const requiresPause = (pull, selectedMode) => selectedMode !== 'promote' || pull.draft ||
+    pull.labels.some(label => label.name === 'automation-hold');
+  for (const value of (await pulls(client)).filter(pull => pull.state === 'open')) {
+    const pull = await get(client, `/pulls/${value.number}`);
+    assert.equal(pull.user?.id, actor.id); assert.equal(pull.user?.login, actor.login);
+    if (!requiresPause(pull, await mode(client))) continue;
+    const current = await history(client, pull);
+    if (current.autoMerge === null) continue;
+    assert.equal(current.autoMerge.enabledBy?.login, actor.login, 'cannot cancel unknown auto-merge owner');
+    const latest = await get(client, `/pulls/${pull.number}`);
+    assert.equal(latest.user?.id, actor.id); assert.equal(latest.user?.login, actor.login);
+    if (latest.state !== 'open' || !requiresPause(latest, await mode(client))) continue;
+    const latestHistory = await history(client, latest);
+    if (latestHistory.autoMerge === null) continue;
+    assert.equal(latestHistory.autoMerge.enabledBy?.login, actor.login, 'cannot cancel unknown auto-merge owner');
+    const deciding = await get(client, `/pulls/${pull.number}`);
+    assert.equal(deciding.user?.id, actor.id); assert.equal(deciding.user?.login, actor.login);
+    if (deciding.state !== 'open' || !requiresPause(deciding, await mode(client))) continue;
+    assert.equal(deciding.node_id, latest.node_id);
+    await writeObserved(() => client.graphql(disableMerge, {input: {pullRequestId: deciding.node_id}}), async () => {
+      const observed = await get(client, `/pulls/${pull.number}`);
+      assert.equal((await history(client, observed)).autoMerge, null, 'auto-merge cancellation not observed');
+    });
+    results.push(held('automation-owned auto-merge disabled by current controls or owner hold', pull));
+  }
+  return results;
+}
+
 export async function proposeHoros({candidate: input, actor, admitCandidate, admitRetirement, admitResume,
   client = new HorosProposalClient()}) {
   const candidate = candidateCopy(input), description = proposalDescription(candidate);

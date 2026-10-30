@@ -90,7 +90,9 @@ jobs:
         if: steps.plan.outputs.ready == 'true'
         run: |
           sudo apt-get update
-          sudo apt-get install --yes bubblewrap
+          sudo apt-get install --yes bubblewrap apparmor
+          sudo install -o root -g root -m 0644 tools/release/bwrap.apparmor /etc/apparmor.d/repository-review-bwrap
+          sudo apparmor_parser --replace /etc/apparmor.d/repository-review-bwrap
           bwrap --version
           mkdir "$RUNNER_TEMP/repository-review"
           node tools/release/cli.mjs setup-review-tools "$RUNNER_TEMP/repository-review/tools" > "$RUNNER_TEMP/repository-review/tools.json"
@@ -108,9 +110,28 @@ jobs:
           archive: false
           if-no-files-found: error
           retention-days: 14
+      - name: Mint short-lived check reporting authority
+        id: check_token
+        if: steps.plan.outputs.ready == 'true'
+        env:
+          REPOSITORY_APP_CLIENT_ID: ${{ vars.REPOSITORY_APP_CLIENT_ID }}
+          REPOSITORY_APP_PRIVATE_KEY: ${{ secrets.REPOSITORY_APP_PRIVATE_KEY }}
+        run: node tools/release/app-token.mjs create tkersey/horos check "$RUNNER_TEMP/review-check-app.json"
+      - name: Preserve original invocation identity beyond artifact expiry
+        id: start_check
+        if: steps.check_token.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ steps.check_token.outputs.token }}
+        run: node tools/release/review-start.mjs "$RUNNER_TEMP/repository-review/review-runtime.json" "$RUNNER_TEMP/review-check-app.json"
+      - name: Revoke check reporting authority before model execution
+        id: revoke_check
+        if: always() && steps.check_token.outputs.token != ''
+        env:
+          GH_TOKEN: ${{ steps.check_token.outputs.token }}
+        run: node tools/release/app-token.mjs revoke
       - name: Execute one ordinary owner turn
         id: review
-        if: steps.plan.outputs.ready == 'true'
+        if: steps.plan.outputs.ready == 'true' && steps.start_check.outcome == 'success' && steps.revoke_check.outcome == 'success'
         timeout-minutes: 8
         env:
           GH_TOKEN: ${{ steps.observer.outputs.token }}

@@ -1,0 +1,6 @@
+abi <abi/4.0>,
+include <tunables/global>
+
+profile repository-review-bwrap /usr/bin/bwrap flags=(default_allow) {
+  userns,
+}

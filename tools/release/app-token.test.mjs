@@ -46,6 +46,8 @@ for (const role of Object.keys(jobPermissions)) {
     assert.equal(result.identity.appId, 5); assert.equal(result.identity.role, role);
     assert.equal(result.identity.login, 'local-release[bot]');
     assert.deepEqual(result.identity.permissions, jobPermissions[role]);
+    assert.equal(result.identity.permissions.checks, ['writer', 'check'].includes(role) ? 'write' : 'read');
+    assert.equal(result.identity.permissions.attestations, 'read');
     assert.equal(result.identity.privateKey, undefined);
     if (role === 'observer') assert.ok(Object.values(result.identity.permissions).every(permission => permission === 'read'));
     await revokeJobToken(result.token, value.transport);

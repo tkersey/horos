@@ -5,6 +5,7 @@ import {parseEvidenceJson} from './evidence-json.mjs';
 import {sha256} from './encoding.mjs';
 import {validateRetainedReview} from './review-owner.mjs';
 import {repositories} from './record.mjs';
+import {readPublishedReview} from './retained-review.mjs';
 
 export function reviewNames(base, head, purpose = 'pull') {
   assert.match(base, /^[0-9a-f]{40}$/); assert.match(head, /^[0-9a-f]{40}$/);
@@ -43,7 +44,9 @@ export function reviewEnvelope(bytes, expected) {
   return value;
 }
 
-export async function readReviewResult({repository, base, head, tree, controlCommit, workflowSha256, purpose = 'pull'}, command = githubCommand) {
+export async function readReviewResult({repository, base, head, tree, controlCommit, workflowSha256, purpose = 'pull'}, command = githubCommand,
+  publishedReader = readPublishedReview) {
+  const subject = {repository, base, head, tree, purpose};
   const names = reviewNames(base, head, purpose), reader = new GitHubReader(repository, command);
   const raw = await Promise.all([names.result, names.start].map(name =>
     workflowPages(reader, `actions/artifacts?name=${name}`, 'artifacts')));
@@ -69,7 +72,19 @@ export async function readReviewResult({repository, base, head, tree, controlCom
     assert.ok(Number.isFinite(Date.parse(item.created_at)), 'missing artifact creation time');
     assert.ok(Number.isSafeInteger(item.workflow_run?.id) && item.workflow_run.id > 0);
   }
-  if (values.length === 0) return {status: 'absent'};
+  if (values.length === 0) {
+    const published = await publishedReader(subject, command);
+    if (published !== null) return published;
+    {
+      const checks = await workflowPages(reader, `commits/${head}/check-runs?filter=all`, 'check_runs');
+      const name = purpose === 'bootstrap' ? 'Repository bootstrap review' : 'Repository owner review';
+      if (checks.some(check => check.name === name && check.head_sha === head &&
+        /^repository-review\/(?:v1:[1-9][0-9]*:[1-9][0-9]*:[0-9a-f]{64}|unresolved:[1-9][0-9]*:[0-9a-f]{40}:[0-9a-f]{40})$/.test(check.external_id))) {
+        return {status: 'blocked', reason: 'An original owner invocation was reported, but its required evidence is unavailable; recover it before another review.'};
+      }
+    }
+    return {status: 'absent'};
+  }
   const latest = values.sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at) || b.id - a.id)[0];
   const original = resultArtifacts.filter(item => item.workflow_run.id === latest.workflow_run.id);
   assert.ok(original.length <= 1, 'ambiguous original review result');
@@ -77,6 +92,12 @@ export async function readReviewResult({repository, base, head, tree, controlCom
     const run = await reader.api(`actions/runs/${latest.workflow_run.id}`);
     return {status: run.status === 'completed' ? 'blocked' : 'running',
       reason: 'original owner invocation has no completed result; original evidence must be recovered before another invocation', run};
+  }
+  if (original[0].expired) {
+    const published = await publishedReader(subject, command);
+    assert.ok(published, 'original review artifact expired and no authenticated publication retains it');
+    assert.equal(`sha256:${sha256(published.bytes)}`, original[0].digest, 'published evidence differs from expired original artifact');
+    return published;
   }
   if (controlCommit === undefined) {
     controlCommit = original[0].workflow_run.head_sha;

@@ -127,6 +127,66 @@ input captures the declaration with its base/head; a later semantic edit to it
 invalidates admission. A PR body alone is never review authority. Generated
 version-preparation PRs include the approved packaging-impact declaration.
 
+## Automated proposal controls
+
+`repository-automation.yml` observes hourly at minute seven, on manual dispatch,
+and after qualification or owner-review completion. Its writer concurrency group
+never cancels an in-flight writer. It checks out the accepted `main` revision and
+compiles `tools/release_manifest.zig` before requesting any App credential. The
+writer executes only that trusted native parser on captured Git manifest bytes;
+it does not build or run candidate code. Checkout credentials are not retained.
+
+The `repository-automation` environment supplies the repository-local App key
+and client ID. The writer token is restricted to Horos and is revoked after the
+job. `REPOSITORY_AUTOMATION` defaults to `off`. Off mode permits authenticated
+required-review check reporting and cancellation of automation-owned pending
+auto-merge, while prohibiting source, proposal, status-comment and promotion
+writes. Without a configured App, the job reports read-only source and release
+observations and explicitly leaves auto-merge cancellation unverified.
+
+`propose` computes the current publication boundary, admits its original review
+and publication evidence, and creates or updates the one ordinary preparation PR.
+Native admission recomputes the current approved version decision and exact
+version-only bytes before source writes. `promote` additionally requires the
+original successful qualification, authenticated complete owner evidence,
+resolved threads, exact check producers, effective protection and all actual
+required human approvals. A zero configured minimum does not waive the effective
+repository approval policy. A changed base, source, control or decision blocks
+promotion. Publication is a separately enabled operation.
+
+An already active owner epoch remains frozen. Successor preparation requires the
+original authenticated closed epoch and a reconstructed native candidate. The
+only pre-review absence exception is a unique original first-attempt qualification
+that has completed with a failure; a missing, pending, skipped, neutral or successful
+run cannot supply retirement authority. Existing failure history remains intact.
+
+An `automation-hold` label or draft state cancels an existing automation-owned
+auto-merge request even in `promote` mode. Unknown or human-owned auto-merge is
+never cancelled by this adapter. Resumption requires reopening the PR, removing
+the hold label, and a new unedited comment from the numeric repository owner:
+
+```text
+/repository-automation resume HEAD
+```
+
+Replace `HEAD` with the exact held PR head. The whole comment must match that
+command, and its creation time must follow the original hold/closure timeline.
+Edited comments, an older command, a different author or source, and a mutable PR
+body cannot grant resume authority. The adapter reobserves the owner, comment,
+head, labels and hold events before accepting it. Resume does not grant review,
+qualification or merge credit.
+
+Enabled automation maintains one App-owned status comment on its preparation PR.
+An unchanged status is a no-op; uncertain writes are read back before retry.
+Status comments explain the outstanding gate and do not carry review authority.
+Normal required checks also cover ordinary qualified local PRs.
+
+The executable entry point is
+`node tools/release/automation-runner.mjs CONTROL_DIRECTORY TRUSTED_MANIFEST_TOOL [APP_IDENTITY_JSON]`.
+The optional identity file is the exact output of the scoped App-token helper;
+without it the runner cannot perform writer operations. Local adapter tests and
+workflow lint do not establish live App-created PR triggers or protected merging.
+
 ## Required qualification inventory
 
 The authoritative commands and platform rules remain in [.github/CI.md](../.github/CI.md).
@@ -228,7 +288,7 @@ blocked, forged, stale-declaration or mismatched-runtime evidence.
 The final runbook must record the implemented invocation, exact delivered heads,
 full qualification results, review closeout, and live commissioning observations.
 Until those exist, this implementation is not PR-ready or commissioned. Required
-remaining components are final operational writer/publisher workflow wiring,
+remaining components are final publisher workflow integration and live writer verification,
 complete cross-repository handoff integration, full exact-head product
 qualification, original serial owner review, and authorized live commissioning.
 The implemented adapters and contract tests do not by themselves establish those
@@ -252,3 +312,53 @@ Live App-created PR triggers, protected merging, immutable publication, and
 interrupted-write recovery remain unverified. No implementation fixture is a
 production release, and implementation PRs do not require a production dependency
 update merely because an upstream implementation merged.
+
+### Local publication
+
+`repository-release.yml` runs on accepted `main`, after qualification/review
+completion and on its own schedule. Its default controls are
+`REPOSITORY_AUTOMATION=off` and `RELEASE_PUBLICATION_ENABLED=false`. A read-only
+App token admits the original landed qualification and owner review; the native
+manifest parser is compiled before introducing App credentials. The publisher
+never builds a candidate or an upstream payload with write authority.
+
+The executable entry points are:
+
+```sh
+node tools/release/publication-runner.mjs prepare "$CONTROL" "$MANIFEST_TOOL" "$OUTPUT" "$OBSERVER_IDENTITY"
+node tools/release/publication-runner.mjs publish "$CONTROL" "$MANIFEST_TOOL" "$OUTPUT" "$PUBLISHER_IDENTITY"
+```
+
+Preparation derives `release.json` from the exact original `source.tar` and
+`source.json`, complete qualification outcomes, reviewed publication boundary,
+original owner closeouts, and original authenticated review artifact envelopes.
+It retains compiler and reviewer binary identities separately. It does not
+rebuild a package or fetch a more recent dependency. A pending landed run is
+reported as pending; failed, duplicated, expired, or missing required evidence
+cannot authorize publication.
+
+The workflow signs the finalized record and assets with GitHub artifact
+attestations before minting the separate publication token. Publication verifies
+the expected workflow signer and re-observes the source, controls, original
+qualification, reviews, and exact bytes before staging and before publishing.
+It requires immutable-release protection, uploads only missing identical assets,
+and verifies the platform release attestation and every published byte. Existing
+matching completed publications are verified no-ops. Conflicting tags, drafts,
+or asset bytes remain untouched. A matching interrupted draft resumes from its
+observed missing assets; expired evidence or an advanced source blocks that
+attempt and requires operator diagnosis without moving the tag.
+
+The workflow uses pinned `actions/attest` in provenance mode with
+`create-storage-record: false`; its GitHub token has only the additional
+`id-token: write` and `attestations: write` authorities needed for signing.
+The separately minted local App token provides release writes and read-only
+administrative inspection of immutable-release protection. Live immutable
+publication and interrupted-write recovery remain commissioning checks requiring
+an owner-authorized environment.
+
+The Ubuntu review sandbox installs an application-scoped AppArmor profile for
+`/usr/bin/bwrap` allowing user namespace creation. Ubuntu documents this
+[per-application prerequisite](https://ubuntu.com/blog/ubuntu-23-10-restricted-unprivileged-user-namespaces).
+The host-wide restrictions remain enabled. The qualification smoke test must
+still prove protected capture writes fail, permitted workspace writes succeed,
+and the original CAS sandbox interface works.

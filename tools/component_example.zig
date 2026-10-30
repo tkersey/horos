@@ -280,12 +280,13 @@ fn prepareRelease(
         if (!std.mem.eql(u8, trimmed, snapshot.commit)) return error.SourceCommitChanged;
     }
     const hash = try consumePackage(r, zig, snapshot.source, output);
-    try retainRelease(r, snapshot, hash, destination, owner);
+    try retainRelease(r, snapshot, hash, zig, destination, owner);
 }
 fn retainRelease(
     r: Runner,
     snapshot: release_source.Snapshot,
     hash: []const u8,
+    zig: []const u8,
     destination: []const u8,
     owner: ?release_source.BuildOutput,
 ) !void {
@@ -298,6 +299,8 @@ fn retainRelease(
         .packageIdentity = hash,
         .files = snapshot.files,
         .compiler = "0.17.0",
+        .compilerSha256 = try release_source.compilerSha256(r, zig),
+        .compilerPlatform = release_source.compilerPlatform(),
     };
     const bytes = try release_source.readArchive(r, snapshot.archive);
     var digest: [32]u8 = undefined;
@@ -374,7 +377,7 @@ fn checkReleaseArchive(r: Runner, args: anytype) !void {
     const source = try r.path(&.{ output, "source" });
     const snapshot = try release_source.verify(r, repository, commit, tree, archive, source);
     const hash = try consumePackage(r, zig, source, output);
-    try retainRelease(r, snapshot, hash, destination, null);
+    try retainRelease(r, snapshot, hash, zig, destination, null);
 }
 
 pub fn main(init: std.process.Init) !void {

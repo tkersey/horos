@@ -1,0 +1,95 @@
+name: Repository publication
+on:
+  schedule:
+    - cron: '23 * * * *'
+  workflow_dispatch:
+  workflow_run:
+    workflows: ['Zig 0.17 qualification', 'Repository owner review']
+    types: [completed]
+concurrency:
+  group: repository-publication
+  cancel-in-progress: false
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+  checks: read
+  id-token: write
+  attestations: write
+jobs:
+  publish:
+    name: Admit and publish qualified source
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: repository-automation
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '26.9.0'
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
+        with:
+          version: '0.17.0'
+          mirror: https://zigmirror.com
+          use-cache: false
+          use-tool-cache: true
+      - name: Compile accepted native manifest parser
+        env:
+          ZIG_GLOBAL_CACHE_DIR: ${{ runner.temp }}/publication-zig-global
+          ZIG_LOCAL_CACHE_DIR: ${{ runner.temp }}/publication-zig-local
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git diff --quiet
+          zig build-exe tools/release_manifest.zig -O safe -femit-bin="$RUNNER_TEMP/horos-manifest"
+      - name: Mint read-only repository observation authority
+        id: observer
+        if: vars.REPOSITORY_APP_CLIENT_ID != ''
+        env:
+          REPOSITORY_APP_CLIENT_ID: ${{ vars.REPOSITORY_APP_CLIENT_ID }}
+          REPOSITORY_APP_PRIVATE_KEY: ${{ secrets.REPOSITORY_APP_PRIVATE_KEY }}
+        run: node tools/release/app-token.mjs create tkersey/horos observer "$RUNNER_TEMP/publication-observer.json"
+      - name: Admit original qualification and reviews and seal exact artifacts
+        id: prepare
+        env:
+          GH_TOKEN: ${{ steps.observer.outputs.token || github.token }}
+          APP_IDENTITY: ${{ steps.observer.outcome == 'success' && format('{0}/publication-observer.json', runner.temp) || '' }}
+        run: |
+          args=(prepare "$GITHUB_WORKSPACE" "$RUNNER_TEMP/horos-manifest" "$RUNNER_TEMP/publication")
+          if [ -n "$APP_IDENTITY" ]; then args+=("$APP_IDENTITY"); fi
+          node tools/release/publication-runner.mjs "${args[@]}"
+      - name: Revoke read-only credential
+        id: revoke_observer
+        if: always() && steps.observer.outputs.token != ''
+        env:
+          GH_TOKEN: ${{ steps.observer.outputs.token }}
+        run: node tools/release/app-token.mjs revoke
+      - name: Attest the admitted record and exact final assets
+        id: attest
+        if: steps.prepare.outputs.status == 'ready' && steps.revoke_observer.outcome == 'success'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-path: ${{ runner.temp }}/publication/assets/*
+          create-storage-record: false
+      - name: Mint repository-local publication authority
+        id: publisher
+        if: steps.attest.outcome == 'success'
+        env:
+          REPOSITORY_APP_CLIENT_ID: ${{ vars.REPOSITORY_APP_CLIENT_ID }}
+          REPOSITORY_APP_PRIVATE_KEY: ${{ secrets.REPOSITORY_APP_PRIVATE_KEY }}
+        run: node tools/release/app-token.mjs create tkersey/horos publisher "$RUNNER_TEMP/publication-app.json"
+      - name: Revalidate, stage, publish, and verify immutable release
+        if: steps.publisher.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ steps.publisher.outputs.token }}
+        run: |
+          node tools/release/publication-runner.mjs publish "$GITHUB_WORKSPACE" \
+            "$RUNNER_TEMP/horos-manifest" "$RUNNER_TEMP/publication" "$RUNNER_TEMP/publication-app.json"
+      - name: Revoke publication credential
+        if: always() && steps.publisher.outputs.token != ''
+        env:
+          GH_TOKEN: ${{ steps.publisher.outputs.token }}
+        run: node tools/release/app-token.mjs revoke

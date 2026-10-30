@@ -4,9 +4,10 @@ import {appendFileSync, writeFileSync} from 'node:fs';
 import {parseEvidenceJson} from './evidence-json.mjs';
 import {repositories} from './record.mjs';
 
-const readPermissions = Object.freeze({metadata: 'read', contents: 'read', actions: 'read', pull_requests: 'read', variables: 'read'});
+const readPermissions = Object.freeze({metadata: 'read', contents: 'read', actions: 'read', attestations: 'read', checks: 'read', pull_requests: 'read', variables: 'read'});
 export const jobPermissions = Object.freeze({
   observer: readPermissions,
+  check: Object.freeze({...readPermissions, checks: 'write'}),
   writer: Object.freeze({...readPermissions, contents: 'write', pull_requests: 'write', checks: 'write', administration: 'read'}),
   publisher: Object.freeze({...readPermissions, contents: 'write', administration: 'read'}),
 });

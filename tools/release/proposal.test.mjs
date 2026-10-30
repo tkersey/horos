@@ -4,7 +4,7 @@ import {mkdtempSync, rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import test from 'node:test';
-import {proposalBranch, proposalMessage, proposalCommitOid, proposalDescription, proposeHoros, promoteHoros} from './proposal.mjs';
+import {proposalBranch, proposalMessage, proposalCommitOid, proposalDescription, proposeHoros, promoteHoros, pauseHorosProposals} from './proposal.mjs';
 
 const actor = {id: 42, login: 'horos-release[bot]'};
 const person = {name: 'Horos Release', email: 'release@example.test', date: '2026-10-30T00:00:00Z'};
@@ -472,4 +472,72 @@ test('trusted cancellation resume preserves original failure and closure history
 test('successor restores required assignee after admitted metadata replacement', async t => {
   const f = fixture(t); await f.propose(); const next = f.successor(); f.state.pulls[0].assignees = [];
   await f.propose(next); assert.deepEqual(f.state.pulls[0].assignees, [{login: 'tkersey'}]);
+});
+
+for (const mode of ['off', 'propose']) test(`pause independently cancels owned auto-merge in ${mode} mode without decoding candidate`, async t => {
+  const f = fixture(t); await proposeHoros(f.options);
+  f.state.autoMerge = {mergeMethod: 'REBASE', enabledBy: {login: actor.login}};
+  f.state.mode = mode; f.state.pulls[0].head.sha = 'e'.repeat(40);
+  f.state.calls.length = 0;
+  const result = await pauseHorosProposals({actor, client: f.options.client});
+  assert.equal(result.length, 1); assert.equal(f.state.autoMerge, null);
+  assert.equal(f.state.calls.filter(value => value.method === 'MUTATION').length, 1);
+  assert.ok(!f.state.calls.some(value => value.path.startsWith('/git/commits/')));
+});
+
+test('pause with no existing auto-merge converges without writes', async t => {
+  const f = fixture(t); await proposeHoros(f.options); f.state.calls.length = 0; f.state.mode = 'off';
+  assert.deepEqual(await pauseHorosProposals({actor, client: f.options.client}), []);
+  assert.ok(!f.state.calls.some(value => ['POST', 'PATCH', 'MUTATION'].includes(value.method)));
+});
+
+test('pause refuses an auto-merge enabled by an unknown actor', async t => {
+  const f = fixture(t); await proposeHoros(f.options); f.state.mode = 'off';
+  f.state.autoMerge = {mergeMethod: 'REBASE', enabledBy: {login: 'human'}}; f.state.calls.length = 0;
+  await assert.rejects(pauseHorosProposals({actor, client: f.options.client}), /unknown auto-merge owner/);
+  assert.ok(!f.state.calls.some(value => value.method === 'MUTATION'));
+});
+
+test('pause preserves an uncertain successful cancellation through readback', async t => {
+  const f = fixture(t); await proposeHoros(f.options); f.state.mode = 'off';
+  f.state.autoMerge = {mergeMethod: 'REBASE', enabledBy: {login: actor.login}};
+  f.state.failAfter = value => value.path === 'PauseProposal';
+  assert.equal((await pauseHorosProposals({actor, client: f.options.client})).length, 1);
+  assert.equal(f.state.autoMerge, null);
+});
+
+for (const hold of ['label', 'draft']) test(`owner ${hold} cancels previously enabled owned auto-merge even in promote mode`, async t => {
+  const f = fixture(t); await proposeHoros(f.options); f.state.mode = 'promote';
+  f.state.autoMerge = {mergeMethod: 'REBASE', enabledBy: {login: actor.login}};
+  assert.deepEqual(await pauseHorosProposals({actor, client: f.options.client}), []);
+  assert.notEqual(f.state.autoMerge, null);
+  if (hold === 'label') f.state.pulls[0].labels.push({name: 'automation-hold'});
+  else f.state.pulls[0].draft = true;
+  assert.equal((await pauseHorosProposals({actor, client: f.options.client})).length, 1);
+  assert.equal(f.state.autoMerge, null);
+});
+
+test('a hold removed during observation cannot cancel an active promote request', async t => {
+  const f = fixture(t); await proposeHoros(f.options); f.state.mode = 'promote';
+  f.state.autoMerge = {mergeMethod: 'REBASE', enabledBy: {login: actor.login}};
+  f.state.pulls[0].labels.push({name: 'automation-hold'});
+  let histories = 0;
+  f.state.onGraphql = operation => {if (operation === 'ProposalHistory' && ++histories === 1) f.state.pulls[0].labels = [];};
+  f.state.calls.length = 0;
+  assert.deepEqual(await pauseHorosProposals({actor, client: f.options.client}), []);
+  assert.notEqual(f.state.autoMerge, null); assert.ok(!f.state.calls.some(value => value.method === 'MUTATION'));
+});
+
+for (const changed of ['mode', 'hold']) test(`pause rechecks ${changed} after its final auto-merge observation`, async t => {
+  const f = fixture(t); await proposeHoros(f.options); f.state.mode = changed === 'mode' ? 'off' : 'promote';
+  f.state.autoMerge = {mergeMethod: 'REBASE', enabledBy: {login: actor.login}};
+  if (changed === 'hold') f.state.pulls[0].labels.push({name: 'automation-hold'});
+  let histories = 0;
+  f.state.onGraphql = operation => {
+    if (operation !== 'ProposalHistory' || ++histories !== 2) return;
+    f.state.mode = 'promote'; f.state.pulls[0].labels = [];
+  };
+  f.state.calls.length = 0;
+  assert.deepEqual(await pauseHorosProposals({actor, client: f.options.client}), []);
+  assert.notEqual(f.state.autoMerge, null); assert.ok(!f.state.calls.some(value => value.method === 'MUTATION'));
 });

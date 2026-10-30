@@ -66,7 +66,7 @@ async function fixture() {
   };
   const source = await admitHorosQualification({runId: 17, commit: candidate.head, tree, event: 'pull_request'}, command);
   const body = impactBlock(versionPreparationImpact);
-  const context = {repository, base, head: candidate.head, tree, impact: impactInput(body, base, candidate.head),
+  const context = {repository, base, head: candidate.head, tree, pullNumber: 42, impact: impactInput(body, base, candidate.head),
     qualification: {runId: 17, workflow: source.workflow, evidenceSha256: sha256(source.evidence), originalEvidence: source.evidence.toString('base64')},
     acceptedRequirements: expected.acceptedRequirements};
   const retained = retainedFixture(context, expected.reviewSettings);
@@ -130,7 +130,7 @@ async function fixture() {
   };
   const options = {expected, client, command, qualificationRunId: 17,
     authenticateReview: async subject => {
-      assert.deepEqual(subject, {base, head: candidate.head, tree}); state.authenticateCalls++; return artifact;
+      assert.deepEqual(subject, {base, head: candidate.head, tree, purpose: 'pull'}); state.authenticateCalls++; return artifact;
     },
     admitCandidate: async ({candidate: admitted}) => {assert.equal(admitted.head, candidate.head); state.admissions++;},
   };
@@ -148,6 +148,15 @@ test('protected promotion admits exact original owner and native proofs using on
   assert.equal(result.record.qualificationRunId, 17); assert.equal(result.record.review.artifactId, 111);
   assert.equal(value.state.admissions, 1); assert.equal(value.state.authenticateCalls, 1);
   assert.equal(value.state.calls.filter(path => path === '/branches/main').length, 2);
+});
+
+for (const kind of ['different pull', 'bootstrap']) test(`promotion distinguishes an otherwise complete ${kind} owner result`, async () => {
+  const value = await fixture();
+  if (kind === 'different pull') value.context.pullNumber = 43;
+  else value.context.bootstrap = {boundary: {base, head: value.candidate.head, tree}};
+  value.envelope.retainedEvidence = Buffer.from(JSON.stringify(retainedFixture(value.context, value.expected.reviewSettings))).toString('base64');
+  value.updateEnvelope();
+  await assert.rejects(value.promote, kind === 'different pull' ? /different pull request/ : /bootstrap review cannot/);
 });
 
 for (const [name, mutate] of [

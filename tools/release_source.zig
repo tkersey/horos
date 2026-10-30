@@ -167,6 +167,41 @@ fn stable(a: std.Io.File.Stat, b: std.Io.File.Stat) bool {
         std.meta.eql(a.ctime, b.ctime);
 }
 
+pub fn compilerPlatform() []const u8 {
+    return std.fmt.comptimePrint("{s}-{s}", .{
+        @tagName(@import("builtin").os.tag), @tagName(@import("builtin").cpu.arch),
+    });
+}
+
+pub fn compilerSha256(r: anytype, supplied: []const u8) ![]const u8 {
+    if (!std.fs.path.isAbsolute(supplied)) return error.AbsolutePathRequired;
+    const path = try Dir.cwd().realPathFileAlloc(r.io, supplied, r.a);
+    var file = try Dir.cwd().openFile(r.io, path, .{
+        .follow_symlinks = false,
+        .allow_directory = false,
+    });
+    defer file.close(r.io);
+    const before = try file.stat(r.io);
+    if (before.kind != .file or before.size == 0 or before.size > 512 << 20)
+        return error.InvalidCompilerExecutable;
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    var reader = file.reader(r.io, &.{});
+    var buffer: [32768]u8 = undefined;
+    var remaining = before.size;
+    while (remaining > 0) {
+        const length: usize = @intCast(@min(remaining, buffer.len));
+        try reader.interface.readSliceAll(buffer[0..length]);
+        hash.update(buffer[0..length]);
+        remaining -= length;
+    }
+    const after = try file.stat(r.io);
+    const named = try Dir.cwd().statFile(r.io, path, .{ .follow_symlinks = false });
+    if (!stable(before, after) or !stable(after, named)) return error.SourceChanged;
+    var digest: [32]u8 = undefined;
+    hash.final(&digest);
+    return r.a.dupe(u8, &std.fmt.bytesToHex(digest, .lower));
+}
+
 pub fn readArchive(r: anytype, path: []const u8) ![]const u8 {
     var file = try Dir.cwd().openFile(r.io, path, .{
         .follow_symlinks = false,
@@ -609,4 +644,22 @@ test "build-owned output rejects special destinations before replacing either ac
     try Dir.cwd().deleteFile(r.io, receipt);
     try Dir.cwd().createDir(r.io, receipt, .fromMode(0o700));
     try std.testing.expectError(error.InvalidBuildOutput, owner.retain(r.io, "wrong", "wrong"));
+}
+
+test "compiler identity hashes exact bounded bytes and rejects empty or relative input" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const r: TestRunner = .{ .a = arena.allocator() };
+    const root = try temporary(r);
+    defer removeFixture(r, root);
+    const path = try r.path(&.{ root, "compiler" });
+    try r.write(path, "abc");
+    try std.testing.expectEqualStrings(
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        try compilerSha256(r, path),
+    );
+    try r.write(path, "");
+    try std.testing.expectError(error.InvalidCompilerExecutable, compilerSha256(r, path));
+    try std.testing.expectError(error.AbsolutePathRequired, compilerSha256(r, "relative"));
+    try std.testing.expect(compilerPlatform().len > 0);
 }

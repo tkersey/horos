@@ -289,7 +289,7 @@ async function reviewedEvidence({candidate, pull, qualificationRunId}, options) 
   assert.equal(qualification.workflow.path, options.expected.qualificationWorkflow.path);
   assert.equal(qualification.workflow.sha256, options.expected.qualificationWorkflow.sha256,
     'original qualification workflow differs from accepted base');
-  const artifact = await options.authenticateReview({base: candidate.base, head: candidate.head, tree: candidate.tree});
+  const artifact = await options.authenticateReview({base: candidate.base, head: candidate.head, tree: candidate.tree, purpose: 'pull'});
   assert.ok(Buffer.isBuffer(artifact.bytes), 'authenticated original review artifact missing');
   assert.deepEqual(artifact.workflow, options.expected.reviewWorkflow, 'review workflow/control source differs');
   assert.equal(artifact.run.head_sha, options.expected.control.commit);
@@ -298,6 +298,8 @@ async function reviewedEvidence({candidate, pull, qualificationRunId}, options) 
   const envelope = reviewEnvelope(artifact.bytes, {repository: repositoryName,
     base: candidate.base, head: candidate.head, tree: candidate.tree});
   assert.equal(envelope.status, 'complete', 'owner review is incomplete');
+  assert.equal(envelope.context.pullNumber, pull.number, 'owner reviewed a different pull request');
+  assert.equal(envelope.context.bootstrap, undefined, 'bootstrap review cannot replace candidate review');
   assert.ok(typeof envelope.retainedEvidence === 'string');
   const bytes = Buffer.from(envelope.retainedEvidence, 'base64');
   assert.equal(bytes.toString('base64'), envelope.retainedEvidence, 'noncanonical retained review evidence');
