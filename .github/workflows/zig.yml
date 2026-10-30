@@ -30,7 +30,11 @@ jobs:
       - name: Require executed release boundary tests
         run: node tools/release/test.mjs
       - name: Verify native Linux review tool and sandbox interfaces
-        run: node tools/release/review-tools-smoke.mjs "$RUNNER_TEMP/release-review-smoke"
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
+          bwrap --version
+          node tools/release/review-tools-smoke.mjs "$RUNNER_TEMP/release-review-smoke"
   source:
     name: Source preflight
     runs-on: ubuntu-24.04

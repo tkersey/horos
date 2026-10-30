@@ -89,6 +89,9 @@ jobs:
       - name: Install exact accepted review tools
         if: steps.plan.outputs.ready == 'true'
         run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
+          bwrap --version
           mkdir "$RUNNER_TEMP/repository-review"
           node tools/release/cli.mjs setup-review-tools "$RUNNER_TEMP/repository-review/tools" > "$RUNNER_TEMP/repository-review/tools.json"
       - name: Prepare immutable subject and original evidence
