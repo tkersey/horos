@@ -78,6 +78,9 @@ for (const status of ['pending', 'blocked', 'absent', 'running']) test(`reports 
 test('updates the one owned check as original evidence completes', async () => {
   const value = fixture('pending'); await value.run();
   value.state.result = fixture().state.result;
+  value.state.result.run = {id: 55, html_url: `https://github.com/${repository}/actions/runs/55`};
+  value.state.result.artifact = {id: 56};
+  value.state.checks[0].external_id = `repository-review/unresolved:55:${base}:${head}`;
   await value.run(); assert.equal(value.state.checks.length, 1);
   assert.equal(value.state.mutations[1].method, 'PATCH');
   assert.equal(value.state.mutations[1].body.head_sha, undefined);
@@ -186,5 +189,30 @@ test('reporting cannot overwrite an invocation changed at the deciding read', as
     }
   };
   await assert.rejects(value.run, /check changed before reporting/);
+  assert.equal(value.state.mutations.length, 0);
+});
+
+for (const status of ['pending', 'blocked', 'complete', 'running'])
+  test(`a newer invocation observed after the ${status} result cannot be overwritten`, async () => {
+    const value = fixture(status === 'running' ? 'pending' : status);
+    if (status === 'running') value.state.result = {status, run: value.state.result.run};
+    value.options.readResult = async () => {
+      value.state.checks.push({id: 9, app: {id: 777}, name: reviewCheckName, head_sha: head,
+        external_id: `repository-review/unresolved:55:${base}:${head}`, status: 'in_progress', conclusion: null});
+      return value.state.result;
+    };
+    await assert.rejects(value.run, /original invocation differs|original check invocation differs/);
+    assert.equal(value.state.mutations.length, 0);
+    assert.equal(value.state.checks[0].external_id, `repository-review/unresolved:55:${base}:${head}`);
+  });
+
+test('current artifact identity must agree with an already read result', async () => {
+  const value = fixture('pending');
+  value.options.readResult = async () => {
+    value.state.checks.push({id: 9, app: {id: 777}, name: reviewCheckName, head_sha: head,
+      external_id: `repository-review/v1:8:99:${'f'.repeat(64)}`, status: 'in_progress', conclusion: null});
+    return value.state.result;
+  };
+  await assert.rejects(value.run, /original artifact differs/);
   assert.equal(value.state.mutations.length, 0);
 });

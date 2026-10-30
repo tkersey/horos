@@ -69,7 +69,7 @@ export function reviewInvocation(check, subject) {
   return value;
 }
 
-function bindInvocation(result, invocation) {
+export function bindReviewInvocation(result, invocation) {
   if (invocation?.runId) assert.equal(result.run.id, invocation.runId, 'original invocation differs from durable check');
   if (invocation?.artifactId) {
     assert.equal(result.artifact.id, invocation.artifactId, 'original artifact differs from durable check');
@@ -115,7 +115,7 @@ export async function readReviewResult({repository, base, head, tree, controlCom
   }
   if (values.length === 0) {
     const published = await publishedReader(subject, command);
-    if (published !== null) return bindInvocation(published, invocation);
+    if (published !== null) return bindReviewInvocation(published, invocation);
     if (invocation) return unavailable();
     return {status: 'absent'};
   }
@@ -132,7 +132,7 @@ export async function readReviewResult({repository, base, head, tree, controlCom
     const published = await publishedReader(subject, command);
     assert.ok(published, 'original review artifact expired and no authenticated publication retains it');
     assert.equal(`sha256:${sha256(published.bytes)}`, original[0].digest, 'published evidence differs from expired original artifact');
-    return bindInvocation(published, invocation);
+    return bindReviewInvocation(published, invocation);
   }
   if (controlCommit === undefined) {
     controlCommit = original[0].workflow_run.head_sha;
@@ -147,7 +147,7 @@ export async function readReviewResult({repository, base, head, tree, controlCom
     jobName: 'Owner review', name: names.result}, command);
   const envelope = reviewEnvelope(authenticated.bytes, {repository, base, head, tree});
   assert.equal(Boolean(envelope.context.bootstrap), purpose === 'bootstrap', 'review purpose differs from original context');
-  return bindInvocation({status: envelope.status, envelope, ...authenticated}, invocation);
+  return bindReviewInvocation({status: envelope.status, envelope, ...authenticated}, invocation);
 }
 
 export async function authenticateReviewContinuation({context, previous}, command = githubCommand) {

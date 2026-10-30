@@ -109,7 +109,7 @@ test('owner deadline includes elapsed setup and reserves cleanup within both wor
 test('hung owner is killed before the enclosing deadline and retains its original diagnostic', async () => {
   const {directory, options} = scratch(), started = performance.now();
   try {
-    const result = await executeReviewTurn({...options, timeoutMs: 5000, deadline: started + 800}, async values => {
+    const result = await executeReviewTurn({...options, timeoutMs: ownerCleanupMs / 2, deadline: started + 800}, async values => {
       await new Promise(resolve => setTimeout(resolve, 75));
       mkdirSync(values.captureRoot); mkdirSync(values.workspace, {recursive: true});
       const processResult = await runOwnerProcess('/bin/sh',
@@ -121,7 +121,7 @@ test('hung owner is killed before the enclosing deadline and retains its origina
       throw new Error('owner deadline retained');
     });
     assert.equal(result.status, 'blocked'); assert.match(result.reason, /owner deadline retained/);
-    assert.ok(performance.now() - started < 4000, 'owner ignored the enclosing deadline');
+    assert.ok(performance.now() - started < ownerCleanupMs / 4, 'owner ignored the enclosing deadline');
     assert.equal(existsSync(join(options.root, 'home/.codex/auth.json')), false);
     assert.ok(existsSync(join(options.outputDirectory, reviewNames(context.base, context.head).diagnostic)));
     assert.match(readFileSync(join(options.root, 'captures/001/owner-events.jsonl'), 'utf8'), /original event/);

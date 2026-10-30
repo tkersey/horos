@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {HorosProposalClient} from './proposal-github.mjs';
-import {readReviewResult, reviewEnvelope, reviewInvocation} from './review-result.mjs';
+import {readReviewResult, reviewEnvelope, reviewInvocation, bindReviewInvocation} from './review-result.mjs';
 import {validateRetainedReview} from './review-owner.mjs';
 import {requireCurrentImpact} from './impact.mjs';
 import {reviewCheckBinding} from './promotion-admission.mjs';
@@ -45,6 +45,11 @@ function matches(check, desired) {
 
 function desiredCheck(result, subject, settings, previous) {
   const retainedInvocation = reviewInvocation(previous, subject);
+  if (result.bytes) bindReviewInvocation(result, retainedInvocation);
+  else if (retainedInvocation?.runId && result.run)
+    assert.equal(result.run.id, retainedInvocation.runId, 'original invocation differs from durable check');
+  if (retainedInvocation && result.invocation)
+    assert.equal(result.invocation.externalId, retainedInvocation.externalId, 'original check invocation differs');
   if (!result.bytes && retainedInvocation && !result.invocation && !result.run) result = {status: 'blocked', invocation: retainedInvocation,
     reason: 'The durable original invocation requires recovery; absent evidence cannot reset this review.'};
   const desired = {name: reviewCheckName, head_sha: subject.head, status: 'in_progress',
