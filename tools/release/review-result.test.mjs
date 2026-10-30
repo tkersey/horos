@@ -68,3 +68,14 @@ test('a later interrupted invocation blocks even when an earlier favorable retai
   const result = await readReviewResult(value.subject, value.command, async () => {throw new Error('must retain later invocation');});
   assert.equal(result.status, 'blocked'); assert.equal(result.run.id, 9);
 });
+
+
+test('a terminal legacy pending check remains blocked when original invocation detail was lost', async () => {
+  const value = fixture();
+  value.checks.push({id: 77, name: 'Repository owner review', head_sha: value.subject.head, status: 'completed', conclusion: 'failure',
+    external_id: `repository-review/pending:${value.subject.base}:${value.subject.head}`});
+  for (let poll = 0; poll < 3; poll++) {
+    const result = await readReviewResult(value.subject, value.command, value.published);
+    assert.equal(result.status, 'blocked'); assert.equal(result.invocation.externalId, value.checks[0].external_id);
+  }
+});

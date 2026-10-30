@@ -181,7 +181,10 @@ fn linkExtended(
 fn package(r: Runner, zig: []const u8, repository: []const u8, output: []const u8) !void {
     try committed(r, repository);
     const snapshot = try release_source.prepare(r, repository, output);
-    _ = try consumePackage(r, zig, snapshot.source, output);
+    var compiler = try release_source.CapturedCompiler.acquire(r, zig, output, r.env);
+    defer compiler.close(r.io);
+    const selected: Runner = .{ .a = r.a, .io = r.io, .env = &compiler.env };
+    _ = try consumePackage(selected, compiler.path, snapshot.source, output);
 }
 fn consumePackage(r: Runner, zig: []const u8, source: []const u8, output: []const u8) ![]const u8 {
     var env = try r.env.clone(r.a);
@@ -268,8 +271,8 @@ fn prepareRelease(
     expected_commit: ?[]const u8,
     build_owned: bool,
 ) !void {
-    const owner = if (build_owned) try release_source.BuildOutput.acquire(r, destination) else null;
-    defer if (owner) |value| value.close(r.io);
+    const owner = try release_source.BuildOutput.acquire(r, destination);
+    defer owner.close(r.io);
     try committed(r, repository);
     const output = try scratch(r, destination);
     defer Dir.cwd().deleteTree(r.io, output) catch |err|
@@ -279,14 +282,24 @@ fn prepareRelease(
         const trimmed = std.mem.trim(u8, commit, "\r\n");
         if (!std.mem.eql(u8, trimmed, snapshot.commit)) return error.SourceCommitChanged;
     }
-    const hash = try consumePackage(r, zig, snapshot.source, output);
-    try retainRelease(r, snapshot, hash, zig, destination, owner);
+    var compiler = try release_source.CapturedCompiler.acquire(r, zig, output, r.env);
+    defer compiler.close(r.io);
+    const selected: Runner = .{ .a = r.a, .io = r.io, .env = &compiler.env };
+    const hash = try consumePackage(selected, compiler.path, snapshot.source, output);
+    try retainRelease(
+        selected,
+        snapshot,
+        hash,
+        compiler.sha256,
+        destination,
+        if (build_owned) owner else null,
+    );
 }
 fn retainRelease(
     r: Runner,
     snapshot: release_source.Snapshot,
     hash: []const u8,
-    zig: []const u8,
+    compiler_sha256: []const u8,
     destination: []const u8,
     owner: ?release_source.BuildOutput,
 ) !void {
@@ -299,17 +312,10 @@ fn retainRelease(
         .packageIdentity = hash,
         .files = snapshot.files,
         .compiler = "0.17.0",
-        .compilerSha256 = try release_source.compilerSha256(r, zig),
+        .compilerSha256 = compiler_sha256,
         .compilerPlatform = release_source.compilerPlatform(),
     };
-    const bytes = try release_source.readArchive(r, snapshot.archive);
-    var digest: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
-    if (bytes.len != snapshot.size or !std.mem.eql(
-        u8,
-        snapshot.sha256,
-        &std.fmt.bytesToHex(digest, .lower),
-    )) return error.SourceChanged;
+    const bytes = try release_source.testedArchive(r, snapshot);
     const record = try std.json.Stringify.valueAlloc(r.a, receipt, .{});
     if (owner) |value| return value.retain(r.io, bytes, record);
     const archive = try r.path(&.{ destination, "source.tar" });
@@ -371,13 +377,18 @@ fn checkReleaseArchive(r: Runner, args: anytype) !void {
     const archive = args.next() orelse return error.MissingArchive;
     const destination = args.next() orelse return error.MissingOutput;
     if (args.next() != null) return error.UnexpectedArgument;
+    const owner = try release_source.BuildOutput.acquire(r, destination);
+    defer owner.close(r.io);
     const output = try scratch(r, destination);
     defer Dir.cwd().deleteTree(r.io, output) catch |err|
         std.log.err("archive scratch cleanup failed: {s}", .{@errorName(err)});
     const source = try r.path(&.{ output, "source" });
     const snapshot = try release_source.verify(r, repository, commit, tree, archive, source);
-    const hash = try consumePackage(r, zig, source, output);
-    try retainRelease(r, snapshot, hash, zig, destination, null);
+    var compiler = try release_source.CapturedCompiler.acquire(r, zig, output, r.env);
+    defer compiler.close(r.io);
+    const selected: Runner = .{ .a = r.a, .io = r.io, .env = &compiler.env };
+    const hash = try consumePackage(selected, compiler.path, source, output);
+    try retainRelease(selected, snapshot, hash, compiler.sha256, destination, null);
 }
 
 pub fn main(init: std.process.Init) !void {

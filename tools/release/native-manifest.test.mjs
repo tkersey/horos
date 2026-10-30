@@ -11,7 +11,8 @@ const directory = mkdtempSync(join(tmpdir(), 'horos-native-version-test-'));
 after(() => rmSync(directory, {recursive: true, force: true}));
 assert.equal(execFileSync('zig', ['version'], {encoding: 'utf8'}).trim(), '0.17.0');
 const tool = join(directory, 'horos-manifest');
-execFileSync('zig', ['build-exe', resolve('tools/release_manifest.zig'), '-O', 'ReleaseSafe', `-femit-bin=${tool}`],
+const cpu = process.platform === 'linux' && process.arch === 'x64' ? ['-mcpu', 'baseline'] : [];
+execFileSync('zig', ['build-exe', resolve('tools/release_manifest.zig'), '-O', 'ReleaseSafe', ...cpu, `-femit-bin=${tool}`],
   {timeout: 90000, maxBuffer: 1024 * 1024});
 const native = manifestOperations(tool), actor = {id: 42, login: 'horos-release[bot]'};
 const bytes = Buffer.from('.{ .name = .horos, .version = "1.0.0", .paths = .{"1.0.0", "src"} }\n');

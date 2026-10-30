@@ -44,10 +44,51 @@ export function reviewEnvelope(bytes, expected) {
   return value;
 }
 
+export function reviewInvocation(check, subject) {
+  if (check === null) return null;
+  const name = subject.purpose === 'bootstrap' ? 'Repository bootstrap review' : 'Repository owner review';
+  if (check.name !== name || check.head_sha !== subject.head) return null;
+  const artifact = /^repository-review\/v1:([1-9][0-9]*):([1-9][0-9]*):([0-9a-f]{64})$/.exec(check.external_id);
+  const start = /^repository-review\/unresolved:([1-9][0-9]*):([0-9a-f]{40}):([0-9a-f]{40})$/.exec(check.external_id);
+  const lost = check.status === 'completed' && check.conclusion === 'failure' &&
+    /^repository-review\/pending:([0-9a-f]{40}):([0-9a-f]{40})$/.exec(check.external_id);
+  if (!artifact && !start && !lost) return null;
+  const value = {externalId: check.external_id};
+  if (artifact || start) {
+    value.runId = Number((artifact ?? start)[1]);
+    assert.ok(Number.isSafeInteger(value.runId));
+    value.detailsUrl = `https://github.com/${subject.repository}/actions/runs/${value.runId}`;
+  }
+  if (artifact) {
+    value.artifactId = Number(artifact[2]); assert.ok(Number.isSafeInteger(value.artifactId));
+    value.sha256 = artifact[3];
+  } else {
+    value.base = (start ?? lost)[start ? 2 : 1];
+    assert.equal((start ?? lost)[start ? 3 : 2], subject.head, 'original check subject differs');
+  }
+  return value;
+}
+
+function bindInvocation(result, invocation) {
+  if (invocation?.runId) assert.equal(result.run.id, invocation.runId, 'original invocation differs from durable check');
+  if (invocation?.artifactId) {
+    assert.equal(result.artifact.id, invocation.artifactId, 'original artifact differs from durable check');
+    assert.equal(sha256(result.bytes), invocation.sha256, 'original result differs from durable check');
+  }
+  return result;
+}
+
 export async function readReviewResult({repository, base, head, tree, controlCommit, workflowSha256, purpose = 'pull'}, command = githubCommand,
   publishedReader = readPublishedReview) {
   const subject = {repository, base, head, tree, purpose};
   const names = reviewNames(base, head, purpose), reader = new GitHubReader(repository, command);
+  const checks = await workflowPages(reader, `commits/${head}/check-runs?filter=all`, 'check_runs');
+  const invocations = checks.map(check => reviewInvocation(check, subject)).filter(Boolean);
+  assert.ok(invocations.length <= 1, 'multiple durable original owner invocations require recovery');
+  const invocation = invocations[0];
+  const unavailable = () => ({status: 'blocked', ...(invocation ? {invocation} : {}),
+    reason: 'An original owner invocation was reported, but its required evidence is unavailable; recover it before another review.'});
+  if (invocation?.base && invocation.base !== base) return unavailable();
   const raw = await Promise.all([names.result, names.start].map(name =>
     workflowPages(reader, `actions/artifacts?name=${name}`, 'artifacts')));
   const admittedRuns = new Map();
@@ -74,30 +115,24 @@ export async function readReviewResult({repository, base, head, tree, controlCom
   }
   if (values.length === 0) {
     const published = await publishedReader(subject, command);
-    if (published !== null) return published;
-    {
-      const checks = await workflowPages(reader, `commits/${head}/check-runs?filter=all`, 'check_runs');
-      const name = purpose === 'bootstrap' ? 'Repository bootstrap review' : 'Repository owner review';
-      if (checks.some(check => check.name === name && check.head_sha === head &&
-        /^repository-review\/(?:v1:[1-9][0-9]*:[1-9][0-9]*:[0-9a-f]{64}|unresolved:[1-9][0-9]*:[0-9a-f]{40}:[0-9a-f]{40})$/.test(check.external_id))) {
-        return {status: 'blocked', reason: 'An original owner invocation was reported, but its required evidence is unavailable; recover it before another review.'};
-      }
-    }
+    if (published !== null) return bindInvocation(published, invocation);
+    if (invocation) return unavailable();
     return {status: 'absent'};
   }
   const latest = values.sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at) || b.id - a.id)[0];
+  if (invocation?.runId && invocation.runId !== latest.workflow_run.id) return unavailable();
   const original = resultArtifacts.filter(item => item.workflow_run.id === latest.workflow_run.id);
   assert.ok(original.length <= 1, 'ambiguous original review result');
   if (original.length === 0) {
     const run = await reader.api(`actions/runs/${latest.workflow_run.id}`);
-    return {status: run.status === 'completed' ? 'blocked' : 'running',
+    return {status: run.status === 'completed' ? 'blocked' : 'running', ...(invocation ? {invocation} : {}),
       reason: 'original owner invocation has no completed result; original evidence must be recovered before another invocation', run};
   }
   if (original[0].expired) {
     const published = await publishedReader(subject, command);
     assert.ok(published, 'original review artifact expired and no authenticated publication retains it');
     assert.equal(`sha256:${sha256(published.bytes)}`, original[0].digest, 'published evidence differs from expired original artifact');
-    return published;
+    return bindInvocation(published, invocation);
   }
   if (controlCommit === undefined) {
     controlCommit = original[0].workflow_run.head_sha;
@@ -112,7 +147,19 @@ export async function readReviewResult({repository, base, head, tree, controlCom
     jobName: 'Owner review', name: names.result}, command);
   const envelope = reviewEnvelope(authenticated.bytes, {repository, base, head, tree});
   assert.equal(Boolean(envelope.context.bootstrap), purpose === 'bootstrap', 'review purpose differs from original context');
-  return {status: envelope.status, envelope, ...authenticated};
+  return bindInvocation({status: envelope.status, envelope, ...authenticated}, invocation);
+}
+
+export async function authenticateReviewContinuation({context, previous}, command = githubCommand) {
+  const authenticated = await authenticateWorkflowArtifact({repository: context.repository, runId: previous.runId,
+    controlCommit: previous.controlCommit, workflowPath: '.github/workflows/repository-review.yml', workflowSha256: previous.workflowSha256,
+    jobName: 'Owner review', name: reviewNames(context.base, context.head, context.bootstrap ? 'bootstrap' : 'pull').result}, command);
+  assert.equal(authenticated.artifact.id, previous.artifactId, 'original continuation artifact changed');
+  assert.equal(sha256(authenticated.bytes), previous.sha256, 'original continuation result changed');
+  const envelope = reviewEnvelope(authenticated.bytes, context);
+  assert.equal(envelope.status, 'pending', 'terminal owner result cannot be reopened');
+  assert.deepEqual(envelope.context, context, 'original continuation context changed');
+  return authenticated;
 }
 
 export async function readActiveReview(result, expected, command = githubCommand) {

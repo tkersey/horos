@@ -8,7 +8,7 @@ import {reviewEnvelope, reviewNames} from './review-result.mjs';
 import {sha256} from './encoding.mjs';
 
 export async function executeReviewTurn({root: inputRoot, outputDirectory, repositoryPath, context, tools,
-  authentication, settings, previous = null, activeState = null, timeoutMs = 540000}, invoke = invokeOwner) {
+  authentication, settings, previous = null, activeState = null, timeoutMs = 540000, deadline}, invoke = invokeOwner) {
   const root = resolve(inputRoot), names = reviewNames(context.base, context.head, context.bootstrap ? 'bootstrap' : 'pull');
   assert.ok(Buffer.isBuffer(authentication) && authentication.length > 0 && authentication.length <= 1024 * 1024);
   assert.ok(context.repository === 'tkersey/horos');
@@ -38,7 +38,7 @@ export async function executeReviewTurn({root: inputRoot, outputDirectory, repos
   try {
     const result = await invoke({...tools, ...settings, workspace: join(root, 'workspace'), captureRoot,
       reviewHome: join(root, 'home'), repository: repositoryPath, contextPath,
-      base: context.base, head: context.head, previousCaptures, path: process.env.PATH, timeoutMs});
+      base: context.base, head: context.head, previousCaptures, path: process.env.PATH, timeoutMs, deadline});
     envelope.status = result.output.status;
     envelope.epochClosed = result.output.epochClosed;
     envelope.reason = result.output.closureBasis;

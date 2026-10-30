@@ -4,7 +4,7 @@ import {constants, closeSync, fstatSync, mkdirSync, openSync, readFileSync, real
 import {basename, dirname, isAbsolute, join, relative, resolve, sep} from 'node:path';
 import {parseEvidenceJson} from './evidence-json.mjs';
 import {encodeRecord, sha256} from './encoding.mjs';
-import {runOwnerProcess} from './owner-process.mjs';
+import {runOwnerProcess, remainingOwnerTime} from './owner-process.mjs';
 import {validateOwnerEvidence} from './review-admission.mjs';
 import {authenticateReceipts} from './review-runtime.mjs';
 
@@ -82,7 +82,7 @@ export function ownerArguments({workspace, captureRoot, model, reasoningEffort, 
   return [...args, '-'];
 }
 
-export function ownerPrompt({repository, policyDirectory, contextPath, workspace, settingsPath, casPath, codexPath, settings}) {
+export function ownerPrompt({repository, policyDirectory, contextPath, workspace, settingsPath, casPath, codexPath, settings, reviewTimeoutSeconds = 420}) {
   return [
     `Apply the Actuating skill at ${join(policyDirectory, 'agents/skills/actuating/SKILL.md')}.`,
     'Execute its ordinary review-closeout procedure with serial-reviews and CAS; this is the review owner invocation, not a request to replace it with a review loop.',
@@ -92,7 +92,7 @@ export function ownerPrompt({repository, policyDirectory, contextPath, workspace
     'Use Node.js and shell for local evidence handling; do not invoke Python. Do not read or copy authentication into evidence. The reviewer-home directory is runtime-private active state and is never release evidence.',
     'If an entailed current finding is discovered, it blocks this mechanical path. Complete all owner-required evidence collection, recovery and fold before closing an invalidated initial epoch. Never repair the candidate.',
     `Use ${casPath} review start --wait --json with --codex-path ${codexPath} --thread-start-params-json @${settingsPath} --store-root ${join(workspace, 'cas')} for each owner-authorized request. Preserve the ordinary owner policy, original receipt and event evidence. Execute each CAS invocation as one direct command using the absolute binary, no shell operators, redirection, substitutions, environment wrappers or output filtering; retain complete stdout in the command execution event. Save those exact stdout bytes separately as the request receipt.`,
-    'In this invocation perform at most ONE next review selected by the ordinary owner procedure, or recover one existing attempt. Export status=pending when the epoch still needs further work. Never call a bounded pause complete or close the epoch merely to fit this turn. A later invocation resumes this exact owner session and its original CAS state. Use a CAS timeout below 420 seconds and leave time to export the current owner facts; a timeout has no review credit and must retain recovery identity.',
+    'In this invocation perform at most ONE next review selected by the ordinary owner procedure, or recover one existing attempt. Export status=pending when the epoch still needs further work. Never call a bounded pause complete or close the epoch merely to fit this turn. A later invocation resumes this exact owner session and its original CAS state. Use a CAS timeout below '+reviewTimeoutSeconds+' seconds and leave time to export the current owner facts; a timeout has no review credit and must retain recovery identity.',
     `Bind these exact model settings for owner and every reviewer: ${JSON.stringify(settings)}. Set reviewer sandbox=read-only and approvalPolicy=never; no silent executor or model fallback.`,
     'Native changeset standard must have no custom instructions. Auxiliary and focused-file instructions must use exact pinned owner sources.',
     'Preserve all original CAS stdout receipts, session records, event logs, instruction bytes, request bindings and per-request owner credit dispositions in this writable workspace. Do not copy secrets.',
@@ -300,12 +300,15 @@ export async function invokeOwner(options) {
   }
   const settingsPath = join(captureRoot, 'thread-start.json');
   writeFileSync(settingsPath, threadBytes, {flag: 'wx', mode: 0o400});
-  const prompt = ownerPrompt({repository, policyDirectory, contextPath, workspace, settingsPath, casPath, codexPath, settings});
+  const remainingMs = remainingOwnerTime(options.timeoutMs, options.deadline);
+  assert.ok(remainingMs > 0, 'owner admission deadline exhausted before model execution');
+  const reviewTimeoutSeconds = Math.max(1, Math.min(420, Math.floor(remainingMs / 1000) - 30));
+  const prompt = ownerPrompt({repository, policyDirectory, contextPath, workspace, settingsPath, casPath, codexPath, settings, reviewTimeoutSeconds});
   writeFileSync(join(captureRoot, 'invocation.txt'), prompt, {flag: 'wx', mode: 0o400});
   const args = ownerArguments({...options, workspace, captureRoot, resumeThread: prior?.thread});
   const result = await runOwnerProcess(codexPath, args, {
     workspace, captureRoot, env: reviewerEnvironment(realpathSync(options.reviewHome), options.path), input: prompt,
-    timeoutMs: options.timeoutMs,
+    timeoutMs: options.timeoutMs, deadline: options.deadline,
   });
   writeFileSync(join(captureRoot, 'process.json'), JSON.stringify(result), {flag: 'wx', mode: 0o400});
   assert.equal(result.failure, null, 'owner execution incomplete; inspect original evidence before recovery');

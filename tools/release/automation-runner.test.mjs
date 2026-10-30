@@ -21,7 +21,7 @@ function fixture() {
   const client = {async request({path, method = 'GET'}) {
     assert.equal(method, 'GET'); state.calls.push(path);
     if (path === '/actions/variables/REPOSITORY_AUTOMATION')
-      return {status: 200, body: {name: 'REPOSITORY_AUTOMATION', value: state.mode}};
+      return state.controlsForbidden ? {status: 403} : {status: 200, body: {name: 'REPOSITORY_AUTOMATION', value: state.mode}};
     if (path.startsWith('/contents/build.zig.zon?ref=')) return {status: 200, body: {type: 'file', encoding: 'base64',
       content: original.toString('base64'), sha: createHash('sha1').update(`blob ${original.length}\0`).update(original).digest('hex')}};
     if (path.startsWith('/pulls?')) return {status: 200, body: structuredClone(state.pulls)};
@@ -87,12 +87,14 @@ test('off still pauses first and reports normal original-review checks without p
 });
 
 test('missing App remains read-only and cannot acknowledge cancellation', async () => {
-  const f = fixture(); f.options.identity = null; f.state.mode = 'off';
+  const f = fixture(); f.options.identity = null; f.state.mode = 'off'; f.state.controlsForbidden = true;
   const value = await f.run(); assert.equal(value.status, 'disabled'); assert.equal(value.pauseVerified, false);
   assert.match(value.reason, /cancellation is unverified/);
   assert.ok(f.state.calls.includes('/releases?per_page=100&page=1'));
   assert.ok(!f.state.calls.some(value => ['actor', 'pause', 'review', 'comment'].includes(value)));
-  f.state.mode = 'propose'; assert.equal((await f.run()).status, 'blocked');
+  f.options.configuredMode = 'propose'; assert.equal((await f.run()).status, 'blocked');
+  assert.ok(!f.state.calls.includes('/actions/variables/REPOSITORY_AUTOMATION'));
+  assert.deepEqual(f.state.writes, []);
 });
 
 test('unconfirmed cancellation blocks before manifest or candidate observation', async () => {

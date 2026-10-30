@@ -3,6 +3,7 @@ import {readRegular} from './review-owner.mjs';
 import {parseEvidenceJson} from './evidence-json.mjs';
 import {HorosProposalClient} from './proposal-github.mjs';
 import {requireCurrentImpact} from './impact.mjs';
+import {authenticateReviewContinuation} from './review-result.mjs';
 
 async function get(client, path) {
   const response = await client.request({path}); assert.equal(response.status, 200); return response.body;
@@ -23,7 +24,7 @@ async function currentCheck(client, head, name, appId) {
   throw new Error('review check inventory exceeds bound');
 }
 
-export async function markHorosReviewStarted({context, previous, controlCommit, runId, appId}, client = new HorosProposalClient()) {
+export async function markHorosReviewStarted({context, previous, controlCommit, runId, appId}, client = new HorosProposalClient(), authenticatePrevious = authenticateReviewContinuation) {
   assert.equal(context.repository, 'tkersey/horos');
   for (const value of [context.base, context.head, context.tree, controlCommit]) assert.match(value, /^[0-9a-f]{40}$/);
   for (const value of [runId, appId]) assert.ok(Number.isSafeInteger(value) && value > 0);
@@ -49,8 +50,15 @@ export async function markHorosReviewStarted({context, previous, controlCommit, 
   const external = `repository-review/unresolved:${runId}:${context.base}:${context.head}`;
   const existing = await currentCheck(client, context.head, name, appId);
   if (existing !== null) {
-    assert.equal(existing.head_sha, context.head); assert.ok(['queued', 'in_progress'].includes(existing.status), 'terminal owner result cannot be reopened');
-    assert.ok(existing.conclusion === null || existing.conclusion === undefined);
+    assert.equal(existing.head_sha, context.head);
+    if (existing.status === 'completed') {
+      assert.ok(['failure', 'stale'].includes(existing.conclusion), 'terminal owner result cannot be reopened');
+      assert.ok(previous, 'original pending evidence is required to recover a failed report');
+      await authenticatePrevious({context, previous});
+    } else {
+      assert.ok(['queued', 'in_progress'].includes(existing.status));
+      assert.ok(existing.conclusion === null || existing.conclusion === undefined);
+    }
     const allowed = [external];
     if (previous === null) allowed.push(`repository-review/pending:${context.base}:${context.head}`);
     else {
@@ -58,7 +66,7 @@ export async function markHorosReviewStarted({context, previous, controlCommit, 
         `repository-review/unresolved:${previous.runId}:${context.base}:${context.head}`);
     }
     assert.ok(allowed.includes(existing.external_id), 'original owner invocation must be recovered before another start');
-    if (existing.external_id === external) return {checkId: existing.id};
+    if (existing.external_id === external && existing.status === 'in_progress') return {checkId: existing.id};
   }
   const body = {name, status: 'in_progress', external_id: external,
     details_url: `https://github.com/${context.repository}/actions/runs/${runId}`,

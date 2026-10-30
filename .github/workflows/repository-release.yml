@@ -44,7 +44,7 @@ jobs:
         run: |
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           git diff --quiet
-          zig build-exe tools/release_manifest.zig -O safe -femit-bin="$RUNNER_TEMP/horos-manifest"
+          zig build-exe tools/release_manifest.zig -O safe -mcpu baseline -femit-bin="$RUNNER_TEMP/horos-manifest"
       - name: Mint read-only repository observation authority
         id: observer
         if: vars.REPOSITORY_APP_CLIENT_ID != ''

@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
 import {HorosProposalClient} from './proposal-github.mjs';
-import {readReviewResult, reviewEnvelope} from './review-result.mjs';
+import {readReviewResult, reviewEnvelope, reviewInvocation} from './review-result.mjs';
 import {validateRetainedReview} from './review-owner.mjs';
 import {requireCurrentImpact} from './impact.mjs';
 import {reviewCheckBinding} from './promotion-admission.mjs';
 import {reviewArchives} from './review-tools.mjs';
+import {GitHubReader} from './github.mjs';
+import {previousReviewForHead, resolveReviewSubject} from './review-subject.mjs';
 
 export const reviewCheckName = 'Repository owner review';
 export const expectedReviewSettings = Object.freeze({model: 'gpt-6-astra', reasoningEffort: 'high', serviceTier: 'priority',
@@ -41,13 +43,20 @@ function matches(check, desired) {
     check.output?.title === desired.output.title && check.output?.summary === desired.output.summary;
 }
 
-function desiredCheck(result, subject, settings) {
+function desiredCheck(result, subject, settings, previous) {
+  const retainedInvocation = reviewInvocation(previous, subject);
+  if (!result.bytes && retainedInvocation && !result.invocation && !result.run) result = {status: 'blocked', invocation: retainedInvocation,
+    reason: 'The durable original invocation requires recovery; absent evidence cannot reset this review.'};
   const desired = {name: reviewCheckName, head_sha: subject.head, status: 'in_progress',
     external_id: `repository-review/pending:${subject.base}:${subject.head}`, details_url: subject.pullUrl,
     output: {title: 'Review pending', summary: 'The original qualified owner review has not completed.'}};
   if (result.status === 'absent') return desired;
+  if (result.invocation) {
+    desired.external_id = result.invocation.externalId;
+    desired.details_url = result.invocation.detailsUrl ?? subject.pullUrl;
+  }
   assert.ok(['running', 'pending', 'blocked', 'complete'].includes(result.status));
-  if (result.run && !result.bytes) {
+  if (result.run && !result.bytes && !result.invocation) {
     assert.ok(Number.isSafeInteger(result.run.id) && result.run.id > 0);
     desired.external_id = `repository-review/unresolved:${result.run.id}:${subject.base}:${subject.head}`;
     desired.details_url = `https://github.com/${subject.repository}/actions/runs/${result.run.id}`;
@@ -92,20 +101,25 @@ export async function reportHorosReview({number, appId}, {client = new HorosProp
   assert.equal(pull.number, number); assert.equal(pull.base.ref, 'main');
   assert.equal(pull.base.repo.id, repository.id); assert.equal(pull.head.repo.id, repository.id);
   if (pull.state !== 'open' || pull.draft || pull.labels.some(label => label.name === 'automation-hold')) return {status: 'held'};
-  const head = pull.head.sha, base = pull.base.sha;
-  assert.match(head, /^[0-9a-f]{40}$/); assert.match(base, /^[0-9a-f]{40}$/);
+  const head = pull.head.sha, controlCommit = pull.base.sha;
+  assert.match(head, /^[0-9a-f]{40}$/); assert.match(controlCommit, /^[0-9a-f]{40}$/);
   const commit = await get(client, `/git/commits/${head}`);
   assert.equal(commit.sha, head); assert.match(commit.tree.sha, /^[0-9a-f]{40}$/);
+  const reader = new GitHubReader(repository.full_name);
+  reader.api = path => get(client, `/${path}`);
+  const {base, prior} = await resolveReviewSubject(reader, pull, commit, controlCommit, undefined,
+    (source, selectedHead, tree, command, subjectBase) => previousReviewForHead(source, selectedHead, tree, command, subjectBase, readResult));
   const subject = {repository: repository.full_name, number, base, head, tree: commit.tree.sha,
     body: pull.body, pullUrl: `https://github.com/${repository.full_name}/pull/${number}`};
-  const result = await readResult(subject);
-  const desired = desiredCheck(result, subject, settings);
+  const result = prior?.value ?? {status: 'absent'};
   const previous = await ownCheck(client, head, appId);
+  const desired = desiredCheck(result, subject, settings, previous);
   if (matches(previous, desired)) return {status: 'unchanged', checkId: previous.id, conclusion: previous.conclusion};
   const current = await get(client, `/pulls/${number}`);
-  assert.equal(current.head.sha, head); assert.equal(current.base.sha, base); assert.equal(current.body, pull.body);
+  assert.equal(current.head.sha, head); assert.equal(current.base.sha, controlCommit); assert.equal(current.body, pull.body);
   assert.equal(current.state, 'open'); assert.equal(current.draft, false);
   assert.ok(!current.labels.some(label => label.name === 'automation-hold'));
+  assert.deepEqual(await ownCheck(client, head, appId), previous, 'original owner check changed before reporting');
   const body = {...desired};
   if (previous) delete body.head_sha;
   let writeError;

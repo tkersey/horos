@@ -4,8 +4,9 @@ import {appendFileSync, mkdirSync, realpathSync, writeFileSync} from 'node:fs';
 import {join, resolve} from 'node:path';
 import {observeHorosReview, automationMode} from './review-observer.mjs';
 import {readActiveReview, reviewEnvelope, reviewNames} from './review-result.mjs';
-import {authenticateWorkflowArtifact} from './workflow-artifact.mjs';
+import {authenticateWorkflowArtifact, workflowPages} from './workflow-artifact.mjs';
 import {executeReviewTurn} from './review-job.mjs';
+import {ownerTurnDeadline, ownerStepTimeoutMs} from './owner-process.mjs';
 import {parseEvidenceJson} from './evidence-json.mjs';
 import {readRegular} from './review-owner.mjs';
 import {sha256} from './encoding.mjs';
@@ -100,9 +101,18 @@ export async function prepareReviewRuntime({planPath, toolsPath, runtimeDirector
 }
 
 export async function runPreparedReview(configPath) {
+  const stepStarted = performance.now();
   const config = parseEvidenceJson(readRegular(configPath, 4 * 1024 * 1024));
   assert.notEqual(await automationMode(), 'off', 'automation paused before owner admission');
   const reader = new GitHubReader('tkersey/horos');
+  const runId = Number(process.env.GITHUB_RUN_ID);
+  assert.ok(Number.isSafeInteger(runId) && runId > 0, 'original owner workflow run is missing');
+  const jobs = await workflowPages(reader, `actions/runs/${runId}/jobs?filter=latest`, 'jobs');
+  const current = jobs.filter(job => job.name === 'Owner review');
+  assert.equal(current.length, 1, 'original owner job is missing or ambiguous');
+  assert.equal(current[0].run_id, runId); assert.equal(current[0].head_sha, config.controlCommit);
+  assert.equal(current[0].status, 'in_progress');
+  const deadline = ownerTurnDeadline({stepStarted, jobStarted: Date.parse(current[0].started_at)});
   if (config.context.bootstrap) {
     assert.equal((await reader.api('git/ref/heads/main')).object.sha, config.controlCommit);
   } else {
@@ -127,7 +137,7 @@ export async function runPreparedReview(configPath) {
   }
   const authentication = Buffer.from(process.env.REPOSITORY_REVIEW_AUTH_JSON ?? '');
   assert.ok(authentication.length > 0, 'missing model authentication');
-  const result = await executeReviewTurn({...config, previous, activeState, authentication, timeoutMs: 480000});
+  const result = await executeReviewTurn({...config, previous, activeState, authentication, timeoutMs: ownerStepTimeoutMs, deadline});
   if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `\nOwner review: ${result.status}\n\n${result.reason}\n`);
   return result;
 }

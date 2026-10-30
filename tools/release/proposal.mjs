@@ -258,6 +258,11 @@ async function successorProposal({client, candidate, actor, pull, timeline, bran
   await storedCandidate(client, previous);
   const recovering = branchBefore === candidate.head;
   if (recovering) {
+    const transitions = timeline.events.filter(event => event.__typename === 'HeadRefForcePushedEvent' &&
+      event.afterCommit?.oid === candidate.head);
+    assert.equal(transitions.length, 1, 'original automation successor transition is required for recovery');
+    assert.equal(transitions[0].beforeCommit?.oid, previous.head, 'original successor predecessor differs');
+    assert.equal(transitions[0].actor?.login, actor.login, 'unknown human branch edit prevents metadata recovery');
     await storedCandidate(client, candidate);
     await candidateObjects(client, candidate, branchBefore, value => admitCandidate({...value, recovering: true}));
   } else {
@@ -312,6 +317,13 @@ async function successorProposal({client, candidate, actor, pull, timeline, bran
 
 function held(reason, pull) { return {status: 'held', reason, ...(pull ? {number: pull.number} : {})}; }
 
+function ownsCurrentAutoMerge(pull, actor) {
+  if (pull.auto_merge === null) return false;
+  assert.equal(pull.auto_merge?.enabled_by?.login, actor.login, 'cannot cancel unknown auto-merge owner');
+  assert.equal(pull.auto_merge.enabled_by.id, actor.id, 'cannot cancel unknown auto-merge owner');
+  return true;
+}
+
 export async function pauseHorosProposals({actor, client = new HorosProposalClient()}) {
   await repository(client); identifier(actor.id);
   const results = [];
@@ -334,6 +346,7 @@ export async function pauseHorosProposals({actor, client = new HorosProposalClie
     assert.equal(deciding.user?.id, actor.id); assert.equal(deciding.user?.login, actor.login);
     if (deciding.state !== 'open' || !requiresPause(deciding, await mode(client))) continue;
     assert.equal(deciding.node_id, latest.node_id);
+    if (!ownsCurrentAutoMerge(deciding, actor)) continue;
     await writeObserved(() => client.graphql(disableMerge, {input: {pullRequestId: deciding.node_id}}), async () => {
       const observed = await get(client, `/pulls/${pull.number}`);
       assert.equal((await history(client, observed)).autoMerge, null, 'auto-merge cancellation not observed');
@@ -474,7 +487,11 @@ export async function promoteHoros({candidate: input, number, actor, admitPromot
   if (selectedMode !== 'promote') {
     if (timeline.autoMerge !== null && pull.state === 'open') {
       assert.equal(timeline.autoMerge.enabledBy?.login, actor.login, 'cannot cancel unknown auto-merge owner');
+      const deciding = await get(client, `/pulls/${number}`);
+      owned(deciding, actor);
+      assert.equal(deciding.node_id, pull.node_id);
       assert.notEqual(await mode(client), 'promote', 'promotion control changed; reobserve');
+      if (deciding.state !== 'open' || !ownsCurrentAutoMerge(deciding, actor)) return {status: 'disabled', number};
       await writeObserved(() => client.graphql(disableMerge, {input: {pullRequestId: pull.node_id}}), async () => {
         const current = await get(client, `/pulls/${number}`);
         assert.equal((await history(client, current)).autoMerge, null, 'auto-merge cancellation not observed');

@@ -27,6 +27,7 @@ function fixture(status = 'complete') {
       await state.onRead?.(request, state);
       const values = new Map([
         ['', {id: 1176152390, full_name: repository, default_branch: 'main'}],
+        ['/actions/artifacts?per_page=100&page=1', {artifacts: []}],
         ['/pulls/42', state.pull], [`/git/commits/${head}`, {sha: head, tree: {sha: tree}}],
         [`/commits/${head}/check-runs?filter=all&per_page=100&page=1`, {check_runs: state.checks}],
       ]);
@@ -148,4 +149,42 @@ for (const change of ['closed', 'draft', 'hold']) test(`does not report held ${c
   if (change === 'hold') value.state.pull.labels = [{name: 'automation-hold'}];
   assert.deepEqual(await value.run(), {status: 'held'});
   assert.equal(value.state.reads, 0); assert.equal(value.state.mutations.length, 0);
+});
+
+
+test('a failed legacy pending marker cannot be reset by repeated absent observations', async () => {
+  const value = fixture(); value.state.result = {status: 'absent'};
+  value.state.checks.push({id: 9, app: {id: 777}, name: reviewCheckName, head_sha: head,
+    external_id: `repository-review/pending:${base}:${head}`, status: 'completed', conclusion: 'failure'});
+  for (let poll = 0; poll < 3; poll++) {
+    await value.run();
+    assert.equal(value.state.checks[0].status, 'completed'); assert.equal(value.state.checks[0].conclusion, 'failure');
+    assert.equal(value.state.checks[0].external_id, `repository-review/pending:${base}:${head}`);
+  }
+  assert.equal(value.state.mutations.length, 1);
+});
+
+test('an invocation observed after result lookup cannot be erased as absent', async () => {
+  const value = fixture();
+  value.options.readResult = async () => {
+    value.state.checks.push({id: 9, app: {id: 777}, name: reviewCheckName, head_sha: head,
+      external_id: `repository-review/unresolved:55:${base}:${head}`, status: 'in_progress', conclusion: null});
+    return {status: 'absent'};
+  };
+  await value.run();
+  assert.equal(value.state.checks[0].external_id, `repository-review/unresolved:55:${base}:${head}`);
+  assert.equal(value.state.checks[0].conclusion, 'failure');
+});
+
+test('reporting cannot overwrite an invocation changed at the deciding read', async () => {
+  const value = fixture('pending'); await value.run(); value.state.mutations = [];
+  value.state.checks[0].output.summary = 'A display refresh is needed.';
+  let reads = 0;
+  value.state.onRead = request => {
+    if (request.path.includes('/check-runs?') && ++reads === 2) {
+      value.state.checks[0].external_id = `repository-review/unresolved:55:${base}:${head}`;
+    }
+  };
+  await assert.rejects(value.run, /check changed before reporting/);
+  assert.equal(value.state.mutations.length, 0);
 });

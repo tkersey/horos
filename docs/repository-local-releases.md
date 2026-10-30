@@ -65,6 +65,13 @@ publisher; the repository must independently contain the authenticated Git sourc
 A malformed source, changed archive, unsupported entry, or consumer failure
 rejects the operation.
 
+Native source admission opens regular files without blocking on FIFOs and checks
+raw and PAX sizes before iterator arithmetic. Output exclusion belongs to the
+opened directory, so alternate path spellings share the same lock. Replacement
+removes the old receipt before publishing new archive bytes. Compiler execution
+and its recorded digest use the same captured executable; native Zig library
+discovery retains the original installation and explicit compiler environment.
+
 The manifest operation parses the complete ZON document and replaces only the
 root version literal. It preserves exact input bytes for a semantic no-op and
 refuses an existing different candidate. Version decisions come from admitted
@@ -144,6 +151,9 @@ required-review check reporting and cancellation of automation-owned pending
 auto-merge, while prohibiting source, proposal, status-comment and promotion
 writes. Without a configured App, the job reports read-only source and release
 observations and explicitly leaves auto-merge cancellation unverified.
+This fallback reads the workflow's configured mode without querying the
+Variables API. Publication reports the missing App credential before attempting
+credentialed control reads. Enabled writers still reobserve live controls.
 
 `propose` computes the current publication boundary, admits its original review
 and publication evidence, and creates or updates the one ordinary preparation PR.
@@ -264,6 +274,13 @@ convergence. `review-evidence.json` retains the original relevant runtime events
 receipts, owner facts and bound inputs; it excludes unrelated model commands and
 authentication. Its structure alone is not provenance: the trusted workflow
 must authenticate the exported artifact before another job can admit it.
+
+Observer, start marker, and check reporter use the same original review subject.
+Missing evidence preserves the durable invocation identity across repeated polls.
+Recovering a failed or stale check display requires the authenticated original
+pending result; a terminal owner result cannot reopen. The owner process deadline
+includes elapsed setup and leaves one minute within both the eight-minute step
+and ten-minute job limits for termination, diagnostics, and retention.
 
 A real disposable owner invocation returned `blocked` for deliberately absent
 product qualification without dispatching any review. Direct CAS review-profile

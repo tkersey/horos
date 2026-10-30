@@ -48,7 +48,7 @@ export function automationOperations({client, command, native, actor}) {
   };
 }
 
-export async function runHorosAutomation({controlCommit, identity = null, native}, {
+export async function runHorosAutomation({controlCommit, identity = null, native, configuredMode = 'off'}, {
   client = new HorosProposalClient(), command = githubCommand,
   actorReader = appActor, sourceReader = currentHorosSource, pause = pauseHorosProposals,
   reportReview = reportHorosReview, reportStatus = reportAutomationStatus,
@@ -62,7 +62,8 @@ export async function runHorosAutomation({controlCommit, identity = null, native
     try { pauses = await pause({actor, client}); }
     catch (error) { return {status: 'blocked', pauseVerified: false, reason: reason(error)}; }
   }
-  const mode = await automationMode(client), source = await sourceReader(client);
+  if (actor === null) assert.ok(['off', 'propose', 'promote'].includes(configuredMode), 'invalid configured automation mode');
+  const mode = actor === null ? configuredMode : await automationMode(client), source = await sourceReader(client);
   const pendingVersion = native.read(await sourceManifest(client, source.commit));
   const checks = [];
   if (actor !== null) {
@@ -74,7 +75,8 @@ export async function runHorosAutomation({controlCommit, identity = null, native
       } catch (error) { checks.push({number: pull.number, status: 'blocked', reason: reason(error)}); }
     }
   }
-  const observed = {mode, source, pendingVersion, pauses, checks, pauseVerified: actor !== null};
+  const observed = {mode, modeSource: actor === null ? 'workflow configuration' : 'live repository variable',
+    source, pendingVersion, pauses, checks, pauseVerified: actor !== null};
   if (actor === null) {
     const releases = await observationPages(client, '/releases');
     return {...observed, status: mode === 'off' ? 'disabled' : 'blocked',
@@ -147,7 +149,7 @@ if (import.meta.main) {
   assert.equal(git(['status', '--porcelain=v1', '--untracked-files=no']), '', 'trusted control checkout changed');
   if (process.env.GITHUB_SHA) assert.equal(controlCommit, process.env.GITHUB_SHA);
   const identity = identityPath ? parseEvidenceJson(readRegular(resolve(identityPath), 1024 * 1024)) : null;
-  const result = await runHorosAutomation({controlCommit, identity, native: manifestOperations(resolve(toolPath))});
+  const result = await runHorosAutomation({controlCommit, identity, configuredMode: process.env.REPOSITORY_AUTOMATION || 'off', native: manifestOperations(resolve(toolPath))});
   if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY,
     `\nRepository automation observation\n\n\`\`\`json\n${JSON.stringify(result, null, 2)}\n\`\`\`\n`);
   process.stdout.write(`${JSON.stringify(result)}\n`);

@@ -29,6 +29,8 @@ export async function publicationEnabled(client) {
 }
 
 export function publicationServices({controlDirectory, nativePath, identity, command = githubCommand}) {
+  if (!identity) return {enabled: async () => false,
+    disabledReason: 'Repository-local App credential is missing; publication remains disabled.'};
   const root = realpathSync(controlDirectory), client = new HorosProposalClient();
   const git = args => execFileSync('git', ['-c', 'core.hooksPath=/dev/null', ...args], {cwd: root, encoding: 'utf8'}).trim();
   const controlCommit = git(['rev-parse', 'HEAD']);
@@ -68,7 +70,8 @@ export function publicationServices({controlDirectory, nativePath, identity, com
 }
 
 export async function preparePublication(directory, services) {
-  if (!await services.enabled()) return {status: 'disabled'};
+  if (!await services.enabled()) return {status: 'disabled',
+    ...(services.disabledReason ? {reason: services.disabledReason} : {})};
   const prepared = await services.prepare();
   if (prepared.status !== 'ready') return prepared;
   const record = readRecord(prepared.recordBytes);
@@ -115,6 +118,7 @@ if (import.meta.main) {
   const [operation, controlDirectory, nativePath, outputDirectory, identityPath] = process.argv.slice(2);
   assert.ok(['prepare', 'publish'].includes(operation)); assert.ok(outputDirectory);
   const identity = identityPath ? parseEvidenceJson(readFileSync(resolve(identityPath))) : null;
+  if (operation === 'publish') assert.ok(identity, 'repository-local App credential is missing');
   const services = publicationServices({controlDirectory, nativePath, identity});
   try {
     const result = operation === 'prepare' ? await preparePublication(resolve(outputDirectory), services) :

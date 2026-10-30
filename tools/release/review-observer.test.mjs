@@ -1,7 +1,8 @@
 import {createHash} from 'node:crypto';
-import {readReviewResult, reviewNames} from './review-result.mjs';
+import {readReviewResult, reviewNames, authenticateReviewContinuation} from './review-result.mjs';
 import {retainedFixture} from './promotion-test-support.mjs';
-import {expectedReviewSettings} from './review-check.mjs';
+import {expectedReviewSettings, reportHorosReview} from './review-check.mjs';
+import {markHorosReviewStarted} from './review-start.mjs';
 import {retireHorosProposal, storedHorosCandidate} from './release-observation.mjs';
 import {proposalBranch, proposalDescription, rootTree} from './proposal.mjs';
 import {prepareHorosCandidate} from './native-manifest.mjs';
@@ -161,7 +162,7 @@ function reviewStorage(f, candidate) {
 }
 
 function originalOwnerResult(f, context, controlCommit, status = 'complete') {
-  const names = reviewNames(context.base, context.head), workflowPath = '.github/workflows/repository-review.yml';
+  const names = reviewNames(context.base, context.head, context.bootstrap ? 'bootstrap' : 'pull'), workflowPath = '.github/workflows/repository-review.yml';
   const envelope = {schema: 'repository-review-result/v1', status, epochClosed: status === 'complete',
     reason: 'Original test owner disposition.', turn: 1, previousSha256: null, context,
     stateSha256: status === 'pending' ? 'f'.repeat(64) : null,
@@ -178,6 +179,7 @@ function originalOwnerResult(f, context, controlCommit, status = 'complete') {
     started_at: '2026-10-30T00:00:00Z', completed_at: '2026-10-30T00:01:00Z'};
   f.responses.set('/actions/artifacts?per_page=100&page=1', {artifacts: [artifact]});
   f.responses.set(`/actions/artifacts?name=${names.result}&per_page=100&page=1`, {artifacts: [artifact]});
+  f.responses.set(`/actions/artifacts?name=${names.start}&per_page=100&page=1`, {artifacts: []});
   f.responses.set('/actions/runs/101', run);
   f.responses.set('/actions/workflows/9', {path: workflowPath});
   f.responses.set(`/contents/${workflowPath}?ref=${controlCommit}`, gitFile(Buffer.from('original accepted review workflow')));
@@ -185,7 +187,7 @@ function originalOwnerResult(f, context, controlCommit, status = 'complete') {
   f.responses.set('/actions/runs/101/artifacts?per_page=100&page=1', {artifacts: [artifact]});
   f.responses.set('/actions/artifacts/111/zip', bytes);
   f.responses.set(`/commits/${context.head}/check-runs?filter=all&per_page=100&page=1`, {check_runs: [
-    {id: 77, name: 'Repository owner review', head_sha: context.head,
+    {id: 77, name: context.bootstrap ? 'Repository bootstrap review' : 'Repository owner review', head_sha: context.head,
       external_id: `repository-review/v1:101:111:${sha256(bytes)}`},
   ]});
   return {envelope, bytes, run, artifact};
@@ -285,4 +287,171 @@ for (const generated of [false, true]) test(`pending original refuses diverged c
   const count = f.qualified(), blocked = await f.observe(advanced, null);
   assert.equal(blocked.status, 'waiting'); assert.equal(blocked.observations[0].status, 'blocked');
   assert.equal(f.qualified(), count); assert.match(blocked.observations[0].reason, /lineage|diverges/);
+});
+
+
+function checkLifecycle(f) {
+  const checkPath = `/commits/${f.candidate.head}/check-runs?filter=all&per_page=100&page=1`, mutations = [];
+  const checks = () => f.responses.get(checkPath).check_runs;
+  const client = {async request(request) {
+    if (request.method === undefined) return f.client.request(request);
+    mutations.push(structuredClone(request));
+    if (request.method === 'POST') {
+      assert.equal(request.path, '/check-runs'); assert.equal(checks().length, 0);
+      checks().push({id: 77, app: {id: 777}, ...structuredClone(request.body)});
+    } else {
+      assert.equal(request.method, 'PATCH'); assert.equal(request.path, '/check-runs/77');
+      Object.assign(checks()[0], structuredClone(request.body));
+      if (request.body.status !== 'completed') checks()[0].conclusion = null;
+    }
+    return {status: request.method === 'POST' ? 201 : 200};
+  }};
+  const report = () => reportHorosReview({number: f.pull.number, appId: 777}, {client,
+    readResult: subject => readReviewResult(subject, f.command)});
+  const start = async (plan, runId = 202) => {
+    assert.equal(plan.status, 'ready');
+    f.responses.set(`/actions/runs/${runId}`, {id: runId, repository: {id: 1176152390}, head_repository: {id: 1176152390},
+      head_sha: f.main.object.sha, head_branch: 'main', path: '.github/workflows/repository-review.yml',
+      event: 'schedule', run_attempt: 1, status: 'in_progress'});
+    return markHorosReviewStarted({...plan, controlCommit: f.main.object.sha, runId, appId: 777}, client,
+      binding => authenticateReviewContinuation(binding, f.command));
+  };
+  const store = (context, control, status = 'pending') => {
+    const original = originalOwnerResult(f, context, control, status);
+    Object.assign(checks()[0], {app: {id: 777}, status: status === 'pending' ? 'in_progress' : 'completed',
+      conclusion: status === 'pending' ? null : status === 'complete' ? 'success' : 'failure'});
+    return original;
+  };
+  const hideArtifacts = () => {
+    const originals = new Map();
+    for (const [key, value] of f.responses) if (Array.isArray(value?.artifacts)) {
+      originals.set(key, value); f.responses.set(key, {artifacts: []});
+    }
+    return () => {for (const [key, value] of originals) f.responses.set(key, value);};
+  };
+  return {report, start, store, hideArtifacts, mutations, checks};
+}
+
+test('reporter observer and start share the generated original subject before first review after base advancement', async () => {
+  const f = await generatedReviewFixture(), lifecycle = checkLifecycle(f); advanceControl(f);
+  await lifecycle.report();
+  assert.equal(lifecycle.checks()[0].external_id, `repository-review/pending:${base}:${f.candidate.head}`);
+  const plan = await f.observe(advanced, null);
+  assert.equal(plan.context.base, base); assert.equal(plan.previous, null);
+  await lifecycle.start(plan);
+  assert.equal(lifecycle.checks()[0].external_id, `repository-review/unresolved:202:${base}:${f.candidate.head}`);
+});
+
+for (const generated of [false, true]) test(`reporter observer and start resume the original pending subject after base advancement generated=${generated}`, async () => {
+  const f = await generatedReviewFixture(), lifecycle = checkLifecycle(f);
+  if (!generated) f.pull.head.ref = 'feature/ordinary-source';
+  const first = await f.observe(base, null); lifecycle.store(first.context, base); advanceControl(f);
+  await lifecycle.report(); assert.equal(lifecycle.checks()[0].status, 'in_progress');
+  const plan = await f.observe(advanced, null);
+  assert.deepEqual(plan.context, first.context); assert.equal(plan.previous.runId, 101);
+  await lifecycle.start(plan);
+  assert.equal(lifecycle.checks()[0].external_id, `repository-review/unresolved:202:${base}:${f.candidate.head}`);
+});
+
+for (const status of ['complete', 'blocked']) test(`reporter and observer retain original ${status} after generated base advancement`, async () => {
+  const f = await generatedReviewFixture(), lifecycle = checkLifecycle(f), first = await f.observe(base, null);
+  lifecycle.store(first.context, base, status); advanceControl(f);
+  await lifecycle.report();
+  assert.equal(lifecycle.checks()[0].status, 'completed');
+  assert.equal(lifecycle.checks()[0].conclusion, status === 'complete' ? 'success' : 'failure');
+  const plan = await f.observe(advanced, null);
+  assert.equal(plan.status, 'waiting'); assert.equal(plan.observations[0].status, status);
+});
+
+for (const marker of ['v1', 'unresolved']) for (const order of ['report-first', 'start-first'])
+  test(`missing evidence remains owned across repeated polls and authenticated recovery ${marker} ${order}`, async () => {
+    const f = await generatedReviewFixture(), lifecycle = checkLifecycle(f), first = await f.observe(base, null);
+    lifecycle.store(first.context, base);
+    if (marker === 'unresolved') lifecycle.checks()[0].external_id = `repository-review/unresolved:101:${base}:${f.candidate.head}`;
+    const originalMarker = lifecycle.checks()[0].external_id, restore = lifecycle.hideArtifacts(); advanceControl(f);
+    for (let poll = 0; poll < 3; poll++) {
+      await lifecycle.report();
+      assert.equal(lifecycle.checks()[0].external_id, originalMarker);
+      assert.equal(lifecycle.checks()[0].status, 'completed'); assert.equal(lifecycle.checks()[0].conclusion, 'failure');
+      const waiting = await f.observe(advanced, null);
+      assert.equal(waiting.status, 'waiting'); assert.equal(waiting.observations[0].status, 'blocked');
+    }
+    assert.equal(lifecycle.mutations.length, 1);
+    restore();
+    const plan = await f.observe(advanced, null);
+    assert.equal(plan.status, 'ready'); assert.deepEqual(plan.context, first.context); assert.equal(plan.previous.runId, 101);
+    if (order === 'report-first') {
+      await lifecycle.report(); assert.equal(lifecycle.checks()[0].status, 'in_progress');
+    }
+    await lifecycle.start(plan);
+    assert.equal(lifecycle.checks()[0].external_id, `repository-review/unresolved:202:${base}:${f.candidate.head}`);
+    await lifecycle.report();
+    assert.equal(lifecycle.checks()[0].external_id, `repository-review/unresolved:202:${base}:${f.candidate.head}`);
+    assert.equal(lifecycle.checks()[0].conclusion, 'failure');
+    const later = await f.observe(advanced, null);
+    assert.equal(later.status, 'waiting'); assert.equal(later.observations[0].status, 'blocked');
+  });
+
+test('uploaded next start before marker visibility preserves the original pending continuation', async () => {
+  const f = await generatedReviewFixture(), lifecycle = checkLifecycle(f), first = await f.observe(base, null);
+  const original = lifecycle.store(first.context, base), plan = await f.observe(base, null);
+  const names = reviewNames(base, f.candidate.head), start = {...original.artifact, id: 212, name: names.start,
+    created_at: '2026-10-30T02:00:00Z', workflow_run: {...original.artifact.workflow_run, id: 202}};
+  f.responses.set('/actions/runs/202', {...original.run, id: 202, status: 'in_progress', conclusion: null});
+  f.responses.get('/actions/artifacts?per_page=100&page=1').artifacts.push(start);
+  f.responses.set(`/actions/artifacts?name=${names.start}&per_page=100&page=1`, {artifacts: [start]});
+  const originalMarker = lifecycle.checks()[0].external_id;
+  await lifecycle.report(); assert.equal(lifecycle.checks()[0].external_id, originalMarker);
+  assert.equal(lifecycle.checks()[0].conclusion, 'failure');
+  await lifecycle.start(plan);
+  await lifecycle.report();
+  assert.equal(lifecycle.checks()[0].external_id, `repository-review/unresolved:202:${base}:${f.candidate.head}`);
+  assert.equal(lifecycle.checks()[0].status, 'in_progress');
+});
+
+for (const status of ['blocked', 'complete']) test(`actual original ${status} cannot masquerade as a pending recovery`, async () => {
+  const f = await generatedReviewFixture(), lifecycle = checkLifecycle(f), first = await f.observe(base, null);
+  const original = lifecycle.store(first.context, base, status);
+  const previous = {runId: original.run.id, artifactId: original.artifact.id, sha256: sha256(original.bytes),
+    controlCommit: base, workflowSha256: sha256(Buffer.from('original accepted review workflow'))};
+  await assert.rejects(() => lifecycle.start({...first, previous}), /terminal owner result/);
+  assert.equal(lifecycle.mutations.length, 0);
+});
+
+for (const status of ['pending', 'blocked']) test(`bootstrap missing evidence and recovery retain original ${status} identity`, async () => {
+  const f = await generatedReviewFixture(), lifecycle = checkLifecycle(f), first = await f.observe(base, null);
+  const context = {...first.context, pullNumber: null,
+    bootstrap: {boundary: {base, head: f.candidate.head, tree: f.candidate.tree}}};
+  const original = lifecycle.store(context, base, status), marker = lifecycle.checks()[0].external_id;
+  const restore = lifecycle.hideArtifacts(), subject = {...context, purpose: 'bootstrap'};
+  for (let poll = 0; poll < 3; poll++) {
+    const result = await readReviewResult(subject, f.command);
+    assert.equal(result.status, 'blocked'); assert.equal(result.invocation.externalId, marker);
+  }
+  restore(); advanceControl(f);
+  const result = await readReviewResult(subject, f.command); assert.equal(result.status, status);
+  const previous = {runId: original.run.id, artifactId: original.artifact.id, sha256: sha256(original.bytes),
+    controlCommit: base, workflowSha256: sha256(Buffer.from('original accepted review workflow'))};
+  Object.assign(lifecycle.checks()[0], {status: 'completed', conclusion: 'failure'});
+  if (status === 'pending') {
+    await lifecycle.start({status: 'ready', context, previous});
+    assert.equal(lifecycle.checks()[0].external_id, `repository-review/unresolved:202:${base}:${f.candidate.head}`);
+  } else await assert.rejects(() => lifecycle.start({status: 'ready', context, previous}), /terminal owner result/);
+});
+
+
+for (const status of ['pending', 'blocked']) test(`provider-staled check resumes only authenticated original ${status} evidence`, async () => {
+  const f = await generatedReviewFixture(), lifecycle = checkLifecycle(f), first = await f.observe(base, null);
+  const original = lifecycle.store(first.context, base, status);
+  Object.assign(lifecycle.checks()[0], {status: 'completed', conclusion: 'stale'});
+  const previous = {runId: original.run.id, artifactId: original.artifact.id, sha256: sha256(original.bytes),
+    controlCommit: base, workflowSha256: sha256(Buffer.from('original accepted review workflow'))};
+  if (status === 'pending') {
+    await lifecycle.start({...first, previous});
+    assert.equal(lifecycle.checks()[0].status, 'in_progress');
+    assert.equal(lifecycle.checks()[0].external_id, `repository-review/unresolved:202:${base}:${f.candidate.head}`);
+  } else {
+    await assert.rejects(() => lifecycle.start({...first, previous}), /terminal owner result/);
+    assert.equal(lifecycle.mutations.length, 0);
+  }
 });

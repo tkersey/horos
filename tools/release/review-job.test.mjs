@@ -4,6 +4,7 @@ import {mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync}
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {executeReviewTurn} from './review-job.mjs';
+import {runOwnerProcess, ownerTurnDeadline, remainingOwnerTime, ownerStepTimeoutMs, ownerJobTimeoutMs, ownerCleanupMs} from './owner-process.mjs';
 import {reviewEnvelope, reviewNames} from './review-result.mjs';
 import {reviewPolicyDigest} from './review-owner.mjs';
 
@@ -89,4 +90,41 @@ test('result declarations cannot create review credit without original evidence'
   value.status = 'pending'; value.epochClosed = false; value.retainedEvidence = null; value.stateSha256 = 'd'.repeat(64);
   assert.equal(reviewEnvelope(Buffer.from(JSON.stringify(value)), context).status, 'pending');
   assert.throws(() => reviewEnvelope(Buffer.from(JSON.stringify(value)), {...context, head: 'e'.repeat(40)}));
+});
+
+test('owner deadline includes elapsed setup and reserves cleanup within both workflow limits', () => {
+  const workflow = readFileSync(new URL('../../.github/workflows/repository-review.yml', import.meta.url), 'utf8');
+  assert.match(workflow, new RegExp('name: Owner review[\\s\\S]*?timeout-minutes: '+ownerJobTimeoutMs / 60000));
+  assert.match(workflow, new RegExp('name: Execute one ordinary owner turn[\\s\\S]*?timeout-minutes: '+ownerStepTimeoutMs / 60000));
+  const wallNow = 1800000000000, monotonicNow = 100000, stepStarted = 10000;
+  const stepLimited = ownerTurnDeadline({stepStarted, jobStarted: wallNow - 90000, wallNow, monotonicNow});
+  assert.equal(stepLimited, stepStarted + ownerStepTimeoutMs - ownerCleanupMs);
+  const jobLimited = ownerTurnDeadline({stepStarted, jobStarted: wallNow - 420000, wallNow, monotonicNow});
+  assert.equal(jobLimited, monotonicNow + 120000);
+  assert.equal(remainingOwnerTime(480000, jobLimited, monotonicNow + 10000), 110000);
+  assert.equal(remainingOwnerTime(480000, jobLimited, jobLimited + 1), 0);
+  assert.throws(() => ownerTurnDeadline({stepStarted, jobStarted: NaN, wallNow, monotonicNow}));
+});
+
+test('hung owner is killed before the enclosing deadline and retains its original diagnostic', async () => {
+  const {directory, options} = scratch(), started = performance.now();
+  try {
+    const result = await executeReviewTurn({...options, timeoutMs: 5000, deadline: started + 800}, async values => {
+      await new Promise(resolve => setTimeout(resolve, 75));
+      mkdirSync(values.captureRoot); mkdirSync(values.workspace, {recursive: true});
+      const processResult = await runOwnerProcess('/bin/sh',
+        ['-c', "trap '' TERM; printf 'original event\\n'; while :; do /bin/sleep 10; done"],
+        {...values, env: {}, input: ''});
+      writeFileSync(join(values.captureRoot, 'process.json'), JSON.stringify(processResult));
+      assert.equal(processResult.failure, 'deadline');
+      assert.equal(processResult.signal, 'SIGKILL');
+      throw new Error('owner deadline retained');
+    });
+    assert.equal(result.status, 'blocked'); assert.match(result.reason, /owner deadline retained/);
+    assert.ok(performance.now() - started < 4000, 'owner ignored the enclosing deadline');
+    assert.equal(existsSync(join(options.root, 'home/.codex/auth.json')), false);
+    assert.ok(existsSync(join(options.outputDirectory, reviewNames(context.base, context.head).diagnostic)));
+    assert.match(readFileSync(join(options.root, 'captures/001/owner-events.jsonl'), 'utf8'), /original event/);
+    assert.equal(reviewEnvelope(readFileSync(result.resultPath), context).epochClosed, false);
+  } finally {rmSync(directory, {recursive: true, force: true});}
 });

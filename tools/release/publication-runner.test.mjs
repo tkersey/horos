@@ -3,7 +3,7 @@ import {mkdtempSync, realpathSync, rmSync, existsSync, writeFileSync, chmodSync,
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import test from 'node:test';
-import {preparePublication, publishPrepared, publicationEnabled} from './publication-runner.mjs';
+import {preparePublication, publishPrepared, publicationEnabled, publicationServices} from './publication-runner.mjs';
 import {sealHorosPublication} from './seal.mjs';
 import {sealFixture} from './seal-test-support.mjs';
 
@@ -78,4 +78,13 @@ test('pending qualification and already published source produce no candidate fi
     value.services.prepare = async () => ({status});
     assert.deepEqual(await preparePublication(value.output, value.services), {status}); assert.equal(existsSync(value.output), false);
   }
+});
+
+test('missing App disables the real publication service before credentialed control or source access', async t => {
+  const value = fixture(t);
+  const services = publicationServices({identity: null, controlDirectory: join(value.directory, 'unavailable-control'),
+    nativePath: join(value.directory, 'unavailable-native'), compilerPath: join(value.directory, 'unavailable-compiler')});
+  const result = await preparePublication(value.output, services);
+  assert.equal(result.status, 'disabled'); assert.match(result.reason, /App credential is missing/);
+  assert.equal(existsSync(value.output), false);
 });

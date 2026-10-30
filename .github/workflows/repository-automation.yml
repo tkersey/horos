@@ -43,7 +43,7 @@ jobs:
         run: |
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           git diff --quiet
-          zig build-exe tools/release_manifest.zig -O safe \
+          zig build-exe tools/release_manifest.zig -O safe -mcpu baseline \
             -femit-bin="$RUNNER_TEMP/horos-manifest"
       - name: Mint repository-local writer authority
         id: writer
@@ -56,6 +56,7 @@ jobs:
         if: always() && steps.native.outcome == 'success'
         env:
           GH_TOKEN: ${{ steps.writer.outputs.token || github.token }}
+          REPOSITORY_AUTOMATION: ${{ vars.REPOSITORY_AUTOMATION || 'off' }}
           APP_IDENTITY: ${{ steps.writer.outcome == 'success' && format('{0}/automation-app.json', runner.temp) || '' }}
         run: |
           args=("$GITHUB_WORKSPACE" "$RUNNER_TEMP/horos-manifest")
