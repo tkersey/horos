@@ -1,13 +1,11 @@
 # Horos repository-local release operations
 
-Implementation is in progress. Native source packaging and release-record
-structure are implemented. Native version preparation, release admission,
-publication/recovery, ordinary preparation PRs, and the review-owner adapter have
-executable implementations and focused tests. Their privileged workflow wiring
-and complete end-to-end verification remain in progress. No
-production activation or release is authorized by this document. Product
-qualification and serial owner reviews of the final implementation remain
-required before PR readiness.
+Native source packaging, version preparation, authenticated release admission,
+proposal/review workflows, protected promotion, and publication/recovery have
+repository-local implementations and executable tests. Automation defaults to
+off. Exact-head product qualification and original serial owner reviews establish
+PR readiness; authorized live commissioning establishes service operation. This
+document does not authorize production activation, publication, or installation.
 
 Horos qualifies and publishes itself. Kosmos consumes a completed qualified
 Horos release through its own ordinary PR. Protean consumes Kosmos and derives
@@ -158,9 +156,12 @@ repository approval policy. A changed base, source, control or decision blocks
 promotion. Publication is a separately enabled operation.
 
 
-A completed candidate stays frozen while its base remains current. After the base
-advances, its authenticated closed epoch permits a fresh candidate and fresh
-qualification/review. If a branch update succeeded before the PR description
+A generated proposal is reviewed against its immutable original Git parent, even
+if main advances before review begins. Trusted current control must descend from
+that base; original preparation, impact, and pending review inputs remain bound to
+the original subject. A completed candidate stays frozen while its base remains
+current. After the base advances, its authenticated closed epoch permits a fresh
+candidate and fresh qualification/review. If a branch update succeeded before the PR description
 update, the writer authenticates the described predecessor and actual successor
 independently, then finishes only the missing metadata update. Further base
 movement does not authorize another source transition during that recovery.
@@ -301,14 +302,11 @@ evidence, declared impact and effective branch protection. The review check writ
 updates one App-owned check for the exact head and never grants credit for pending,
 blocked, forged, stale-declaration or mismatched-runtime evidence.
 
-The final runbook must record the implemented invocation, exact delivered heads,
-full qualification results, review closeout, and live commissioning observations.
-Until those exist, this implementation is not PR-ready or commissioned. Required
-remaining components are final publisher workflow integration and live writer verification,
-complete cross-repository handoff integration, full exact-head product
-qualification, original serial owner review, and authorized live commissioning.
-The implemented adapters and contract tests do not by themselves establish those
-outcomes.
+The implementation PR proof and final handoff record exact delivered heads,
+qualification commands/results, and original review closeout. PR readiness
+requires all applicable checks and reviews on those subjects. Live App-created
+PR triggers, effective protected merging, immutable publication, and recovery
+require separate owner-authorized commissioning evidence.
 
 ## Merge and commissioning order
 
