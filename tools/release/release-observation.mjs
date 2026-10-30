@@ -12,7 +12,7 @@ import {admitPublishedRelease} from './release-admission.mjs';
 import {sha256} from './encoding.mjs';
 import {sourceManifest, prepareHorosCandidate, classifyNativeVersion} from './native-manifest.mjs';
 import {expectedReviewSettings} from './review-check.mjs';
-import {proposalBranch} from './proposal.mjs';
+import {proposalBranch, describedProposalSubject} from './proposal.mjs';
 
 export async function observation(client, path, missing = false) {
   const response = await client.request({path});
@@ -159,15 +159,18 @@ export async function originalHorosQualification(head, command = githubCommand) 
   return run;
 }
 
-export function retireHorosProposal({client, native, actor, command = githubCommand, readResult = readReviewResult}) {
-  return async ({pull, knownHead}) => {
+export function retireHorosProposal({client, native, actor, command = githubCommand, readResult = readReviewResult, readCandidate = storedHorosCandidate}) {
+  return async ({pull, knownHead, candidate, previousSubject = describedProposalSubject(pull.body)}) => {
     assert.equal(pull.head.sha, knownHead);
-    const previousCandidate = await storedHorosCandidate(knownHead, {client, native, actor});
-    const subject = {repository: 'tkersey/horos', base: previousCandidate.base, head: knownHead,
+    assert.ok(knownHead === previousSubject.head || knownHead === candidate?.head,
+      'live branch differs from the described predecessor and admitted successor');
+    const previousCandidate = await readCandidate(previousSubject.head, {client, native, actor});
+    assert.equal(previousCandidate.head, previousSubject.head); assert.equal(previousCandidate.base, previousSubject.base);
+    const subject = {repository: 'tkersey/horos', base: previousCandidate.base, head: previousCandidate.head,
       tree: previousCandidate.tree, purpose: 'pull'};
     const result = await readResult(subject, command);
     if (result.status === 'absent') {
-      const run = await originalHorosQualification(knownHead, command);
+      const run = await originalHorosQualification(previousCandidate.head, command);
       assert.ok(run !== null && run.status === 'completed' &&
         ['failure', 'timed_out', 'cancelled', 'startup_failure'].includes(run.conclusion),
       'unreviewed subject can retire only after its unique original qualification failed');

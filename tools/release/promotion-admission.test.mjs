@@ -14,7 +14,7 @@ const qualificationBytes = Buffer.from('accepted qualification workflow');
 const person = {name: 'Release', email: 'release@example.test', date: '2026-10-30T00:00:00Z'};
 const file = bytes => ({type: 'file', encoding: 'base64', content: bytes.toString('base64')});
 
-async function fixture() {
+async function fixture(declaration = versionPreparationImpact) {
   const candidate = {base, tree, manifestBytes: Buffer.from('.{ .version = "1.0.1" }\n'),
     version: '1.0.1', author: person, committer: person};
   candidate.message = proposalMessage(candidate); candidate.head = proposalCommitOid(candidate);
@@ -65,7 +65,7 @@ async function fixture() {
     const body = replies.get(args[1]); return Buffer.isBuffer(body) ? Buffer.from(body) : Buffer.from(JSON.stringify(body));
   };
   const source = await admitHorosQualification({runId: 17, commit: candidate.head, tree, event: 'pull_request'}, command);
-  const body = impactBlock(versionPreparationImpact);
+  const body = impactBlock(declaration);
   const context = {repository, base, head: candidate.head, tree, pullNumber: 42, impact: impactInput(body, base, candidate.head),
     qualification: {runId: 17, workflow: source.workflow, evidenceSha256: sha256(source.evidence), originalEvidence: source.evidence.toString('base64')},
     acceptedRequirements: expected.acceptedRequirements};
@@ -148,6 +148,25 @@ test('protected promotion admits exact original owner and native proofs using on
   assert.equal(result.record.qualificationRunId, 17); assert.equal(result.record.review.artifactId, 111);
   assert.equal(value.state.admissions, 1); assert.equal(value.state.authenticateCalls, 1);
   assert.equal(value.state.calls.filter(path => path === '/branches/main').length, 2);
+});
+
+test('promotion admits a compatible revised rationale retained by the original review', async () => {
+  const declaration = {...versionPreparationImpact, rationale: 'The reviewed version preparation preserves package consumers.'};
+  const value = await fixture(declaration), result = await value.promote();
+  assert.deepEqual(result.impact, declaration);
+  assert.deepEqual(result.record.impact, value.context.impact);
+});
+
+test('promotion refuses a breaking disposition retained by the original review', async () => {
+  const value = await fixture({...versionPreparationImpact, disposition: 'breaking'});
+  await assert.rejects(value.promote(), /reviewed release impact is not compatible/);
+  assert.equal(value.state.authenticateCalls, 1);
+});
+
+test('promotion refuses a compatible rationale changed after the original review', async () => {
+  const value = await fixture();
+  value.state.pull.body = impactBlock({...versionPreparationImpact, rationale: 'Changed after owner review.'});
+  await assert.rejects(value.promote(), /release impact changed after review/);
 });
 
 for (const kind of ['different pull', 'bootstrap']) test(`promotion distinguishes an otherwise complete ${kind} owner result`, async () => {

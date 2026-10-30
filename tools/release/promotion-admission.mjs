@@ -313,6 +313,7 @@ async function reviewedEvidence({candidate, pull, qualificationRunId}, options) 
   assert.deepEqual(review.context.acceptedRequirements, options.expected.acceptedRequirements);
   for (const [key, value] of Object.entries(options.expected.reviewSettings)) assert.equal(review.binding[key], value, `review runtime changed: ${key}`);
   const impact = requireCurrentImpact(review.context.impact, pull.body, candidate.base, candidate.head);
+  assert.equal(impact.disposition, 'compatible', 'reviewed release impact is not compatible');
   return {qualification, artifact, review, impact};
 }
 

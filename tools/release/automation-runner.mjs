@@ -12,11 +12,11 @@ import {automationMode} from './review-observer.mjs';
 import {reportHorosReview} from './review-check.mjs';
 import {computeHorosPublicationBoundary} from './publication-boundary.mjs';
 import {manifestOperations, prepareHorosCandidate, sourceManifest, admitNativeVersion} from './native-manifest.mjs';
-import {proposeHoros, promoteHoros, pauseHorosProposals} from './proposal.mjs';
+import {proposeHoros, promoteHoros, pauseHorosProposals, recoverProposalMetadata} from './proposal.mjs';
 import {createHorosPromotionAdmission} from './promotion-admission.mjs';
 import {admitOwnerResume, reportAutomationStatus} from './proposal-authority.mjs';
 import {appActor, currentHorosSource, horosBoundaryOperations, originalHorosQualification,
-  observationPages, preparationPulls, promotionRequirements, retireHorosProposal} from './release-observation.mjs';
+  observationPages, preparationPulls, promotionRequirements, storedHorosCandidate, retireHorosProposal} from './release-observation.mjs';
 
 function writerIdentity(identity) {
   assert.equal(identity.repository, 'tkersey/horos'); assert.equal(identity.repositoryId, 1176152390);
@@ -31,6 +31,10 @@ function reason(error) {
 export function automationOperations({client, command, native, actor}) {
   const boundaryOptions = horosBoundaryOperations({client, command, native, actor});
   return {
+    recover: pull => recoverProposalMetadata({pull, actor, client,
+      readCandidate: head => storedHorosCandidate(head, {client, command, native, actor}),
+      admitRetirement: retireHorosProposal({client, command, native, actor}),
+      admitResume: value => admitOwnerResume(value, client)}),
     boundary: source => computeHorosPublicationBoundary({source}, boundaryOptions),
     prepare: selection => prepareHorosCandidate({...selection, actor}, {client, native}),
     retire: retireHorosProposal({client, command, native, actor}),
@@ -92,6 +96,8 @@ export async function runHorosAutomation({controlCommit, identity = null, native
   try {
     const pulls = await preparationPulls(client);
     currentPull = pulls.find(pull => pull.state === 'open') ?? null;
+    const recovery = await actions.recover(currentPull);
+    if (recovery !== null) {candidate = recovery.candidate; return finish(recovery.result);}
     const boundary = await actions.boundary(source);
     assert.deepEqual(boundary.record.source, source, 'publication boundary source differs');
     if (boundary.status !== 'prepare') return finish({status: boundary.status === 'ready' ? 'publication ready' : boundary.status,

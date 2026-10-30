@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import test from 'node:test';
-import {rootTree, proposalBranch} from './proposal.mjs';
+import {rootTree, proposalBranch, proposalDescription} from './proposal.mjs';
 import {prepareHorosCandidate} from './native-manifest.mjs';
 import {currentHorosSource, appActor, storedHorosCandidate, preparationPulls, promotionRequirements,
   originalHorosQualification, retireHorosProposal} from './release-observation.mjs';
@@ -41,6 +41,7 @@ async function fixture() {
   };
   const pull = {id: 52, number: 52, state: 'open', head: {ref: proposalBranch, sha: candidate.head, repo: {id: 1176152390}},
     base: {ref: 'main', repo: {id: 1176152390}}};
+  pull.body = proposalDescription(candidate).body; pull.title = `Prepare Horos ${candidate.version}`;
   let result = {status: 'absent'};
   const retire = retireHorosProposal({client, native, actor, command, readResult: async () => result});
   return {candidate, client, native, actor, values, tree, run, runs, command, pull,
@@ -118,4 +119,21 @@ test('App actor identity is obtained from the exact installation login', async (
     assert.equal(args[1], 'users/horos-release%5Bbot%5D'); return Buffer.from(JSON.stringify({...actor, type: 'Bot'}));
   });
   assert.deepEqual(value, actor);
+});
+
+
+test('retirement binds original source and closure independently of edited explanatory prose', async () => {
+  const f = await fixture();
+  const envelope = {schema: 'repository-review-result/v1', context: {repository: 'tkersey/horos', base,
+    head: f.candidate.head, tree: f.candidate.tree, pullNumber: 52}, status: 'blocked', reason: 'Original closed owner epoch.',
+    epochClosed: true, turn: 1, previousSha256: null, stateSha256: null, retainedEvidence: null};
+  f.setReview({status: 'blocked', bytes: Buffer.from(JSON.stringify(envelope)), run: {id: 20}, artifact: {id: 21}});
+  f.pull.body += 'Reviewed explanatory rationale.\n'; f.pull.title = 'Human explanatory title';
+  assert.equal((await f.retire()).review.runId, 20);
+});
+
+test('retirement cannot substitute an unrelated described subject for the observed branch', async () => {
+  const f = await fixture();
+  f.pull.body = f.pull.body.replace(`Head: \`${f.candidate.head}\``, `Head: \`${'f'.repeat(40)}\``);
+  await assert.rejects(f.retire(), /live branch differs/);
 });

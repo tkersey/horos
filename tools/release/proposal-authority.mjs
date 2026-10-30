@@ -17,8 +17,8 @@ function localPull(pull) {
   assert.match(pull.head.sha, /^[0-9a-f]{40}$/);
 }
 
-export async function admitOwnerResume({pull, events}, client = new HorosProposalClient()) {
-  localPull(pull);
+export async function admitOwnerResume({pull, events, resumeHead = pull.head.sha}, client = new HorosProposalClient()) {
+  localPull(pull); assert.match(resumeHead, /^[0-9a-f]{40}$/);
   assert.equal(pull.state, 'open', 'owner must reopen the proposal before resuming');
   assert.ok(!pull.labels.some(label => label.name === 'automation-hold'), 'owner must remove the hold label before resuming');
   const repository = await observation(client, '');
@@ -27,17 +27,24 @@ export async function admitOwnerResume({pull, events}, client = new HorosProposa
   assert.ok(Number.isSafeInteger(repository.owner.id) && repository.owner.id > 0);
   assert.equal(repository.owner.login, 'tkersey');
   const issueEvents = await observationPages(client, `/issues/${pull.number}/events`);
-  const holds = [...events.filter(event => ['AutoMergeDisabledEvent', 'ClosedEvent'].includes(event.__typename))
+  const holds = [...events.filter(event => ['AutoMergeDisabledEvent', 'ClosedEvent', 'ReopenedEvent', 'LabeledEvent', 'UnlabeledEvent'].includes(event.__typename) &&
+    (!['LabeledEvent', 'UnlabeledEvent'].includes(event.__typename) || event.label?.name === 'automation-hold'))
     .map(event => timestamp(event.createdAt)),
-  ...issueEvents.filter(event => event.event === 'closed' ||
+  ...issueEvents.filter(event => ['closed', 'reopened'].includes(event.event) ||
     (['labeled', 'unlabeled'].includes(event.event) && event.label?.name === 'automation-hold'))
     .map(event => timestamp(event.created_at))];
   assert.ok(holds.length > 0, 'original hold timeline unavailable');
   const lastHold = Math.max(...holds), command = `/repository-automation resume ${pull.head.sha}`;
+  const transitions = events.filter(event => event.__typename === 'HeadRefForcePushedEvent' &&
+    event.beforeCommit?.oid === resumeHead && event.afterCommit?.oid === pull.head.sha && event.actor?.login === pull.user?.login);
+  const predecessorDeadline = resumeHead !== pull.head.sha && transitions.length === 1 ? timestamp(transitions[0].createdAt) : null;
+  const authorizesHead = comment => comment.body === command || (predecessorDeadline !== null &&
+    comment.body === `/repository-automation resume ${resumeHead}` && timestamp(comment.created_at) < predecessorDeadline &&
+    lastHold < predecessorDeadline);
   const comments = await observationPages(client, `/issues/${pull.number}/comments`);
   const accepted = comments.filter(comment => comment.user?.id === repository.owner.id &&
     comment.user?.login === repository.owner.login && comment.user?.type === 'User' &&
-    comment.body === command && comment.created_at === comment.updated_at &&
+    authorizesHead(comment) && comment.created_at === comment.updated_at &&
     timestamp(comment.created_at) > lastHold);
   assert.ok(accepted.length > 0, 'exact fresh unedited repository-owner resume command required');
   const selected = accepted.sort((left, right) => timestamp(right.created_at) - timestamp(left.created_at) || right.id - left.id)[0];
@@ -48,7 +55,7 @@ export async function admitOwnerResume({pull, events}, client = new HorosProposa
   assert.deepEqual(current.labels, pull.labels, 'hold labels changed during resume admission');
   assert.deepEqual(await observationPages(client, `/issues/${pull.number}/events`), issueEvents, 'hold timeline changed during resume admission');
   assert.deepEqual((await observation(client, '')).owner, repository.owner, 'repository owner changed');
-  return {head: pull.head.sha, commentId: selected.id, ownerId: repository.owner.id, createdAt: selected.created_at};
+  return {head: selected.body === command ? pull.head.sha : resumeHead, commentId: selected.id, ownerId: repository.owner.id, createdAt: selected.created_at};
 }
 
 export function automationStatusBody({status, reason = null, head = null, version = null}) {

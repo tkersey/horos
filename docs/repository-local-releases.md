@@ -115,7 +115,10 @@ conflicting objects, and reobserves uncertain writes before deciding whether
 they succeeded. It checks controls and effective immutable-release settings
 before each write. `proposeHoros` and `promoteHoros` in `proposal.mjs` own the
 single `automation/dependency-release` branch and ordinary PR. Promotion uses
-protected rebase auto-merge with the expected head. A retired merged proposal may
+the normal protected rebase merge operation for an already `MERGEABLE/CLEAN` PR,
+with `expectedHeadOid` binding the admitted head. It preserves required checks,
+human approvals, and protections; it never uses an administrative bypass.
+A retired merged proposal may
 yield its branch through an atomic expected-old-head update; an open epoch,
 manual closure, hold, disabled auto-merge, or unknown human edit cannot be erased
 by that update.
@@ -153,6 +156,19 @@ resolved threads, exact check producers, effective protection and all actual
 required human approvals. A zero configured minimum does not waive the effective
 repository approval policy. A changed base, source, control or decision blocks
 promotion. Publication is a separately enabled operation.
+
+
+A completed candidate stays frozen while its base remains current. After the base
+advances, its authenticated closed epoch permits a fresh candidate and fresh
+qualification/review. If a branch update succeeded before the PR description
+update, the writer authenticates the described predecessor and actual successor
+independently, then finishes only the missing metadata update. Further base
+movement does not authorize another source transition during that recovery.
+Unknown source edits, altered metadata, or unavailable original evidence hold
+recovery. Branch updates use atomic expected-head checks; PR metadata uses
+before/after observations and has no claimed atomic conditional-edit guarantee.
+Historical closure/reopen and hold-label removal still require explicit owner
+resume; removing the hold alone does not grant authority.
 
 An already active owner epoch remains frozen. Successor preparation requires the
 original authenticated closed epoch and a reconstructed native candidate. The

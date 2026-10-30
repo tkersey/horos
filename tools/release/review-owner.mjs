@@ -348,7 +348,6 @@ export async function invokeOwner(options) {
       codexBinaryDigest: `sha256:${options.codexSha256}`, threadStartParamsDigest: `sha256:${sha256(threadBytes)}`,
     };
     validateOwnerEvidence(resultOwner.output, contract, policyFiles, receipts, runtime);
-    writeFileSync(join(captureRoot, 'receipt-provenance.json'), encodeRecord(Object.fromEntries(provenance)), {flag: 'wx', mode: 0o400});
     writeFileSync(join(captureRoot, 'review-evidence.json'), retainReview({captures, receipts, contextBytes, binding,
       contractBytes, policyFiles, runtime, settingsPaths}), {flag: 'wx', mode: 0o400});
   }

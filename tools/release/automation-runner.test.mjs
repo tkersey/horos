@@ -40,6 +40,7 @@ function fixture() {
     reportReview: async value => {state.calls.push('review'); assert.equal(value.appId, 9); return {status: 'reported', conclusion: state.review};},
     reportStatus: async value => {state.calls.push('comment'); assert.equal(value.appId, 9); return {status: 'reported'};},
     operations: () => ({
+      recover: async () => null,
       boundary: async source => {
         state.boundaryCalls++; state.onBoundary?.(state.boundaryCalls); state.calls.push('boundary');
         return {status: state.boundaryStatus, version: state.version, sha256: 'd'.repeat(64), record: {source: {...source}}};
@@ -145,7 +146,7 @@ for (const key of ['role', 'permissions', 'expiresAt']) test(`writer refuses inv
 test('production operations provide concrete owner, native, qualification and promotion procedures', () => {
   const f = fixture(); const value = automationOperations({client: f.dependencies.client, command: async () => assert.fail('unexpected API'),
     native: f.options.native, actor});
-  assert.deepEqual(Object.keys(value).sort(), ['boundary', 'prepare', 'retire', 'resume', 'propose', 'promote',
+  assert.deepEqual(Object.keys(value).sort(), ['recover', 'boundary', 'prepare', 'retire', 'resume', 'propose', 'promote',
     'qualification', 'requirements', 'promotion'].sort());
   assert.ok(Object.values(value).every(value => typeof value === 'function'));
 });

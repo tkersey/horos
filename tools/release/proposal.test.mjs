@@ -4,10 +4,16 @@ import {mkdtempSync, rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import test from 'node:test';
-import {proposalBranch, proposalMessage, proposalCommitOid, proposalDescription, proposeHoros, promoteHoros, pauseHorosProposals} from './proposal.mjs';
+import {proposalBranch, proposalMessage, proposalCommitOid, proposalDescription, proposeHoros, promoteHoros, pauseHorosProposals, recoverProposalMetadata} from './proposal.mjs';
+
+import {retireHorosProposal, storedHorosCandidate} from './release-observation.mjs';
+import {admitOwnerResume} from './proposal-authority.mjs';
+
+import {runHorosAutomation} from './automation-runner.mjs';
+import {jobPermissions} from './app-token.mjs';
 
 const actor = {id: 42, login: 'horos-release[bot]'};
-const person = {name: 'Horos Release', email: 'release@example.test', date: '2026-10-30T00:00:00Z'};
+const person = {name: actor.login, email: `${actor.id}+${actor.login}@users.noreply.github.com`, date: '2026-10-30T00:00:00Z'};
 
 function fixture(t) {
   const directory = mkdtempSync(join(tmpdir(), 'horos-proposal-test-'));
@@ -44,7 +50,7 @@ function fixture(t) {
     ['/git/commits', commit(candidate.head, newTree, candidate.message, [base])],
   ]);
   const state = {mode: 'propose', main: base, branch: null, pulls: [], objects, calls: [],
-    autoMerge: null, events: [], admissions: [], retirements: [], resumes: [],
+    autoMerge: null, events: [], issueEvents: [], comments: [], owner: {id: 1, login: 'tkersey', type: 'User'}, admissions: [], retirements: [], resumes: [],
     protected: true, protection: {required_status_checks: {strict: true, checks: [{context: 'qualification', app_id: 123}]}},
     rules: [], autoMergeAllowed: true, rebaseAllowed: true, onRequest: null, onGraphql: null, failAfter: null, failBefore: null};
   const reply = body => ({status: 200, body: structuredClone(body)});
@@ -55,11 +61,22 @@ function fixture(t) {
       await state.onRequest?.(request, state);
       if (method !== 'GET' && state.failBefore?.({method, path})) throw new Error('request failed before write');
       if (method === 'GET') {
-        if (path === '') return reply({id: 1176152390, node_id: 'REPO', full_name: 'tkersey/horos', default_branch: 'main', allow_auto_merge: state.autoMergeAllowed, allow_rebase_merge: state.rebaseAllowed});
+        if (path === '') return reply({id: 1176152390, node_id: 'REPO', full_name: 'tkersey/horos', default_branch: 'main', owner: state.owner, allow_auto_merge: state.autoMergeAllowed, allow_rebase_merge: state.rebaseAllowed});
         if (path === '/actions/variables/REPOSITORY_AUTOMATION') return state.mode === null ? {status: 404} : reply({name: 'REPOSITORY_AUTOMATION', value: state.mode});
         if (path.startsWith('/git/ref/heads/')) {
           const branch = path.slice('/git/ref/heads/'.length), sha = branch === 'main' ? state.main : state.branch;
           return sha === null ? {status: 404} : reply({ref: `refs/heads/${branch}`, object: {type: 'commit', sha}});
+        }
+        if (/^\/issues\/[0-9]+\/events\?/.test(path)) return reply(state.issueEvents);
+        if (/^\/issues\/[0-9]+\/comments\?/.test(path)) return reply(state.comments);
+        if (path.startsWith('/issues/comments/')) return reply(state.comments.find(value => value.id === Number(path.split('/').at(-1))));
+        if (path.startsWith('/contents/')) {
+          const [file, ref] = path.slice('/contents/'.length).split('?ref=');
+          let tree = objects.get(`/git/commits/${ref}`).tree.sha;
+          const parts = file.split('/');
+          for (const name of parts.slice(0, -1)) tree = objects.get(`/git/trees/${tree}`).tree.find(value => value.path === name).sha;
+          const sha = objects.get(`/git/trees/${tree}`).tree.find(value => value.path === parts.at(-1)).sha;
+          return reply({...objects.get(`/git/blobs/${sha}`), type: 'file'});
         }
         if (path.startsWith('/pulls?')) {
           const page = Number(new URL(`https://example.test${path}`).searchParams.get('page'));
@@ -83,7 +100,7 @@ function fixture(t) {
         assert.equal(request.body.head, proposalBranch); assert.equal(request.body.base, 'main');
         assert.equal(state.pulls.filter(value => value.state === 'open').length, 0);
         const number = state.pulls.length + 1;
-        const value = {number, node_id: `PR${number}`, state: 'open', merged: false, draft: false,
+        const value = {id: number, number, node_id: `PR${number}`, state: 'open', merged: false, draft: false,
           head: {ref: proposalBranch, sha: state.branch, repo: {id: 1176152390}},
           base: {ref: 'main', sha: state.main, repo: {id: 1176152390}}, user: {...actor},
           title: request.body.title, body: request.body.body, labels: [], assignees: []};
@@ -105,6 +122,9 @@ function fixture(t) {
       state.calls.push({method: operation === 'ProposalHistory' ? 'QUERY' : 'MUTATION', path: operation, variables: structuredClone(variables)});
       await state.onGraphql?.(operation, variables, state);
       if (operation === 'ProposalHistory') {
+        assert.match(query, /CLOSED_EVENT,REOPENED_EVENT,LABELED_EVENT,UNLABELED_EVENT/);
+        assert.match(query, /on LabeledEvent\{id createdAt label\{name\}/);
+        assert.match(query, /on UnlabeledEvent\{id createdAt label\{name\}/);
         const pull = state.pulls.find(value => value.number === variables.number);
         return {repository: {databaseId: 1176152390, pullRequest: {id: pull.node_id, headRefOid: pull.head.sha,
           baseRefOid: pull.base.sha, state: pull.merged ? 'MERGED' : pull.state.toUpperCase(), autoMergeRequest: structuredClone(state.autoMerge),
@@ -118,11 +138,18 @@ function fixture(t) {
         assert.equal(updates[0].beforeOid, state.branch ?? '0'.repeat(40), 'lease mismatch');
         state.branch = updates[0].afterOid;
         for (const pull of state.pulls.filter(value => value.state === 'open')) pull.head.sha = state.branch;
+        if (updates[0].beforeOid !== '0'.repeat(40) && state.pulls.some(value => value.state === 'open'))
+          state.events.push({id: `PUSH-${state.events.length}`, __typename: 'HeadRefForcePushedEvent',
+            beforeCommit: {oid: updates[0].beforeOid}, afterCommit: {oid: updates[0].afterOid},
+            actor: {login: actor.login}, createdAt: '2026-10-30T01:00:00Z'});
       } else if (operation === 'PromoteProposal') {
         const pull = state.pulls.find(value => value.node_id === variables.input.pullRequestId);
         assert.equal(variables.input.expectedHeadOid, pull.head.sha);
         assert.equal(variables.input.mergeMethod, 'REBASE');
-        state.autoMerge = {mergeMethod: 'REBASE', enabledBy: {login: actor.login}};
+        assert.match(query, /\$input:MergePullRequestInput!/);
+        assert.match(query, /mergePullRequest\(input:/);
+        pull.merged = true; pull.state = 'closed'; pull.merged_at = '2026-10-30T02:00:00Z';
+        pull.merge_commit_sha = pull.head.sha; state.main = pull.head.sha;
       } else if (operation === 'PauseProposal') state.autoMerge = null;
       else throw new Error(`unexpected GraphQL operation ${operation}`);
       if (state.failAfter?.({method: 'MUTATION', path: operation})) throw new Error('mutation response lost');
@@ -301,14 +328,14 @@ test('controls and base are reobserved before each write', async t => {
   assert.equal(f.writes().length, 1); assert.equal(f.state.branch, null);
 });
 
-test('promote requires protected gates and requests expected-head rebase auto-merge', async t => {
+test('CLEAN promotion uses normal protected expected-head rebase merge', async t => {
   const f = fixture(t); await f.propose(); f.state.mode = 'promote'; f.state.calls = [];
-  assert.equal((await f.promote()).status, 'promotion requested');
+  assert.equal((await f.promote()).status, 'landed—qualification pending');
   assert.deepEqual(f.writes().map(value => value.path), ['PromoteProposal']);
   assert.equal(f.writes()[0].variables.input.expectedHeadOid, f.candidate.head);
   assert.equal(f.writes()[0].variables.input.mergeMethod, 'REBASE');
   f.state.calls = [];
-  assert.equal((await f.promote()).status, 'promotion pending'); assert.equal(f.writes().length, 0);
+  assert.equal((await f.promote()).status, 'landed—qualification pending'); assert.equal(f.writes().length, 0);
 });
 
 test('propose control cannot request automatic merge', async t => {
@@ -317,7 +344,7 @@ test('propose control cannot request automatic merge', async t => {
 });
 
 test('turning promotion off cancels only automation-owned pending requests', async t => {
-  const f = fixture(t); await f.propose(); f.state.mode = 'promote'; await f.promote();
+  const f = fixture(t); await f.propose(); f.state.autoMerge = {mergeMethod: 'REBASE', enabledBy: {login: actor.login}};
   f.state.mode = 'off'; f.state.calls = [];
   assert.equal((await f.promote()).status, 'held'); assert.equal(f.state.autoMerge, null);
   assert.deepEqual(f.writes().map(value => value.path), ['PauseProposal']);
@@ -350,17 +377,17 @@ test('human hold introduced during gate admission is reobserved before promotion
   assert.equal(f.writes().length, 0);
 });
 
-test('uncertain successful auto-merge request is observed and not repeated', async t => {
+test('uncertain successful protected merge is observed and not repeated', async t => {
   const f = fixture(t); await f.propose(); f.state.mode = 'promote'; f.state.calls = [];
   f.state.failAfter = value => value.path === 'PromoteProposal';
-  assert.equal((await f.promote()).status, 'promotion requested');
+  assert.equal((await f.promote()).status, 'landed—qualification pending');
   assert.equal(f.writes().length, 1);
 });
 
 test('effective rulesets can be admitted by owner without inventing replacement protection policy', async t => {
   const f = fixture(t); await f.propose(); f.state.mode = 'promote'; f.state.protection = null;
   f.state.rules = [{type: 'required_status_checks', parameters: {strict_required_status_checks_policy: true}}];
-  assert.equal((await f.promote()).status, 'promotion requested');
+  assert.equal((await f.promote()).status, 'landed—qualification pending');
 });
 
 test('foreign actor and changed PR provenance cannot acquire automation ownership', async t => {
@@ -465,8 +492,8 @@ test('trusted cancellation resume preserves original failure and closure history
   const f = fixture(t); await f.propose(); const next = f.successor();
   const event = {id: 'cancel-1', __typename: 'AutoMergeDisabledEvent', actor: {login: actor.login}};
   f.state.events.push(event); let resumed = 0;
-  next.admitResume = async ({events}) => {assert.deepEqual(events, [event]); resumed++;};
-  await f.propose(next); assert.equal(resumed, 1); assert.deepEqual(f.state.events, [event]);
+  next.admitResume = async ({events}) => {assert.deepEqual(events.filter(value => value.__typename === 'AutoMergeDisabledEvent'), [event]); resumed++;};
+  await f.propose(next); assert.equal(resumed, 3); assert.deepEqual(f.state.events.filter(value => value.__typename === 'AutoMergeDisabledEvent'), [event]);
 });
 
 test('successor restores required assignee after admitted metadata replacement', async t => {
@@ -541,3 +568,189 @@ for (const changed of ['mode', 'hold']) test(`pause rechecks ${changed} after it
   assert.deepEqual(await pauseHorosProposals({actor, client: f.options.client}), []);
   assert.notEqual(f.state.autoMerge, null); assert.ok(!f.state.calls.some(value => value.method === 'MUTATION'));
 });
+
+function originalLifecycle(f, candidates) {
+  const native = {read: bytes => /\.version = "([0-9.]+)"/.exec(bytes.toString())[1],
+    prepare: (bytes, version) => Buffer.from(bytes.toString().replace(/\.version = "[0-9.]+"/, `.version = "${version}"`))};
+  const readCandidate = head => storedHorosCandidate(head, {client: f.options.client, actor, native});
+  const state = {closed: true, status: 'blocked', subjects: []};
+  const readResult = async subject => {
+    state.subjects.push(subject.head);
+    const candidate = candidates.get(subject.head);
+    assert.ok(candidate); assert.equal(subject.base, candidate.base); assert.equal(subject.tree, candidate.tree);
+    if (state.status === 'pending') return {status: 'pending'};
+    const envelope = {schema: 'repository-review-result/v1', context: {repository: 'tkersey/horos',
+      base: candidate.base, head: candidate.head, tree: candidate.tree, pullNumber: 1},
+      status: 'blocked', reason: 'Original owner disposition.', epochClosed: state.closed, turn: 1,
+      previousSha256: null, stateSha256: null, retainedEvidence: null};
+    return {status: 'blocked', bytes: Buffer.from(JSON.stringify(envelope)), run: {id: 21}, artifact: {id: 22}};
+  };
+  const admitRetirement = retireHorosProposal({client: f.options.client, actor, readCandidate, readResult});
+  const admitResume = value => admitOwnerResume(value, f.options.client);
+  return {state, readCandidate, admitRetirement, admitResume,
+    recover: () => recoverProposalMetadata({pull: structuredClone(f.state.pulls[0]), actor,
+      client: f.options.client, readCandidate, admitRetirement, admitResume})};
+}
+
+for (const advanceAgain of [false, true]) test(`real retirement recovers interrupted metadata with later base advance ${advanceAgain}`, async t => {
+  const f = fixture(t); await f.propose(); const next = f.successor('1.0.2');
+  const lifecycle = originalLifecycle(f, new Map([[f.candidate.head, f.candidate], [next.candidate.head, next.candidate]]));
+  f.state.failBefore = value => value.method === 'PATCH' && value.path === '/pulls/1';
+  await assert.rejects(f.propose({...next, admitRetirement: lifecycle.admitRetirement}), /not confirmed/);
+  assert.equal(f.state.branch, next.candidate.head);
+  assert.equal(f.state.pulls[0].body, proposalDescription(f.candidate).body);
+  if (advanceAgain) f.successor('1.0.3', true);
+  f.state.failBefore = null; f.state.calls = [];
+  const recovered = await lifecycle.recover();
+  assert.equal(recovered.result.status, 'proposal open'); assert.equal(recovered.candidate.head, next.candidate.head);
+  assert.deepEqual(f.writes().map(value => [value.method, value.path]), [['PATCH', '/pulls/1']]);
+  assert.equal(f.state.pulls[0].body, proposalDescription(next.candidate).body);
+  assert.deepEqual(lifecycle.state.subjects, [f.candidate.head, f.candidate.head]);
+  f.state.calls = [];
+  assert.equal(await lifecycle.recover(), null); assert.equal(f.writes().length, 0);
+});
+
+for (const [name, change] of [
+  ['open owner epoch', (f, lifecycle) => {lifecycle.state.closed = false;}],
+  ['missing owner disposition', (f, lifecycle) => {lifecycle.state.status = 'pending';}],
+  ['unknown human head', f => {f.state.branch = 'f'.repeat(40); f.state.pulls[0].head.sha = f.state.branch;}],
+  ['edited predecessor body', f => {f.state.pulls[0].body += 'Human note.\n';}],
+  ['ambiguous predecessor identity', f => {f.state.pulls[0].body += `\nHead: \`${f.candidate.head}\`\n`;}],
+]) test(`real metadata recovery holds ${name}`, async t => {
+  const f = fixture(t); await f.propose(); const next = f.successor();
+  const lifecycle = originalLifecycle(f, new Map([[f.candidate.head, f.candidate], [next.candidate.head, next.candidate]]));
+  f.state.failBefore = value => value.method === 'PATCH';
+  await assert.rejects(f.propose({...next, admitRetirement: lifecycle.admitRetirement}));
+  f.state.failBefore = null; f.state.calls = []; change(f, lifecycle);
+  if (name === 'edited predecessor body') assert.equal((await lifecycle.recover()).result.status, 'held');
+  else await assert.rejects(lifecycle.recover());
+  assert.equal(f.writes().length, 0);
+});
+
+for (const kind of ['closure', 'label']) for (const operation of ['propose', 'promote'])
+  test(`real owner resume is required for prior ${kind} before any auto-merge in ${operation}`, async t => {
+    const f = fixture(t); await f.propose(); f.state.mode = 'promote';
+    f.state.events = kind === 'closure' ? [
+      {id: 'C', __typename: 'ClosedEvent', createdAt: '2026-10-30T00:00:00Z'},
+      {id: 'R', __typename: 'ReopenedEvent', createdAt: '2026-10-30T00:10:00Z'},
+    ] : [
+      {id: 'L', __typename: 'LabeledEvent', label: {name: 'automation-hold'}, createdAt: '2026-10-30T00:00:00Z'},
+      {id: 'U', __typename: 'UnlabeledEvent', label: {name: 'automation-hold'}, createdAt: '2026-10-30T00:10:00Z'},
+    ];
+    const admitResume = value => admitOwnerResume(value, f.options.client);
+    f.state.calls = [];
+    await assert.rejects(f[operation]({admitResume}), /fresh unedited/); assert.equal(f.writes().length, 0);
+    f.state.comments.push({id: 9, user: f.state.owner, body: `/repository-automation resume ${f.candidate.head}`,
+      created_at: '2026-10-30T00:05:00Z', updated_at: '2026-10-30T00:05:00Z'});
+    await assert.rejects(f[operation]({admitResume}), /fresh unedited/); assert.equal(f.writes().length, 0);
+    Object.assign(f.state.comments[0], {created_at: '2026-10-30T00:20:00Z', updated_at: '2026-10-30T00:20:00Z'});
+    assert.equal((await f[operation]({admitResume})).status,
+      operation === 'propose' ? 'proposal open' : 'landed—qualification pending');
+  });
+
+test('pending automation-owned auto-merge is preserved without another merge mutation', async t => {
+  const f = fixture(t); await f.propose(); f.state.mode = 'promote';
+  f.state.autoMerge = {mergeMethod: 'REBASE', enabledBy: {login: actor.login}}; f.state.calls = [];
+  assert.equal((await f.promote()).status, 'promotion pending'); assert.equal(f.writes().length, 0);
+});
+
+test('protected merge refuses a head changed at the mutation boundary', async t => {
+  const f = fixture(t); await f.propose(); f.state.mode = 'promote';
+  f.state.onGraphql = (operation, variables) => {
+    if (operation === 'PromoteProposal') {
+      assert.equal(variables.input.expectedHeadOid, f.candidate.head);
+      f.state.pulls[0].head.sha = 'e'.repeat(40);
+    }
+  };
+  await assert.rejects(f.promote(), /not confirmed/); assert.equal(f.state.pulls[0].merged, false);
+});
+
+test('rejected protected merge remains unconfirmed and cannot become a success', async t => {
+  const f = fixture(t); await f.propose(); f.state.mode = 'promote';
+  f.state.failBefore = value => value.path === 'PromoteProposal';
+  await assert.rejects(f.promote(), /not confirmed/); assert.equal(f.state.pulls[0].merged, false);
+});
+
+
+test('writer restart finishes authenticated interrupted metadata before current-source planning', async t => {
+  const f = fixture(t); await f.propose(); const next = f.successor();
+  const lifecycle = originalLifecycle(f, new Map([[f.candidate.head, f.candidate], [next.candidate.head, next.candidate]]));
+  f.state.failBefore = value => value.method === 'PATCH';
+  await assert.rejects(f.propose({...next, admitRetirement: lifecycle.admitRetirement}));
+  f.state.failBefore = null; f.successor('1.0.3', true); f.state.calls = [];
+  const identity = {repository: 'tkersey/horos', repositoryId: 1176152390, role: 'writer', appId: 9,
+    permissions: jobPermissions.writer, expiresAt: '2099-01-01T00:00:00Z'};
+  const result = await runHorosAutomation({controlCommit: f.state.main, identity,
+    native: {read: () => '1.0.0', prepare: () => assert.fail('recovery does not regenerate native source'), facts: () => assert.fail('recovery does not plan new native inputs')}}, {
+    client: f.options.client, actorReader: async () => actor,
+    sourceReader: async () => ({commit: f.state.main, tree: f.baseTree}), pause: async () => [],
+    reportReview: async () => ({status: 'reported'}), reportStatus: async () => ({status: 'reported'}),
+    operations: () => ({recover: pull => recoverProposalMetadata({pull, actor, client: f.options.client,
+      readCandidate: lifecycle.readCandidate, admitRetirement: lifecycle.admitRetirement, admitResume: lifecycle.admitResume}),
+      boundary: async () => assert.fail('recovery precedes new publication planning'),
+      freeze: async () => assert.fail('recovery precedes new candidate selection'),
+    }),
+  });
+  assert.equal(result.status, 'proposal open', result.reason);
+  assert.equal(result.head, next.candidate.head);
+  assert.deepEqual(f.writes().map(value => [value.method, value.path]), [['PATCH', '/pulls/1']]);
+});
+
+test('reviewed body changed after trusted promotion admission prevents merge', async t => {
+  const f = fixture(t); await f.propose(); f.state.mode = 'promote'; f.state.calls = [];
+  await assert.rejects(f.promote({admitPromotion: async () => {f.state.pulls[0].body += 'Changed reviewed rationale.\n';}}), /body changed/);
+  assert.equal(f.writes().length, 0);
+});
+
+test('new historical hold during successor admission stops the branch transition', async t => {
+  const f = fixture(t); await f.propose(); const next = f.successor();
+  const admit = next.admitCandidate;
+  next.admitCandidate = async input => {
+    const result = await admit(input);
+    f.state.events.push({id: 'NEW', __typename: 'UnlabeledEvent', label: {name: 'automation-hold'}, createdAt: '2026-10-30T01:00:00Z'});
+    return result;
+  };
+  f.state.calls = [];
+  await assert.rejects(f.propose(next), /history changed/);
+  assert.ok(!f.writes().some(value => value.path === 'UpdateProposal' || value.method === 'PATCH'));
+});
+
+
+for (const laterHold of [false, true]) test(`interrupted held successor resumes with a current-head command after later hold ${laterHold}`, async t => {
+  const f = fixture(t); await f.propose(); const next = f.successor();
+  const lifecycle = originalLifecycle(f, new Map([[f.candidate.head, f.candidate], [next.candidate.head, next.candidate]]));
+  f.state.events.push({id: 'HOLD', __typename: 'ClosedEvent', createdAt: '2026-10-30T00:00:00Z'});
+  f.state.comments.push({id: 9, user: f.state.owner, body: `/repository-automation resume ${f.candidate.head}`,
+    created_at: '2026-10-30T00:20:00Z', updated_at: '2026-10-30T00:20:00Z'});
+  f.state.failBefore = value => value.method === 'PATCH';
+  await assert.rejects(f.propose({...next, admitRetirement: lifecycle.admitRetirement, admitResume: lifecycle.admitResume}), /not confirmed/);
+  assert.equal(f.state.branch, next.candidate.head);
+  f.state.failBefore = null; f.state.calls = [];
+  if (laterHold) {
+    f.state.events.push({id: 'LATER', __typename: 'UnlabeledEvent', label: {name: 'automation-hold'}, createdAt: '2026-10-30T01:10:00Z'});
+    await assert.rejects(lifecycle.recover(), /fresh unedited/); assert.equal(f.writes().length, 0);
+    f.state.comments.push({id: 10, user: f.state.owner, body: `/repository-automation resume ${next.candidate.head}`,
+      created_at: '2026-10-30T01:20:00Z', updated_at: '2026-10-30T01:20:00Z'});
+  }
+  assert.equal((await lifecycle.recover()).result.status, 'proposal open');
+  assert.deepEqual(f.writes().map(value => [value.method, value.path]), [['PATCH', '/pulls/1']]);
+});
+
+
+for (const change of ['missing', 'ambiguous', 'wrong actor'])
+  test(`predecessor resume cannot rely on ${change} branch transition evidence`, async t => {
+    const f = fixture(t); await f.propose(); const next = f.successor();
+    const lifecycle = originalLifecycle(f, new Map([[f.candidate.head, f.candidate], [next.candidate.head, next.candidate]]));
+    f.state.events.push({id: 'HOLD', __typename: 'ClosedEvent', createdAt: '2026-10-30T00:00:00Z'});
+    f.state.comments.push({id: 9, user: f.state.owner, body: `/repository-automation resume ${f.candidate.head}`,
+      created_at: '2026-10-30T00:20:00Z', updated_at: '2026-10-30T00:20:00Z'});
+    f.state.failBefore = value => value.method === 'PATCH';
+    await assert.rejects(f.propose({...next, admitRetirement: lifecycle.admitRetirement, admitResume: lifecycle.admitResume}));
+    f.state.failBefore = null; f.state.calls = [];
+    const transition = f.state.events.find(event => event.__typename === 'HeadRefForcePushedEvent');
+    assert.ok(transition);
+    if (change === 'missing') f.state.events = f.state.events.filter(event => event !== transition);
+    else if (change === 'ambiguous') f.state.events.push({...structuredClone(transition), id: 'ANOTHER'});
+    else transition.actor.login = 'unknown-human';
+    await assert.rejects(lifecycle.recover(), /fresh unedited/); assert.equal(f.writes().length, 0);
+  });

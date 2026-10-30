@@ -8,9 +8,9 @@ import {impactBlock, versionPreparationImpact} from './impact.mjs';
 export const proposalBranch = 'automation/dependency-release';
 const zero = '0'.repeat(40);
 const updateRefs = 'mutation UpdateProposal($input:UpdateRefsInput!){updateRefs(input:$input){clientMutationId}}';
-const enableMerge = 'mutation PromoteProposal($input:EnablePullRequestAutoMergeInput!){enablePullRequestAutoMerge(input:$input){pullRequest{id}}}';
+const mergePull = 'mutation PromoteProposal($input:MergePullRequestInput!){mergePullRequest(input:$input){pullRequest{id}}}';
 const disableMerge = 'mutation PauseProposal($input:DisablePullRequestAutoMergeInput!){disablePullRequestAutoMerge(input:$input){pullRequest{id}}}';
-const timelineQuery = 'query ProposalHistory($number:Int!,$cursor:String){repository(owner:"tkersey",name:"horos"){databaseId pullRequest(number:$number){id headRefOid baseRefOid state autoMergeRequest{enabledBy{login} mergeMethod} timelineItems(first:100,after:$cursor,itemTypes:[AUTO_MERGE_DISABLED_EVENT,CLOSED_EVENT,REOPENED_EVENT]){nodes{__typename ... on AutoMergeDisabledEvent{id createdAt reasonCode actor{login}} ... on ClosedEvent{id createdAt actor{login}} ... on ReopenedEvent{id createdAt actor{login}}} pageInfo{hasNextPage endCursor}}}}}';
+const timelineQuery = 'query ProposalHistory($number:Int!,$cursor:String){repository(owner:"tkersey",name:"horos"){databaseId pullRequest(number:$number){id headRefOid baseRefOid state autoMergeRequest{enabledBy{login} mergeMethod} timelineItems(first:100,after:$cursor,itemTypes:[AUTO_MERGE_DISABLED_EVENT,CLOSED_EVENT,REOPENED_EVENT,LABELED_EVENT,UNLABELED_EVENT,HEAD_REF_FORCE_PUSHED_EVENT]){nodes{__typename ... on AutoMergeDisabledEvent{id createdAt reasonCode actor{login}} ... on ClosedEvent{id createdAt actor{login}} ... on ReopenedEvent{id createdAt actor{login}} ... on LabeledEvent{id createdAt label{name} actor{login}} ... on UnlabeledEvent{id createdAt label{name} actor{login}} ... on HeadRefForcePushedEvent{id createdAt beforeCommit{oid} afterCommit{oid} actor{login}}} pageInfo{hasNextPage endCursor}}}}}';
 
 function oid(value) { assert.match(value, /^[0-9a-f]{40}$/); return value; }
 function objectId(type, bytes) { return createHash('sha1').update(`${type} ${bytes.length}\0`).update(bytes).digest('hex'); }
@@ -49,6 +49,21 @@ export function proposalDescription(candidate) {
     version: candidate.version, manifestSha256: sha256(candidate.manifestBytes)};
   const marker = `<!-- repository-proposal/v1 ${sha256(encodeRecord(descriptor))} -->`;
   return {marker, body: `${marker}\n\nPrepare Horos ${candidate.version}.\n\nBase: \`${candidate.base}\`\nHead: \`${candidate.head}\`\n\nScope: build.zig.zon version only. Dependencies unchanged.\n\n${impactBlock(versionPreparationImpact)}\n\nAwaiting full qualification and owner review; publication is separately controlled.\n`};
+}
+
+export function describedProposalSubject(body) {
+  assert.equal(typeof body, 'string');
+  assert.match(body, /^<!-- repository-proposal\/v1 [0-9a-f]{64} -->\n/);
+  const base = [...body.matchAll(/^Base: `([0-9a-f]{40})`$/gm)];
+  const head = [...body.matchAll(/^Head: `([0-9a-f]{40})`$/gm)];
+  assert.equal(base.length, 1, 'missing or ambiguous described proposal base');
+  assert.equal(head.length, 1, 'missing or ambiguous described proposal head');
+  return {base: base[0][1], head: head[0][1]};
+}
+
+export function proposalHoldEvents(events) {
+  return events.filter(event => ['AutoMergeDisabledEvent', 'ClosedEvent', 'ReopenedEvent'].includes(event.__typename) ||
+    (['LabeledEvent', 'UnlabeledEvent'].includes(event.__typename) && event.label?.name === 'automation-hold'));
 }
 
 async function get(client, path, missing = false) {
@@ -132,9 +147,9 @@ async function history(client, pull) {
   throw new Error('proposal history capacity exceeded');
 }
 
-async function guard(client, candidate, branchBefore, allowed = ['propose', 'promote']) {
+async function guard(client, candidate, branchBefore, allowed = ['propose', 'promote'], expectedBase = candidate.base) {
   const repo = await repository(client);
-  assert.equal(await reference(client, 'main'), candidate.base, 'stale proposal base');
+  assert.equal(await reference(client, 'main'), expectedBase, 'stale proposal base');
   assert.equal(await reference(client, proposalBranch, true), branchBefore, 'automation branch changed');
   assert.ok(allowed.includes(await mode(client)), 'proposal mutation disabled');
   return repo;
@@ -223,11 +238,12 @@ async function storedCandidate(client, candidate) {
   assert.equal(manifests[0].sha, objectId('blob', candidate.manifestBytes), 'retired manifest differs from original Git source');
 }
 
-async function successorProposal({client, candidate, actor, pull, timeline, branchBefore, admitCandidate, admitRetirement}) {
+async function successorProposal({client, candidate, actor, pull, timeline, branchBefore, currentBase, admitCandidate, admitRetirement, admitResume}) {
   if (branchBefore !== pull.head.sha) return held('unknown human branch edit prevents successor preparation', pull);
   if (timeline.autoMerge !== null) return held('previous auto-merge request must be cancelled before successor preparation', pull);
   if (typeof admitRetirement !== 'function') return held('original owner epoch closure is required before successor preparation', pull);
-  const retirement = await admitRetirement({pull: structuredClone(pull), knownHead: branchBefore,
+  const previousSubject = describedProposalSubject(pull.body);
+  const retirement = await admitRetirement({pull: structuredClone(pull), knownHead: branchBefore, previousSubject,
     events: structuredClone(timeline.events), candidate: candidateCopy(candidate)});
   if (retirement?.epochClosed !== true || retirement.previousCandidate === undefined) {
     return held('authenticated original candidate and closed epoch are required before successor preparation', pull);
@@ -238,19 +254,33 @@ async function successorProposal({client, candidate, actor, pull, timeline, bran
     return held('human proposal metadata edits prevent automatic successor replacement', pull);
   }
   assert.notEqual(previous.head, candidate.head, 'successor must name a distinct admitted candidate');
+  assert.equal(previous.base, previousSubject.base); assert.equal(previous.head, previousSubject.head);
   await storedCandidate(client, previous);
-  await candidateObjects(client, candidate, branchBefore, admitCandidate);
+  const recovering = branchBefore === candidate.head;
+  if (recovering) {
+    await storedCandidate(client, candidate);
+    await candidateObjects(client, candidate, branchBefore, value => admitCandidate({...value, recovering: true}));
+  } else {
+    assert.equal(candidate.base, currentBase, 'stale successor candidate');
+    await candidateObjects(client, candidate, branchBefore, admitCandidate);
+  }
   const observe = async expectedHead => {
-    await guard(client, candidate, expectedHead);
+    await guard(client, candidate, expectedHead, ['propose', 'promote'], currentBase);
     const current = await get(client, `/pulls/${pull.number}`);
     owned(current, actor);
     assert.equal(current.state, 'open'); assert.equal(current.head.sha, expectedHead);
-    assert.equal(current.base.sha, candidate.base); assert.equal(current.draft, false);
+    assert.equal(current.base.sha, currentBase); assert.equal(current.draft, false);
     assert.equal(current.body, pull.body, 'proposal body changed during successor preparation');
     assert.equal(current.title, pull.title, 'proposal title changed during successor preparation');
     assert.deepEqual(current.labels, pull.labels, 'proposal labels changed during successor preparation');
     const latest = await history(client, current);
-    assert.deepEqual(latest, timeline, 'proposal history changed during successor preparation');
+    const transitions = latest.events.filter(event => !timeline.events.some(previous => previous.id === event.id) &&
+      event.__typename === 'HeadRefForcePushedEvent' && event.beforeCommit?.oid === previous.head &&
+      event.afterCommit?.oid === candidate.head && event.actor?.login === actor.login && expectedHead === candidate.head);
+    assert.ok(transitions.length <= 1, 'ambiguous successor branch transition');
+    assert.deepEqual({...latest, events: latest.events.filter(event => !transitions.includes(event))}, timeline,
+      'proposal history changed during successor preparation');
+    if (proposalHoldEvents(latest.events).length > 0) await admitResume({pull: current, events: latest.events, resumeHead: previous.head, candidate: candidateCopy(candidate)});
     return current;
   };
   await observe(branchBefore);
@@ -271,7 +301,7 @@ async function successorProposal({client, candidate, actor, pull, timeline, bran
     return current;
   });
   if (!updated.assignees.some(value => value.login === 'tkersey')) {
-    await guard(client, candidate, candidate.head);
+    await guard(client, candidate, candidate.head, ['propose', 'promote'], currentBase);
     await writeObserved(() => restWrite(client, {method: 'POST', path: `/issues/${pull.number}/assignees`, body: {assignees: ['tkersey']}}), async () => {
       const assigned = await get(client, `/pulls/${pull.number}`);
       assert.ok(assigned.assignees.some(value => value.login === 'tkersey'));
@@ -313,6 +343,21 @@ export async function pauseHorosProposals({actor, client = new HorosProposalClie
   return results;
 }
 
+export async function recoverProposalMetadata({pull, actor, readCandidate, admitRetirement, admitResume, client}) {
+  if (pull === null || describedProposalSubject(pull.body).head === pull.head.sha) return null;
+  const candidate = await readCandidate(pull.head.sha);
+  assert.equal(candidate.head, pull.head.sha);
+  const result = await proposeHoros({candidate, actor, client, admitRetirement, admitResume,
+    admitCandidate: async ({candidate: proposed, recovering}) => {
+      assert.equal(recovering, true, 'metadata recovery cannot authorize a source transition');
+      const original = await readCandidate(pull.head.sha);
+      assert.deepEqual(candidateCopy(proposed), candidateCopy(original), 'original prepared candidate changed');
+      return undefined;
+    },
+  });
+  return {candidate, result};
+}
+
 export async function proposeHoros({candidate: input, actor, admitCandidate, admitRetirement, admitResume,
   client = new HorosProposalClient()}) {
   const candidate = candidateCopy(input), description = proposalDescription(candidate);
@@ -321,7 +366,7 @@ export async function proposeHoros({candidate: input, actor, admitCandidate, adm
   await repository(client);
   const observedMode = await mode(client);
   if (observedMode === 'off') return {status: 'disabled'};
-  if (await reference(client, 'main') !== candidate.base) return held('stale base; owner must close the previous epoch before regeneration');
+  const currentBase = await reference(client, 'main');
   const branchBefore = await reference(client, proposalBranch, true);
   const existing = await pulls(client);
   let pull = existing.find(value => value.state === 'open') ?? existing[0];
@@ -329,21 +374,32 @@ export async function proposeHoros({candidate: input, actor, admitCandidate, adm
     pull = await get(client, `/pulls/${pull.number}`);
     owned(pull, actor);
     const timeline = await history(client, pull);
-    const holdEvents = pull.merged ? [] : timeline.events.filter(event => event.__typename === 'AutoMergeDisabledEvent');
+    const holdEvents = pull.merged ? [] : proposalHoldEvents(timeline.events);
     if (pull.labels.some(label => label.name === 'automation-hold') || (pull.state === 'closed' && !pull.merged) || holdEvents.length > 0) {
       if (typeof admitResume !== 'function') return held('manual closure, hold, or disabled auto-merge requires explicit owner resume', pull);
-      await admitResume({pull: structuredClone(pull), events: structuredClone(timeline.events), candidate: candidateCopy(candidate)});
+      await admitResume({pull: structuredClone(pull), events: structuredClone(timeline.events),
+        resumeHead: describedProposalSubject(pull.body).head, candidate: candidateCopy(candidate)});
       if (pull.state === 'closed' && !pull.merged) return held('owner must reopen or retire the manually closed proposal before regeneration', pull);
     }
     if (pull.state === 'open') {
+      const recovering = branchBefore === candidate.head && pull.head.sha === candidate.head &&
+        describedProposalSubject(pull.body).head !== candidate.head;
+      if (currentBase !== candidate.base && !recovering) return held('stale base; owner must close the previous epoch before regeneration', pull);
       if (pull.head.sha !== candidate.head || branchBefore !== candidate.head || !pull.body.startsWith(`${description.marker}\n`)) {
-        return successorProposal({client, candidate, actor, pull, timeline, branchBefore, admitCandidate, admitRetirement});
+        return successorProposal({client, candidate, actor, pull, timeline, branchBefore, currentBase, admitCandidate, admitRetirement, admitResume});
       }
       assert.ok(pull.body.startsWith(`${description.marker}\n`), 'proposal binding changed');
       if (pull.base.sha !== candidate.base) return held('proposal base changed', pull);
       await candidateObjects(client, candidate, branchBefore, admitCandidate);
       if (!pull.assignees.some(value => value.login === 'tkersey')) {
         await guard(client, candidate, branchBefore);
+        const current = await get(client, `/pulls/${pull.number}`);
+        owned(current, actor); assert.equal(current.state, 'open'); assert.equal(current.head.sha, candidate.head);
+        assert.equal(current.body, pull.body); assert.equal(current.title, pull.title); assert.equal(current.draft, pull.draft);
+        assert.deepEqual(current.labels, pull.labels, 'proposal labels changed before assignment');
+        const latest = await history(client, current);
+        assert.deepEqual(latest, timeline, 'proposal history changed before assignment');
+        if (holdEvents.length > 0) await admitResume({pull: current, events: latest.events, candidate: candidateCopy(candidate)});
         await writeObserved(() => restWrite(client, {method: 'POST', path: `/issues/${pull.number}/assignees`, body: {assignees: ['tkersey']}}), async () => {
           const assigned = await get(client, `/pulls/${pull.number}`);
           assert.ok(assigned.assignees.some(value => value.login === 'tkersey'));
@@ -353,6 +409,7 @@ export async function proposeHoros({candidate: input, actor, admitCandidate, adm
     }
     if (pull.merged && pull.head.sha === candidate.head) return {status: 'landed—qualification pending', number: pull.number, head: candidate.head};
   }
+  if (currentBase !== candidate.base) return held('stale base; owner must close the previous epoch before regeneration', pull);
   let reset = false;
   if (branchBefore !== null && branchBefore !== candidate.head) {
     if (!pull?.merged || pull.head.sha !== branchBefore) return held('unknown human branch edit; refusing branch replacement', pull);
@@ -389,6 +446,16 @@ export async function proposeHoros({candidate: input, actor, admitCandidate, adm
   return {status: 'proposal open', number: pull.number, head: candidate.head};
 }
 
+async function observedLanding(client, pull, candidate) {
+  assert.equal(pull.head.ref, proposalBranch); assert.equal(pull.head.repo?.id, 1176152390);
+  assert.equal(pull.base.ref, 'main'); assert.equal(pull.base.repo?.id, 1176152390);
+  assert.equal(pull.head.sha, candidate.head); assert.equal(pull.merged, true);
+  assert.equal(pull.state, 'closed'); assert.ok(Number.isFinite(Date.parse(pull.merged_at)));
+  const commit = await get(client, `/git/commits/${oid(pull.merge_commit_sha)}`);
+  assert.equal(commit.sha, pull.merge_commit_sha); assert.equal(commit.tree.sha, candidate.tree);
+  assert.deepEqual(commit.parents.map(parent => parent.sha), [candidate.base], 'landing base differs from admitted source');
+}
+
 export async function promoteHoros({candidate: input, number, actor, admitPromotion, admitResume, client = new HorosProposalClient()}) {
   const candidate = candidateCopy(input);
   identifier(number); identifier(actor.id);
@@ -398,6 +465,10 @@ export async function promoteHoros({candidate: input, number, actor, admitPromot
   owned(pull, actor);
   assert.equal(pull.head.ref, proposalBranch); assert.equal(pull.head.repo?.id, 1176152390);
   assert.equal(pull.base.ref, 'main'); assert.equal(pull.base.repo?.id, 1176152390);
+  if (pull.merged === true) {
+    await observedLanding(client, pull, candidate);
+    return {status: 'landed—qualification pending', number, head: candidate.head};
+  }
   const timeline = await history(client, pull);
   const selectedMode = await mode(client);
   if (selectedMode !== 'promote') {
@@ -417,9 +488,9 @@ export async function promoteHoros({candidate: input, number, actor, admitPromot
   if (pull.head.sha !== candidate.head || pull.base.sha !== candidate.base || await reference(client, 'main') !== candidate.base ||
     await reference(client, proposalBranch) !== candidate.head) return held('stale base or human head edit prevents promotion', pull);
   assert.ok(pull.body.startsWith(`${proposalDescription(candidate).marker}\n`), 'proposal binding changed');
-  const disabled = timeline.events.filter(event => event.__typename === 'AutoMergeDisabledEvent');
-  if (disabled.length > 0) {
-    if (typeof admitResume !== 'function') return held('disabled auto-merge requires explicit owner resume', pull);
+  const holds = proposalHoldEvents(timeline.events);
+  if (holds.length > 0) {
+    if (typeof admitResume !== 'function') return held('historical hold requires explicit owner resume', pull);
     await admitResume({pull: structuredClone(pull), events: structuredClone(timeline.events), candidate: candidateCopy(candidate)});
   }
   const branch = await get(client, '/branches/main');
@@ -431,6 +502,7 @@ export async function promoteHoros({candidate: input, number, actor, admitPromot
   const repo = await repository(client);
   assert.equal(repo.allow_auto_merge, true, 'repository auto-merge unavailable');
   assert.equal(repo.allow_rebase_merge, true, 'protected rebase merge unavailable');
+  const admittedBody = pull.body;
   await admitPromotion({candidate: candidateCopy(candidate), pull: structuredClone(pull),
     protection: structuredClone(protection), rules: structuredClone(rules), history: structuredClone(timeline.events), repository: structuredClone(repo)});
   await guard(client, candidate, candidate.head, ['promote']);
@@ -440,22 +512,19 @@ export async function promoteHoros({candidate: input, number, actor, admitPromot
   assert.equal(pull.draft, false);
   assert.ok(pull.assignees.some(value => value.login === 'tkersey'), 'proposal assignee changed during admission');
   assert.ok(!pull.labels.some(label => label.name === 'automation-hold'), 'proposal held during admission');
+  assert.equal(pull.body, admittedBody, 'reviewed proposal body changed during admission');
   assert.ok(pull.body.startsWith(`${proposalDescription(candidate).marker}\n`), 'proposal binding changed during admission');
   const current = await history(client, pull);
   assert.deepEqual(current.events, timeline.events, 'proposal history changed during admission');
+  if (holds.length > 0) await admitResume({pull: structuredClone(pull), events: structuredClone(current.events), candidate: candidateCopy(candidate)});
   if (current.autoMerge !== null) {
     assert.equal(current.autoMerge.enabledBy?.login, actor.login, 'unknown auto-merge owner');
     assert.equal(current.autoMerge.mergeMethod, 'REBASE');
     return {status: 'promotion pending', number, head: candidate.head};
   }
   assert.equal(await mode(client), 'promote', 'promotion disabled');
-  const merged = await writeObserved(() => client.graphql(enableMerge, {input: {pullRequestId: pull.node_id, expectedHeadOid: candidate.head, mergeMethod: 'REBASE'}}), async () => {
-    const observed = await get(client, `/pulls/${number}`);
-    assert.equal(observed.head.sha, candidate.head);
-    if (observed.merged === true) return true;
-    const enabled = (await history(client, observed)).autoMerge;
-    assert.equal(enabled?.mergeMethod, 'REBASE'); assert.equal(enabled.enabledBy?.login, actor.login);
-    return false;
+  await writeObserved(() => client.graphql(mergePull, {input: {pullRequestId: pull.node_id, expectedHeadOid: candidate.head, mergeMethod: 'REBASE'}}), async () => {
+    await observedLanding(client, await get(client, `/pulls/${number}`), candidate);
   });
-  return {status: merged ? 'landed—qualification pending' : 'promotion requested', number, head: candidate.head};
+  return {status: 'landed—qualification pending', number, head: candidate.head};
 }
