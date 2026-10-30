@@ -152,7 +152,7 @@ async function restWrite(client, request) {
   assert.ok([200, 201].includes(response.status), 'proposal GitHub write rejected');
 }
 
-function rootTree(entries) {
+export function rootTree(entries) {
   assert.ok(Array.isArray(entries) && entries.length > 0 && entries.length <= 10000);
   const names = new Set();
   const values = entries.map(entry => {
@@ -209,6 +209,77 @@ async function candidateObjects(client, candidate, branchBefore, admitCandidate)
   });
 }
 
+async function storedCandidate(client, candidate) {
+  const value = await get(client, `/git/commits/${candidate.head}`);
+  assert.equal(value.sha, candidate.head); assert.equal(value.tree.sha, candidate.tree);
+  assert.deepEqual(value.parents.map(parent => parent.sha), [candidate.base]);
+  assert.equal(value.message, candidate.message);
+  assert.equal(proposalCommitOid({...candidate, author: value.author, committer: value.committer}), candidate.head);
+  const tree = await get(client, `/git/trees/${candidate.tree}`);
+  assert.equal(tree.truncated, false); assert.equal(tree.sha, candidate.tree);
+  assert.equal(rootTree(tree.tree), candidate.tree);
+  const manifests = tree.tree.filter(entry => entry.path === 'build.zig.zon');
+  assert.equal(manifests.length, 1); assert.equal(manifests[0].type, 'blob'); assert.equal(manifests[0].mode, '100644');
+  assert.equal(manifests[0].sha, objectId('blob', candidate.manifestBytes), 'retired manifest differs from original Git source');
+}
+
+async function successorProposal({client, candidate, actor, pull, timeline, branchBefore, admitCandidate, admitRetirement}) {
+  if (branchBefore !== pull.head.sha) return held('unknown human branch edit prevents successor preparation', pull);
+  if (timeline.autoMerge !== null) return held('previous auto-merge request must be cancelled before successor preparation', pull);
+  if (typeof admitRetirement !== 'function') return held('original owner epoch closure is required before successor preparation', pull);
+  const retirement = await admitRetirement({pull: structuredClone(pull), knownHead: branchBefore,
+    events: structuredClone(timeline.events), candidate: candidateCopy(candidate)});
+  if (retirement?.epochClosed !== true || retirement.previousCandidate === undefined) {
+    return held('authenticated original candidate and closed epoch are required before successor preparation', pull);
+  }
+  const previous = candidateCopy(retirement.previousCandidate), previousDescription = proposalDescription(previous);
+  if (![previous.head, candidate.head].includes(branchBefore)) return held('unknown human branch edit prevents successor preparation', pull);
+  if (pull.draft || pull.body !== previousDescription.body || pull.title !== `Prepare Horos ${previous.version}`) {
+    return held('human proposal metadata edits prevent automatic successor replacement', pull);
+  }
+  assert.notEqual(previous.head, candidate.head, 'successor must name a distinct admitted candidate');
+  await storedCandidate(client, previous);
+  await candidateObjects(client, candidate, branchBefore, admitCandidate);
+  const observe = async expectedHead => {
+    await guard(client, candidate, expectedHead);
+    const current = await get(client, `/pulls/${pull.number}`);
+    owned(current, actor);
+    assert.equal(current.state, 'open'); assert.equal(current.head.sha, expectedHead);
+    assert.equal(current.base.sha, candidate.base); assert.equal(current.draft, false);
+    assert.equal(current.body, pull.body, 'proposal body changed during successor preparation');
+    assert.equal(current.title, pull.title, 'proposal title changed during successor preparation');
+    assert.deepEqual(current.labels, pull.labels, 'proposal labels changed during successor preparation');
+    const latest = await history(client, current);
+    assert.deepEqual(latest, timeline, 'proposal history changed during successor preparation');
+    return current;
+  };
+  await observe(branchBefore);
+  if (branchBefore !== candidate.head) {
+    const repo = await repository(client);
+    await writeObserved(() => client.graphql(updateRefs, {input: {repositoryId: repo.node_id,
+      refUpdates: [{name: `refs/heads/${proposalBranch}`, beforeOid: previous.head, afterOid: candidate.head, force: true}]} }), async () => {
+      assert.equal(await reference(client, proposalBranch), candidate.head, 'successor branch update not observed');
+    });
+  }
+  await observe(candidate.head);
+  const description = proposalDescription(candidate);
+  const updated = await writeObserved(() => restWrite(client, {method: 'PATCH', path: `/pulls/${pull.number}`,
+    body: {title: `Prepare Horos ${candidate.version}`, body: description.body}}), async () => {
+    const current = await get(client, `/pulls/${pull.number}`);
+    owned(current, actor); assert.equal(current.state, 'open'); assert.equal(current.head.sha, candidate.head);
+    assert.equal(current.body, description.body); assert.equal(current.title, `Prepare Horos ${candidate.version}`);
+    return current;
+  });
+  if (!updated.assignees.some(value => value.login === 'tkersey')) {
+    await guard(client, candidate, candidate.head);
+    await writeObserved(() => restWrite(client, {method: 'POST', path: `/issues/${pull.number}/assignees`, body: {assignees: ['tkersey']}}), async () => {
+      const assigned = await get(client, `/pulls/${pull.number}`);
+      assert.ok(assigned.assignees.some(value => value.login === 'tkersey'));
+    });
+  }
+  return {status: 'proposal open', number: pull.number, head: candidate.head, previousHead: previous.head};
+}
+
 function held(reason, pull) { return {status: 'held', reason, ...(pull ? {number: pull.number} : {})}; }
 
 export async function proposeHoros({candidate: input, actor, admitCandidate, admitRetirement, admitResume,
@@ -234,7 +305,9 @@ export async function proposeHoros({candidate: input, actor, admitCandidate, adm
       if (pull.state === 'closed' && !pull.merged) return held('owner must reopen or retire the manually closed proposal before regeneration', pull);
     }
     if (pull.state === 'open') {
-      if (pull.head.sha !== candidate.head || branchBefore !== candidate.head) return held('existing open proposal stays frozen; changed or successor head requires owner epoch closure', pull);
+      if (pull.head.sha !== candidate.head || branchBefore !== candidate.head || !pull.body.startsWith(`${description.marker}\n`)) {
+        return successorProposal({client, candidate, actor, pull, timeline, branchBefore, admitCandidate, admitRetirement});
+      }
       assert.ok(pull.body.startsWith(`${description.marker}\n`), 'proposal binding changed');
       if (pull.base.sha !== candidate.base) return held('proposal base changed', pull);
       await candidateObjects(client, candidate, branchBefore, admitCandidate);

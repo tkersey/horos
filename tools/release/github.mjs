@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
-import {parseExactJson} from '../v2/exact_json.mjs';
+import {parseEvidenceJson} from './evidence-json.mjs';
 import {repositories} from './record.mjs';
 
 const execute = promisify(execFile);
@@ -29,13 +29,13 @@ export class GitHubReader {
       !/[\x00-\x20\x7f]/.test(path), 'unsafe API path');
     const bytes = await this.command(['api', `repos/${this.repository}/${path}`, '-H', 'Accept: application/vnd.github+json']);
     assert.ok(Buffer.isBuffer(bytes) && bytes.length <= 8 * 1024 * 1024, 'API response too large');
-    return parseExactJson(bytes);
+    return parseEvidenceJson(bytes);
   }
 
   async verifyRepository() {
     const bytes = await this.command(['api', `repos/${this.repository}`, '-H', 'Accept: application/vnd.github+json']);
     assert.ok(Buffer.isBuffer(bytes) && bytes.length <= 1024 * 1024, 'repository response too large');
-    const value = parseExactJson(bytes);
+    const value = parseEvidenceJson(bytes);
     assert.equal(value.full_name, this.repository);
     assert.equal(value.id, repositories[this.repository], 'repository identity changed');
     assert.equal(value.default_branch, 'main', 'unapproved default branch');

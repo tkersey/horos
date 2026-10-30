@@ -90,7 +90,7 @@ export function ownerPrompt({repository, policyDirectory, contextPath, workspace
     `Candidate repository: ${repository}. Accepted policy checkout: ${policyDirectory}.`,
     'The candidate and Git metadata are read-only. No implementation, commit, publication, PR comment, merge, credential creation, or repository administration is authorized.',
     'Use Node.js and shell for local evidence handling; do not invoke Python. Do not read or copy authentication into evidence. The reviewer-home directory is runtime-private active state and is never release evidence.',
-    'A current finding blocks this mechanical path. Complete all owner-required evidence collection, recovery and fold before closing an invalidated initial epoch. Never repair the candidate.',
+    'If an entailed current finding is discovered, it blocks this mechanical path. Complete all owner-required evidence collection, recovery and fold before closing an invalidated initial epoch. Never repair the candidate.',
     `Use ${casPath} review start --wait --json with --codex-path ${codexPath} --thread-start-params-json @${settingsPath} --store-root ${join(workspace, 'cas')} for each owner-authorized request. Preserve the ordinary owner policy, original receipt and event evidence. Execute each CAS invocation as one direct command using the absolute binary, no shell operators, redirection, substitutions, environment wrappers or output filtering; retain complete stdout in the command execution event. Save those exact stdout bytes separately as the request receipt.`,
     'In this invocation perform at most ONE next review selected by the ordinary owner procedure, or recover one existing attempt. Export status=pending when the epoch still needs further work. Never call a bounded pause complete or close the epoch merely to fit this turn. A later invocation resumes this exact owner session and its original CAS state. Use a CAS timeout below 420 seconds and leave time to export the current owner facts; a timeout has no review credit and must retain recovery identity.',
     `Bind these exact model settings for owner and every reviewer: ${JSON.stringify(settings)}. Set reviewer sandbox=read-only and approvalPolicy=never; no silent executor or model fallback.`,
@@ -305,6 +305,7 @@ export async function invokeOwner(options) {
   const args = ownerArguments({...options, workspace, captureRoot, resumeThread: prior?.thread});
   const result = await runOwnerProcess(codexPath, args, {
     workspace, captureRoot, env: reviewerEnvironment(realpathSync(options.reviewHome), options.path), input: prompt,
+    timeoutMs: options.timeoutMs,
   });
   writeFileSync(join(captureRoot, 'process.json'), JSON.stringify(result), {flag: 'wx', mode: 0o400});
   assert.equal(result.failure, null, 'owner execution incomplete; inspect original evidence before recovery');

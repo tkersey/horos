@@ -9,6 +9,7 @@ export const reviewArchives = Object.freeze({
   cas: Object.freeze({
     url: 'https://github.com/tkersey/skills-zig/releases/download/cas-v0.8.4/cas-v0.8.4-linux-x86_64.tar.gz',
     sha256: '1341dda106c9b6ed736da5c2567e631bb98268586aae8cf18813c64561e58120', size: 32387477,
+    binarySha256: '75563ebff7226e8b8586ad7ba92abc55d9eb87329e22fc2ac04cc67332fcfac5',
     members: ['.', 'cas_account', 'cas_instance_runner', 'cas_automation', 'cas_session_inquiry',
       'cas_app_server_preflight', 'cas-session-inquiry', 'cas', 'cas-instance-runner', 'cas-smoke-check',
       'cas_smoke_check', 'cas_review_session', 'cas-review-session', 'cas-goal', 'cas-conformance-suite',
@@ -17,6 +18,7 @@ export const reviewArchives = Object.freeze({
   codex: Object.freeze({
     url: 'https://github.com/openai/codex/releases/download/rust-v0.166.0/codex-x86_64-unknown-linux-musl.tar.gz',
     sha256: 'a0bf572d2f93f056c6712a6da348e96078dc84f3885fd7be67807ef389cb3978', size: 121764138,
+    binarySha256: 'b8a11fedf24b2dfb59a70c9e52b030f9a508dcd49cd2dd0d41956f4c785156b8',
     members: ['codex-x86_64-unknown-linux-musl'],
   }),
 });
@@ -70,6 +72,8 @@ export async function installReviewTools(directory) {
   assert.equal(git(['rev-parse', 'HEAD']), reviewPolicyCommit);
   assert.equal(sha256(readFileSync(join(policyDirectory, 'agents/skills/actuating/references/review-contract.json'))), reviewPolicyDigest);
   const casPath = join(root, 'cas/cas'), codexPath = join(root, 'codex/codex-x86_64-unknown-linux-musl');
+  assert.equal(sha256(readFileSync(casPath)), reviewArchives.cas.binarySha256);
+  assert.equal(sha256(readFileSync(codexPath)), reviewArchives.codex.binarySha256);
   assert.equal(execFileSync(casPath, ['--version'], {encoding: 'utf8', timeout: 30000}).trim(), '0.8.4');
   assert.equal(execFileSync(codexPath, ['--version'], {encoding: 'utf8', timeout: 30000}).trim(), 'codex-cli 0.166.0');
   return {casPath, codexPath, policyDirectory, casSha256: sha256(readFileSync(casPath)),

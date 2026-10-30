@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 
-export function parseEvidenceJson(input) {
+export function parseEvidenceJson(input, maximumBytes = 64 * 1024 * 1024) {
+  assert.ok(Number.isSafeInteger(maximumBytes) && maximumBytes > 0 && maximumBytes <= 256 * 1024 * 1024);
   const text = typeof input === 'string' ? input : new TextDecoder('utf-8', {fatal: true}).decode(input);
-  assert.ok(Buffer.byteLength(text) <= 64 * 1024 * 1024, 'evidence JSON too large');
+  assert.ok(Buffer.byteLength(text) <= maximumBytes, 'evidence JSON too large');
   const token = /\s+|"(?:[^"\\\x00-\x1f]|\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))*"|[{}\[\]:,]|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?|true|false|null/y;
   const stack = [];
   let offset = 0, count = 0;

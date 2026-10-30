@@ -443,7 +443,7 @@ fn releaseSourceChecks(
     b.step("check-release-source", "Reject corrupt source archives against Git identities")
         .dependOn(&run_tests.step);
     const release = b.addRunArtifact(helper);
-    release.addArg("prepare-release-source");
+    release.addArg("prepare-build-release-source");
     release.addFileArg2(.zig_exe, .{ .make_absolute = true });
     release.addDirectoryArg2(b.path("."), .{ .make_absolute = true });
     const release_output = release.addOutputDirectoryArg2("release-source", .{});

@@ -1,0 +1,144 @@
+name: Repository owner review
+on:
+  schedule:
+    - cron: '7 * * * *'
+  workflow_dispatch:
+    inputs:
+      pull:
+        description: 'Optional local pull request number'
+        required: false
+        type: string
+      bootstrap_base:
+        description: 'Initial publication review: exact accepted source base commit'
+        required: false
+        type: string
+      bootstrap_version:
+        description: 'Initial publication review: current committed package version'
+        required: false
+        type: string
+      bootstrap_impact:
+        description: 'Reviewed initial publication impact'
+        required: false
+        type: choice
+        options: [none, patch, minor, major]
+        default: patch
+      bootstrap_disposition:
+        description: 'Initial publication compatibility for downstream admission'
+        required: false
+        type: choice
+        options: [compatible, breaking]
+        default: compatible
+      bootstrap_rationale:
+        description: 'Explicit initial publication compatibility rationale'
+        required: false
+        type: string
+      bootstrap_contracts:
+        description: 'Initial publication affected public contracts as a JSON string array'
+        required: false
+        type: string
+  workflow_run:
+    workflows: ['Zig 0.17 qualification']
+    types: [completed]
+concurrency:
+  group: repository-owner-review
+  cancel-in-progress: false
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+jobs:
+  owner:
+    name: Owner review
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: repository-review
+    steps:
+      - name: Report disabled automation
+        if: vars.REPOSITORY_AUTOMATION != 'propose' && vars.REPOSITORY_AUTOMATION != 'promote'
+        run: echo 'Owner review admission is disabled by REPOSITORY_AUTOMATION.' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        if: vars.REPOSITORY_AUTOMATION == 'propose' || vars.REPOSITORY_AUTOMATION == 'promote'
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        if: vars.REPOSITORY_AUTOMATION == 'propose' || vars.REPOSITORY_AUTOMATION == 'promote'
+        with:
+          node-version: '26.9.0'
+      - name: Mint repository-local read authority
+        id: observer
+        if: vars.REPOSITORY_AUTOMATION == 'propose' || vars.REPOSITORY_AUTOMATION == 'promote'
+        env:
+          REPOSITORY_APP_CLIENT_ID: ${{ vars.REPOSITORY_APP_CLIENT_ID }}
+          REPOSITORY_APP_PRIVATE_KEY: ${{ secrets.REPOSITORY_APP_PRIVATE_KEY }}
+        run: node tools/release/app-token.mjs create tkersey/horos observer "$RUNNER_TEMP/review-app.json"
+      - name: Observe original qualification and owner state
+        id: plan
+        if: steps.observer.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ steps.observer.outputs.token }}
+          REQUESTED_PULL: ${{ inputs.pull }}
+          BOOTSTRAP_BASE: ${{ inputs.bootstrap_base }}
+          BOOTSTRAP_VERSION: ${{ inputs.bootstrap_version }}
+          BOOTSTRAP_IMPACT: ${{ inputs.bootstrap_impact }}
+          BOOTSTRAP_DISPOSITION: ${{ inputs.bootstrap_disposition }}
+          BOOTSTRAP_RATIONALE: ${{ inputs.bootstrap_rationale }}
+          BOOTSTRAP_CONTRACTS: ${{ inputs.bootstrap_contracts }}
+        run: node tools/release/review-runner.mjs plan "$GITHUB_WORKSPACE" "$RUNNER_TEMP/review-output" "$REQUESTED_PULL"
+      - name: Install exact accepted review tools
+        if: steps.plan.outputs.ready == 'true'
+        run: |
+          mkdir "$RUNNER_TEMP/repository-review"
+          node tools/release/cli.mjs setup-review-tools "$RUNNER_TEMP/repository-review/tools" > "$RUNNER_TEMP/repository-review/tools.json"
+      - name: Prepare immutable subject and original evidence
+        if: steps.plan.outputs.ready == 'true'
+        env:
+          GH_TOKEN: ${{ steps.observer.outputs.token }}
+          REPOSITORY_REVIEW_AUTH_JSON: ${{ secrets.REPOSITORY_REVIEW_AUTH_JSON }}
+        run: node tools/release/review-runner.mjs prepare "$RUNNER_TEMP/review-output/plan.json" "$RUNNER_TEMP/repository-review/tools.json" "$RUNNER_TEMP/repository-review" "$RUNNER_TEMP/review-output"
+      - name: Retain original owner admission before invocation
+        if: steps.plan.outputs.ready == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          path: ${{ runner.temp }}/review-output/${{ steps.plan.outputs.start }}
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
+      - name: Execute one ordinary owner turn
+        id: review
+        if: steps.plan.outputs.ready == 'true'
+        timeout-minutes: 8
+        env:
+          GH_TOKEN: ${{ steps.observer.outputs.token }}
+          REPOSITORY_REVIEW_AUTH_JSON: ${{ secrets.REPOSITORY_REVIEW_AUTH_JSON }}
+        run: node tools/release/review-runner.mjs run "$RUNNER_TEMP/repository-review/review-runtime.json"
+      - name: Retain owner result and original compact evidence
+        if: steps.review.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          path: ${{ runner.temp }}/review-output/${{ steps.plan.outputs.result }}
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
+      - name: Retain pending owner runtime without credentials or caches
+        if: steps.review.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          path: ${{ runner.temp }}/review-output/${{ steps.plan.outputs.state }}
+          archive: false
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Retain blocked invocation diagnostics
+        if: always() && steps.plan.outputs.ready == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          path: ${{ runner.temp }}/review-output/${{ steps.plan.outputs.diagnostic }}
+          archive: false
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Revoke local observer credential
+        if: always() && steps.observer.outputs.token != ''
+        env:
+          GH_TOKEN: ${{ steps.observer.outputs.token }}
+        run: node tools/release/app-token.mjs revoke

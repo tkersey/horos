@@ -266,7 +266,10 @@ fn prepareRelease(
     repository: []const u8,
     destination: []const u8,
     expected_commit: ?[]const u8,
+    build_owned: bool,
 ) !void {
+    const owner = if (build_owned) try release_source.BuildOutput.acquire(r, destination) else null;
+    defer if (owner) |value| value.close(r.io);
     try committed(r, repository);
     const output = try scratch(r, destination);
     defer Dir.cwd().deleteTree(r.io, output) catch |err|
@@ -277,13 +280,14 @@ fn prepareRelease(
         if (!std.mem.eql(u8, trimmed, snapshot.commit)) return error.SourceCommitChanged;
     }
     const hash = try consumePackage(r, zig, snapshot.source, output);
-    try retainRelease(r, snapshot, hash, destination);
+    try retainRelease(r, snapshot, hash, destination, owner);
 }
 fn retainRelease(
     r: Runner,
     snapshot: release_source.Snapshot,
     hash: []const u8,
     destination: []const u8,
+    owner: ?release_source.BuildOutput,
 ) !void {
     const receipt = .{
         .commit = snapshot.commit,
@@ -303,6 +307,8 @@ fn retainRelease(
         snapshot.sha256,
         &std.fmt.bytesToHex(digest, .lower),
     )) return error.SourceChanged;
+    const record = try std.json.Stringify.valueAlloc(r.a, receipt, .{});
+    if (owner) |value| return value.retain(r.io, bytes, record);
     const archive = try r.path(&.{ destination, "source.tar" });
     const created = try release_source.retain(r, archive, bytes);
     errdefer if (created) Dir.cwd().deleteFile(r.io, archive) catch |err|
@@ -310,7 +316,7 @@ fn retainRelease(
     _ = try release_source.retain(
         r,
         try r.path(&.{ destination, "source.json" }),
-        try std.json.Stringify.valueAlloc(r.a, receipt, .{}),
+        record,
     );
 }
 fn packageConsumer(r: Runner, source: []const u8, output: []const u8) ![]const u8 {
@@ -368,7 +374,7 @@ fn checkReleaseArchive(r: Runner, args: anytype) !void {
     const source = try r.path(&.{ output, "source" });
     const snapshot = try release_source.verify(r, repository, commit, tree, archive, source);
     const hash = try consumePackage(r, zig, source, output);
-    try retainRelease(r, snapshot, hash, destination);
+    try retainRelease(r, snapshot, hash, destination, null);
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -388,13 +394,19 @@ pub fn main(init: std.process.Init) !void {
         return Dir.cwd().deleteTree(r.io, output);
     }
     if (std.mem.eql(u8, name, "check-release-archive")) return checkReleaseArchive(r, &args);
-    if (std.mem.eql(u8, name, "prepare-release-source")) {
+    if (std.mem.eql(u8, name, "prepare-release-source") or
+        std.mem.eql(u8, name, "prepare-build-release-source"))
+    {
         const zig = args.next() orelse return error.MissingCompiler;
         const repository = args.next() orelse return error.MissingRepository;
         const output = args.next() orelse return error.MissingOutput;
         const expected_commit = args.next();
         if (args.next() != null) return error.UnexpectedArgument;
-        return prepareRelease(r, zig, repository, output, expected_commit);
+        return prepareRelease(r, zig, repository, output, expected_commit, std.mem.eql(
+            u8,
+            name,
+            "prepare-build-release-source",
+        ));
     }
     if (std.mem.eql(u8, name, "check-package")) {
         const zig = args.next() orelse return error.MissingCompiler;

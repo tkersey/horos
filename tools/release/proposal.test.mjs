@@ -74,8 +74,9 @@ function fixture(t) {
       let response;
       if (expectedObjects.has(path)) {
         const value = expectedObjects.get(path);
-        if (path === '/git/trees') assert.deepEqual(request.body, {base_tree: baseTree, tree: [{path: 'build.zig.zon', mode: '100644', type: 'blob', sha: newBlob}]});
-        if (path === '/git/commits') assert.deepEqual(request.body.parents, [base]);
+        if (path === '/git/trees') assert.deepEqual(request.body, {base_tree: baseTree,
+          tree: [{path: 'build.zig.zon', mode: '100644', type: 'blob', sha: value.tree.find(entry => entry.path === 'build.zig.zon').sha}]});
+        if (path === '/git/commits') assert.deepEqual(request.body.parents, value.parents.map(parent => parent.sha));
         objects.set(`${path}/${value.sha}`, structuredClone(value));
         response = {status: 201, body: structuredClone(value)};
       } else if (path === '/pulls') {
@@ -87,6 +88,10 @@ function fixture(t) {
           base: {ref: 'main', sha: state.main, repo: {id: 1176152390}}, user: {...actor},
           title: request.body.title, body: request.body.body, labels: [], assignees: []};
         state.pulls.push(value); response = {status: 201, body: structuredClone(value)};
+      } else if (method === 'PATCH' && /^\/pulls\/[0-9]+$/.test(path)) {
+        const value = state.pulls.find(value => value.number === Number(path.split('/')[2]));
+        assert.deepEqual(Object.keys(request.body).sort(), ['body', 'title']);
+        Object.assign(value, request.body); response = reply(value);
       } else if (/^\/issues\/[0-9]+\/assignees$/.test(path)) {
         assert.deepEqual(request.body, {assignees: ['tkersey']});
         const value = state.pulls.find(value => value.number === Number(path.split('/')[2]));
@@ -112,6 +117,7 @@ function fixture(t) {
         assert.equal(updates[0].name, `refs/heads/${proposalBranch}`);
         assert.equal(updates[0].beforeOid, state.branch ?? '0'.repeat(40), 'lease mismatch');
         state.branch = updates[0].afterOid;
+        for (const pull of state.pulls.filter(value => value.state === 'open')) pull.head.sha = state.branch;
       } else if (operation === 'PromoteProposal') {
         const pull = state.pulls.find(value => value.node_id === variables.input.pullRequestId);
         assert.equal(variables.input.expectedHeadOid, pull.head.sha);
@@ -134,7 +140,28 @@ function fixture(t) {
       assert.ok(value.protection?.required_status_checks?.strict || value.rules.length > 0);
     },
   };
-  return {state, candidate, options, baseTree, newBlob, baseBlob, objects, expectedObjects,
+  const successor = (version = '1.0.2', advance = false) => {
+    const manifestBytes = Buffer.from(`.{ .name = .horos, .version = "${version}" }\n`);
+    const selectedBlob = git(['hash-object', '-w', '--stdin'], manifestBytes), selectedTree = tree(selectedBlob);
+    const selectedBase = advance ? git(['-c', 'commit.gpgsign=false', 'commit-tree', baseTree, '-p', base], 'Advanced base\n') : base;
+    if (advance) {
+      objects.set(`/git/commits/${selectedBase}`, commit(selectedBase, baseTree, 'Advanced base\n', [base]));
+      state.main = selectedBase;
+      for (const pull of state.pulls.filter(value => value.state === 'open')) pull.base.sha = selectedBase;
+    }
+    const value = {base: selectedBase, tree: selectedTree, manifestBytes, version, author: {...person}, committer: {...person}};
+    value.message = proposalMessage(value); value.head = proposalCommitOid(value);
+    expectedObjects.set('/git/blobs', blob(selectedBlob, manifestBytes));
+    expectedObjects.set('/git/trees', {sha: selectedTree, truncated: false, tree: entries(selectedBlob)});
+    expectedObjects.set('/git/commits', commit(value.head, selectedTree, value.message, [selectedBase]));
+    return {candidate: value,
+      admitCandidate: async ({candidate: observed, baseManifest: previous}) => {
+        assert.equal(observed.head, value.head); assert.deepEqual(previous, baseManifest);
+      },
+      admitRetirement: async value => {state.retirements.push(value.knownHead); return {epochClosed: true, previousCandidate: candidate};},
+    };
+  };
+  return {state, candidate, options, baseTree, newBlob, baseBlob, objects, expectedObjects, successor,
     propose: overrides => proposeHoros({...options, ...overrides}),
     promote: overrides => promoteHoros({...options, number: 1, ...overrides}),
     writes: () => state.calls.filter(value => !['GET', 'QUERY'].includes(value.method)),
@@ -349,4 +376,100 @@ test('candidate attribution includes exact version manifest and frozen subject',
   assert.ok(description.body.includes(f.candidate.base) && description.body.includes(f.candidate.head));
   assert.ok(description.body.startsWith(description.marker));
   assert.ok(description.body.includes('build.zig.zon version only'));
+});
+
+test('closed original epoch admits successor on same ordinary PR with exact branch lease', async t => {
+  for (const advance of [false, true]) {
+    const f = fixture(t); await f.propose(); const next = f.successor('1.0.2', advance);
+    f.state.pulls[0].labels = [{name: 'retained-label'}]; f.state.pulls[0].assignees.push({login: 'human'});
+    f.state.calls = [];
+    const result = await f.propose(next);
+    assert.equal(result.status, 'proposal open'); assert.equal(result.number, 1);
+    assert.equal(result.previousHead, f.candidate.head); assert.equal(result.head, next.candidate.head);
+    assert.equal(f.state.pulls.length, 1); assert.equal(f.state.branch, next.candidate.head);
+    assert.equal(f.state.pulls[0].body, proposalDescription(next.candidate).body);
+    assert.deepEqual(f.state.pulls[0].labels, [{name: 'retained-label'}]);
+    assert.deepEqual(f.state.pulls[0].assignees, [{login: 'tkersey'}, {login: 'human'}]);
+    const update = f.writes().find(value => value.path === 'UpdateProposal').variables.input.refUpdates[0];
+    assert.equal(update.beforeOid, f.candidate.head); assert.equal(update.afterOid, next.candidate.head); assert.equal(update.force, true);
+    assert.deepEqual(f.writes().filter(value => value.path.startsWith('/pulls')).map(value => [value.method, value.path]), [['PATCH', '/pulls/1']]);
+    f.state.calls = []; await f.propose(next); assert.equal(f.writes().length, 0);
+  }
+});
+
+for (const [name, mutate] of [
+  ['missing original owner closure', (f, next) => {next.admitRetirement = undefined;}],
+  ['still-open original epoch', (f, next) => {next.admitRetirement = async () => ({epochClosed: false, previousCandidate: f.candidate});}],
+  ['missing authenticated old candidate', (f, next) => {next.admitRetirement = async () => ({epochClosed: true});}],
+  ['human body edit', f => {f.state.pulls[0].body += '\nHuman note.\n';}],
+  ['human title edit', f => {f.state.pulls[0].title = 'Owner edited title';}],
+  ['human draft hold', f => {f.state.pulls[0].draft = true;}],
+  ['manual hold label', f => {f.state.pulls[0].labels.push({name: 'automation-hold'});}],
+  ['human branch edit', f => {f.state.branch = 'd'.repeat(40); f.state.pulls[0].head.sha = f.state.branch;}],
+  ['pending auto merge', f => {f.state.autoMerge = {enabledBy: {login: actor.login}, mergeMethod: 'REBASE'};}],
+  ['manual auto merge cancellation', f => {f.state.events.push({id: 'event-1', __typename: 'AutoMergeDisabledEvent', actor: {login: 'human'}});}],
+]) test(`successor holds ${name} without branch or metadata writes`, async t => {
+  const f = fixture(t); await f.propose(); const next = f.successor(); mutate(f, next); f.state.calls = [];
+  assert.equal((await f.propose(next)).status, 'held'); assert.equal(f.writes().length, 0);
+});
+
+test('retirement proof corruption cannot replace original Git source', async t => {
+  const f = fixture(t); await f.propose(); const next = f.successor(); f.state.calls = [];
+  next.admitRetirement = async () => ({epochClosed: true, previousCandidate: {...f.candidate, manifestBytes: Buffer.from('forged')}});
+  await assert.rejects(f.propose(next)); assert.equal(f.writes().length, 0);
+});
+
+test('lost successor branch response is observed and completes metadata on the same PR', async t => {
+  const f = fixture(t); await f.propose(); const next = f.successor(); f.state.calls = [];
+  f.state.failAfter = value => value.path === 'UpdateProposal';
+  await f.propose(next); assert.equal(f.state.pulls.length, 1); assert.equal(f.state.branch, next.candidate.head);
+  assert.equal(f.writes().filter(value => value.path === 'UpdateProposal').length, 1);
+  assert.equal(f.state.pulls[0].body, proposalDescription(next.candidate).body);
+});
+
+test('interrupted successor metadata resumes only the same frozen candidate', async t => {
+  const f = fixture(t); await f.propose(); const next = f.successor();
+  f.state.failBefore = value => value.method === 'PATCH' && value.path === '/pulls/1';
+  await assert.rejects(f.propose(next), /not confirmed/);
+  assert.equal(f.state.branch, next.candidate.head); assert.equal(f.state.pulls[0].body, proposalDescription(f.candidate).body);
+  f.state.failBefore = null; f.state.calls = [];
+  const third = f.successor('1.0.3');
+  assert.equal((await f.propose(third)).status, 'held'); assert.equal(f.writes().length, 0);
+  await f.propose(next);
+  assert.deepEqual(f.writes().map(value => [value.method, value.path]), [['PATCH', '/pulls/1']]);
+  assert.equal(f.state.pulls[0].body, proposalDescription(next.candidate).body);
+});
+
+test('lost metadata response converges without another branch or PR write', async t => {
+  const f = fixture(t); await f.propose(); const next = f.successor();
+  f.state.failAfter = value => value.method === 'PATCH' && value.path === '/pulls/1';
+  await f.propose(next); f.state.calls = []; await f.propose(next);
+  assert.equal(f.writes().length, 0); assert.equal(f.state.pulls.length, 1);
+});
+
+test('successor CAS preserves concurrent human branch edits', async t => {
+  const f = fixture(t); await f.propose(); const next = f.successor();
+  f.state.onGraphql = (operation, _variables, state) => {if (operation === 'UpdateProposal') state.branch = 'd'.repeat(40);};
+  await assert.rejects(f.propose(next), /not confirmed/);
+  assert.equal(f.state.branch, 'd'.repeat(40)); assert.equal(f.state.pulls[0].body, proposalDescription(f.candidate).body);
+});
+
+test('new hold during successor admission stops before branch replacement', async t => {
+  const f = fixture(t); await f.propose(); const next = f.successor();
+  next.admitCandidate = async () => {f.state.pulls[0].labels.push({name: 'automation-hold'});}; f.state.calls = [];
+  await assert.rejects(f.propose(next), /labels changed/);
+  assert.equal(f.writes().some(value => value.path === 'UpdateProposal' || value.method === 'PATCH'), false);
+});
+
+test('trusted cancellation resume preserves original failure and closure history', async t => {
+  const f = fixture(t); await f.propose(); const next = f.successor();
+  const event = {id: 'cancel-1', __typename: 'AutoMergeDisabledEvent', actor: {login: actor.login}};
+  f.state.events.push(event); let resumed = 0;
+  next.admitResume = async ({events}) => {assert.deepEqual(events, [event]); resumed++;};
+  await f.propose(next); assert.equal(resumed, 1); assert.deepEqual(f.state.events, [event]);
+});
+
+test('successor restores required assignee after admitted metadata replacement', async t => {
+  const f = fixture(t); await f.propose(); const next = f.successor(); f.state.pulls[0].assignees = [];
+  await f.propose(next); assert.deepEqual(f.state.pulls[0].assignees, [{login: 'tkersey'}]);
 });

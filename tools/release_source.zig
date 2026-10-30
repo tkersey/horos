@@ -199,6 +199,67 @@ pub fn retain(r: anytype, path: []const u8, bytes: []const u8) !bool {
     return true;
 }
 
+pub const BuildOutput = struct {
+    directory: Dir,
+    lock: std.Io.File,
+
+    pub fn acquire(r: anytype, path: []const u8) !BuildOutput {
+        try Dir.cwd().createDirPath(r.io, path);
+        const directory = try Dir.cwd().openDir(r.io, path, .{ .follow_symlinks = false });
+        errdefer directory.close(r.io);
+        const lock_path = try std.fmt.allocPrint(r.a, "{s}.lock", .{path});
+        const lock = Dir.cwd().createFile(r.io, lock_path, .{
+            .exclusive = true,
+        }) catch |err| blk: {
+            if (err != error.PathAlreadyExists) return err;
+            break :blk try Dir.cwd().openFile(r.io, lock_path, .{
+                .mode = .read_write,
+                .follow_symlinks = false,
+                .allow_directory = false,
+            });
+        };
+        errdefer lock.close(r.io);
+        if ((try lock.stat(r.io)).kind != .file) return error.InvalidBuildOutputLock;
+        if (!try lock.tryLock(r.io, .exclusive)) return error.BuildOutputBusy;
+        return .{ .directory = directory, .lock = lock };
+    }
+
+    pub fn close(output: BuildOutput, io: std.Io) void {
+        output.lock.unlock(io);
+        output.lock.close(io);
+        output.directory.close(io);
+    }
+
+    fn regular(output: BuildOutput, io: std.Io, name: []const u8) !void {
+        const stat = output.directory.statFile(io, name, .{
+            .follow_symlinks = false,
+        }) catch |err| {
+            if (err == error.FileNotFound) return;
+            return err;
+        };
+        if (stat.kind != .file) return error.InvalidBuildOutput;
+    }
+
+    pub fn retain(output: BuildOutput, io: std.Io, archive: []const u8, receipt: []const u8) !void {
+        try output.regular(io, "source.tar");
+        try output.regular(io, "source.json");
+        var staged_archive = try output.directory.createFileAtomic(io, "source.tar", .{
+            .replace = true,
+        });
+        defer staged_archive.deinit(io);
+        var staged_receipt = try output.directory.createFileAtomic(io, "source.json", .{
+            .replace = true,
+        });
+        defer staged_receipt.deinit(io);
+        try staged_archive.file.writeStreamingAll(io, archive);
+        try staged_receipt.file.writeStreamingAll(io, receipt);
+        try output.regular(io, "source.tar");
+        try output.regular(io, "source.json");
+        try staged_archive.replace(io);
+        try staged_receipt.replace(io);
+    }
+};
+
 pub fn prepare(r: anytype, repository: []const u8, output: []const u8) !Snapshot {
     const commit = try identity((try r.run(
         &.{ "git", "--no-replace-objects", "rev-parse", "HEAD" },
@@ -491,4 +552,61 @@ test "retained source artifacts converge on identical bytes and preserve collisi
     try std.testing.expect(!try retain(r, path, "accepted"));
     try std.testing.expectError(error.ReleaseArtifactCollision, retain(r, path, "different"));
     try std.testing.expectEqualStrings("accepted", try readArchive(r, path));
+}
+
+test "build-owned output replaces changed heads and producers with exclusive ownership" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const r: TestRunner = .{ .a = arena.allocator() };
+    const root = try temporary(r);
+    defer removeFixture(r, root);
+    const path = try r.path(&.{ root, "build" });
+    {
+        const owner = try BuildOutput.acquire(r, path);
+        defer owner.close(r.io);
+        try owner.retain(r.io, "head-one", "producer-one");
+        try std.testing.expectError(error.BuildOutputBusy, BuildOutput.acquire(r, path));
+    }
+    const owner = try BuildOutput.acquire(r, path);
+    defer owner.close(r.io);
+    try std.testing.expectEqualStrings("head-one", try readArchive(
+        r,
+        try r.path(&.{ path, "source.tar" }),
+    ));
+    try owner.retain(r.io, "head-two", "producer-one-next-head");
+    try owner.retain(r.io, "head-two", "producer-two-next-head");
+    try std.testing.expectEqualStrings("head-two", try readArchive(
+        r,
+        try r.path(&.{ path, "source.tar" }),
+    ));
+    try std.testing.expectEqualStrings("producer-two-next-head", try readArchive(
+        r,
+        try r.path(&.{ path, "source.json" }),
+    ));
+}
+
+test "build-owned output rejects special destinations before replacing either accepted file" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const r: TestRunner = .{ .a = arena.allocator() };
+    const root = try temporary(r);
+    defer removeFixture(r, root);
+    const path = try r.path(&.{ root, "build" });
+    const owner = try BuildOutput.acquire(r, path);
+    defer owner.close(r.io);
+    try owner.retain(r.io, "accepted", "accepted-receipt");
+    const receipt = try r.path(&.{ path, "source.json" });
+    const outside = try r.path(&.{ root, "outside" });
+    try r.write(outside, "preserved");
+    try Dir.cwd().deleteFile(r.io, receipt);
+    try Dir.cwd().symLink(r.io, outside, receipt, .{});
+    try std.testing.expectError(error.InvalidBuildOutput, owner.retain(r.io, "wrong", "wrong"));
+    try std.testing.expectEqualStrings("accepted", try readArchive(
+        r,
+        try r.path(&.{ path, "source.tar" }),
+    ));
+    try std.testing.expectEqualStrings("preserved", try readArchive(r, outside));
+    try Dir.cwd().deleteFile(r.io, receipt);
+    try Dir.cwd().createDir(r.io, receipt, .fromMode(0o700));
+    try std.testing.expectError(error.InvalidBuildOutput, owner.retain(r.io, "wrong", "wrong"));
 }

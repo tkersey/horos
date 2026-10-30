@@ -23,8 +23,14 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
         with:
           node-version: '26.9.0'
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
+        with:
+          version: '0.17.0'
+          use-cache: false
       - name: Require executed release boundary tests
         run: node tools/release/test.mjs
+      - name: Verify native Linux review tool and sandbox interfaces
+        run: node tools/release/review-tools-smoke.mjs "$RUNNER_TEMP/release-review-smoke"
   source:
     name: Source preflight
     runs-on: ubuntu-24.04

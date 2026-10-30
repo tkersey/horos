@@ -137,7 +137,7 @@ The implementation adds a required release-tool result to the same terminal gate
 | Source preflight | Tracked Zig inventory, formatting, full-source TigerStyle with pinned auditor tests, launcher behavior tests. | 5 minutes |
 | Installation | `zig build check-package -Doptimize=safe --summary all`; fresh exported-package authoring/data consumers, negative category/lifecycle/compiler checks, and native archive tests. | 10 minutes |
 | Contracts | `zig build check -Doptimize=safe --summary all --verbose`; native contracts, component/linker behavior, independent source oracle, and WASM byte/identity observations. | 10 minutes |
-| Release tooling | `node tools/release/test.mjs`, using pinned Node 26.9.0. | 10 minutes |
+| Release tooling | `node tools/release/test.mjs`, using pinned Node 26.9.0 and the actual Zig manifest helper; `node tools/release/review-tools-smoke.mjs OUTPUT_DIRECTORY` verifies native Linux review tool compatibility and sandbox confinement. | 10 minutes |
 | `native` aggregate | Runs even after prerequisite failures and requires actual success of source, both qualification lanes, and release tooling. | 5 minutes |
 
 CI executes on native Ubuntu 24.04 x86-64 with Zig 0.17.0. Native macOS checks
@@ -194,13 +194,45 @@ preflight passed on the inspected native macOS runtime. Nested CAS preflight
 inside the owner sandbox also passed after directing its schema cache into
 permitted scratch; writes to the protected capture directory were denied. Full
 review execution, resumption in Actions, and final closeout are still unverified.
+An actual bounded owner/CAS review attempt on macOS subsequently stopped before
+review creation with `SystemBootIdentityUnavailable`: the Codex sandbox denied
+CAS's `kern.boottime` query. That attempt received no review credit. The automated
+execution target remains native Linux x86-64; its added interface smoke is a
+separate observation and does not count as an executed product review.
+
+`repository-review.yml` polls qualified local PRs and accepts an explicit initial
+publication review range through its `bootstrap_*` manual inputs. It uses only a
+repository-local read token and separate model authentication, starts at most one
+owner-selected review per job, and retains the same owner session for subsequent
+turns. Pending results and credential-free active state are ordinary Actions
+artifacts with 14-day retention. Expired or incomplete original evidence blocks
+automatic recovery. The current pinned runtime is `gpt-6-astra`, high reasoning,
+priority service, CAS 0.8.4 and Codex 0.166.0; changing these bindings invalidates
+an active epoch.
+
+Required deployment inputs are `REPOSITORY_APP_CLIENT_ID`, the
+`REPOSITORY_APP_PRIVATE_KEY` secret, and `REPOSITORY_REVIEW_AUTH_JSON`. The
+`repository-review` environment must be configured by the owner. Token creation
+requests exactly this repository and the job's explicit permissions; model
+processes never receive the App key or writer token. These inputs have not been
+provisioned by this implementation.
+
+The native version adapter prepares only `build.zig.zon` through
+`horos-manifest`, preserves the base commit's timestamp for deterministic Git
+identity, and authenticates root-tree contents independently. Promotion and
+publication-boundary adapters require original qualification, authenticated owner
+evidence, declared impact and effective branch protection. The review check writer
+updates one App-owned check for the exact head and never grants credit for pending,
+blocked, forged, stale-declaration or mismatched-runtime evidence.
 
 The final runbook must record the implemented invocation, exact delivered heads,
 full qualification results, review closeout, and live commissioning observations.
 Until those exist, this implementation is not PR-ready or commissioned. Required
-remaining components are review invocation/export/admission, authenticated
-release admission, local version preparation, one ordinary local PR lifecycle,
-protected promotion, and collision-safe publication/recovery.
+remaining components are final operational writer/publisher workflow wiring,
+complete cross-repository handoff integration, full exact-head product
+qualification, original serial owner review, and authorized live commissioning.
+The implemented adapters and contract tests do not by themselves establish those
+outcomes.
 
 ## Merge and commissioning order
 
