@@ -11,6 +11,20 @@ permissions:
   contents: read
   actions: read
 jobs:
+  release-tools:
+    name: Release tooling
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '26.9.0'
+      - name: Require executed release boundary tests
+        run: node tools/release/test.mjs
   source:
     name: Source preflight
     runs-on: ubuntu-24.04
@@ -78,10 +92,28 @@ jobs:
       - name: Run selected native build root
         run: |
           if [ "${{ matrix.lane }}" = installation ]; then
-            zig build check-package -Doptimize=safe --summary all
+            zig build check-package release-source -Doptimize=safe --summary all
           else
             zig build check -Doptimize=safe --summary all --verbose
           fi
+      - name: Retain exact source bytes exercised by the package consumer
+        if: matrix.lane == 'installation'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: horos-source-${{ github.event.pull_request.head.sha || github.sha }}.tar
+          path: zig-out/release-source/source.tar
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
+      - name: Retain native source and package identities
+        if: matrix.lane == 'installation'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: horos-source-inventory-${{ github.event.pull_request.head.sha || github.sha }}.json
+          path: zig-out/release-source/source.json
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
       - name: Admit complete bounded compiler cache
         id: cache_size
         if: ${{ !cancelled() && matrix.lane == 'contracts' }}
@@ -117,7 +149,7 @@ jobs:
           key: horos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ hashFiles('build.zig.zon') }}-${{ github.run_id }}-${{ github.run_attempt }}
   native:
     name: native
-    needs: [source, qualify]
+    needs: [source, qualify, release-tools]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -126,6 +158,8 @@ jobs:
         env:
           SOURCE: ${{ needs.source.result }}
           QUALIFICATION: ${{ needs.qualify.result }}
+          RELEASE_TOOLS: ${{ needs.release-tools.result }}
         run: |
           test "$SOURCE" = success
           test "$QUALIFICATION" = success
+          test "$RELEASE_TOOLS" = success

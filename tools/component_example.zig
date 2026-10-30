@@ -3,16 +3,17 @@
 //! The transported linker imports data only; package consumers use Zig's package.
 const std = @import("std");
 const horos = @import("horos");
+const release_source = @import("release_source.zig");
 const Dir = std.Io.Dir;
 const Runner = struct {
     a: std.mem.Allocator,
     io: std.Io,
     env: *const std.process.Environ.Map,
 
-    fn path(r: Runner, parts: []const []const u8) ![]const u8 {
+    pub fn path(r: Runner, parts: []const []const u8) ![]const u8 {
         return std.fs.path.join(r.a, parts);
     }
-    fn run(
+    pub fn run(
         r: Runner,
         argv: []const []const u8,
         cwd: []const u8,
@@ -36,10 +37,10 @@ const Runner = struct {
         }
         return result;
     }
-    fn write(r: Runner, file_path: []const u8, bytes: []const u8) !void {
+    pub fn write(r: Runner, file_path: []const u8, bytes: []const u8) !void {
         try Dir.cwd().writeFile(r.io, .{ .sub_path = file_path, .data = bytes });
     }
-    fn read(r: Runner, file_path: []const u8) ![]u8 {
+    pub fn read(r: Runner, file_path: []const u8) ![]u8 {
         return Dir.cwd().readFileAlloc(r.io, file_path, r.a, .limited(64 << 20));
     }
 };
@@ -178,7 +179,11 @@ fn linkExtended(
     return r.run(&.{ transported, "link.json" }, output, true);
 }
 fn package(r: Runner, zig: []const u8, repository: []const u8, output: []const u8) !void {
-    const source = try packageSource(r, repository, output);
+    try committed(r, repository);
+    const snapshot = try release_source.prepare(r, repository, output);
+    _ = try consumePackage(r, zig, snapshot.source, output);
+}
+fn consumePackage(r: Runner, zig: []const u8, source: []const u8, output: []const u8) ![]const u8 {
     var env = try r.env.clone(r.a);
     defer env.deinit();
     const global = try r.path(&.{ output, "global" });
@@ -186,6 +191,9 @@ fn package(r: Runner, zig: []const u8, repository: []const u8, output: []const u
     try env.put("ZIG_LOCAL_CACHE_DIR", try r.path(&.{ output, "local" }));
     try env.put("ZIG_LOCAL_PKG_DIR", try r.path(&.{ output, "packages" }));
     const selected: Runner = .{ .a = r.a, .io = r.io, .env = &env };
+    const compiler = try selected.run(&.{ zig, "version" }, output, true);
+    if (!std.mem.eql(u8, std.mem.trim(u8, compiler.stdout, "\r\n"), "0.17.0"))
+        return error.UnsupportedCompiler;
     const fetched = try selected.run(&.{ zig, "fetch", source }, output, true);
     const hash = std.mem.trim(u8, fetched.stdout, "\r\n ");
     if (hash.len == 0 or std.mem.indexOfAny(
@@ -220,6 +228,10 @@ fn package(r: Runner, zig: []const u8, repository: []const u8, output: []const u
     const hyper_image = try selected.run(&.{ zig, "build", "hyper" }, consumer, true);
     var hyper_admitted = try horos.data.program_image.Admitted.decode(r.a, hyper_image.stdout);
     defer hyper_admitted.deinit();
+    try packageRejections(selected, zig, consumer);
+    return hash;
+}
+fn packageRejections(selected: Runner, zig: []const u8, consumer: []const u8) !void {
     inline for (.{
         .{ "category", "wrong handle family", "expected schema" },
         .{ "failure_literal_category", "wrong handle family", "expected failure_literal" },
@@ -239,24 +251,62 @@ fn package(r: Runner, zig: []const u8, repository: []const u8, output: []const u
         );
     }
 }
-fn packageSource(r: Runner, repository: []const u8, output: []const u8) ![]const u8 {
+
+fn committed(r: Runner, repository: []const u8) !void {
     const status = try r.run(
         &.{ "git", "--no-replace-objects", "status", "--porcelain", "--untracked-files=all" },
         repository,
         true,
     );
     if (status.stdout.len != 0) return error.PackageCheckRequiresCommittedCandidate;
-    const snapshot = try r.run(
-        &.{ "git", "--no-replace-objects", "archive", "--format=tar", "HEAD" },
-        repository,
-        true,
+}
+fn prepareRelease(
+    r: Runner,
+    zig: []const u8,
+    repository: []const u8,
+    destination: []const u8,
+) !void {
+    try committed(r, repository);
+    const output = try scratch(r, destination);
+    defer Dir.cwd().deleteTree(r.io, output) catch |err|
+        std.log.err("release scratch cleanup failed: {s}", .{@errorName(err)});
+    const snapshot = try release_source.prepare(r, repository, output);
+    const hash = try consumePackage(r, zig, snapshot.source, output);
+    try retainRelease(r, snapshot, hash, destination);
+}
+fn retainRelease(
+    r: Runner,
+    snapshot: release_source.Snapshot,
+    hash: []const u8,
+    destination: []const u8,
+) !void {
+    const receipt = .{
+        .commit = snapshot.commit,
+        .tree = snapshot.tree,
+        .archive = "source.tar",
+        .sha256 = snapshot.sha256,
+        .size = snapshot.size,
+        .packageIdentity = hash,
+        .files = snapshot.files,
+        .compiler = "0.17.0",
+    };
+    const bytes = try release_source.readArchive(r, snapshot.archive);
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    if (bytes.len != snapshot.size or !std.mem.eql(
+        u8,
+        snapshot.sha256,
+        &std.fmt.bytesToHex(digest, .lower),
+    )) return error.SourceChanged;
+    const archive = try r.path(&.{ destination, "source.tar" });
+    const created = try release_source.retain(r, archive, bytes);
+    errdefer if (created) Dir.cwd().deleteFile(r.io, archive) catch |err|
+        std.log.err("release archive cleanup failed: {s}", .{@errorName(err)});
+    _ = try release_source.retain(
+        r,
+        try r.path(&.{ destination, "source.json" }),
+        try std.json.Stringify.valueAlloc(r.a, receipt, .{}),
     );
-    const archive = try r.path(&.{ output, "source.tar" });
-    try r.write(archive, snapshot.stdout);
-    const source = try r.path(&.{ output, "source" });
-    try Dir.cwd().createDirPath(r.io, source);
-    _ = try r.run(&.{ "tar", "-xf", archive, "-C", source }, output, true);
-    return source;
 }
 fn packageConsumer(r: Runner, source: []const u8, output: []const u8) ![]const u8 {
     const consumer = try r.path(&.{ output, "consumer" });
@@ -299,6 +349,23 @@ fn scratch(r: Runner, parent: []const u8) ![]const u8 {
     try Dir.cwd().createDir(r.io, selected, .fromMode(0o700));
     return selected;
 }
+fn checkReleaseArchive(r: Runner, args: anytype) !void {
+    const zig = args.next() orelse return error.MissingCompiler;
+    const repository = args.next() orelse return error.MissingRepository;
+    const commit = args.next() orelse return error.MissingCommit;
+    const tree = args.next() orelse return error.MissingTree;
+    const archive = args.next() orelse return error.MissingArchive;
+    const destination = args.next() orelse return error.MissingOutput;
+    if (args.next() != null) return error.UnexpectedArgument;
+    const output = try scratch(r, destination);
+    defer Dir.cwd().deleteTree(r.io, output) catch |err|
+        std.log.err("archive scratch cleanup failed: {s}", .{@errorName(err)});
+    const source = try r.path(&.{ output, "source" });
+    const snapshot = try release_source.verify(r, repository, commit, tree, archive, source);
+    const hash = try consumePackage(r, zig, source, output);
+    try retainRelease(r, snapshot, hash, destination);
+}
+
 pub fn main(init: std.process.Init) !void {
     var args = init.minimal.args.iterate();
     _ = args.next();
@@ -314,6 +381,14 @@ pub fn main(init: std.process.Init) !void {
         if (args.next() != null) return error.UnexpectedArgument;
         try components(r, linker, output);
         return Dir.cwd().deleteTree(r.io, output);
+    }
+    if (std.mem.eql(u8, name, "check-release-archive")) return checkReleaseArchive(r, &args);
+    if (std.mem.eql(u8, name, "prepare-release-source")) {
+        const zig = args.next() orelse return error.MissingCompiler;
+        const repository = args.next() orelse return error.MissingRepository;
+        const output = args.next() orelse return error.MissingOutput;
+        if (args.next() != null) return error.UnexpectedArgument;
+        return prepareRelease(r, zig, repository, output);
     }
     if (std.mem.eql(u8, name, "check-package")) {
         const zig = args.next() orelse return error.MissingCompiler;

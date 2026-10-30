@@ -417,17 +417,45 @@ fn componentChecks(
         "Check actual data-only linker admission and composition",
     );
     component_step.dependOn(&component_checks.step);
-    const package = b.addRunArtifact(helper);
-    package.addArg("check-package");
-    package.addFileArg2(.zig_exe, .{ .make_absolute = true });
-    package.addDirectoryArg2(b.path("."), .{ .make_absolute = true });
-    _ = package.addOutputDirectoryArg2("package", .{});
-    package.has_side_effects = true;
-    b.step(
-        "check-package",
-        "Build a clean public source package through Zig",
-    ).dependOn(&package.step);
+    const release_source_step = releaseSourceChecks(b, helper, horos.resolved_target.?, optimize);
+    b.step("check-package", "Build a clean public source package through Zig")
+        .dependOn(release_source_step);
     return component_step;
+}
+
+fn releaseSourceChecks(
+    b: *std.Build,
+    helper: *std.Build.Step.Compile,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+) *std.Build.Step {
+    const installed_helper = b.addInstallArtifact(helper, .{});
+    b.step("build-release-tools", "Build the native source archive and consumer verifier")
+        .dependOn(&installed_helper.step);
+    const tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("tools/release_source.zig"),
+        .target = target,
+        .optimize = optimize,
+    }) });
+    const run_tests = b.addRunArtifact(tests);
+    run_tests.has_side_effects = true;
+    b.step("check-release-source", "Reject corrupt source archives against Git identities")
+        .dependOn(&run_tests.step);
+    const release = b.addRunArtifact(helper);
+    release.addArg("prepare-release-source");
+    release.addFileArg2(.zig_exe, .{ .make_absolute = true });
+    release.addDirectoryArg2(b.path("."), .{ .make_absolute = true });
+    const release_output = release.addOutputDirectoryArg2("release-source", .{});
+    release.has_side_effects = true;
+    const install_release = b.addInstallDirectory(.{
+        .source_dir = release_output,
+        .install_dir = .prefix,
+        .install_subdir = "release-source",
+    });
+    release.step.dependOn(&run_tests.step);
+    b.step("release-source", "Qualify and retain the exact full source archive")
+        .dependOn(&install_release.step);
+    return &release.step;
 }
 
 const AuthoringChecks = struct { step: *std.Build.Step, run: *std.Build.Step.Run };

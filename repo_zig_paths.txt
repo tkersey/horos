@@ -338,3 +338,4 @@ test/v2/emit_source.zig
 test/v2/oracle_scopes.zig
 tools/component_example.zig
 tools/component_link.zig
+tools/release_source.zig
