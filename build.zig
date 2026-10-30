@@ -430,8 +430,9 @@ fn releaseSourceChecks(
     optimize: std.lang.Optimize,
 ) *std.Build.Step {
     const installed_helper = b.addInstallArtifact(helper, .{});
-    b.step("build-release-tools", "Build the native source archive and consumer verifier")
-        .dependOn(&installed_helper.step);
+    const tools = b.step("build-release-tools", "Build the native release tools");
+    tools.dependOn(&installed_helper.step);
+    const manifest_tests = releaseManifestChecks(b, tools, target, optimize);
     const tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("tools/release_source.zig"),
         .target = target,
@@ -446,6 +447,10 @@ fn releaseSourceChecks(
     release.addFileArg2(.zig_exe, .{ .make_absolute = true });
     release.addDirectoryArg2(b.path("."), .{ .make_absolute = true });
     const release_output = release.addOutputDirectoryArg2("release-source", .{});
+    const revision = b.addSystemCommand(&.{ "git", "--no-replace-objects", "rev-parse", "HEAD" });
+    revision.setCwd(b.path("."));
+    revision.has_side_effects = true;
+    release.addFileContentArg2(revision.captureStdOut(.{}), .{});
     release.has_side_effects = true;
     const install_release = b.addInstallDirectory(.{
         .source_dir = release_output,
@@ -453,9 +458,31 @@ fn releaseSourceChecks(
         .install_subdir = "release-source",
     });
     release.step.dependOn(&run_tests.step);
+    release.step.dependOn(manifest_tests);
     b.step("release-source", "Qualify and retain the exact full source archive")
         .dependOn(&install_release.step);
     return &release.step;
+}
+
+fn releaseManifestChecks(
+    b: *std.Build,
+    tools: *std.Build.Step,
+    target: std.Build.ResolvedTarget,
+    optimize: std.lang.Optimize,
+) *std.Build.Step {
+    const module = b.createModule(.{
+        .root_source_file = b.path("tools/release_manifest.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const executable = b.addExecutable(.{ .name = "horos-manifest", .root_module = module });
+    tools.dependOn(&b.addInstallArtifact(executable, .{}).step);
+    const tests = b.addTest(.{ .root_module = module });
+    const run = b.addRunArtifact(tests);
+    run.has_side_effects = true;
+    b.step("check-release-manifest", "Check semantic version preparation and failure preservation")
+        .dependOn(&run.step);
+    return &run.step;
 }
 
 const AuthoringChecks = struct { step: *std.Build.Step, run: *std.Build.Step.Run };

@@ -265,12 +265,17 @@ fn prepareRelease(
     zig: []const u8,
     repository: []const u8,
     destination: []const u8,
+    expected_commit: ?[]const u8,
 ) !void {
     try committed(r, repository);
     const output = try scratch(r, destination);
     defer Dir.cwd().deleteTree(r.io, output) catch |err|
         std.log.err("release scratch cleanup failed: {s}", .{@errorName(err)});
     const snapshot = try release_source.prepare(r, repository, output);
+    if (expected_commit) |commit| {
+        const trimmed = std.mem.trim(u8, commit, "\r\n");
+        if (!std.mem.eql(u8, trimmed, snapshot.commit)) return error.SourceCommitChanged;
+    }
     const hash = try consumePackage(r, zig, snapshot.source, output);
     try retainRelease(r, snapshot, hash, destination);
 }
@@ -387,8 +392,9 @@ pub fn main(init: std.process.Init) !void {
         const zig = args.next() orelse return error.MissingCompiler;
         const repository = args.next() orelse return error.MissingRepository;
         const output = args.next() orelse return error.MissingOutput;
+        const expected_commit = args.next();
         if (args.next() != null) return error.UnexpectedArgument;
-        return prepareRelease(r, zig, repository, output);
+        return prepareRelease(r, zig, repository, output, expected_commit);
     }
     if (std.mem.eql(u8, name, "check-package")) {
         const zig = args.next() orelse return error.MissingCompiler;

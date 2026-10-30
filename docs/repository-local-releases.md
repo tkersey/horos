@@ -1,8 +1,10 @@
 # Horos repository-local release operations
 
 Implementation is in progress. Native source packaging and release-record
-structure are implemented; authenticated publication, ordinary preparation PRs,
-and the repository-local review-owner adapter are not yet operational. No
+structure are implemented. Native version preparation, release admission,
+publication/recovery, ordinary preparation PRs, and the review-owner adapter have
+executable implementations and focused tests. Their privileged workflow wiring
+and complete end-to-end verification remain in progress. No
 production activation or release is authorized by this document. Product
 qualification and serial owner reviews of the final implementation remain
 required before PR readiness.
@@ -36,6 +38,9 @@ node tools/release/test.mjs
 zig build check-release-source -Doptimize=safe --summary all
 zig build check-package -Doptimize=safe --summary all
 zig build release-source -Doptimize=safe --summary all
+zig build check-release-manifest build-release-tools -Doptimize=safe --summary all
+zig-out/bin/horos-manifest read build.zig.zon
+zig-out/bin/horos-manifest prepare build.zig.zon 8.0.1 /tmp/horos-candidate.zon
 ```
 
 The test runner rejects empty file discovery, files without tests, failed,
@@ -62,6 +67,13 @@ publisher; the repository must independently contain the authenticated Git sourc
 A malformed source, changed archive, unsupported entry, or consumer failure
 rejects the operation.
 
+The manifest operation parses the complete ZON document and replaces only the
+root version literal. It preserves exact input bytes for a semantic no-op and
+refuses an existing different candidate. Version decisions come from admitted
+release impacts; the publisher never changes source versions. Source preparation
+binds the exact Git head as a lazy build input, so a new source cannot reuse an
+old output slot merely because its repository directory has the same name.
+
 `tools/release/assemble.mjs` assembles record bytes from the native receipt,
 matching manifest bytes, final payloads, and separately admitted evidence. It
 checks manifest Git blob identity and archive size/digest correspondence, then
@@ -72,6 +84,48 @@ review or qualification evidence and does not upload anything.
 paginated stable-release observations, annotated-tag resolution, and forward
 source-lineage selection. Observed legacy releases remain ordinary legacy inputs;
 no automatic consumer may admit them as new-format qualified releases.
+
+The repository-private adapter entry point is:
+
+```sh
+node tools/release/cli.mjs admit-release tkersey/horos RELEASE_ID OUTPUT_DIRECTORY
+node tools/release/cli.mjs check-qualification RUN_ID COMMIT TREE
+node tools/release/cli.mjs review-owner CONFIG_JSON
+```
+
+Replace uppercase values with frozen inputs. `admit-release` downloads the exact
+record and payload assets, checks numeric repository identity, immutable
+publication, tag, source tree and workflow definition, then invokes GitHub's
+artifact and release attestation verification. The expected certificate identity
+names this repository's admission workflow on `main`; signer/source digests
+bind the actual accepted control revision. It never admits a fixture or treats
+payload checksums as signatures. Its output directory must not already exist.
+
+`check-qualification` admits one original landed workflow run. It requires every
+listed job to have actually succeeded on the expected source, platform and first
+attempt within its existing budget. It rejects ambiguous duplicate runs and
+downloads the exact installation artifact bytes, checking both GitHub's artifact
+digest and the native source inventory. These are admission checks around the
+existing qualification, not replacement product tests.
+
+`publishHoros` in `tools/release/publish.mjs` stages exactly one Horos release.
+Its trusted admission and final-attestation callbacks are mandatory. It downloads
+and compares every existing asset, uploads only matching missing work, preserves
+conflicting objects, and reobserves uncertain writes before deciding whether
+they succeeded. It checks controls and effective immutable-release settings
+before each write. `proposeHoros` and `promoteHoros` in `proposal.mjs` own the
+single `automation/dependency-release` branch and ordinary PR. Promotion uses
+protected rebase auto-merge with the expected head. A retired merged proposal may
+yield its branch through an atomic expected-old-head update; an open epoch,
+manual closure, hold, disabled auto-merge, or unknown human edit cannot be erased
+by that update.
+
+Feature PRs provide a `repository-release-impact/v1` JSON declaration in their
+body, containing `impact`, `disposition`, `rationale`, and `contracts`.
+`impactBlock` in `tools/release/impact.mjs` renders its exact syntax. The review
+input captures the declaration with its base/head; a later semantic edit to it
+invalidates admission. A PR body alone is never review authority. Generated
+version-preparation PRs include the approved packaging-impact declaration.
 
 ## Required qualification inventory
 
@@ -98,8 +152,11 @@ Actuating policy is dotfiles commit
 `7aac0823b02dc31905ba57521dd9c1477686351e`, contract
 `actuating-review-contract-v27`. Its contract file SHA-256 is
 `cb72f160d9ff1ea1743513cee3058ca2f72e287599158e2763f296ab73b6e511`.
-These pins identify the inspected interface; executable integration and its
-qualification are still outstanding.
+The Linux review installer pins the complete CAS and Codex release archives by
+size and SHA-256 before extraction and fetches this exact policy revision.
+`node tools/release/cli.mjs setup-review-tools OUTPUT_DIRECTORY` installs them
+into a new private directory on native Linux x86-64. It does not install a global
+command or change the product toolchain.
 
 CAS supplies individual owner-lived reviews and original evidence. Actuating
 owns the complete inventory, finding adjudication, per-request credit,
@@ -108,6 +165,35 @@ outputs cannot replace that procedure. The repository adapter must invoke the
 ordinary owner noninteractively and retain its actual output plus original
 executor evidence. Missing authentication, strong account identity, runtime
 compatibility, or owner closeout blocks review admission.
+
+`review-owner CONFIG_JSON` takes `repository`, `base`, `head`, `policyDirectory`,
+`contextPath`, `workspace`, `captureRoot`, `reviewHome`, `path`, `casPath`,
+`codexPath`, both executable SHA-256 values, and explicit `model`,
+`reasoningEffort`, `serviceTier`. The context contains the accepted requirements,
+release-impact input, and complete exact-subject proof inventory. `reviewHome`
+contains dedicated Codex authentication under `.codex/auth.json`. It must not
+contain GitHub writer credentials.
+
+Each invocation lets the ordinary owner select at most one next review or
+recovery, exporting `pending`, `blocked`, or `complete`. `previousCaptures`
+resumes the same owner session and frozen inputs; a terminal blocked result is
+not an automatic retry. The caller preserves active owner/CAS state between
+jobs, excluding authentication and compiler caches from retained evidence.
+Parent-owned capture directories remain outside the model's writable scratch.
+Every credited CAS receipt must match an actual pinned command and its exact
+runtime-captured output. Completion checks the full pinned lens/file inventory,
+owner credit and limitation dispositions, epoch closure, and serial standard
+convergence. `review-evidence.json` retains the original relevant runtime events,
+receipts, owner facts and bound inputs; it excludes unrelated model commands and
+authentication. Its structure alone is not provenance: the trusted workflow
+must authenticate the exported artifact before another job can admit it.
+
+A real disposable owner invocation returned `blocked` for deliberately absent
+product qualification without dispatching any review. Direct CAS review-profile
+preflight passed on the inspected native macOS runtime. Nested CAS preflight
+inside the owner sandbox also passed after directing its schema cache into
+permitted scratch; writes to the protected capture directory were denied. Full
+review execution, resumption in Actions, and final closeout are still unverified.
 
 The final runbook must record the implemented invocation, exact delivered heads,
 full qualification results, review closeout, and live commissioning observations.

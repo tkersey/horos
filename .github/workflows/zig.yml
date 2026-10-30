@@ -100,7 +100,6 @@ jobs:
         if: matrix.lane == 'installation'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: horos-source-${{ github.event.pull_request.head.sha || github.sha }}.tar
           path: zig-out/release-source/source.tar
           archive: false
           if-no-files-found: error
@@ -109,7 +108,6 @@ jobs:
         if: matrix.lane == 'installation'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: horos-source-inventory-${{ github.event.pull_request.head.sha || github.sha }}.json
           path: zig-out/release-source/source.json
           archive: false
           if-no-files-found: error
