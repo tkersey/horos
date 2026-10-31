@@ -71,6 +71,11 @@ opened directory, so alternate path spellings share the same lock. Replacement
 removes the old receipt before publishing new archive bytes. Compiler execution
 and its recorded digest use the same captured executable; native Zig library
 discovery retains the original installation and explicit compiler environment.
+Discovered library paths remain absolute when the package consumer changes
+directories. Before extraction succeeds, filesystem-returned names and kinds
+must exactly match authenticated files and directory prefixes. A filesystem that
+aliases or rewrites those names rejects the source and cleans up the new
+extraction; representable case and Unicode names remain supported.
 
 The manifest operation parses the complete ZON document and replaces only the
 root version literal. It preserves exact input bytes for a semantic no-op and
@@ -135,6 +140,12 @@ input captures the declaration with its base/head; a later semantic edit to it
 invalidates admission. A PR body alone is never review authority. Generated
 version-preparation PRs include the approved packaging-impact declaration.
 
+
+Explanatory PR prose may change while the exact generated binding marker remains
+intact. Version-only classification authenticates the original native preparation,
+source bytes, commit message and unchanged dependency selection. The reviewed
+impact declaration remains separately bound; changing it invalidates admission.
+
 ## Automated proposal controls
 
 `repository-automation.yml` observes hourly at minute seven, on manual dispatch,
@@ -176,10 +187,17 @@ update, the writer authenticates the described predecessor and actual successor
 independently, then finishes only the missing metadata update. Further base
 movement does not authorize another source transition during that recovery.
 Unknown source edits, altered metadata, or unavailable original evidence hold
-recovery. Branch updates use atomic expected-head checks; PR metadata uses
+recovery. A branch written before its first PR can be recovered from its
+original prewrite intent, exact Git objects, complete absence of PR history,
+and absence of an original review invocation. Main may advance before that first
+PR exists: a fresh admitted candidate can conditionally replace the known orphan.
+Missing evidence, prior manual closure and started review epochs remain held. Branch updates use atomic expected-head checks; PR metadata uses
 before/after observations and has no claimed atomic conditional-edit guarantee.
 Historical closure/reopen and hold-label removal still require explicit owner
-resume; removing the hold alone does not grant authority.
+resume; removing the hold alone does not grant authority. An automation-owned
+pending merge is still cancelled after hold removal until the original owner
+resume is positively admitted. Unavailable resume evidence keeps that hold in
+force; cancellation still checks the current numeric merge-request owner.
 
 An already active owner epoch remains frozen. Successor preparation requires the
 original authenticated closed epoch and a reconstructed native candidate. The
@@ -210,6 +228,15 @@ Normal required checks also cover ordinary qualified local PRs.
 
 The executable entry point is
 `node tools/release/automation-runner.mjs CONTROL_DIRECTORY TRUSTED_MANIFEST_TOOL [APP_IDENTITY_JSON]`.
+
+The workflow first invokes this command with `PROPOSAL_INTENT_PHASE=plan` and
+`PROPOSAL_INTENT_FILE` set to its private output path. It uploads the resulting
+`horos-writer-intent-BASE-HEAD.json` before applying source writes. The intent
+binds the native candidate, approved boundary, parser, App actor, predecessor
+branch and original control/run. Apply authenticates that remote artifact and
+the successful ordered plan/upload steps. A later writer failure preserves the
+intent; it supplies no qualification or review credit. A local invocation alone
+cannot fabricate original workflow evidence.
 The optional identity file is the exact output of the scoped App-token helper;
 without it the runner cannot perform writer operations. Local adapter tests and
 workflow lint do not establish live App-created PR triggers or protected merging.

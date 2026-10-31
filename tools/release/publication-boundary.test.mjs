@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import test from 'node:test';
-import {encodeRecord, sha256} from './encoding.mjs';
+import {encodeRecord, maximumRecordBytes, sha256} from './encoding.mjs';
 import {impactBlock, impactInput} from './impact.mjs';
 import {computeHorosPublicationBoundary} from './publication-boundary.mjs';
 import {retainedFixture} from './promotion-test-support.mjs';
 import {metadata} from './test-support.mjs';
+import {proposalCommitOid, proposalMessage} from './proposal.mjs';
+import {encodeWriterIntent, readWriterIntentBytes} from './proposal-intent.mjs';
 
 const repository = 'tkersey/horos', repositoryId = 1176152390;
 const oid = number => number.toString(16).padStart(40, '0');
@@ -44,13 +46,15 @@ function fixture() {
     const artifact = {bytes: Buffer.from(JSON.stringify(envelope)), run: {id: 100 + reviews.size}, artifact: {id: 200 + reviews.size}};
     reviews.set(`${subject.base}:${subject.head}`, artifact); return {artifact, envelope};
   }
-  function addChange({impact = 'patch', version = '1.0.0', count = 1, squash = false, versionOnly = false} = {}) {
+  function addChange({impact = 'patch', version = '1.0.0', count = 1, squash = false, versionOnly = false, contracts = null} = {}) {
     const base = main, source = [];
     for (let index = 0; index < count; index++) source.push(addCommit(source.at(-1)?.sha ?? base, version));
     const landed = [];
     for (const original of squash ? source.slice(-1) : source) landed.push(addCommit(landed.at(-1)?.sha ?? base, version, original.tree.sha));
     main = landed.at(-1).sha;
-    const number = pulls.size + 1, body = impactBlock(declaration(impact));
+    const reviewed = declaration(impact);
+    if (contracts !== null) reviewed.contracts = contracts;
+    const number = pulls.size + 1, body = impactBlock(reviewed);
     const pull = {id: number + 500, number, state: 'closed', merged: true, merged_at: '2026-10-30T00:00:00Z',
       body, merge_commit_sha: main, base: {ref: 'main', sha: base, repo: {id: repositoryId}},
       head: {sha: source.at(-1).sha, repo: {id: repositoryId}}};
@@ -289,4 +293,31 @@ test('source movement during boundary observation prevents publication', async (
     if (path === '/git/ref/heads/main' && ++reads === 2) value.setMain(value.root.sha);
   };
   await assert.rejects(value.run(), /source changed/);
+});
+
+test('intent encloses a computed boundary at its existing value limit and a full-sized manifest', async () => {
+  const f = fixture(); f.addRelease();
+  const contracts = Array.from({length: 128}, (_, index) => `contract${index}`);
+  for (let index = 0; index < 221; index++) f.addChange({contracts});
+  f.addChange({contracts: contracts.slice(0, 19)});
+  const boundary = await f.run();
+  const count = value => 1 + (value !== null && typeof value === 'object' ?
+    Object.values(value).reduce((total, child) => total + count(child), 0) : 0);
+  assert.equal(boundary.status, 'prepare'); assert.equal(count(boundary.record), 32768);
+  assert.deepEqual(encodeRecord(boundary.record), boundary.bytes);
+  assert.ok(boundary.bytes.length <= maximumRecordBytes);
+  const actor = {id: 42, login: 'horos-release[bot]'};
+  const person = {name: actor.login, email: `${actor.id}+${actor.login}@users.noreply.github.com`, date: '2026-10-30T00:00:00Z'};
+  const manifestBytes = Buffer.alloc(maximumRecordBytes, 0x20);
+  Buffer.from(`.{ .name = .horos, .version = "${boundary.version}" }\n`).copy(manifestBytes);
+  const candidate = {base: boundary.record.source.commit, tree: oid(99999), version: boundary.version,
+    manifestBytes, author: person, committer: person};
+  candidate.message = proposalMessage(candidate); candidate.head = proposalCommitOid(candidate);
+  const bytes = encodeWriterIntent({candidate, boundary, controlCommit: candidate.base,
+    runId: 12, workflowSha256: 'a'.repeat(64), identity: {appId: 9, installationId: 10}, actor,
+    toolSha256: 'b'.repeat(64), branchBefore: null});
+  assert.ok(bytes.length > maximumRecordBytes);
+  const admitted = readWriterIntentBytes(bytes);
+  assert.deepEqual(admitted.candidate, candidate); assert.deepEqual(admitted.value.boundary, boundary.record);
+  assert.equal(admitted.value.boundarySha256, boundary.sha256);
 });

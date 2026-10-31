@@ -224,7 +224,10 @@ fn extract(r: anytype, entries: []const Entry, source: []const u8) !void {
     try Dir.cwd().createDir(r.io, source, .fromMode(0o700));
     errdefer Dir.cwd().deleteTree(r.io, source) catch |err|
         std.log.err("source cleanup failed: {s}", .{@errorName(err)});
-    var root = try Dir.cwd().openDir(r.io, source, .{ .follow_symlinks = false });
+    var root = try Dir.cwd().openDir(r.io, source, .{
+        .follow_symlinks = false,
+        .iterate = true,
+    });
     defer root.close(r.io);
     for (entries) |entry| {
         if (std.fs.path.dirname(entry.path)) |parent| try root.createDirPath(r.io, parent);
@@ -233,6 +236,41 @@ fn extract(r: anytype, entries: []const Entry, source: []const u8) !void {
         try file.writeStreamingAll(r.io, entry.bytes.?);
         try file.setPermissions(r.io, .fromMode(@intCast(entry.mode)));
     }
+    try verifyNamespace(r, root, entries);
+}
+
+fn verifyNamespace(r: anytype, root: Dir, entries: []const Entry) !void {
+    var expected: std.StringHashMapUnmanaged(std.Io.File.Kind) = .empty;
+    defer expected.deinit(r.a);
+    for (entries) |entry| {
+        try expected.put(r.a, entry.path, .file);
+        for (entry.path, 0..) |byte, offset| {
+            if (byte == '/') try expected.put(r.a, entry.path[0..offset], .directory);
+        }
+    }
+    var directories: std.ArrayList([]const u8) = .empty;
+    defer directories.deinit(r.a);
+    try directories.append(r.a, "");
+    var cursor: usize = 0;
+    while (cursor < directories.items.len) : (cursor += 1) {
+        const path = directories.items[cursor];
+        var directory = try root.openDir(r.io, if (path.len == 0) "." else path, .{
+            .follow_symlinks = false,
+            .iterate = true,
+        });
+        defer directory.close(r.io);
+        var iterator = directory.iterate();
+        while (try iterator.next(r.io)) |entry| {
+            const actual = try r.path(&.{ path, entry.name });
+            defer r.a.free(actual);
+            const admitted = expected.fetchRemove(actual) orelse
+                return error.SourceNamespaceMismatch;
+            const stat = try directory.statFile(r.io, entry.name, .{ .follow_symlinks = false });
+            if (stat.kind != admitted.value) return error.SourceNamespaceMismatch;
+            if (stat.kind == .directory) try directories.append(r.a, admitted.key);
+        }
+    }
+    if (expected.count() != 0) return error.SourceNamespaceMismatch;
 }
 
 fn stable(a: std.Io.File.Stat, b: std.Io.File.Stat) bool {
@@ -347,7 +385,8 @@ pub const CapturedCompiler = struct {
             const cwd = try Dir.cwd().realPathFileAlloc(r.io, ".", r.a);
             if (std.zig.findZigLibDirFromSelfExe(r.a, r.io, cwd, original)) |library| {
                 defer library.handle.close(r.io);
-                try env.put("ZIG_LIB_DIR", library.path orelse cwd);
+                const absolute = try library.handle.realPathFileAlloc(r.io, ".", r.a);
+                try env.put("ZIG_LIB_DIR", absolute);
             } else |err| {
                 if (err != error.FileNotFound) return err;
             }
@@ -1145,4 +1184,140 @@ test "forwarding compiler wrappers preserve configured execution without library
         root,
         true,
     )).stdout);
+}
+
+fn distinctDirectoryNames(r: TestRunner, root: []const u8, names: [2][]const u8) !bool {
+    const probe = try r.path(&.{ root, "names" });
+    try Dir.cwd().createDir(r.io, probe, .fromMode(0o700));
+    defer removeFixture(r, probe);
+    var directory = try Dir.cwd().openDir(r.io, probe, .{ .iterate = true });
+    defer directory.close(r.io);
+    try directory.createDir(r.io, names[0], .default_dir);
+    directory.createDir(r.io, names[1], .default_dir) catch |err| {
+        if (err == error.PathAlreadyExists) return false;
+        return err;
+    };
+    var iterator = directory.iterate();
+    var found: [2]bool = .{ false, false };
+    while (try iterator.next(r.io)) |entry| {
+        for (names, 0..) |name, index| {
+            if (std.mem.eql(u8, entry.name, name)) found[index] = true;
+        }
+    }
+    return found[0] and found[1];
+}
+
+fn indexPaths(r: TestRunner, repo: []const u8, paths: []const []const u8) !void {
+    const blob = std.mem.trim(u8, (try r.run(
+        &.{ "git", "rev-parse", "HEAD:ordinary" },
+        repo,
+        true,
+    )).stdout, "\r\n");
+    for (paths) |path| _ = try r.run(&.{
+        "git",          "-c",    "core.ignorecase=false", "-c",     "core.precomposeunicode=false",
+        "update-index", "--add", "--cacheinfo",           "100644", blob,
+        path,
+    }, repo, true);
+    try commitFixture(r, repo);
+}
+
+fn checkNamespacePair(r: TestRunner, names: [2][]const u8, shape: u8) !void {
+    const root = try temporary(r);
+    defer removeFixture(r, root);
+    const representable = try distinctDirectoryNames(r, root, names);
+    const repo = try r.path(&.{ root, "repo" });
+    try fixture(r, repo);
+    const paths = [_][]const u8{
+        try r.path(&.{ "test", names[0], if (shape == 0) "one.txt" else "" }),
+        try r.path(&.{ "test", names[1], if (shape == 1) "" else "two.txt" }),
+    };
+    try indexPaths(r, repo, &paths);
+    const snapshot = prepare(r, repo, root) catch |err| {
+        if (representable) return err;
+        if (shape == 0) try std.testing.expectEqual(error.SourceNamespaceMismatch, err);
+        try std.testing.expectError(error.FileNotFound, Dir.cwd().statFile(
+            r.io,
+            try r.path(&.{ root, "source" }),
+            .{ .follow_symlinks = false },
+        ));
+        return;
+    };
+    try std.testing.expect(representable);
+    try std.testing.expectEqual(@as(usize, 4), snapshot.files.len);
+    for (paths) |path| try std.testing.expectEqualStrings("source\n", try readArchive(
+        r,
+        try r.path(&.{ snapshot.source, path }),
+    ));
+}
+
+test "filesystem case and Unicode aliases preserve exact representable Git paths or reject" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const r: TestRunner = .{ .a = arena.allocator() };
+    for ([_][2][]const u8{ .{ "A", "a" }, .{ "\u{e9}", "e\u{301}" } }) |names| {
+        for (0..3) |shape| try checkNamespacePair(r, names, @intCast(shape));
+    }
+}
+
+test "shared exact prefixes preserve files modes and existing destination ownership" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const r: TestRunner = .{ .a = arena.allocator() };
+    const root = try temporary(r);
+    defer removeFixture(r, root);
+    const repo = try r.path(&.{ root, "repo" });
+    try fixture(r, repo);
+    try indexPaths(r, repo, &.{ "test/Shared/one.txt", "test/Shared/two.txt", "test/\u{3bb}.txt" });
+    const snapshot = try prepare(r, repo, root);
+    try std.testing.expectEqual(@as(usize, 5), snapshot.files.len);
+    const executable_path = try r.path(&.{ snapshot.source, "executable" });
+    const executable = try Dir.cwd().statFile(r.io, executable_path, .{});
+    try std.testing.expectEqual(@as(u32, 0o755), executable.permissions.toMode() & 0o7777);
+    try std.testing.expectError(error.PathAlreadyExists, verify(
+        r,
+        repo,
+        snapshot.commit,
+        snapshot.tree,
+        snapshot.archive,
+        snapshot.source,
+    ));
+    try std.testing.expectEqualStrings("source\n", try readArchive(
+        r,
+        try r.path(&.{ snapshot.source, "test/Shared/two.txt" }),
+    ));
+}
+
+test "compiler library discovered below producer cwd remains absolute in another cwd" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var env = try std.testing.environ.createMap(arena.allocator());
+    defer env.deinit();
+    _ = env.swapRemove("ZIG_LIB_DIR");
+    const r: TestRunner = .{ .a = arena.allocator(), .env = &env };
+    const root = try temporary(r);
+    defer removeFixture(r, root);
+    const supplied = std.mem.trim(u8, (try r.run(&.{ "which", "zig" }, root, true)).stdout, "\r\n");
+    const original = try Dir.cwd().realPathFileAlloc(r.io, supplied, r.a);
+    const cwd = try Dir.cwd().openDir(r.io, ".", .{});
+    defer cwd.close(r.io);
+    const cwd_path = try cwd.realPathFileAlloc(r.io, ".", r.a);
+    const library = try std.zig.findZigLibDirFromSelfExe(r.a, r.io, cwd_path, original);
+    defer library.handle.close(r.io);
+    const library_path = try library.handle.realPathFileAlloc(r.io, ".", r.a);
+    const local = try r.path(&.{ root, "zig" });
+    _ = try copyCompiler(r, original, local);
+    const local_library = try r.path(&.{ root, "lib" });
+    try Dir.cwd().symLink(r.io, library_path, local_library, .{ .is_directory = true });
+    try std.process.setCurrentPath(r.io, root);
+    defer std.process.setCurrentDir(r.io, cwd) catch |err|
+        std.debug.panic("cwd restoration failed: {s}", .{@errorName(err)});
+    var compiler = try CapturedCompiler.acquire(r, local, root, &env);
+    defer compiler.close(r.io);
+    try std.testing.expect(std.fs.path.isAbsolute(compiler.env.get("ZIG_LIB_DIR").?));
+    const elsewhere = try r.path(&.{ root, "elsewhere" });
+    try Dir.cwd().createDir(r.io, elsewhere, .default_dir);
+    const probe = try r.path(&.{ elsewhere, "probe.zig" });
+    try r.write(probe, "test { try @import(\"std\").testing.expect(true); }\n");
+    const selected: TestRunner = .{ .a = r.a, .env = &compiler.env };
+    _ = try selected.run(&.{ compiler.path, "test", probe }, elsewhere, true);
 }

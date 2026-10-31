@@ -1,10 +1,14 @@
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
-import {readFileSync} from 'node:fs';
+import {readFileSync, writeFileSync, mkdtempSync, mkdirSync, rmSync, existsSync} from 'node:fs';
+import {execFileSync} from 'node:child_process';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
 import test from 'node:test';
 import {runHorosAutomation, automationOperations} from './automation-runner.mjs';
 import {jobPermissions} from './app-token.mjs';
 import {proposalBranch} from './proposal.mjs';
+import {readWriterIntentBytes, writerIntentName} from './proposal-intent.mjs';
 
 const base = 'a'.repeat(40), tree = 'b'.repeat(40), head = 'c'.repeat(40);
 const actor = {id: 42, login: 'horos-release[bot]'};
@@ -48,8 +52,17 @@ function fixture() {
       prepare: async value => {assert.deepEqual(value, {base, version: state.version}); return candidate;},
       retire: async () => {throw Error('retirement belongs to separately tested original evidence adapter');},
       resume: async () => {throw Error('resume belongs to separately tested owner command adapter');},
+      orphan: async () => {throw Error('orphan belongs to separately tested original preparation adapter');},
+      intent: async () => {throw Error('intent belongs to separately tested retained artifact adapter');},
+      prepareIntent: async value => {
+        state.calls.push('intent');
+        assert.equal(value.candidate, candidate); assert.equal(value.boundary.status, 'prepare');
+        assert.equal(value.controlCommit, base); assert.equal(value.identity, identity);
+        if (state.intentFailure) throw Error('original intent unavailable');
+        return {status: 'writer intent prepared', head, intentBytes: Buffer.from('retained fixture')};
+      },
       propose: async value => {
-        for (const key of ['admitCandidate', 'admitRetirement', 'admitResume']) assert.equal(typeof value[key], 'function');
+        for (const key of ['admitCandidate', 'admitRetirement', 'admitResume', 'admitOrphan', 'admitIntent']) assert.equal(typeof value[key], 'function');
         await value.admitCandidate({candidate, baseManifest: original}); state.writes.push('proposal');
         if (state.modeAfterPropose) state.mode = state.modeAfterPropose;
         return {status: 'proposal open', number: 52, head};
@@ -148,7 +161,7 @@ for (const key of ['role', 'permissions', 'expiresAt']) test(`writer refuses inv
 test('production operations provide concrete owner, native, qualification and promotion procedures', () => {
   const f = fixture(); const value = automationOperations({client: f.dependencies.client, command: async () => assert.fail('unexpected API'),
     native: f.options.native, actor});
-  assert.deepEqual(Object.keys(value).sort(), ['recover', 'boundary', 'prepare', 'retire', 'resume', 'propose', 'promote',
+  assert.deepEqual(Object.keys(value).sort(), ['recover', 'boundary', 'prepare', 'retire', 'orphan', 'prepareIntent', 'intent', 'resume', 'propose', 'promote',
     'qualification', 'requirements', 'promotion'].sort());
   assert.ok(Object.values(value).every(value => typeof value === 'function'));
 });
@@ -159,4 +172,90 @@ test('workflow compiles only trusted native code before creating any App credent
   assert.match(workflow, /persist-credentials: false/); assert.match(workflow, /cancel-in-progress: false/);
   assert.match(workflow, /create tkersey\/horos writer/); assert.match(workflow, /app-token.mjs revoke/);
   assert.ok(!workflow.includes('pull_request_target')); assert.ok(!workflow.includes('pull_request.head.sha'));
+  const plan = workflow.indexOf('name: Prepare original source-write intent');
+  const upload = workflow.indexOf('name: Retain original source-write intent before mutation');
+  const apply = workflow.indexOf('name: Observe controls and perform admitted repository-local work');
+  assert.ok(plan > 0 && plan < upload && upload < apply);
+  assert.match(workflow.slice(plan, upload), /PROPOSAL_INTENT_PHASE: plan/);
+  assert.match(workflow.slice(upload, apply), /archive: false/);
+  assert.match(workflow.slice(apply), /if: always\(\) && steps.native.outcome == 'success'/);
+});
+
+test('plan admits native source and original boundary without proposing or promoting', async () => {
+  const f = fixture(); f.options.phase = 'plan';
+  const result = await f.run();
+  assert.equal(result.status, 'writer intent prepared'); assert.deepEqual(result.intentBytes, Buffer.from('retained fixture'));
+  assert.equal(f.state.boundaryCalls, 2); assert.deepEqual(f.state.writes, []);
+  assert.ok(f.state.calls.indexOf('pause') < f.state.calls.indexOf('intent'));
+});
+
+test('intent preparation failure cannot suppress independent pending merge cancellation', async () => {
+  const f = fixture(); f.options.phase = 'plan'; f.state.intentFailure = true;
+  const result = await f.run(); assert.equal(result.status, 'held'); assert.match(result.reason, /intent unavailable/);
+  assert.equal(result.pauseVerified, true); assert.ok(f.state.calls.includes('pause')); assert.deepEqual(f.state.writes, []);
+});
+
+test('plan CLI retains canonical original intent under its exact upload name before apply', t => {
+  const root = mkdtempSync(join(tmpdir(), 'horos-writer-intent-cli-'));
+  t.after(() => rmSync(root, {recursive: true, force: true}));
+  mkdirSync(join(root, '.github/workflows'), {recursive: true});
+  const workflowBytes = Buffer.from('trusted CLI workflow fixture');
+  writeFileSync(join(root, '.github/workflows/repository-automation.yml'), workflowBytes);
+  execFileSync('git', ['init', '--quiet', root]); execFileSync('git', ['add', '.'], {cwd: root});
+  const env = {...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_AUTHOR_NAME: 'Fixture', GIT_AUTHOR_EMAIL: 'fixture@example.test', GIT_COMMITTER_NAME: 'Fixture', GIT_COMMITTER_EMAIL: 'fixture@example.test'};
+  execFileSync('git', ['-c', 'commit.gpgsign=false', 'commit', '--quiet', '-m', 'Control'], {cwd: root, env});
+  const control = execFileSync('git', ['rev-parse', 'HEAD'], {cwd: root, encoding: 'utf8'}).trim();
+  const identity = {...fixture().options.identity, installationId: 10};
+  const identityPath = join(root, 'identity.json'), intentPath = join(root, 'intent.json'), outputPath = join(root, 'outputs');
+  writeFileSync(identityPath, JSON.stringify(identity));
+  const proposalUrl = new URL('./proposal.mjs', import.meta.url).href;
+  const mocks = {
+    './proposal-github.mjs': `export class HorosProposalClient {async request({path}) {
+      if (path === '') return {status:200,body:{full_name:'tkersey/horos',id:1176152390,default_branch:'main',node_id:'REPO'}};
+      if (path.startsWith('/pulls?')) return {status:200,body:[]};
+      if (path === '/actions/variables/REPOSITORY_AUTOMATION') return {status:200,body:{name:'REPOSITORY_AUTOMATION',value:'propose'}};
+      if (path.startsWith('/git/ref/')) return {status:404}; throw Error(path);
+    }}`,
+    './github.mjs': `export async function githubCommand(args) {
+      if (args[1] === 'repos/tkersey/horos/actions/artifacts?per_page=100&page=1') return Buffer.from('{"artifacts":[]}'); throw Error(args[1]);
+    }`,
+    './publication-boundary.mjs': `export async function computeHorosPublicationBoundary({source}) {
+      const record = {schema:'repository-publication-boundary/v1',repository:'tkersey/horos',source,status:'prepare',version:'1.0.1'};
+      const {encodeRecord,sha256} = await import(${JSON.stringify(new URL('./encoding.mjs', import.meta.url).href)});
+      return {record,status:'prepare',version:'1.0.1',sha256:sha256(encodeRecord(record))};
+    }`,
+    './native-manifest.mjs': `import {proposalMessage,proposalCommitOid} from ${JSON.stringify(proposalUrl)};
+      export const manifestOperations = () => ({sha256:'d'.repeat(64),read:()=> '1.0.0',prepare:()=>Buffer.from('prepared')});
+      export const sourceManifest = async () => Buffer.from('base');
+      export const admitNativeVersion = () => async () => {};
+      export const prepareHorosCandidate = async ({base,version,actor}) => {
+        const person = {name:actor.login,email:actor.id+'+'+actor.login+'@users.noreply.github.com',date:'2026-10-30T00:00:00Z'};
+        const candidate = {base,version,tree:'c'.repeat(40),manifestBytes:Buffer.from('prepared'),author:person,committer:person};
+        candidate.message=proposalMessage(candidate); candidate.head=proposalCommitOid(candidate); return candidate;
+      };`,
+    './release-observation.mjs': `export const appActor=async()=>(${JSON.stringify(actor)});
+      export const currentHorosSource=async()=>({commit:${JSON.stringify(control)},tree:'c'.repeat(40)});
+      export const horosBoundaryOperations=()=>({}), originalHorosQualification=async()=>null;
+      export const observationPages=async()=>[], preparationPulls=async()=>[];
+      export const promotionRequirements=async()=>({}), storedHorosCandidate=async()=>null;
+      export const retireHorosProposal=()=>async()=>{}, admitUnproposedHoros=()=>async()=>{throw Error('unexpected orphan');};
+      export const observation=async()=>null;`,
+  };
+  const loader = join(root, 'loader.mjs'), runner = new URL('./automation-runner.mjs', import.meta.url);
+  writeFileSync(loader, `import {registerHooks} from 'node:module';
+    const mocks=${JSON.stringify(mocks)}, owner=${JSON.stringify(runner.href)};
+    registerHooks({resolve(specifier,context,next){
+      if(context.parentURL===owner && Object.hasOwn(mocks,specifier)) return {url:'data:text/javascript,'+encodeURIComponent(mocks[specifier]),shortCircuit:true};
+      return next(specifier,context);
+    }});`);
+  const run = () => execFileSync(process.execPath, ['--import', loader, runner.pathname, root, join(root, 'native'), identityPath],
+    {cwd: root, env: {...env, GITHUB_SHA: control, GITHUB_RUN_ID: '12', PROPOSAL_INTENT_PHASE: 'plan',
+      PROPOSAL_INTENT_FILE: intentPath, GITHUB_OUTPUT: outputPath}, encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'pipe']});
+  const result = JSON.parse(run()), retained = readWriterIntentBytes(readFileSync(intentPath));
+  assert.equal(result.status, 'writer intent prepared'); assert.equal(Object.hasOwn(result, 'intentBytes'), false);
+  assert.equal(retained.value.context.controlCommit, control); assert.equal(retained.value.context.runId, 12);
+  assert.equal(readFileSync(outputPath, 'utf8'), `intent_ready=true\nintent_name=${writerIntentName(control, retained.candidate.head)}\n`);
+  const before = readFileSync(intentPath); assert.throws(run); assert.deepEqual(readFileSync(intentPath), before);
+  assert.equal(existsSync(join(root, 'native')), false);
 });

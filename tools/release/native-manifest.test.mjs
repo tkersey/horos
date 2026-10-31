@@ -79,7 +79,8 @@ test('generated version-only classification preserves ordinary change impact', a
   assert.deepEqual(await classify(input), {versionOnly: true});
   assert.deepEqual(await classify({...input, pull: {...input.pull, user: {id: 99, login: 'human'}}}), {versionOnly: false});
   assert.deepEqual(await classify({...input, manifestBytes: Buffer.from(candidate.manifestBytes.toString().replace('"src"', '"other"'))}), {versionOnly: false});
-  await assert.rejects(() => classify({...input, pull: {...input.pull, body: input.pull.body + ' human edit'}}), /edited/);
+  assert.deepEqual(await classify({...input, pull: {...input.pull, body: input.pull.body + '\nReviewed explanation.\n'}}), {versionOnly: true});
+  await assert.rejects(() => classify({...input, pull: {...input.pull, body: input.pull.body.replace('repository-proposal/v1', 'repository-proposal/v2')}}), /binding changed/);
 });
 
 test('tampered native executable and Git blob are rejected before candidate admission', async t => {

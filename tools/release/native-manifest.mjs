@@ -91,7 +91,7 @@ export function classifyNativeVersion({client, native, actor}) {
     const candidate = await prepareHorosCandidate({base: subject.base, version, actor}, {client, native});
     assert.equal((await commitTree(client, subject.base)).source.tree.sha, baseTree);
     assert.equal(candidate.head, subject.head, 'generated version source differs'); assert.equal(candidate.tree, subject.tree);
-    assert.equal(pull.body, proposalDescription(candidate).body, 'generated version proposal was edited');
+    assert.ok(pull.body.startsWith(`${proposalDescription(candidate).marker}\n`), 'generated version proposal binding changed');
     assert.equal(originalCommits[0].message, candidate.message);
     return {versionOnly: true};
   };

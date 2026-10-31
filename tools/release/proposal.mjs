@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import {readOwnerResume} from './proposal-authority.mjs';
 import {createHash} from 'node:crypto';
 import {encodeRecord, sha256} from './encoding.mjs';
 import {parseVersion} from './version.mjs';
@@ -238,7 +239,7 @@ async function storedCandidate(client, candidate) {
   assert.equal(manifests[0].sha, objectId('blob', candidate.manifestBytes), 'retired manifest differs from original Git source');
 }
 
-async function successorProposal({client, candidate, actor, pull, timeline, branchBefore, currentBase, admitCandidate, admitRetirement, admitResume}) {
+async function successorProposal({client, candidate, actor, pull, timeline, branchBefore, currentBase, admitCandidate, admitRetirement, admitResume, admitIntent}) {
   if (branchBefore !== pull.head.sha) return held('unknown human branch edit prevents successor preparation', pull);
   if (timeline.autoMerge !== null) return held('previous auto-merge request must be cancelled before successor preparation', pull);
   if (typeof admitRetirement !== 'function') return held('original owner epoch closure is required before successor preparation', pull);
@@ -290,6 +291,8 @@ async function successorProposal({client, candidate, actor, pull, timeline, bran
   };
   await observe(branchBefore);
   if (branchBefore !== candidate.head) {
+    assert.equal(typeof admitIntent, 'function', 'original writer intent required before branch mutation');
+    await admitIntent({candidate: candidateCopy(candidate), branchBefore});
     const repo = await repository(client);
     await writeObserved(() => client.graphql(updateRefs, {input: {repositoryId: repo.node_id,
       refUpdates: [{name: `refs/heads/${proposalBranch}`, beforeOid: previous.head, afterOid: candidate.head, force: true}]} }), async () => {
@@ -327,26 +330,36 @@ function ownsCurrentAutoMerge(pull, actor) {
 export async function pauseHorosProposals({actor, client = new HorosProposalClient()}) {
   await repository(client); identifier(actor.id);
   const results = [];
-  const requiresPause = (pull, selectedMode) => selectedMode !== 'promote' || pull.draft ||
-    pull.labels.some(label => label.name === 'automation-hold');
+  const requiresPause = async (pull, selectedMode, events) => {
+    if (selectedMode !== 'promote' || pull.draft || pull.labels.some(label => label.name === 'automation-hold')) return true;
+    if (proposalHoldEvents(events).length === 0) return false;
+    try { return await readOwnerResume({pull, events}, client) === null; }
+    catch { return true; }
+  };
   for (const value of (await pulls(client)).filter(pull => pull.state === 'open')) {
     const pull = await get(client, `/pulls/${value.number}`);
     assert.equal(pull.user?.id, actor.id); assert.equal(pull.user?.login, actor.login);
-    if (!requiresPause(pull, await mode(client))) continue;
     const current = await history(client, pull);
-    if (current.autoMerge === null) continue;
+    if (current.autoMerge === null || !await requiresPause(pull, await mode(client), current.events)) continue;
     assert.equal(current.autoMerge.enabledBy?.login, actor.login, 'cannot cancel unknown auto-merge owner');
     const latest = await get(client, `/pulls/${pull.number}`);
     assert.equal(latest.user?.id, actor.id); assert.equal(latest.user?.login, actor.login);
-    if (latest.state !== 'open' || !requiresPause(latest, await mode(client))) continue;
+    if (latest.state !== 'open') continue;
     const latestHistory = await history(client, latest);
-    if (latestHistory.autoMerge === null) continue;
+    if (latestHistory.autoMerge === null || !await requiresPause(latest, await mode(client), latestHistory.events)) continue;
     assert.equal(latestHistory.autoMerge.enabledBy?.login, actor.login, 'cannot cancel unknown auto-merge owner');
     const deciding = await get(client, `/pulls/${pull.number}`);
     assert.equal(deciding.user?.id, actor.id); assert.equal(deciding.user?.login, actor.login);
-    if (deciding.state !== 'open' || !requiresPause(deciding, await mode(client))) continue;
+    if (deciding.state !== 'open' || !await requiresPause(deciding, await mode(client), latestHistory.events)) continue;
     assert.equal(deciding.node_id, latest.node_id);
-    if (!ownsCurrentAutoMerge(deciding, actor)) continue;
+    const ownedRequest = await get(client, `/pulls/${pull.number}`);
+    assert.equal(ownedRequest.node_id, deciding.node_id);
+    assert.equal(ownedRequest.user?.id, actor.id); assert.equal(ownedRequest.user?.login, actor.login);
+    if (ownedRequest.state !== 'open') continue;
+    assert.equal(ownedRequest.head.sha, deciding.head.sha, 'proposal changed before cancellation');
+    assert.equal(ownedRequest.draft, deciding.draft, 'proposal changed before cancellation');
+    assert.deepEqual(ownedRequest.labels, deciding.labels, 'hold labels changed before cancellation');
+    if (!ownsCurrentAutoMerge(ownedRequest, actor)) continue;
     await writeObserved(() => client.graphql(disableMerge, {input: {pullRequestId: deciding.node_id}}), async () => {
       const observed = await get(client, `/pulls/${pull.number}`);
       assert.equal((await history(client, observed)).autoMerge, null, 'auto-merge cancellation not observed');
@@ -371,7 +384,7 @@ export async function recoverProposalMetadata({pull, actor, readCandidate, admit
   return {candidate, result};
 }
 
-export async function proposeHoros({candidate: input, actor, admitCandidate, admitRetirement, admitResume,
+export async function proposeHoros({candidate: input, actor, admitCandidate, admitRetirement, admitResume, admitOrphan, admitIntent,
   client = new HorosProposalClient()}) {
   const candidate = candidateCopy(input), description = proposalDescription(candidate);
   identifier(actor.id); assert.ok(typeof actor.login === 'string' && actor.login.length > 0);
@@ -399,7 +412,7 @@ export async function proposeHoros({candidate: input, actor, admitCandidate, adm
         describedProposalSubject(pull.body).head !== candidate.head;
       if (currentBase !== candidate.base && !recovering) return held('stale base; owner must close the previous epoch before regeneration', pull);
       if (pull.head.sha !== candidate.head || branchBefore !== candidate.head || !pull.body.startsWith(`${description.marker}\n`)) {
-        return successorProposal({client, candidate, actor, pull, timeline, branchBefore, currentBase, admitCandidate, admitRetirement, admitResume});
+        return successorProposal({client, candidate, actor, pull, timeline, branchBefore, currentBase, admitCandidate, admitRetirement, admitResume, admitIntent});
       }
       assert.ok(pull.body.startsWith(`${description.marker}\n`), 'proposal binding changed');
       if (pull.base.sha !== candidate.base) return held('proposal base changed', pull);
@@ -423,15 +436,32 @@ export async function proposeHoros({candidate: input, actor, admitCandidate, adm
     if (pull.merged && pull.head.sha === candidate.head) return {status: 'landed—qualification pending', number: pull.number, head: candidate.head};
   }
   if (currentBase !== candidate.base) return held('stale base; owner must close the previous epoch before regeneration', pull);
-  let reset = false;
-  if (branchBefore !== null && branchBefore !== candidate.head) {
-    if (!pull?.merged || pull.head.sha !== branchBefore) return held('unknown human branch edit; refusing branch replacement', pull);
+  let reset = false, orphan = null;
+  const observeOrphan = async () => {
+    if (orphan === null) return;
+    const admitted = await admitOrphan({head: branchBefore});
+    assert.equal(admitted?.unproposed, true, 'original unproposed candidate evidence required');
+    assert.deepEqual(candidateCopy(admitted.previousCandidate), orphan, 'original unproposed candidate changed');
+    await storedCandidate(client, orphan);
+  };
+  if (branchBefore !== null && (!pull?.merged || pull.head.sha !== branchBefore)) {
+    if (typeof admitOrphan !== 'function') return held('unknown human branch edit; original unproposed candidate evidence required', pull);
+    const admitted = await admitOrphan({head: branchBefore});
+    assert.equal(admitted?.unproposed, true, 'original unproposed candidate evidence required');
+    orphan = candidateCopy(admitted.previousCandidate);
+    assert.equal(orphan.head, branchBefore, 'unknown human branch edit; refusing branch replacement');
+    await storedCandidate(client, orphan);
+    reset = branchBefore !== candidate.head;
+  } else if (branchBefore !== null && branchBefore !== candidate.head) {
     assert.equal(typeof admitRetirement, 'function', 'prior merged proposal epoch retirement required');
     await admitRetirement({pull: structuredClone(pull), knownHead: branchBefore, candidate: candidateCopy(candidate)});
     reset = true;
   }
   await candidateObjects(client, candidate, branchBefore, admitCandidate);
   if (branchBefore !== candidate.head) {
+    await observeOrphan();
+    assert.equal(typeof admitIntent, 'function', 'original writer intent required before branch mutation');
+    await admitIntent({candidate: candidateCopy(candidate), branchBefore});
     const repo = await guard(client, candidate, branchBefore);
     assert.equal((await pulls(client)).filter(value => value.state === 'open').length, 0, 'proposal opened during preparation');
     await writeObserved(() => client.graphql(updateRefs, {input: {repositoryId: repo.node_id,
@@ -439,6 +469,7 @@ export async function proposeHoros({candidate: input, actor, admitCandidate, adm
       assert.equal(await reference(client, proposalBranch), candidate.head, 'branch update not observed');
     });
   }
+  await observeOrphan();
   await guard(client, candidate, candidate.head);
   assert.equal((await pulls(client)).filter(value => value.state === 'open').length, 0, 'proposal opened during preparation');
   pull = await writeObserved(() => restWrite(client, {method: 'POST', path: '/pulls', body: {

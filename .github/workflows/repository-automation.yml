@@ -52,6 +52,28 @@ jobs:
           REPOSITORY_APP_CLIENT_ID: ${{ vars.REPOSITORY_APP_CLIENT_ID }}
           REPOSITORY_APP_PRIVATE_KEY: ${{ secrets.REPOSITORY_APP_PRIVATE_KEY }}
         run: node tools/release/app-token.mjs create tkersey/horos writer "$RUNNER_TEMP/automation-app.json"
+      - name: Prepare original source-write intent
+        id: intent
+        if: always() && steps.native.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ steps.writer.outputs.token || github.token }}
+          REPOSITORY_AUTOMATION: ${{ vars.REPOSITORY_AUTOMATION || 'off' }}
+          APP_IDENTITY: ${{ steps.writer.outcome == 'success' && format('{0}/automation-app.json', runner.temp) || '' }}
+          PROPOSAL_INTENT_PHASE: plan
+          PROPOSAL_INTENT_FILE: ${{ runner.temp }}/horos-writer-intent.json
+        run: |
+          args=("$GITHUB_WORKSPACE" "$RUNNER_TEMP/horos-manifest")
+          if [ -n "$APP_IDENTITY" ]; then args+=("$APP_IDENTITY"); fi
+          node tools/release/automation-runner.mjs "${args[@]}"
+      - name: Retain original source-write intent before mutation
+        if: steps.intent.outputs.intent_ready == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ${{ steps.intent.outputs.intent_name }}
+          path: ${{ runner.temp }}/horos-writer-intent.json
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
       - name: Observe controls and perform admitted repository-local work
         if: always() && steps.native.outcome == 'success'
         env:

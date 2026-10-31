@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import {readHorosWriterIntent} from './proposal-intent.mjs';
 import {mkdtempSync, rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
@@ -182,5 +183,25 @@ export function retireHorosProposal({client, native, actor, command = githubComm
     assert.equal(envelope.context.pullNumber, pull.number); assert.equal(envelope.context.bootstrap, undefined);
     assert.equal(envelope.epochClosed, true, 'original owner did not close its epoch');
     return {epochClosed: true, previousCandidate, review: {runId: result.run.id, artifactId: result.artifact.id, sha256: sha256(result.bytes)}};
+  };
+}
+
+export function admitUnproposedHoros({client, native, actor, command = githubCommand, readResult = readReviewResult,
+  readCandidate = async head => (await readHorosWriterIntent({head, actor}, command)).candidate}) {
+  return async ({head}) => {
+    const previousCandidate = await readCandidate(head);
+    assert.equal(previousCandidate.head, head, 'unknown branch source differs from original preparation');
+    const observe = async () => {
+      const values = await preparationPulls(client);
+      assert.ok(!values.some(pull => pull.state === 'open' || pull.head.sha === head),
+        'candidate has proposal history; preserve its original owner epoch');
+      assert.equal((await observationPages(client, `/commits/${head}/pulls`)).length, 0,
+        'candidate has proposal history; preserve its original owner epoch');
+      const result = await readResult({repository: 'tkersey/horos', base: previousCandidate.base, head,
+        tree: previousCandidate.tree, purpose: 'pull'}, command);
+      assert.equal(result.status, 'absent', 'original owner invocation must be recovered and closed before branch replacement');
+    };
+    await observe();
+    return {unproposed: true, previousCandidate};
   };
 }

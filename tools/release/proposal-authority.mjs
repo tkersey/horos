@@ -17,7 +17,7 @@ function localPull(pull) {
   assert.match(pull.head.sha, /^[0-9a-f]{40}$/);
 }
 
-export async function admitOwnerResume({pull, events, resumeHead = pull.head.sha}, client = new HorosProposalClient()) {
+export async function readOwnerResume({pull, events, resumeHead = pull.head.sha}, client = new HorosProposalClient()) {
   localPull(pull); assert.match(resumeHead, /^[0-9a-f]{40}$/);
   assert.equal(pull.state, 'open', 'owner must reopen the proposal before resuming');
   assert.ok(!pull.labels.some(label => label.name === 'automation-hold'), 'owner must remove the hold label before resuming');
@@ -46,16 +46,23 @@ export async function admitOwnerResume({pull, events, resumeHead = pull.head.sha
     comment.user?.login === repository.owner.login && comment.user?.type === 'User' &&
     authorizesHead(comment) && comment.created_at === comment.updated_at &&
     timestamp(comment.created_at) > lastHold);
-  assert.ok(accepted.length > 0, 'exact fresh unedited repository-owner resume command required');
   const selected = accepted.sort((left, right) => timestamp(right.created_at) - timestamp(left.created_at) || right.id - left.id)[0];
-  const original = await observation(client, `/issues/comments/${selected.id}`);
-  assert.deepEqual(original, selected, 'owner resume changed during admission');
+  if (selected) {
+    const original = await observation(client, `/issues/comments/${selected.id}`);
+    assert.deepEqual(original, selected, 'owner resume changed during admission');
+  }
   const current = await observation(client, `/pulls/${pull.number}`);
   assert.equal(current.state, 'open'); assert.equal(current.head.sha, pull.head.sha);
   assert.deepEqual(current.labels, pull.labels, 'hold labels changed during resume admission');
   assert.deepEqual(await observationPages(client, `/issues/${pull.number}/events`), issueEvents, 'hold timeline changed during resume admission');
   assert.deepEqual((await observation(client, '')).owner, repository.owner, 'repository owner changed');
-  return {head: selected.body === command ? pull.head.sha : resumeHead, commentId: selected.id, ownerId: repository.owner.id, createdAt: selected.created_at};
+  return selected ? {head: selected.body === command ? pull.head.sha : resumeHead, commentId: selected.id, ownerId: repository.owner.id, createdAt: selected.created_at} : null;
+}
+
+export async function admitOwnerResume(input, client = new HorosProposalClient()) {
+  const resume = await readOwnerResume(input, client);
+  assert.ok(resume, 'exact fresh unedited repository-owner resume command required');
+  return resume;
 }
 
 export function automationStatusBody({status, reason = null, head = null, version = null}) {

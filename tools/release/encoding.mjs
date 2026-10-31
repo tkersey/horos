@@ -3,8 +3,14 @@ import {createHash} from 'node:crypto';
 
 export const maximumRecordBytes = 1024 * 1024;
 
+function recordLimits({maximumBytes = maximumRecordBytes, maximumValues = 32768, maximumDepth = 32} = {}) {
+  for (const limit of [maximumBytes, maximumValues, maximumDepth])
+    assert.ok(Number.isSafeInteger(limit) && limit > 0, 'invalid record limit');
+  return {maximumBytes, maximumValues, maximumDepth};
+}
+
 function ordered(value, depth, budget) {
-  assert.ok(depth <= 32 && --budget.remaining >= 0, 'record complexity exceeded');
+  assert.ok(depth <= budget.maximumDepth && --budget.remaining >= 0, 'record complexity exceeded');
   if (value === null || typeof value === 'boolean') return value;
   if (typeof value === 'string') {
     assert.ok(value.isWellFormed(), 'invalid Unicode');
@@ -31,17 +37,19 @@ function ordered(value, depth, budget) {
   return result;
 }
 
-export function encodeRecord(value) {
-  const bytes = Buffer.from(`${JSON.stringify(ordered(value, 0, {remaining: 32768}))}\n`, 'utf8');
-  assert.ok(bytes.length <= maximumRecordBytes, 'record too large');
+export function encodeRecord(value, limits) {
+  const {maximumBytes, maximumValues, maximumDepth} = recordLimits(limits);
+  const bytes = Buffer.from(`${JSON.stringify(ordered(value, 0, {remaining: maximumValues, maximumDepth}))}\n`, 'utf8');
+  assert.ok(bytes.length <= maximumBytes, 'record too large');
   return bytes;
 }
 
-export function decodeRecord(bytes) {
-  assert.ok(Buffer.isBuffer(bytes) && bytes.length <= maximumRecordBytes, 'record too large or not bytes');
+export function decodeRecord(bytes, limits) {
+  const admitted = recordLimits(limits);
+  assert.ok(Buffer.isBuffer(bytes) && bytes.length <= admitted.maximumBytes, 'record too large or not bytes');
   const text = new TextDecoder('utf-8', {fatal: true}).decode(bytes);
   const value = JSON.parse(text);
-  assert.ok(encodeRecord(value).equals(bytes), 'noncanonical or ambiguous record');
+  assert.ok(encodeRecord(value, admitted).equals(bytes), 'noncanonical or ambiguous record');
   return value;
 }
 

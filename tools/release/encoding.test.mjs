@@ -42,3 +42,31 @@ test('reject values JSON would silently omit or normalize', () => {
   }
   assert.throws(() => encodeRecord({get value() { throw new Error('accessor executed'); }}), /accessor field/);
 });
+
+test('explicit transport limits preserve canonical bytes without widening ordinary records', () => {
+  const limits = {maximumBytes: 4 * maximumRecordBytes, maximumValues: 65536, maximumDepth: 33};
+  let nested = null;
+  for (let index = 0; index < 33; index++) nested = {nested};
+  for (const value of [{value: 'x'.repeat(maximumRecordBytes)}, Array(32768).fill(null), nested]) {
+    assert.throws(() => encodeRecord(value));
+    const bytes = encodeRecord(value, limits);
+    assert.deepEqual(decodeRecord(bytes, limits), value);
+    assert.throws(() => decodeRecord(bytes));
+  }
+  const ordinary = {z: ['x', true, null], a: {b: 1}};
+  assert.deepEqual(encodeRecord(ordinary, limits), encodeRecord(ordinary));
+  assert.throws(() => decodeRecord(Buffer.from('{"z":1,"a":2}\n'), limits), /noncanonical/);
+  assert.throws(() => decodeRecord(Buffer.from('{"a":1,"a":2}\n'), limits), /noncanonical/);
+});
+
+test('explicit transport limits remain finite and enforce each resource bound', () => {
+  for (const field of ['maximumBytes', 'maximumValues', 'maximumDepth']) {
+    for (const invalid of [Infinity, NaN, 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      assert.throws(() => encodeRecord(null, {[field]: invalid}), /invalid record limit/);
+      assert.throws(() => decodeRecord(Buffer.from('null\n'), {[field]: invalid}), /invalid record limit/);
+    }
+  }
+  assert.throws(() => encodeRecord('abc', {maximumBytes: 5}), /too large/);
+  assert.throws(() => encodeRecord([null, null], {maximumValues: 2}), /complexity/);
+  assert.throws(() => encodeRecord({a: {b: null}}, {maximumDepth: 1}), /complexity/);
+});

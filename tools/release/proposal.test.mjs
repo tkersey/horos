@@ -6,7 +6,7 @@ import {join} from 'node:path';
 import test from 'node:test';
 import {proposalBranch, proposalMessage, proposalCommitOid, proposalDescription, proposeHoros, promoteHoros, pauseHorosProposals, recoverProposalMetadata} from './proposal.mjs';
 
-import {retireHorosProposal, storedHorosCandidate} from './release-observation.mjs';
+import {admitUnproposedHoros, retireHorosProposal, storedHorosCandidate} from './release-observation.mjs';
 import {admitOwnerResume} from './proposal-authority.mjs';
 
 import {runHorosAutomation} from './automation-runner.mjs';
@@ -79,6 +79,7 @@ function fixture(t) {
           const sha = objects.get(`/git/trees/${tree}`).tree.find(value => value.path === parts.at(-1)).sha;
           return reply({...objects.get(`/git/blobs/${sha}`), type: 'file'});
         }
+        if (/^\/commits\/[a-f0-9]{40}\/pulls\?/.test(path)) return reply(state.associatedPulls ?? []);
         if (path.startsWith('/pulls?')) {
           const page = Number(new URL(`https://example.test${path}`).searchParams.get('page'));
           return reply(state.pulls.slice((page - 1) * 100, page * 100));
@@ -157,7 +158,7 @@ function fixture(t) {
       return {};
     },
   };
-  const options = {candidate, actor, client,
+  const options = {candidate, actor, client, admitIntent: async () => {},
     admitCandidate: async ({candidate: value, baseManifest: previous}) => {
       state.admissions.push('candidate'); assert.deepEqual(previous, baseManifest);
       assert.equal(value.version, '1.0.1'); assert.deepEqual(value.manifestBytes, manifestBytes);
@@ -291,7 +292,7 @@ test('interrupted partial object or PR preparation resumes only missing work', a
     await assert.rejects(f.propose(), /not confirmed/);
     const before = new Set(f.state.objects.keys());
     f.state.failBefore = null; f.state.calls = [];
-    await f.propose();
+    await f.propose({admitOrphan: async ({head}) => {assert.equal(head, f.candidate.head); return {unproposed: true, previousCandidate: f.candidate};}});
     assert.equal(f.state.pulls.length, 1);
     for (const write of f.writes().filter(value => value.path.startsWith('/git/'))) {
       assert.ok(!before.has(`${write.path}/${f.expectedObjects.get(write.path).sha}`));
@@ -545,29 +546,40 @@ for (const hold of ['label', 'draft']) test(`owner ${hold} cancels previously en
   assert.equal(f.state.autoMerge, null);
 });
 
-test('a hold removed during observation cannot cancel an active promote request', async t => {
+test('a hold removed during observation still cancels without fresh owner resume', async t => {
   const f = fixture(t); await proposeHoros(f.options); f.state.mode = 'promote';
   f.state.autoMerge = {mergeMethod: 'REBASE', enabledBy: {login: actor.login}};
   f.state.pulls[0].labels.push({name: 'automation-hold'});
   let histories = 0;
-  f.state.onGraphql = operation => {if (operation === 'ProposalHistory' && ++histories === 1) f.state.pulls[0].labels = [];};
+  f.state.events.push({id: 'HOLD', __typename: 'LabeledEvent', label: {name: 'automation-hold'}, createdAt: '2026-10-30T00:01:00Z'});
+  f.state.onGraphql = operation => {if (operation === 'ProposalHistory' && ++histories === 1) {
+    f.state.pulls[0].labels = [];
+    f.state.events.push({id: 'RELEASE', __typename: 'UnlabeledEvent', label: {name: 'automation-hold'}, createdAt: '2026-10-30T00:02:00Z'});
+  }};
   f.state.calls.length = 0;
-  assert.deepEqual(await pauseHorosProposals({actor, client: f.options.client}), []);
-  assert.notEqual(f.state.autoMerge, null); assert.ok(!f.state.calls.some(value => value.method === 'MUTATION'));
+  assert.equal((await pauseHorosProposals({actor, client: f.options.client})).length, 1);
+  assert.equal(f.state.autoMerge, null);
+  assert.deepEqual(f.writes().map(value => value.path), ['PauseProposal']);
 });
 
 for (const changed of ['mode', 'hold']) test(`pause rechecks ${changed} after its final auto-merge observation`, async t => {
   const f = fixture(t); await proposeHoros(f.options); f.state.mode = changed === 'mode' ? 'off' : 'promote';
   f.state.autoMerge = {mergeMethod: 'REBASE', enabledBy: {login: actor.login}};
-  if (changed === 'hold') f.state.pulls[0].labels.push({name: 'automation-hold'});
+  if (changed === 'hold') {
+    f.state.pulls[0].labels.push({name: 'automation-hold'});
+    f.state.events.push({id: 'HOLD', __typename: 'LabeledEvent', label: {name: 'automation-hold'}, createdAt: '2026-10-30T00:01:00Z'});
+  }
   let histories = 0;
   f.state.onGraphql = operation => {
     if (operation !== 'ProposalHistory' || ++histories !== 2) return;
     f.state.mode = 'promote'; f.state.pulls[0].labels = [];
+    if (changed === 'hold') f.state.events.push({id: 'RELEASE', __typename: 'UnlabeledEvent', label: {name: 'automation-hold'}, createdAt: '2026-10-30T00:02:00Z'});
   };
   f.state.calls.length = 0;
-  assert.deepEqual(await pauseHorosProposals({actor, client: f.options.client}), []);
-  assert.notEqual(f.state.autoMerge, null); assert.ok(!f.state.calls.some(value => value.method === 'MUTATION'));
+  const result = await pauseHorosProposals({actor, client: f.options.client});
+  assert.equal(result.length, changed === 'hold' ? 1 : 0);
+  assert.equal(f.state.autoMerge === null, changed === 'hold');
+  assert.deepEqual(f.writes().map(value => value.path), changed === 'hold' ? ['PauseProposal'] : []);
 });
 
 function originalLifecycle(f, candidates) {
@@ -799,3 +811,88 @@ for (const transition of ['human', 'missing', 'wrong predecessor', 'ambiguous'])
     assert.equal(f.writes().length, 0);
     assert.equal(f.state.pulls[0].body, proposalDescription(f.candidate).body);
   });
+
+function unproposedLifecycle(f, candidates = new Map([[f.candidate.head, f.candidate]])) {
+  const state = {review: {status: 'absent'}, missing: false, reads: 0};
+  const admitOrphan = admitUnproposedHoros({client: f.options.client, actor,
+    readCandidate: async head => {state.reads++; assert.equal(state.missing, false, 'original preparation unavailable');
+      assert.ok(candidates.has(head), 'unknown human branch source'); return candidates.get(head);},
+    readResult: async () => state.review});
+  return {state, admitOrphan};
+}
+
+test('authenticated orphan advances after main changes before first PR and converges', async t => {
+  const f = fixture(t); f.state.failBefore = value => value.path === '/pulls';
+  await assert.rejects(f.propose(), /not confirmed/);
+  assert.equal(f.state.branch, f.candidate.head); assert.equal(f.state.pulls.length, 0);
+  const next = f.successor('1.0.2', true), original = unproposedLifecycle(f);
+  f.state.failBefore = null; f.state.calls = [];
+  const result = await f.propose({...next, admitOrphan: original.admitOrphan});
+  assert.equal(result.status, 'proposal open'); assert.equal(result.head, next.candidate.head);
+  assert.equal(f.state.pulls.length, 1); assert.ok(original.state.reads >= 2);
+  const updates = f.writes().filter(value => value.path === 'UpdateProposal');
+  assert.equal(updates.length, 1);
+  assert.deepEqual(updates[0].variables.input.refUpdates, [{name: 'refs/heads/' + proposalBranch,
+    beforeOid: f.candidate.head, afterOid: next.candidate.head, force: true}]);
+  f.state.calls = []; await f.propose({...next, admitOrphan: original.admitOrphan});
+  assert.equal(f.writes().length, 0);
+});
+
+for (const failure of ['missing original', 'unknown source', 'started owner', 'expired owner', 'associated closed PR'])
+  test(`orphan recovery preserves ${failure}`, async t => {
+    const f = fixture(t); f.state.failBefore = value => value.path === '/pulls';
+    await assert.rejects(f.propose());
+    const next = f.successor('1.0.2', true), original = unproposedLifecycle(f);
+    f.state.failBefore = null; f.state.calls = [];
+    if (failure === 'missing original') original.state.missing = true;
+    if (failure === 'unknown source') f.state.branch = 'f'.repeat(40);
+    if (failure === 'started owner') original.state.review = {status: 'running'};
+    if (failure === 'expired owner') original.state.review = {status: 'blocked', reason: 'original evidence expired'};
+    if (failure === 'associated closed PR') f.state.associatedPulls = [{id: 99, number: 99, state: 'closed'}];
+    const before = f.state.branch;
+    await assert.rejects(f.propose({...next, admitOrphan: original.admitOrphan}));
+    assert.equal(f.state.branch, before); assert.equal(f.writes().length, 0);
+  });
+
+test('orphan recovery rechecks original epoch before its conditional ref write', async t => {
+  const f = fixture(t); f.state.failBefore = value => value.path === '/pulls';
+  await assert.rejects(f.propose());
+  const next = f.successor('1.0.2', true), original = unproposedLifecycle(f);
+  f.state.failBefore = null; f.state.calls = [];
+  const admitCandidate = next.admitCandidate;
+  next.admitCandidate = async value => {const result = await admitCandidate(value); original.state.review = {status: 'running'}; return result;};
+  await assert.rejects(f.propose({...next, admitOrphan: original.admitOrphan}), /original owner/);
+  assert.equal(f.state.branch, f.candidate.head);
+  assert.ok(!f.writes().some(value => value.path === 'UpdateProposal' || value.path === '/pulls'));
+});
+
+for (const resumed of [false, true]) test(`pending auto-merge retains historical hold authority with resume=${resumed}`, async t => {
+  const f = fixture(t); await f.propose(); f.state.mode = 'promote';
+  f.state.autoMerge = {mergeMethod: 'REBASE', enabledBy: {login: actor.login}};
+  f.state.events.push(
+    {id: 'HOLD', __typename: 'LabeledEvent', label: {name: 'automation-hold'}, createdAt: '2026-10-30T00:01:00Z'},
+    {id: 'RELEASE', __typename: 'UnlabeledEvent', label: {name: 'automation-hold'}, createdAt: '2026-10-30T00:02:00Z'});
+  if (resumed) f.state.comments.push({id: 99, user: f.state.owner,
+    body: '/repository-automation resume ' + f.candidate.head,
+    created_at: '2026-10-30T00:03:00Z', updated_at: '2026-10-30T00:03:00Z'});
+  f.state.calls = [];
+  const result = await pauseHorosProposals({actor, client: f.options.client});
+  assert.equal(result.length, resumed ? 0 : 1); assert.equal(f.state.autoMerge === null, !resumed);
+  assert.deepEqual(f.writes().map(value => value.path), resumed ? [] : ['PauseProposal']);
+  f.state.calls = []; assert.deepEqual(await pauseHorosProposals({actor, client: f.options.client}), []);
+  assert.equal(f.writes().length, 0);
+});
+
+
+test('known historical hold still cancels owned pending merge when resume evidence is unavailable', async t => {
+  const f = fixture(t); await f.propose(); f.state.mode = 'promote';
+  f.state.autoMerge = {mergeMethod: 'REBASE', enabledBy: {login: actor.login}};
+  f.state.events.push({id: 'HOLD', __typename: 'UnlabeledEvent', label: {name: 'automation-hold'}, createdAt: '2026-10-30T00:02:00Z'});
+  f.state.onRequest = request => {
+    if (request.path.startsWith('/issues/1/comments?')) throw new Error('original owner resume observation unavailable');
+  };
+  f.state.calls = [];
+  assert.equal((await pauseHorosProposals({actor, client: f.options.client})).length, 1);
+  assert.equal(f.state.autoMerge, null);
+  assert.deepEqual(f.writes().map(value => value.path), ['PauseProposal']);
+});
