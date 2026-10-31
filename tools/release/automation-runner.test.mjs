@@ -40,7 +40,7 @@ function fixture() {
   const dependencies = {client,
     actorReader: async value => {assert.equal(value, identity); state.calls.push('actor'); return actor;},
     sourceReader: async () => {state.calls.push('source'); return {...state.source};},
-    pause: async value => {assert.equal(value.actor, actor); state.calls.push('pause'); if (state.pauseFailure) throw Error('cancellation unavailable'); return [];},
+    pause: async value => {assert.equal(value.actor, actor); state.calls.push('pause'); if (state.pauseFailure) throw Error('cancellation unavailable'); return {mode: state.mode, results: [], pending: []};},
     reportReview: async value => {state.calls.push('review'); assert.equal(value.appId, 9); return {status: 'reported', conclusion: state.review};},
     reportStatus: async value => {state.calls.push('comment'); assert.equal(value.appId, 9); return {status: 'reported'};},
     operations: () => ({

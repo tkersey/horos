@@ -47,6 +47,15 @@ function shellWords(command) {
   return words;
 }
 
+function reviewOptions(action) {
+  return {
+    flags: new Set(['--json', ...(action === 'wait' ? [] : ['--wait'])]),
+    values: new Set(['--cwd', '--store-root', '--timeout-ms', '--poll-interval-ms',
+      ...(action === 'wait' ? ['--review-thread-id', '--path'] : ['--base', '--codex-path', '--thread-start-params-json',
+        '--workflow-binding-json', '--custom-instructions', '--fresh-attempt'])]),
+  };
+}
+
 function commandArguments(command, expected) {
   let words = shellWords(command);
   if (['/bin/zsh', '/bin/bash'].includes(words[0])) {
@@ -58,10 +67,7 @@ function commandArguments(command, expected) {
   assert.equal(words[1], 'review', 'not a review command');
   const action = words[2];
   assert.ok(['start', 'wait'].includes(action), 'unsupported review action');
-  const flags = new Set(['--json', ...(action === 'start' ? ['--wait'] : [])]);
-  const values = new Set(['--cwd', '--store-root', '--timeout-ms', '--poll-interval-ms',
-    ...(action === 'start' ? ['--base', '--codex-path', '--thread-start-params-json',
-      '--workflow-binding-json', '--custom-instructions', '--fresh-attempt'] : ['--review-thread-id', '--path'])]);
+  const {flags, values} = reviewOptions(action);
   const options = new Map();
   for (let index = 3; index < words.length; index++) {
     const flag = words[index];
@@ -101,7 +107,66 @@ function withoutTerminalNewline(text) {
   return text.endsWith('\r\n') ? text.slice(0, -2) : text.endsWith('\n') ? text.slice(0, -1) : text;
 }
 
-export function authenticateReceipts(eventsBytes, receipts, expected) {
+function reviewCommand(command, casPath) {
+  if (typeof command !== 'string') return false;
+  try {
+    let words = shellWords(command);
+    if (['/bin/zsh', '/bin/bash'].includes(words[0]) && words.length === 3) words = shellWords(words[2]);
+    if (words[0] !== casPath || words[1] !== 'review') return false;
+    if (words.length === 2 || ['--help', '--version'].includes(words[2])) return false;
+    const {flags, values} = reviewOptions(words[2]);
+    for (let index = 3; index < words.length; index++) {
+      const option = words[index];
+      if (['--help', '--version'].includes(option)) return false;
+      if (flags.has(option)) continue;
+      if (!values.has(option) || ++index >= words.length) return true;
+    }
+    return true;
+  } catch {
+    return command.includes(casPath) && /\breview\b/.test(command);
+  }
+}
+
+export function capturedReceipts(captures, outputs, expected) {
+  const receipts = new Map(), observations = [];
+  assert.equal(captures.length, outputs.length);
+  for (let source = 0; source < captures.length; source++) {
+    const events = textBytes(captures[source].events, 64 * 1024 * 1024).trimEnd().split('\n').map(line => parseEvidenceJson(line));
+    const started = new Set(), completed = new Set(), executions = [];
+    for (const event of events) {
+      const item = event.item;
+      if (item?.type !== 'command_execution' || !reviewCommand(item.command, expected.casPath)) continue;
+      if (event.type === 'item.started') started.add(item.id);
+      if (event.type !== 'item.completed') continue;
+      completed.add(item.id);
+      commandArguments(item.command, expected);
+      const bytes = Buffer.from(item.aggregated_output, 'utf8');
+      const receipt = parseEvidenceJson(bytes);
+      executions.push({source, item: item.id, bytes, receipt});
+    }
+    for (const id of started) assert.ok(completed.has(id), 'review execution is still unresolved');
+    assert.ok(executions.length <= 1, 'owner turn performed more than one review operation');
+    const output = outputs[source];
+    if (executions.length === 1) {
+      const execution = executions[0];
+      const request = output.requests.find(request => request.request_id === execution.receipt.workflowBinding?.requestId);
+      assert.ok(request, 'unexported original review execution');
+      const name = request.receipt;
+      assert.ok(typeof name === 'string' && name.length > 0 && !isAbsolute(name) && !name.split('/').includes('..'), 'invalid receipt name');
+      assert.ok(!receipts.has(name), 'original receipt label reused for another execution');
+      receipts.set(name, execution.bytes);
+      observations.push({...execution, name, request});
+    }
+    for (const request of output.requests) {
+      for (const name of [request.receipt, request.start_receipt, ...(request.prior_receipts ?? [])].filter(Boolean)) {
+        assert.ok(receipts.has(name), 'owner export lacks original captured receipt');
+      }
+    }
+  }
+  return {receipts, observations};
+}
+
+export function authenticateReceipts(eventsBytes, receipts, expected, observations = null) {
   assert.ok(Array.isArray(eventsBytes) && eventsBytes.length > 0 && eventsBytes.length <= 64);
   assert.ok(receipts instanceof Map && receipts.size > 0 && receipts.size <= 256);
   for (const field of ['casPath', 'codexPath', 'repositoryPath', 'storeRoot']) {
@@ -112,6 +177,7 @@ export function authenticateReceipts(eventsBytes, receipts, expected) {
   for (const path of settingsPaths) assert.ok(typeof path === 'string' && isAbsolute(path) && normalize(path) === path, 'noncanonical settings path');
   assert.match(expected.base, /^[0-9a-f]{40}$/);
   const byOutput = new Map(), admitted = new Map(), completed = new Set();
+  const byExecution = new Map(observations?.map(value => [JSON.stringify([value.source, value.item]), value.name]) ?? []);
   let receiptBytes = 0;
   for (const [name, bytes] of receipts) {
     assert.ok(typeof name === 'string' && name.length > 0 && !isAbsolute(name) && !name.split('/').includes('..'), 'invalid receipt name');
@@ -119,7 +185,7 @@ export function authenticateReceipts(eventsBytes, receipts, expected) {
     receiptBytes += bytes.length;
     assert.ok(receiptBytes <= 64 * 1024 * 1024, 'receipt inventory too large');
     const receipt = parseEvidenceJson(output);
-    assert.ok(!byOutput.has(output), 'duplicate receipt output');
+    assert.ok(observations !== null || !byOutput.has(output), 'duplicate receipt output');
     byOutput.set(output, {name, receipt, digest: sha256(bytes)});
   }
   let totalBytes = 0, sequence = 0;
@@ -146,8 +212,14 @@ export function authenticateReceipts(eventsBytes, receipts, expected) {
       completed.add(identity);
       sequence++;
       assert.equal(typeof item.aggregated_output, 'string', 'missing runtime command output');
-      const match = byOutput.get(withoutTerminalNewline(item.aggregated_output));
-      if (!match) continue;
+      const name = byExecution.get(JSON.stringify([source, item.id]));
+      const match = observations === null ? byOutput.get(withoutTerminalNewline(item.aggregated_output)) :
+        name === undefined ? undefined : {name, receipt: parseEvidenceJson(receipts.get(name)), digest: sha256(receipts.get(name))};
+      if (match && observations !== null) assert.equal(item.aggregated_output, receipts.get(name).toString('utf8'), 'captured output differs from original receipt');
+      if (!match) {
+        assert.ok(!reviewCommand(item.command, expected.casPath), 'review receipt lacks exact runtime execution evidence');
+        continue;
+      }
       assert.ok(['completed', 'failed'].includes(item.status), 'review command incomplete');
       assert.ok(Number.isInteger(item.exit_code) && item.exit_code >= 0, 'review command has no terminal exit');
       if (item.exit_code !== 0 || item.status !== 'completed') {

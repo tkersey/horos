@@ -6,7 +6,7 @@ function same(a, b, message) {
   assert.deepEqual(JSON.parse(JSON.stringify(a)), JSON.parse(JSON.stringify(b)), message);
 }
 
-function instructionBytes(request, receipt, context, contract, policyFiles) {
+export function instructionBytes(request, receipt, context, contract, policyFiles) {
   if (request.scope === 'changeset' && request.lens_name === 'standard') {
     assert.equal(receipt.developerInstructions ?? null, null, 'customized native standard');
     return Buffer.from('codex-default-review/v1');
@@ -33,7 +33,7 @@ function instructionBytes(request, receipt, context, contract, policyFiles) {
   return Buffer.from(actual);
 }
 
-function validateReceipt(request, receipt, context, contract, policyFiles, receipts, runtime) {
+export function validateReceipt(request, receipt, context, contract, policyFiles, receipts, runtime) {
   assert.ok(['start', 'wait'].includes(receipt.action));
   const original = receipt.action === 'start' ? receipt : parseEvidenceJson(receipts.get(request.start_receipt));
   assert.equal(original.action, 'start');
@@ -46,8 +46,8 @@ function validateReceipt(request, receipt, context, contract, policyFiles, recei
     'transport recovery allowance exceeded');
   for (const name of recovered) {
     const failed = parseEvidenceJson(receipts.get(name));
-    assert.equal(failed.action, 'start');
-    assert.equal(failed.waited, true);
+    assert.ok(['start', 'wait'].includes(failed.action));
+    if (failed.action === 'start') assert.equal(failed.waited, true);
     assert.equal(failed.tupleVerdictExists, false, 'semantic outcome cannot be erased by transport recovery');
     assert.equal(failed.reviewAttemptPhase, 'review_terminal', 'observation timeout is not terminal');
     assert.equal(failed.failureClass, 'transport_review_attempt');
@@ -101,15 +101,7 @@ function validateReceipt(request, receipt, context, contract, policyFiles, recei
   return verdict.reviewThreadId;
 }
 
-export function validateOwnerEvidence(output, contract, policyFiles, receipts, runtime) {
-  assert.equal(output.status, 'complete', 'owner closeout is blocked');
-  assert.equal(output.epochClosed, true, 'review epoch remains open');
-  assert.equal(output.executionMode, 'cas');
-  const context = output.reviewContext;
-  assert.equal(context.repository, runtime.repository);
-  assert.equal(context.execution_mode, 'cas');
-  assert.equal(context.base_sha, output.base);
-  assert.equal(context.head_sha, output.head);
+export function reviewObligations(context, contract) {
   const focused = context.focused_files;
   assert.ok(Array.isArray(focused) && focused.length <= contract.focused_file_reviews.maximum_files);
   assert.equal(new Set(focused.map(value => JSON.stringify(value))).size, focused.length, 'duplicate focused file');
@@ -120,6 +112,20 @@ export function validateOwnerEvidence(output, contract, policyFiles, receipts, r
   for (let index = 1; index < contract.standard_convergence.required_consecutive_clean_attempts; index++) {
     expected.push({scope: 'changeset', focus: null, lens_name: 'standard', role: 'standard', phase: 'confirmation'});
   }
+  return expected;
+}
+
+export function validateOwnerEvidence(output, contract, policyFiles, receipts, runtime) {
+  assert.equal(output.status, 'complete', 'owner closeout is blocked');
+  assert.equal(output.epochClosed, true, 'review epoch remains open');
+  assert.equal(output.epochInvalidated, false, 'invalidated epoch cannot earn credit');
+  assert.equal(output.executionMode, 'cas');
+  const context = output.reviewContext;
+  assert.equal(context.repository, runtime.repository);
+  assert.equal(context.execution_mode, 'cas');
+  assert.equal(context.base_sha, output.base);
+  assert.equal(context.head_sha, output.head);
+  const expected = reviewObligations(context, contract);
   assert.equal(output.requests.length, expected.length, 'incomplete owner review inventory');
   const ids = new Set(), threads = new Set(), receiptNames = new Set();
   for (let index = 0; index < expected.length; index++) {

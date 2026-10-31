@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import {execFileSync} from 'node:child_process';
 import {mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
@@ -9,7 +10,7 @@ import {runOwnerProcess} from './owner-process.mjs';
 const expected = {base: 'a'.repeat(40), head: 'b'.repeat(40), contextSha256: 'c'.repeat(64)};
 function output() {
   return {schema: 'repository-review-owner/v1', status: 'blocked', ...expected,
-    policySha256: reviewPolicyDigest, executionMode: 'cas', epochClosed: false,
+    policySha256: reviewPolicyDigest, executionMode: 'cas', epochClosed: false, epochInvalidated: false, invalidationBasis: null,
     closureBasis: 'Test-only missing authentication.', requests: []};
 }
 function transcript(value) {
@@ -67,7 +68,7 @@ test('bounded owner turns resume the same session without awarding partial credi
   const request = {request_id: 'one', request_fingerprint: 'bound', receipt: 'one.json'};
   assert.throws(() => verifyOwnerChain([capture({...pending, requests: [request]}), capture(pending)], expected), /lost original/);
   assert.throws(() => verifyOwnerChain([capture({...pending, requests: [request]}),
-    capture({...pending, requests: [{...request, receipt: 'forged.json'}]})], expected), /rewritten original/);
+    capture({...pending, requests: [{...request, request_fingerprint: 'forged'}]})], expected), /rewritten original/);
   assert.equal(verifyOwnerChain([capture({...pending, requests: [request]}),
     capture({...pending, requests: [{...request, start_receipt: request.receipt, receipt: 'wait.json'}]})], expected).output.status, 'pending');
   assert.equal(verifyOwnerChain([capture({...pending, requests: [request]}),
@@ -112,6 +113,17 @@ test('evidence reader rejects symlinks and byte-limit violations', () => {
     assert.throws(() => readRegular(link, 8));
     assert.throws(() => readRegular(directory, 1024));
   } finally { rmSync(directory, {recursive: true, force: true}); }
+});
+
+test('FIFO evidence is rejected within a bounded subprocess without waiting for a writer', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'review-fifo-'));
+  try {
+    const fifo = join(directory, 'receipt');
+    execFileSync('mkfifo', [fifo], {timeout: 2000});
+    const script = "const {readRegular} = await import(process.env.REVIEW_MODULE); try {readRegular(process.env.REVIEW_FIFO, 1024); process.exitCode = 1;} catch(error) {if (!error.message.includes('unsupported evidence file')) throw error;}";
+    execFileSync(process.execPath, ['--input-type=module', '-e', script],
+      {timeout: 2000, stdio: 'pipe', env: {REVIEW_MODULE: new URL('./review-owner.mjs', import.meta.url).href, REVIEW_FIFO: fifo}});
+  } finally {rmSync(directory, {recursive: true, force: true});}
 });
 
 for (const [name, script, options, expectedFailure] of [

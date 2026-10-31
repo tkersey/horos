@@ -271,7 +271,6 @@ async function successorProposal({client, candidate, actor, pull, timeline, bran
     await candidateObjects(client, candidate, branchBefore, admitCandidate);
   }
   const observe = async expectedHead => {
-    await guard(client, candidate, expectedHead, ['propose', 'promote'], currentBase);
     const current = await get(client, `/pulls/${pull.number}`);
     owned(current, actor);
     assert.equal(current.state, 'open'); assert.equal(current.head.sha, expectedHead);
@@ -286,14 +285,21 @@ async function successorProposal({client, candidate, actor, pull, timeline, bran
     assert.ok(transitions.length <= 1, 'ambiguous successor branch transition');
     assert.deepEqual({...latest, events: latest.events.filter(event => !transitions.includes(event))}, timeline,
       'proposal history changed during successor preparation');
-    if (proposalHoldEvents(latest.events).length > 0) await admitResume({pull: current, events: latest.events, resumeHead: previous.head, candidate: candidateCopy(candidate)});
-    return current;
+    if (proposalHoldEvents(latest.events).length > 0)
+      await admitResume({pull: current, events: latest.events, resumeHead: previous.head, candidate: candidateCopy(candidate)});
+    await guard(client, candidate, expectedHead, ['propose', 'promote'], currentBase);
+    const deciding = await get(client, `/pulls/${pull.number}`);
+    owned(deciding, actor); assert.equal(deciding.node_id, current.node_id); assert.equal(deciding.state, 'open');
+    assert.equal(deciding.head.sha, expectedHead); assert.equal(deciding.base.sha, current.base.sha);
+    assert.equal(deciding.body, current.body); assert.equal(deciding.title, current.title);
+    assert.equal(deciding.draft, false); assert.deepEqual(deciding.labels, current.labels, 'hold labels changed before successor write');
+    return deciding;
   };
-  await observe(branchBefore);
   if (branchBefore !== candidate.head) {
     assert.equal(typeof admitIntent, 'function', 'original writer intent required before branch mutation');
-    await admitIntent({candidate: candidateCopy(candidate), branchBefore});
     const repo = await repository(client);
+    await admitIntent({candidate: candidateCopy(candidate), branchBefore});
+    await observe(branchBefore);
     await writeObserved(() => client.graphql(updateRefs, {input: {repositoryId: repo.node_id,
       refUpdates: [{name: `refs/heads/${proposalBranch}`, beforeOid: previous.head, afterOid: candidate.head, force: true}]} }), async () => {
       assert.equal(await reference(client, proposalBranch), candidate.head, 'successor branch update not observed');
@@ -327,46 +333,98 @@ function ownsCurrentAutoMerge(pull, actor) {
   return true;
 }
 
-export async function pauseHorosProposals({actor, client = new HorosProposalClient()}) {
-  await repository(client); identifier(actor.id);
-  const results = [];
+function mergeDuringPause(pull) {
+  if (pull.merged !== true) return null;
+  assert.equal(pull.state, 'closed'); assert.ok(Number.isFinite(Date.parse(pull.merged_at)));
+  return {kind: 'merged', pull, mergeCommit: oid(pull.merge_commit_sha)};
+}
+
+function pauseResult(outcome) {
+  if (outcome.kind === 'merged') return {status: 'blocked', number: outcome.pull.number, pauseVerified: false,
+    reason: 'The proposal merged before pause could be confirmed; inspect the landed source and its qualification.',
+    head: outcome.pull.head.sha, mergeCommit: outcome.mergeCommit};
+  return {...held('No automation-owned auto-merge remains pending after pause observation.', outcome.pull), pauseVerified: true};
+}
+
+async function reconcilePendingMerge({actor, client, number, force = false, readMode = () => mode(client)}) {
   const requiresPause = async (pull, selectedMode, events) => {
-    if (selectedMode !== 'promote' || pull.draft || pull.labels.some(label => label.name === 'automation-hold')) return true;
+    if (force || selectedMode !== 'promote' || pull.draft || pull.labels.some(label => label.name === 'automation-hold')) return true;
     if (proposalHoldEvents(events).length === 0) return false;
     try { return await readOwnerResume({pull, events}, client) === null; }
     catch { return true; }
   };
-  for (const value of (await pulls(client)).filter(pull => pull.state === 'open')) {
-    const pull = await get(client, `/pulls/${value.number}`);
+  const read = async () => {
+    const pull = await get(client, `/pulls/${number}`);
     assert.equal(pull.user?.id, actor.id); assert.equal(pull.user?.login, actor.login);
-    const current = await history(client, pull);
-    if (current.autoMerge === null || !await requiresPause(pull, await mode(client), current.events)) continue;
-    assert.equal(current.autoMerge.enabledBy?.login, actor.login, 'cannot cancel unknown auto-merge owner');
-    const latest = await get(client, `/pulls/${pull.number}`);
-    assert.equal(latest.user?.id, actor.id); assert.equal(latest.user?.login, actor.login);
-    if (latest.state !== 'open') continue;
-    const latestHistory = await history(client, latest);
-    if (latestHistory.autoMerge === null || !await requiresPause(latest, await mode(client), latestHistory.events)) continue;
-    assert.equal(latestHistory.autoMerge.enabledBy?.login, actor.login, 'cannot cancel unknown auto-merge owner');
-    const deciding = await get(client, `/pulls/${pull.number}`);
-    assert.equal(deciding.user?.id, actor.id); assert.equal(deciding.user?.login, actor.login);
-    if (deciding.state !== 'open' || !await requiresPause(deciding, await mode(client), latestHistory.events)) continue;
-    assert.equal(deciding.node_id, latest.node_id);
-    const ownedRequest = await get(client, `/pulls/${pull.number}`);
-    assert.equal(ownedRequest.node_id, deciding.node_id);
-    assert.equal(ownedRequest.user?.id, actor.id); assert.equal(ownedRequest.user?.login, actor.login);
-    if (ownedRequest.state !== 'open') continue;
-    assert.equal(ownedRequest.head.sha, deciding.head.sha, 'proposal changed before cancellation');
-    assert.equal(ownedRequest.draft, deciding.draft, 'proposal changed before cancellation');
-    assert.deepEqual(ownedRequest.labels, deciding.labels, 'hold labels changed before cancellation');
-    if (!ownsCurrentAutoMerge(ownedRequest, actor)) continue;
-    await writeObserved(() => client.graphql(disableMerge, {input: {pullRequestId: deciding.node_id}}), async () => {
-      const observed = await get(client, `/pulls/${pull.number}`);
-      assert.equal((await history(client, observed)).autoMerge, null, 'auto-merge cancellation not observed');
-    });
-    results.push(held('automation-owned auto-merge disabled by current controls or owner hold', pull));
+    assert.equal(pull.number, number);
+    assert.equal(pull.head.ref, proposalBranch); assert.equal(pull.base.ref, 'main');
+    assert.equal(pull.head.repo?.id, 1176152390); assert.equal(pull.base.repo?.id, 1176152390);
+    return pull;
+  };
+  const clear = async () => {
+    const current = await read();
+    if (current.merged === true) return mergeDuringPause(current);
+    assert.equal(current.auto_merge, null, 'pending merge changed during reconciliation');
+    return null;
+  };
+  const pull = await read();
+  if (pull.merged === true) return mergeDuringPause(pull);
+  const current = await history(client, pull);
+  if (current.autoMerge === null) return clear();
+  if (!await requiresPause(pull, await readMode(), current.events)) return {kind: 'pending', pull};
+  assert.equal(current.autoMerge.enabledBy?.login, actor.login, 'cannot cancel unknown auto-merge owner');
+  const latest = await read();
+  if (latest.merged === true) return mergeDuringPause(latest);
+  if (latest.state !== 'open') return null;
+  const latestHistory = await history(client, latest);
+  if (latestHistory.autoMerge === null) return clear();
+  if (!await requiresPause(latest, await readMode(), latestHistory.events)) return {kind: 'pending', pull: latest};
+  assert.equal(latestHistory.autoMerge.enabledBy?.login, actor.login, 'cannot cancel unknown auto-merge owner');
+  const deciding = await read();
+  if (deciding.merged === true) return mergeDuringPause(deciding);
+  if (deciding.state !== 'open') return null;
+  if (!await requiresPause(deciding, await readMode(), latestHistory.events)) return {kind: 'pending', pull: deciding};
+  assert.equal(deciding.node_id, latest.node_id);
+  const ownedRequest = await read();
+  assert.equal(ownedRequest.node_id, deciding.node_id);
+  if (ownedRequest.merged === true) return mergeDuringPause(ownedRequest);
+  if (ownedRequest.state !== 'open') return null;
+  assert.equal(ownedRequest.head.sha, deciding.head.sha, 'proposal changed before cancellation');
+  assert.equal(ownedRequest.draft, deciding.draft, 'proposal changed before cancellation');
+  assert.deepEqual(ownedRequest.labels, deciding.labels, 'hold labels changed before cancellation');
+  if (!ownsCurrentAutoMerge(ownedRequest, actor)) return null;
+  return writeObserved(() => client.graphql(disableMerge, {input: {pullRequestId: deciding.node_id}}), async () => {
+    const observed = await read();
+    assert.equal(observed.node_id, deciding.node_id);
+    if (observed.merged === true) return mergeDuringPause(observed);
+    assert.equal(observed.auto_merge, null, 'auto-merge cancellation not observed');
+    assert.equal((await history(client, observed)).autoMerge, null, 'auto-merge cancellation not observed');
+    const final = await read();
+    assert.equal(final.node_id, deciding.node_id);
+    if (final.merged === true) return mergeDuringPause(final);
+    assert.equal(final.auto_merge, null, 'auto-merge cancellation changed during observation');
+    return {kind: 'paused', pull: final};
+  });
+}
+
+export async function reconcileHorosProposals({actor, hold = false, number = null, client = new HorosProposalClient()}) {
+  await repository(client); identifier(actor.id);
+  assert.equal(typeof hold, 'boolean'); if (number !== null) identifier(number);
+  let selectedMode;
+  const readMode = async () => {selectedMode = await mode(client); return selectedMode;};
+  await readMode();
+  const selected = (await pulls(client)).filter(pull => pull.state === 'open' || pull.number === number);
+  const results = [], pending = [];
+  for (const pull of selected) {
+    const outcome = await reconcilePendingMerge({actor, client, number: pull.number, force: hold, readMode});
+    if (outcome?.kind === 'pending') pending.push(pull.number);
+    else if (outcome !== null) results.push(pauseResult(outcome));
   }
-  return results;
+  return {mode: selectedMode, results, pending};
+}
+
+export async function pauseHorosProposals(input) {
+  return (await reconcileHorosProposals(input)).results;
 }
 
 export async function recoverProposalMetadata({pull, actor, readCandidate, admitRetirement, admitResume, client}) {
@@ -500,7 +558,7 @@ async function observedLanding(client, pull, candidate) {
   assert.deepEqual(commit.parents.map(parent => parent.sha), [candidate.base], 'landing base differs from admitted source');
 }
 
-export async function promoteHoros({candidate: input, number, actor, admitPromotion, admitResume, client = new HorosProposalClient()}) {
+async function promoteCandidate({candidate: input, number, actor, admitPromotion, admitResume, client}) {
   const candidate = candidateCopy(input);
   identifier(number); identifier(actor.id);
   assert.equal(typeof admitPromotion, 'function', 'trusted promotion admission required');
@@ -515,30 +573,16 @@ export async function promoteHoros({candidate: input, number, actor, admitPromot
   }
   const timeline = await history(client, pull);
   const selectedMode = await mode(client);
-  if (selectedMode !== 'promote') {
-    if (timeline.autoMerge !== null && pull.state === 'open') {
-      assert.equal(timeline.autoMerge.enabledBy?.login, actor.login, 'cannot cancel unknown auto-merge owner');
-      const deciding = await get(client, `/pulls/${number}`);
-      owned(deciding, actor);
-      assert.equal(deciding.node_id, pull.node_id);
-      assert.notEqual(await mode(client), 'promote', 'promotion control changed; reobserve');
-      if (deciding.state !== 'open' || !ownsCurrentAutoMerge(deciding, actor)) return {status: 'disabled', number};
-      await writeObserved(() => client.graphql(disableMerge, {input: {pullRequestId: pull.node_id}}), async () => {
-        const current = await get(client, `/pulls/${number}`);
-        assert.equal((await history(client, current)).autoMerge, null, 'auto-merge cancellation not observed');
-      });
-      return {status: 'held', reason: 'automation-owned auto-merge disabled by current controls', number};
-    }
-    return {status: 'disabled', number};
-  }
-  if (pull.state !== 'open' || pull.draft || pull.labels.some(label => label.name === 'automation-hold')) return held('proposal is closed, draft, or explicitly held', pull);
+  if (selectedMode !== 'promote') return {status: 'disabled', number, controlHold: true};
+  if (pull.state !== 'open' || pull.draft || pull.labels.some(label => label.name === 'automation-hold'))
+    return {...held('proposal is closed, draft, or explicitly held', pull), controlHold: true};
   assert.ok(pull.assignees.some(value => value.login === 'tkersey'), 'proposal assignee missing');
   if (pull.head.sha !== candidate.head || pull.base.sha !== candidate.base || await reference(client, 'main') !== candidate.base ||
     await reference(client, proposalBranch) !== candidate.head) return held('stale base or human head edit prevents promotion', pull);
   assert.ok(pull.body.startsWith(`${proposalDescription(candidate).marker}\n`), 'proposal binding changed');
   const holds = proposalHoldEvents(timeline.events);
   if (holds.length > 0) {
-    if (typeof admitResume !== 'function') return held('historical hold requires explicit owner resume', pull);
+    if (typeof admitResume !== 'function') return {...held('historical hold requires explicit owner resume', pull), controlHold: true};
     await admitResume({pull: structuredClone(pull), events: structuredClone(timeline.events), candidate: candidateCopy(candidate)});
   }
   const branch = await get(client, '/branches/main');
@@ -553,7 +597,6 @@ export async function promoteHoros({candidate: input, number, actor, admitPromot
   const admittedBody = pull.body;
   await admitPromotion({candidate: candidateCopy(candidate), pull: structuredClone(pull),
     protection: structuredClone(protection), rules: structuredClone(rules), history: structuredClone(timeline.events), repository: structuredClone(repo)});
-  await guard(client, candidate, candidate.head, ['promote']);
   pull = await get(client, `/pulls/${number}`);
   assert.equal(pull.state, 'open'); assert.equal(pull.head.sha, candidate.head); assert.equal(pull.base.sha, candidate.base);
   owned(pull, actor);
@@ -565,14 +608,51 @@ export async function promoteHoros({candidate: input, number, actor, admitPromot
   const current = await history(client, pull);
   assert.deepEqual(current.events, timeline.events, 'proposal history changed during admission');
   if (holds.length > 0) await admitResume({pull: structuredClone(pull), events: structuredClone(current.events), candidate: candidateCopy(candidate)});
+  await guard(client, candidate, candidate.head, ['promote']);
+  const deciding = await get(client, `/pulls/${number}`);
+  owned(deciding, actor); assert.equal(deciding.node_id, pull.node_id);
+  assert.equal(deciding.state, 'open'); assert.equal(deciding.head.sha, candidate.head); assert.equal(deciding.base.sha, candidate.base);
+  assert.equal(deciding.draft, false); assert.deepEqual(deciding.labels, pull.labels, 'hold labels changed before promotion');
+  assert.equal(deciding.body, admittedBody, 'reviewed proposal body changed before promotion');
+  assert.ok(deciding.assignees.some(value => value.login === 'tkersey'), 'proposal assignee changed before promotion');
   if (current.autoMerge !== null) {
+    assert.ok(ownsCurrentAutoMerge(deciding, actor), 'pending merge changed before promotion');
     assert.equal(current.autoMerge.enabledBy?.login, actor.login, 'unknown auto-merge owner');
     assert.equal(current.autoMerge.mergeMethod, 'REBASE');
     return {status: 'promotion pending', number, head: candidate.head};
   }
-  assert.equal(await mode(client), 'promote', 'promotion disabled');
+  assert.equal(deciding.auto_merge, null, 'pending merge changed before promotion');
   await writeObserved(() => client.graphql(mergePull, {input: {pullRequestId: pull.node_id, expectedHeadOid: candidate.head, mergeMethod: 'REBASE'}}), async () => {
     await observedLanding(client, await get(client, `/pulls/${number}`), candidate);
   });
   return {status: 'landed—qualification pending', number, head: candidate.head};
+}
+
+export async function promoteHoros({candidate: input, number, actor, admitPromotion, admitResume, client = new HorosProposalClient()}) {
+  const candidate = candidateCopy(input); identifier(number); identifier(actor.id);
+  let result;
+  try { result = await promoteCandidate({candidate, number, actor, admitPromotion, admitResume, client}); }
+  catch (error) {
+    try { await reconcilePendingMerge({actor, client, number, force: true}); }
+    catch (pauseError) { throw new AggregateError([error, pauseError], error.message + '; pending merge reconciliation failed: ' + pauseError.message); }
+    throw error;
+  }
+  const {controlHold = false, ...value} = result;
+  const admissionHeld = !controlHold && ['held', 'blocked'].includes(value.status);
+  if (value.status === 'landed—qualification pending') return value;
+  const outcome = await reconcilePendingMerge({actor, client, number,
+    force: admissionHeld});
+  if (outcome?.kind === 'merged') {
+    await observedLanding(client, outcome.pull, candidate);
+    return {status: 'landed—qualification pending', number, head: candidate.head, pauseVerified: false,
+      reason: 'The proposal merged before pause could be confirmed; landed qualification remains required.'};
+  }
+  if (outcome?.kind === 'paused') {
+    const paused = pauseResult(outcome);
+    return {...value, ...paused, admissionHeld, reason: [value.reason, paused.reason].filter(Boolean).join(' ')};
+  }
+  if (controlHold && outcome?.kind === 'pending') return {status: 'blocked', number, pauseVerified: false, admissionHeld: false,
+    reason: 'The pause condition changed during observation; pending promotion requires fresh admission.'};
+  if (value.status === 'promotion pending' && outcome === null) return {...held('The pending merge is no longer present; reobserve before promotion.', {number}), pauseVerified: true, admissionHeld: false};
+  return value.status === 'held' ? {...value, admissionHeld} : value;
 }

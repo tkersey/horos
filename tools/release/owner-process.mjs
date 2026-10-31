@@ -18,6 +18,23 @@ export function remainingOwnerTime(timeoutMs = 540000, deadline, now = performan
   return Math.max(0, Math.floor(Math.min(timeoutMs, deadline - now)));
 }
 
+export async function removeOwnerRuntime(paths, deadline) {
+  assert.ok(Array.isArray(paths) && paths.length === 2);
+  const timeout = Math.min(10000, Math.floor(deadline - performance.now()));
+  assert.ok(timeout > 0, 'credential cleanup deadline exhausted');
+  const script = "import {rmSync} from 'node:fs'; for (const path of process.argv.slice(1)) rmSync(path, {recursive: true, force: true});";
+  await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', script, ...paths], {env: {}, stdio: 'ignore'});
+    const timer = setTimeout(() => child.kill('SIGKILL'), timeout);
+    child.once('error', error => {clearTimeout(timer); reject(error);});
+    child.once('close', (code, signal) => {
+      clearTimeout(timer);
+      if (code === 0 && signal === null) resolve();
+      else reject(new Error('credential cleanup did not complete within its bound'));
+    });
+  });
+}
+
 export async function runOwnerProcess(command, args, {workspace, captureRoot, env, input, timeoutMs = 540000, deadline, maximumBytes = 64 * 1024 * 1024}) {
   assert.ok(['darwin', 'linux'].includes(process.platform));
   assert.ok(Number.isSafeInteger(timeoutMs) && timeoutMs > 0 && timeoutMs <= 540000);

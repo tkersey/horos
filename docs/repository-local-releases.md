@@ -75,11 +75,11 @@ Discovered library paths remain absolute when the package consumer changes
 directories. Before extraction succeeds, filesystem-returned names and kinds
 must exactly match authenticated files and directory prefixes. A filesystem that
 aliases or rewrites those names rejects the source and cleans up the new
-extraction; representable case and Unicode names remain supported.
+extraction; representable case and Unicode names remain supported. Source cardinality is bounded by the existing archive byte limit, not a separate file-count cap. Build-driven native tests receive the exact invoking compiler; direct diagnostic `zig test` invocations must set `RELEASE_TEST_ZIG` to its absolute path.
 
 The manifest operation parses the complete ZON document and replaces only the
 root version literal. It preserves exact input bytes for a semantic no-op and
-refuses an existing different candidate. Version decisions come from admitted
+refuses an existing different candidate. FIFO inputs and outputs are rejected without waiting for a writer; regular-file permissions remain preserved. Version decisions come from admitted
 release impacts; the publisher never changes source versions. Source preparation
 binds the exact Git head as a lazy build input, so a new source cannot reuse an
 old output slot merely because its repository directory has the same name.
@@ -241,6 +241,8 @@ The optional identity file is the exact output of the scoped App-token helper;
 without it the runner cannot perform writer operations. Local adapter tests and
 workflow lint do not establish live App-created PR triggers or protected merging.
 
+Qualification correspondence retains the original API evidence bytes and their digest. Later observations compare the admitted run, attempt, source, workflow, platform, job/step outcomes and clocks, and artifact identities. Mutable repository descriptions, avatars, display titles, runner names, and download URLs do not invalidate that evidence. Fresh qualification admission still checks the actual current artifacts and required outcomes.
+
 ## Required qualification inventory
 
 The authoritative commands and platform rules remain in [.github/CI.md](../.github/CI.md).
@@ -302,12 +304,16 @@ receipts, owner facts and bound inputs; it excludes unrelated model commands and
 authentication. Its structure alone is not provenance: the trusted workflow
 must authenticate the exported artifact before another job can admit it.
 
+Original receipt bytes come from parent-captured command output, not model-writable receipt files. Each retained turn preserves prior executions and owner dispositions; a confirmation requires the preceding completed initial fold. Reasoned reassessment may resolve a hold, but cannot erase an accepted epoch invalidation or replace an original outcome. Interrupted invocation diagnostics retain available captures and CAS attempt/session identity before bounded credential cleanup; unsupported entries are reported without discarding the other retained evidence. Diagnostics permit investigation, not review credit or an automatic retry.
+
 Observer, start marker, and check reporter use the same original review subject.
 Missing evidence preserves the durable invocation identity across repeated polls.
 Recovering a failed or stale check display requires the authenticated original
 pending result; a terminal owner result cannot reopen. The owner process deadline
 includes elapsed setup and leaves one minute within both the eight-minute step
 and ten-minute job limits for termination, diagnostics, and retention.
+
+Pending automation-owned merges are reconciled again when an invocation finishes, including held, blocked, and early-exit paths. The reported mode comes from that reconciliation. A pause acknowledgement requires an observed absence of the pending request. A merge that completed during cancellation is reported separately with pause unverified and landed qualification still required; it is never reported as successfully cancelled. Unknown merge-request ownership blocks cancellation.
 
 A real disposable owner invocation returned `blocked` for deliberately absent
 product qualification without dispatching any review. Direct CAS review-profile

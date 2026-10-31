@@ -4,7 +4,7 @@ import {mkdtempSync, rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import test from 'node:test';
-import {proposalBranch, proposalMessage, proposalCommitOid, proposalDescription, proposeHoros, promoteHoros, pauseHorosProposals, recoverProposalMetadata} from './proposal.mjs';
+import {proposalBranch, proposalMessage, proposalCommitOid, proposalDescription, proposeHoros, promoteHoros, pauseHorosProposals, reconcileHorosProposals, recoverProposalMetadata} from './proposal.mjs';
 
 import {admitUnproposedHoros, retireHorosProposal, storedHorosCandidate} from './release-observation.mjs';
 import {admitOwnerResume} from './proposal-authority.mjs';
@@ -696,7 +696,7 @@ test('writer restart finishes authenticated interrupted metadata before current-
   const result = await runHorosAutomation({controlCommit: f.state.main, identity,
     native: {read: () => '1.0.0', prepare: () => assert.fail('recovery does not regenerate native source'), facts: () => assert.fail('recovery does not plan new native inputs')}}, {
     client: f.options.client, actorReader: async () => actor,
-    sourceReader: async () => ({commit: f.state.main, tree: f.baseTree}), pause: async () => [],
+    sourceReader: async () => ({commit: f.state.main, tree: f.baseTree}), pause: async () => ({mode: f.state.mode, results: [], pending: []}),
     reportReview: async () => ({status: 'reported'}), reportStatus: async () => ({status: 'reported'}),
     operations: () => ({recover: pull => recoverProposalMetadata({pull, actor, client: f.options.client,
       readCandidate: lifecycle.readCandidate, admitRetirement: lifecycle.admitRetirement, admitResume: lifecycle.admitResume}),
@@ -895,4 +895,237 @@ test('known historical hold still cancels owned pending merge when resume eviden
   assert.equal((await pauseHorosProposals({actor, client: f.options.client})).length, 1);
   assert.equal(f.state.autoMerge, null);
   assert.deepEqual(f.writes().map(value => value.path), ['PauseProposal']);
+});
+
+
+function completePendingMerge(f) {
+  const pull = f.state.pulls[0];
+  pull.merged = true; pull.state = 'closed'; pull.merged_at = '2026-10-30T02:00:00Z';
+  pull.merge_commit_sha = f.candidate.head; f.state.main = f.candidate.head; f.state.autoMerge = null;
+}
+
+for (const condition of ['label', 'draft', 'historical hold']) test(
+  `direct promotion reconciles an already pending merge for a newly observed ${condition}`, async t => {
+    const f = fixture(t); await f.propose(); f.state.mode = 'promote';
+    f.state.autoMerge = {mergeMethod: 'REBASE', enabledBy: {login: actor.login}};
+    if (condition === 'label') f.state.pulls[0].labels.push({name: 'automation-hold'});
+    if (condition === 'draft') f.state.pulls[0].draft = true;
+    if (condition === 'historical hold') f.state.events.push({id: 'HOLD', __typename: 'UnlabeledEvent',
+      label: {name: 'automation-hold'}, createdAt: '2026-10-30T00:01:00Z'});
+    f.state.calls = [];
+    assert.equal((await f.promote()).status, 'held'); assert.equal(f.state.autoMerge, null);
+    assert.deepEqual(f.writes().map(value => value.path), ['PauseProposal']);
+  });
+
+for (const operation of ['pause', 'promote']) for (const response of ['success', 'failure']) test(
+  `${operation} distinguishes a completed merge from cancellation when disable reports ${response}`, async t => {
+    const f = fixture(t); await f.propose(); f.state.mode = 'off';
+    f.state.autoMerge = {mergeMethod: 'REBASE', enabledBy: {login: actor.login}};
+    f.state.onGraphql = operation => {
+      if (operation !== 'PauseProposal') return;
+      completePendingMerge(f);
+      if (response === 'failure') throw Error('merge completed before disable');
+    };
+    f.state.calls = [];
+    const result = operation === 'pause' ? (await pauseHorosProposals({actor, client: f.options.client}))[0] : await f.promote();
+    assert.equal(result.status, operation === 'pause' ? 'blocked' : 'landed—qualification pending');
+    assert.equal(result.pauseVerified, false); assert.match(result.reason, /merged before pause/);
+    assert.deepEqual(f.writes().map(value => value.path), ['PauseProposal']);
+  });
+
+test('a merged cancellation race cannot bypass original landing source proof', async t => {
+  const f = fixture(t); await f.propose(); f.state.mode = 'off';
+  f.state.autoMerge = {mergeMethod: 'REBASE', enabledBy: {login: actor.login}};
+  f.state.onGraphql = operation => {
+    if (operation !== 'PauseProposal') return;
+    completePendingMerge(f); f.objects.get('/git/commits/' + f.candidate.head).tree.sha = 'f'.repeat(40);
+    throw Error('merge completed before disable');
+  };
+  await assert.rejects(f.promote());
+});
+
+for (const failure of ['late hold', 'failed original review']) test(
+  `promotion preserves ${failure} failure while cancelling an existing owned pending merge`, async t => {
+    const f = fixture(t); await f.propose(); f.state.mode = 'promote';
+    f.state.autoMerge = {mergeMethod: 'REBASE', enabledBy: {login: actor.login}}; f.state.calls = [];
+    await assert.rejects(f.promote({admitPromotion: async () => {
+      if (failure === 'failed original review') throw Error('original owner review failed');
+      f.state.pulls[0].labels.push({name: 'automation-hold'});
+    }}), failure === 'late hold' ? /held during/ : /original owner review failed/);
+    assert.equal(f.state.autoMerge, null); assert.deepEqual(f.writes().map(value => value.path), ['PauseProposal']);
+  });
+
+test('failed disable with a still-pending merge never acknowledges pause', async t => {
+  const f = fixture(t); await f.propose(); f.state.mode = 'off';
+  f.state.autoMerge = {mergeMethod: 'REBASE', enabledBy: {login: actor.login}};
+  f.state.failBefore = value => value.path === 'PauseProposal';
+  await assert.rejects(pauseHorosProposals({actor, client: f.options.client}), /not confirmed/);
+  assert.notEqual(f.state.autoMerge, null);
+});
+
+test('current owner resume preserves an admitted pending merge without cancellation', async t => {
+  const f = fixture(t); await f.propose(); f.state.mode = 'promote';
+  f.state.autoMerge = {mergeMethod: 'REBASE', enabledBy: {login: actor.login}};
+  f.state.events.push({id: 'HOLD', __typename: 'UnlabeledEvent', label: {name: 'automation-hold'}, createdAt: '2026-10-30T00:01:00Z'});
+  f.state.comments.push({id: 99, user: f.state.owner, body: '/repository-automation resume ' + f.candidate.head,
+    created_at: '2026-10-30T00:02:00Z', updated_at: '2026-10-30T00:02:00Z'});
+  f.state.calls = [];
+  assert.equal((await f.promote({admitResume: input => admitOwnerResume(input, f.options.client)})).status, 'promotion pending');
+  const observed = await reconcileHorosProposals({actor, client: f.options.client});
+  assert.equal(observed.mode, 'promote'); assert.deepEqual(observed.results, []); assert.deepEqual(observed.pending, [1]);
+  assert.equal(f.writes().length, 0); assert.notEqual(f.state.autoMerge, null);
+});
+
+function runnerObservation(f, stage, change = () => {f.state.pulls[0].labels.push({name: 'automation-hold'});}) {
+  const source = {commit: f.candidate.base, tree: f.baseTree};
+  const input = {controlCommit: f.candidate.base, native: {read: () => '1.0.0', prepare: () => Buffer.from('native')},
+    identity: {repository: 'tkersey/horos', repositoryId: 1176152390, role: 'writer', appId: 9,
+      permissions: {...jobPermissions.writer}, expiresAt: '2099-01-01T00:00:00Z'}};
+  const dependencies = {client: f.options.client, actorReader: async () => actor,
+    sourceReader: async () => {
+      if (stage === 'source error') {change(); throw Error('source observation unavailable');}
+      return source;
+    },
+    reportReview: async () => ({status: 'reported', conclusion: 'success'}),
+    reportStatus: async () => {if (stage === 'comment') change(); return {status: 'reported'};},
+    operations: () => ({
+      recover: async () => {
+        if (stage === 'recovery') {change(); return {candidate: f.candidate, result: {status: 'held', reason: 'original candidate remains held'}};}
+        return null;
+      },
+      freeze: async () => null,
+      boundary: async () => {
+        if (stage === 'boundary') change();
+        return {status: stage === 'boundary' ? 'held' : 'prepare', version: f.candidate.version, record: {source}};
+      },
+      plan: async () => {
+        if (stage === 'boundary') change();
+        return {status: stage === 'boundary' ? 'held' : 'prepare', decision: {version: f.candidate.version,
+          horosRecordSha256: 'a'.repeat(64), kosmosRecordSha256: 'b'.repeat(64)}};
+      },
+      prepare: async () => f.candidate,
+      preparation: async () => ({candidate: f.candidate}),
+      propose: async () => ({status: 'proposal open', number: 1, head: f.candidate.head}),
+      qualification: async () => {
+        if (stage === 'qualification' || stage === 'failed qualification' || stage === 'final mode') change();
+        return {id: 17, status: stage === 'failed qualification' ? 'completed' : 'in_progress', conclusion: stage === 'failed qualification' ? 'failure' : null};
+      },
+    })};
+  return {input, dependencies, run: () => runHorosAutomation(input, dependencies)};
+}
+
+for (const stage of ['source error', 'recovery', 'boundary', 'qualification', 'failed qualification', 'comment']) test(
+  `runner reconciles a hold first observed during ${stage}`, async t => {
+    const f = fixture(t); await f.propose(); f.state.mode = 'promote';
+    f.state.autoMerge = {mergeMethod: 'REBASE', enabledBy: {login: actor.login}}; f.state.calls = [];
+    const result = await runnerObservation(f, stage).run();
+    assert.equal(result.status, 'held', result.reason); assert.equal(result.pauseVerified, true);
+    if (stage === 'failed qualification') assert.match(result.reason, /original qualification failed/);
+    assert.equal(f.state.autoMerge, null); assert.deepEqual(f.writes().map(value => value.path), ['PauseProposal']);
+  });
+
+test('runner binds reported mode to final reconciliation when the next control read observes off', async t => {
+  const f = fixture(t); await f.propose(); f.state.mode = 'promote';
+  f.state.autoMerge = {mergeMethod: 'REBASE', enabledBy: {login: actor.login}};
+  let armed = false;
+  f.state.onRequest = request => {
+    if (armed && request.path === '/actions/variables/REPOSITORY_AUTOMATION') {f.state.mode = 'off'; armed = false;}
+  };
+  f.state.calls = [];
+  const result = await runnerObservation(f, 'final mode', () => {armed = true;}).run();
+  assert.equal(result.mode, 'off'); assert.equal(result.status, 'held'); assert.equal(result.pauseVerified, true);
+  assert.equal(f.state.autoMerge, null); assert.deepEqual(f.writes().map(value => value.path), ['PauseProposal']);
+});
+
+test('runner preserves original qualification failure when merge wins the pause race', async t => {
+  const f = fixture(t); await f.propose(); f.state.mode = 'promote';
+  f.state.autoMerge = {mergeMethod: 'REBASE', enabledBy: {login: actor.login}};
+  f.state.onGraphql = operation => {if (operation === 'PauseProposal') {completePendingMerge(f); throw Error('already merged');}};
+  const result = await runnerObservation(f, 'failed qualification').run();
+  assert.equal(result.status, 'blocked'); assert.equal(result.pauseVerified, false);
+  assert.match(result.reason, /original qualification failed/); assert.match(result.reason, /merged before pause/);
+});
+
+test('runner cannot claim a hold effective when pending merge ownership is unknown', async t => {
+  const f = fixture(t); await f.propose(); f.state.mode = 'promote';
+  f.state.autoMerge = {mergeMethod: 'REBASE', enabledBy: {login: actor.login}}; f.state.calls = [];
+  const result = await runnerObservation(f, 'failed qualification', () => {f.state.autoMerge.enabledBy.login = 'human';}).run();
+  assert.equal(result.status, 'blocked'); assert.equal(result.pauseVerified, false);
+  assert.match(result.reason, /original qualification failed/); assert.match(result.reason, /unknown auto-merge owner/);
+  assert.notEqual(f.state.autoMerge, null); assert.equal(f.writes().length, 0);
+});
+
+
+for (const change of ['off', 'hold', 'unchanged']) test(`successor observes ${change} after original intent admission before its ref write`, async t => {
+  const f = fixture(t); await f.propose(); const next = f.successor();
+  f.state.calls = [];
+  const operation = f.propose({...next, admitIntent: async () => {
+    if (change === 'off') f.state.mode = 'off';
+    if (change === 'hold') f.state.pulls[0].labels.push({name: 'automation-hold'});
+  }});
+  if (change === 'unchanged') {
+    assert.equal((await operation).status, 'proposal open'); assert.equal(f.state.branch, next.candidate.head);
+  } else {
+    await assert.rejects(operation); assert.equal(f.state.branch, f.candidate.head);
+    assert.ok(!f.writes().some(value => value.path === 'UpdateProposal' || value.method === 'PATCH'));
+  }
+});
+
+
+test('runner preserves a fresh resume after status reporting without claiming an effective pause', async t => {
+  const f = fixture(t); await f.propose(); f.state.mode = 'promote';
+  f.state.autoMerge = {mergeMethod: 'REBASE', enabledBy: {login: actor.login}};
+  const operation = runnerObservation(f, 'qualification');
+  operation.dependencies.reportStatus = async () => {
+    f.state.pulls[0].labels = [];
+    f.state.events.push({id: 'HOLD', __typename: 'UnlabeledEvent', label: {name: 'automation-hold'}, createdAt: '2026-10-30T00:01:00Z'});
+    f.state.comments.push({id: 99, user: f.state.owner, body: '/repository-automation resume ' + f.candidate.head,
+      created_at: '2026-10-30T00:02:00Z', updated_at: '2026-10-30T00:02:00Z'});
+    f.state.autoMerge = {mergeMethod: 'REBASE', enabledBy: {login: actor.login}};
+    return {status: 'reported'};
+  };
+  f.state.calls = [];
+  const result = await operation.run();
+  assert.equal(result.status, 'blocked'); assert.equal(result.pauseVerified, false);
+  assert.match(result.reason, /remains allowed/); assert.notEqual(f.state.autoMerge, null);
+  assert.deepEqual(f.writes().map(value => value.path), ['PauseProposal']);
+});
+
+
+for (const change of ['off', 'hold']) test(`promotion observes ${change} after its final asynchronous owner-resume admission`, async t => {
+  const f = fixture(t); await f.propose(); f.state.mode = 'promote';
+  f.state.events.push({id: 'HOLD', __typename: 'UnlabeledEvent', label: {name: 'automation-hold'}, createdAt: '2026-10-30T00:01:00Z'});
+  f.state.comments.push({id: 99, user: f.state.owner, body: '/repository-automation resume ' + f.candidate.head,
+    created_at: '2026-10-30T00:02:00Z', updated_at: '2026-10-30T00:02:00Z'});
+  let admissions = 0;
+  f.state.calls = [];
+  await assert.rejects(f.promote({admitResume: async input => {
+    const admitted = await admitOwnerResume(input, f.options.client);
+    if (++admissions === 2) {
+      if (change === 'off') f.state.mode = 'off';
+      else f.state.pulls[0].labels.push({name: 'automation-hold'});
+    }
+    return admitted;
+  }}));
+  assert.equal(admissions, 2); assert.equal(f.writes().length, 0); assert.equal(f.state.pulls[0].merged, false);
+});
+
+
+test('fresh owner resume cannot override the original failed qualification during finalization', async t => {
+  const f = fixture(t); await f.propose(); f.state.mode = 'promote';
+  f.state.autoMerge = {mergeMethod: 'REBASE', enabledBy: {login: actor.login}};
+  const operation = runnerObservation(f, 'failed qualification');
+  operation.dependencies.reportStatus = async () => {
+    f.state.pulls[0].labels = [];
+    f.state.events.push({id: 'HOLD', __typename: 'UnlabeledEvent', label: {name: 'automation-hold'}, createdAt: '2026-10-30T00:01:00Z'});
+    f.state.comments.push({id: 99, user: f.state.owner, body: '/repository-automation resume ' + f.candidate.head,
+      created_at: '2026-10-30T00:02:00Z', updated_at: '2026-10-30T00:02:00Z'});
+    f.state.autoMerge = {mergeMethod: 'REBASE', enabledBy: {login: actor.login}};
+    return {status: 'reported'};
+  };
+  f.state.calls = [];
+  const result = await operation.run();
+  assert.equal(result.status, 'held'); assert.equal(result.pauseVerified, true);
+  assert.match(result.reason, /original qualification failed/); assert.equal(f.state.autoMerge, null);
+  assert.deepEqual(f.writes().map(value => value.path), ['PauseProposal', 'PauseProposal']);
 });

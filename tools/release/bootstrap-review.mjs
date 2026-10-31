@@ -1,3 +1,4 @@
+import {requireSameQualification} from './qualification-binding.mjs';
 import assert from 'node:assert/strict';
 import {GitHubReader, githubCommand} from './github.mjs';
 import {HorosProposalClient} from './proposal-github.mjs';
@@ -79,7 +80,7 @@ export async function observeHorosBootstrap({controlCommit, request = null, orig
       observation: 'Exact landed source and all required original qualification obligations admitted before bootstrap review.'})),
   };
   assert.equal(context.qualification.runId, qualification.run.id);
-  assert.equal(context.qualification.evidenceSha256, sha256(qualification.evidence), 'bootstrap proof changed');
+  requireSameQualification(context.qualification, qualification);
   assert.equal((await reader.api('git/ref/heads/main')).object.sha, controlCommit, 'bootstrap control advanced');
   return {status: 'ready', context, previous: prior.status === 'pending' ? previousBinding(prior) : null};
 }

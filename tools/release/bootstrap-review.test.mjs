@@ -11,7 +11,7 @@ function fixture() {
     rationale: 'Explicit reviewed initial publication.', contracts: ['library public contracts', 'package identity']}};
   const run = {id: 12, status: 'completed', conclusion: 'success'};
   const inventory = {commit: head, tree, packageIdentity: `horos-8.0.0-${'x'.repeat(44)}`};
-  const evidence = Buffer.from('original full landed qualification');
+  const evidence = Buffer.from(JSON.stringify({run: {repository: {}, head_repository: {}}, jobs: [], artifacts: []}));
   const qualification = {run: {...run, html_url: 'https://github.com/tkersey/horos/actions/runs/12'},
     workflow: {path: '.github/workflows/zig.yml', commit: head, sha256: 'd'.repeat(64)}, evidence,
     jobs: [{id: 13, name: 'original admitted inventory', conclusion: 'success'}], payloads: new Map()};
@@ -61,10 +61,14 @@ test('pending bootstrap resumes its original context instead of inventing new au
   const value = fixture(), first = await value.observe();
   const original = {status: 'pending', envelope: {context: first.context}, run: {id: 14}, artifact: {id: 15},
     bytes: Buffer.from('authenticated original pending artifact'), workflow: {commit: head, sha256: 'e'.repeat(64)}};
+  const refreshed = JSON.parse(value.qualification.evidence);
+  refreshed.run.repository.description = 'Changed after the original review started';
+  value.qualification.evidence = Buffer.from(JSON.stringify(refreshed));
   const result = await value.observe({request: null, original});
   assert.deepEqual(result.context, first.context); assert.equal(result.previous.runId, 14);
-  value.qualification.evidence = Buffer.from('changed original proof');
-  await assert.rejects(value.observe({request: null, original}), /proof changed/);
+  refreshed.run.conclusion = 'failure';
+  value.qualification.evidence = Buffer.from(JSON.stringify(refreshed));
+  await assert.rejects(value.observe({request: null, original}), /proof inventory differs/);
 });
 
 test('finished or blocked bootstrap is never rerun for a more favorable outcome', async () => {

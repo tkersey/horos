@@ -1,3 +1,4 @@
+import {requireSameQualification} from './qualification-binding.mjs';
 import assert from 'node:assert/strict';
 import {encodeRecord, sha256} from './encoding.mjs';
 import {githubCommand} from './github.mjs';
@@ -307,9 +308,7 @@ async function reviewedEvidence({candidate, pull, qualificationRunId}, options) 
   assert.equal(review.owner.output.status, 'complete');
   assert.deepEqual(envelope.context, review.context, 'review envelope differs from original owner context');
   assert.equal(review.context.repository, repositoryName); assert.equal(review.context.tree, candidate.tree);
-  assert.deepEqual(review.context.qualification, {runId: qualification.run.id,
-    workflow: qualification.workflow, evidenceSha256: sha256(qualification.evidence),
-    originalEvidence: qualification.evidence.toString('base64')}, 'review proof inventory differs from actual qualification');
+  requireSameQualification(review.context.qualification, qualification);
   assert.deepEqual(review.context.acceptedRequirements, options.expected.acceptedRequirements);
   for (const [key, value] of Object.entries(options.expected.reviewSettings)) assert.equal(review.binding[key], value, `review runtime changed: ${key}`);
   const impact = requireCurrentImpact(review.context.impact, pull.body, candidate.base, candidate.head);

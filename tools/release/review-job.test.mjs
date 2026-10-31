@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync} from 'node:fs';
+import {mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, existsSync} from 'node:fs';
+import {gunzipSync} from 'node:zlib';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {executeReviewTurn} from './review-job.mjs';
@@ -68,6 +69,71 @@ test('failed owner process retains diagnostic evidence and blocks without a fres
     assert.equal(envelope.retainedEvidence, null);
     assert.ok(existsSync(join(options.outputDirectory, reviewNames(context.base, context.head).diagnostic)));
     assert.equal(existsSync(join(options.root, 'home/.codex/auth.json')), false);
+  } finally {rmSync(directory, {recursive: true, force: true});}
+});
+
+for (const substitution of ['directory', 'intermediate-symlink']) {
+  test(`credential cleanup survives ${substitution} and retains original evidence without outside deletion`, async () => {
+    const {directory, options} = scratch();
+    const outside = join(directory, 'outside'); mkdirSync(outside);
+    writeFileSync(join(outside, 'auth.json'), 'outside sentinel');
+    try {
+      const result = await executeReviewTurn(options, async values => {
+        const result = await pending(values), reviewer = join(values.workspace, 'reviewer-home');
+        if (substitution === 'directory') {
+          rmSync(join(reviewer, 'auth.json')); mkdirSync(join(reviewer, 'auth.json'));
+        } else {
+          rmSync(reviewer, {recursive: true}); symlinkSync(outside, reviewer);
+          result.output.status = 'blocked'; result.output.closureBasis = 'Original owner blocked.';
+        }
+        return result;
+      });
+      assert.equal(result.status, 'blocked'); assert.equal(result.statePath, null);
+      assert.equal(readFileSync(join(outside, 'auth.json'), 'utf8'), 'outside sentinel');
+      assert.equal(existsSync(join(options.root, 'workspace')), false);
+      const diagnostic = JSON.parse(gunzipSync(readFileSync(join(options.outputDirectory, reviewNames(context.base, context.head).diagnostic))));
+      assert.ok(diagnostic.files.some(file => file.path.endsWith('/owner-events.jsonl') && Buffer.from(file.bytes, 'base64').toString() === 'original runtime capture'));
+      assert.equal(reviewEnvelope(readFileSync(result.resultPath), context).status, 'blocked');
+    } finally {rmSync(directory, {recursive: true, force: true});}
+  });
+}
+
+test('interrupted pre-stdout attempt retains original CAS identity and events for manual recovery', async () => {
+  const {directory, options} = scratch();
+  try {
+    const result = await executeReviewTurn(options, async values => {
+      mkdirSync(values.captureRoot); mkdirSync(join(values.workspace, 'cas/review_sessions'), {recursive: true});
+      const script = "const fs=require('node:fs'), p=process.argv[1]; fs.writeFileSync(p+'/original.json',JSON.stringify({reviewThreadId:'original-attempt',workflowBinding:{requestId:'original-request'}})); fs.writeFileSync(p+'/original.events.ndjson','original review/start response'); process.stdout.write('original owner command started\\n'); setInterval(()=>{},1000);";
+      const processResult = await runOwnerProcess(process.execPath, ['-e', script, join(values.workspace, 'cas/review_sessions')],
+        {...values, env: {}, input: '', deadline: performance.now() + 1500});
+      assert.equal(processResult.failure, 'deadline');
+      throw new Error('Interrupted before original CAS stdout receipt');
+    });
+    assert.equal(result.status, 'blocked'); assert.equal(result.statePath, null);
+    const diagnostic = JSON.parse(gunzipSync(readFileSync(join(options.outputDirectory, reviewNames(context.base, context.head).diagnostic))));
+    const record = diagnostic.files.find(file => file.path === 'workspace/cas/review_sessions/original.json');
+    assert.equal(JSON.parse(Buffer.from(record.bytes, 'base64')).reviewThreadId, 'original-attempt');
+    assert.ok(diagnostic.files.some(file => file.path.endsWith('original.events.ndjson')));
+    assert.equal(existsSync(join(options.root, 'workspace')), false);
+    assert.equal(reviewEnvelope(readFileSync(result.resultPath), context).retainedEvidence, null);
+  } finally {rmSync(directory, {recursive: true, force: true});}
+});
+
+test('diagnostics reject linked runtime state while preserving protected captures', async () => {
+  const {directory, options} = scratch(), outside = join(directory, 'outside');
+  mkdirSync(outside); writeFileSync(join(outside, 'record.json'), 'outside private bytes');
+  try {
+    const result = await executeReviewTurn(options, async values => {
+      const result = await pending(values);
+      symlinkSync(outside, join(values.workspace, 'cas'));
+      return result;
+    });
+    assert.equal(result.status, 'blocked');
+    const diagnostic = JSON.parse(gunzipSync(readFileSync(join(options.outputDirectory, reviewNames(context.base, context.head).diagnostic))));
+    assert.ok(diagnostic.errors.some(error => /symlink/.test(error.reason)));
+    assert.ok(diagnostic.files.some(file => file.path.endsWith('/owner-events.jsonl')));
+    assert.ok(!diagnostic.files.some(file => Buffer.from(file.bytes, 'base64').toString().includes('outside private bytes')));
+    assert.equal(readFileSync(join(outside, 'record.json'), 'utf8'), 'outside private bytes');
   } finally {rmSync(directory, {recursive: true, force: true});}
 });
 

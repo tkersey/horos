@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
 import {execFileSync} from 'node:child_process';
-import {constants, closeSync, fstatSync, mkdirSync, openSync, readFileSync, realpathSync, writeFileSync} from 'node:fs';
+import {constants, closeSync, fstatSync, mkdirSync, openSync, readSync, realpathSync, writeFileSync} from 'node:fs';
 import {basename, dirname, isAbsolute, join, relative, resolve, sep} from 'node:path';
 import {parseEvidenceJson} from './evidence-json.mjs';
 import {encodeRecord, sha256} from './encoding.mjs';
 import {runOwnerProcess, remainingOwnerTime} from './owner-process.mjs';
 import {validateOwnerEvidence} from './review-admission.mjs';
-import {authenticateReceipts} from './review-runtime.mjs';
+import {admitOwnerHistory} from './review-history.mjs';
 
 export const reviewPolicyCommit = '7aac0823b02dc31905ba57521dd9c1477686351e';
 export const reviewPolicyDigest = 'cb72f160d9ff1ea1743513cee3058ca2f72e287599158e2763f296ab73b6e511';
@@ -31,11 +31,18 @@ function newDirectory(path) {
 }
 
 export function readRegular(path, maximumBytes) {
-  const descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const before = fstatSync(descriptor, {bigint: true});
     assert.ok(before.isFile() && before.size <= BigInt(maximumBytes), 'unsupported evidence file');
-    const bytes = readFileSync(descriptor);
+    const buffer = Buffer.alloc(Number(before.size) + 1);
+    let length = 0;
+    while (length < buffer.length) {
+      const count = readSync(descriptor, buffer, length, buffer.length - length, null);
+      if (count === 0) break;
+      length += count;
+    }
+    const bytes = buffer.subarray(0, length);
     const after = fstatSync(descriptor, {bigint: true});
     for (const field of ['dev', 'ino', 'size', 'mode', 'mtimeNs', 'ctimeNs']) assert.equal(after[field], before[field], 'evidence changed');
     assert.equal(BigInt(bytes.length), before.size);
@@ -91,15 +98,15 @@ export function ownerPrompt({repository, policyDirectory, contextPath, workspace
     'The candidate and Git metadata are read-only. No implementation, commit, publication, PR comment, merge, credential creation, or repository administration is authorized.',
     'Use Node.js and shell for local evidence handling; do not invoke Python. Do not read or copy authentication into evidence. The reviewer-home directory is runtime-private active state and is never release evidence.',
     'If an entailed current finding is discovered, it blocks this mechanical path. Complete all owner-required evidence collection, recovery and fold before closing an invalidated initial epoch. Never repair the candidate.',
-    `Use ${casPath} review start --wait --json with --codex-path ${codexPath} --thread-start-params-json @${settingsPath} --store-root ${join(workspace, 'cas')} for each owner-authorized request. Preserve the ordinary owner policy, original receipt and event evidence. Execute each CAS invocation as one direct command using the absolute binary, no shell operators, redirection, substitutions, environment wrappers or output filtering; retain complete stdout in the command execution event. Save those exact stdout bytes separately as the request receipt.`,
+    `Use ${casPath} review start --wait --json with --codex-path ${codexPath} --thread-start-params-json @${settingsPath} --store-root ${join(workspace, 'cas')} for each owner-authorized request. Preserve the ordinary owner policy, original receipt and event evidence. Execute each CAS invocation as one direct command using the absolute binary, no shell operators, redirection, substitutions, environment wrappers or output filtering; retain complete stdout in the command execution event. The trusted adapter derives original receipt bytes from that event; receipt filenames are unique labels, never authority for replacement bytes.`,
     'In this invocation perform at most ONE next review selected by the ordinary owner procedure, or recover one existing attempt. Export status=pending when the epoch still needs further work. Never call a bounded pause complete or close the epoch merely to fit this turn. A later invocation resumes this exact owner session and its original CAS state. Use a CAS timeout below '+reviewTimeoutSeconds+' seconds and leave time to export the current owner facts; a timeout has no review credit and must retain recovery identity.',
     `Bind these exact model settings for owner and every reviewer: ${JSON.stringify(settings)}. Set reviewer sandbox=read-only and approvalPolicy=never; no silent executor or model fallback.`,
     'Native changeset standard must have no custom instructions. Auxiliary and focused-file instructions must use exact pinned owner sources.',
     'Preserve all original CAS stdout receipts, session records, event logs, instruction bytes, request bindings and per-request owner credit dispositions in this writable workspace. Do not copy secrets.',
     'Use the pinned Review Fold owner for adjudication and record any unavailable history honestly. An absent original receipt or unknown limitation cannot earn credit.',
     'Do not infer reviewability from this prompt: verify the supplied proof inventory and accepted source, and block if required proof is absent or not exact-subject.',
-    'At the end of this bounded invocation export your actual owner facts as a JSON object with schema="repository-review-owner/v1", status="complete", "pending" or "blocked", contextSha256 (exact input context bytes), policySha256, base, head, executionMode="cas", epochClosed, closureBasis, reviewContext, and requests. Return raw JSON without Markdown fences.',
-    'reviewContext is your ordinary fully bound ephemeral review_context, including the frozen focused_files and proof inventory. requests preserves each existing per-request handoff in policy order: request_id, request_fingerprint, target_fingerprint, lens_name, role, scope, focus, phase (initial or confirmation), instruction_digest (lowercase SHA-256 hex), receipt (relative path), credit_disposition, credit_basis, limitations (array of disposition/basis), fold_complete, and unresolved_findings. If receipt is a recovered wait output, also retain start_receipt. If ordinary policy permits one fresh exact-request recovery after a verdictless terminal, retain that original failed start in prior_receipts and preserve the same opaque request binding; never classify an observation timeout as terminal. Do not invent requests, successful observations, counters, or receipts.',
+    'At the end of this bounded invocation export your actual owner facts as a JSON object with schema="repository-review-owner/v1", status="complete", "pending" or "blocked", contextSha256 (exact input context bytes), policySha256, base, head, executionMode="cas", epochClosed, epochInvalidated, invalidationBasis, closureBasis, reviewContext, and requests. epochInvalidated records whether this epoch has admitted a current material entailed finding or another owner-policy invalidation; it remains true thereafter and all credit remains held. invalidationBasis is null before invalidation, otherwise the original owner basis. Raw findings and unresolved limitations alone are not admitted invalidation. A reasoned rejection or limitation recovery may change hold to credit while the epoch remains valid. Return raw JSON without Markdown fences.',
+    'reviewContext is your ordinary fully bound ephemeral review_context, including the frozen focused_files and proof inventory. requests preserves each existing per-request handoff in policy order: request_id, request_fingerprint, target_fingerprint, lens_name, role, scope, focus, phase (initial or confirmation), instruction_digest (lowercase SHA-256 hex), receipt (unique relative label for the latest captured stdout), credit_disposition, credit_basis, limitations (array of disposition/basis), fold_complete, and unresolved_findings. Assign a new receipt label for every start or wait observation; all earlier captured observations remain retained. If receipt is a recovered wait output, also retain start_receipt. If ordinary policy permits one fresh exact-request recovery after a verdictless terminal, retain that terminal failure observation in prior_receipts and preserve the same opaque request binding; never classify an observation timeout as terminal. Before a next initial request the previous turn must export the preceding terminal outcome and completed owner fold. Before a confirmation the previous turn must export the complete credited initial inventory and preceding confirmations. A turn may perform only adjudication when a hold needs reassessment. Do not invent requests, successful observations, counters, or receipts.',
     'Complete means the entire ordinary owner closeout is complete, with all required changeset and focused-file obligations and standard convergence. Pending means normal owner work remains on this frozen epoch. Blocked means a precise missing observation, required repair, or capability prevents progress. Process success alone is not credit.',
     'Write no new policy, scheduler state, or Actuating ledger. The requested final JSON is only a repository-local export of your existing owner facts and original evidence.',
   ].join('\n\n');
@@ -125,6 +132,12 @@ export function verifyOwnerTranscript(eventsBytes, finalBytes, expected) {
   assert.equal(output.executionMode, 'cas');
   assert.ok(typeof output.closureBasis === 'string' && output.closureBasis.length > 0);
   assert.ok(Array.isArray(output.requests));
+  assert.equal(typeof output.epochInvalidated, 'boolean', 'missing owner invalidation disposition');
+  if (output.epochInvalidated) {
+    assert.ok(typeof output.invalidationBasis === 'string' && output.invalidationBasis.length > 0, 'missing owner invalidation basis');
+    assert.notEqual(output.status, 'complete', 'invalidated epoch cannot complete');
+    for (const request of output.requests) assert.equal(request.credit_disposition, 'hold', 'invalidated epoch cannot earn credit');
+  } else assert.equal(output.invalidationBasis, null);
   if (output.status === 'pending') assert.equal(output.epochClosed, false, 'pending owner closed epoch');
   if (output.status === 'complete') {
     assert.equal(output.epochClosed, true);
@@ -144,15 +157,15 @@ export function verifyOwnerChain(captures, expected) {
     if (previous) {
       assert.equal(previous.output.status, 'pending', 'cannot continue a terminal owner disposition');
       assert.equal(current.thread, previous.thread, 'owner session changed');
+      if (previous.output.epochInvalidated) {
+        assert.equal(current.output.epochInvalidated, true, 'accepted epoch invalidation was erased');
+        assert.equal(current.output.invalidationBasis, previous.output.invalidationBasis, 'original invalidation basis changed');
+      }
       for (const request of previous.output.requests) {
         const retained = current.output.requests.find(item => item.request_id === request.request_id);
         assert.ok(retained, 'lost original review request');
-        for (const key of ['request_fingerprint', 'target_fingerprint', 'instruction_digest']) {
-          assert.equal(retained[key], request[key], 'rewritten original review request');
-        }
-        const preserved = new Set([retained.receipt, retained.start_receipt, ...(retained.prior_receipts ?? [])]);
-        for (const name of [request.receipt, request.start_receipt, ...(request.prior_receipts ?? [])].filter(Boolean)) {
-          assert.ok(preserved.has(name), 'rewritten original review request');
+        for (const key of ['request_fingerprint', 'target_fingerprint', 'instruction_digest', 'scope', 'focus', 'phase', 'role', 'lens_name']) {
+          assert.deepEqual(retained[key], request[key], 'rewritten original review request');
         }
       }
     }
@@ -184,40 +197,34 @@ export function validateRetainedReview(bytes, expected) {
   const contract = parseEvidenceJson(contractBytes);
   const captures = retained.captures.map(capture => ({events: originalBytes(capture.events), final: originalBytes(capture.final)}));
   const owner = verifyOwnerChain(captures, {...expected, contextSha256: sha256(contextBytes)});
-  const receipts = new Map(Object.entries(retained.receipts).map(([name, value]) => [name, originalBytes(value)]));
+  const retainedReceipts = new Map(Object.entries(retained.receipts).map(([name, value]) => [name, originalBytes(value)]));
   const policyFiles = new Map(Object.entries(retained.policyFiles).map(([name, value]) => [name, originalBytes(value)]));
   const runtime = retained.runtime;
   assert.equal(runtime.repository, context.repository);
   assert.equal(runtime.repositoryPath, binding.repository);
   assert.equal(runtime.codexBinaryDigest, `sha256:${binding.codexSha256}`);
-  const provenance = authenticateReceipts(captures.map(capture => capture.events), receipts, {
+  const {receipts} = admitOwnerHistory(captures, captures.map(capture => parseEvidenceJson(capture.final)), contract, policyFiles, runtime, {
     casPath: binding.casPath, codexPath: binding.codexPath, repositoryPath: binding.repository,
     base: expected.base, storeRoot: join(binding.workspace, 'cas'), settingsPaths: retained.settingsPaths,
   });
-  validateReceiptExecutions(owner.output, provenance);
+  assert.equal(retainedReceipts.size, receipts.size, 'retained original receipt inventory differs');
+  for (const [name, bytes] of receipts) assert.ok(retainedReceipts.get(name)?.equals(bytes), 'retained original receipts differ from captured history');
   validateOwnerEvidence(owner.output, contract, policyFiles, receipts, runtime);
   return {owner, context, binding, runtime};
-}
-
-function validateReceiptExecutions(output, provenance) {
-  for (const request of output.requests) {
-    assert.equal(provenance.get(request.receipt)?.exitCode, 0, 'credited receipt command failed');
-    if ((request.prior_receipts ?? []).length > 0) {
-      const start = provenance.get(request.start_receipt ?? request.receipt);
-      assert.ok(typeof start?.freshAttempt === 'string' && start.freshAttempt.length > 0, 'missing explicit fresh recovery');
-    }
-  }
 }
 
 function retainReview({captures, receipts, contextBytes, binding, contractBytes, policyFiles, runtime, settingsPaths}) {
   const outputs = new Set([...receipts.values()].map(bytes => bytes.toString().trimEnd()));
   const compact = captures.map(capture => {
-    const lines = capture.events.toString('utf8').trimEnd().split('\n').filter(line => {
+    const source = capture.events.toString('utf8').trimEnd().split('\n');
+    const commands = new Set(source.map(line => parseEvidenceJson(line)).filter(event =>
+      event.type === 'item.completed' && event.item?.type === 'command_execution' &&
+      outputs.has(event.item.aggregated_output.trimEnd())).map(event => event.item.id));
+    const lines = source.filter(line => {
       const event = parseEvidenceJson(line);
       if (['thread.started', 'turn.completed', 'turn.failed', 'error'].includes(event.type)) return true;
-      if (event.type !== 'item.completed') return false;
-      return event.item?.type === 'agent_message' || (event.item?.type === 'command_execution' &&
-        outputs.has(event.item.aggregated_output.trimEnd()));
+      if (event.item?.type === 'command_execution') return commands.has(event.item.id);
+      return event.type === 'item.completed' && event.item?.type === 'agent_message';
     });
     return {events: Buffer.from(`${lines.join('\n')}\n`).toString('base64'), final: capture.final.toString('base64')};
   });
@@ -321,35 +328,21 @@ export async function invokeOwner(options) {
   captures.push({events: readRegular(join(captureRoot, 'owner-events.jsonl'), 64 * 1024 * 1024),
     final: readRegular(join(captureRoot, 'owner-final.json'), 4 * 1024 * 1024)});
   const resultOwner = verifyOwnerChain(captures, expected);
+  const contractBytes = readRegular(join(policyDirectory, policyPath), 1024 * 1024);
+  const contract = parseEvidenceJson(contractBytes), policyFiles = new Map();
+  for (const path of [contract.focused_file_reviews.instructions_ref,
+    ...contract.required_lenses.filter(lens => lens.instructions_ref).map(lens => lens.instructions_ref)]) {
+    policyFiles.set(path, readRegular(join(policyDirectory, path), 1024 * 1024));
+  }
+  const settingsPaths = [...(options.previousCaptures ?? []), captureRoot].map(root => join(realpathSync(root), 'thread-start.json'));
+  const runtime = {
+    repository: context.repository, repositoryPath: repository, codexVersion: '0.166.0',
+    codexBinaryDigest: `sha256:${options.codexSha256}`, threadStartParamsDigest: `sha256:${sha256(threadBytes)}`,
+  };
+  const {receipts} = admitOwnerHistory(captures, captures.map(capture => parseEvidenceJson(capture.final)), contract, policyFiles, runtime, {
+    casPath, codexPath, repositoryPath: repository, base: options.base, storeRoot: join(workspace, 'cas'), settingsPaths,
+  });
   if (resultOwner.output.status === 'complete') {
-    const contractBytes = readRegular(join(policyDirectory, policyPath), 1024 * 1024);
-    const contract = parseEvidenceJson(contractBytes);
-    const policyFiles = new Map();
-    for (const path of [contract.focused_file_reviews.instructions_ref,
-      ...contract.required_lenses.filter(lens => lens.instructions_ref).map(lens => lens.instructions_ref)]) {
-      policyFiles.set(path, readRegular(join(policyDirectory, path), 1024 * 1024));
-    }
-    const receipts = new Map();
-    for (const request of resultOwner.output.requests) {
-      for (const name of [request.receipt, request.start_receipt, ...(request.prior_receipts ?? [])].filter(value => value !== undefined)) {
-        assert.equal(typeof name, 'string');
-        assert.ok(!isAbsolute(name));
-        const file = realpathSync(join(workspace, name));
-        const distance = relative(workspace, file);
-        assert.ok(distance !== '..' && !distance.startsWith(`..${sep}`), 'evidence escapes owner workspace');
-        receipts.set(name, readRegular(file, 8 * 1024 * 1024));
-      }
-    }
-    const settingsPaths = [...(options.previousCaptures ?? []), captureRoot].map(root => join(realpathSync(root), 'thread-start.json'));
-    const provenance = authenticateReceipts(captures.map(capture => capture.events), receipts, {
-      casPath, codexPath, repositoryPath: repository, base: options.base, storeRoot: join(workspace, 'cas'),
-      settingsPaths,
-    });
-    validateReceiptExecutions(resultOwner.output, provenance);
-    const runtime = {
-      repository: context.repository, repositoryPath: repository, codexVersion: '0.166.0',
-      codexBinaryDigest: `sha256:${options.codexSha256}`, threadStartParamsDigest: `sha256:${sha256(threadBytes)}`,
-    };
     validateOwnerEvidence(resultOwner.output, contract, policyFiles, receipts, runtime);
     writeFileSync(join(captureRoot, 'review-evidence.json'), retainReview({captures, receipts, contextBytes, binding,
       contractBytes, policyFiles, runtime, settingsPaths}), {flag: 'wx', mode: 0o400});

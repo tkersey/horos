@@ -1,5 +1,6 @@
 const std = @import("std");
 const Dir = std.Io.Dir;
+const regular_file = @import("regular_file.zig");
 const maximum_bytes = 1024 * 1024;
 
 comptime {
@@ -104,10 +105,10 @@ fn stable(a: std.Io.File.Stat, b: std.Io.File.Stat) bool {
 }
 
 fn readSource(a: std.mem.Allocator, io: std.Io, path: []const u8) !Source {
-    var file = try Dir.cwd().openFile(io, path, .{
-        .follow_symlinks = false,
-        .allow_directory = false,
-    });
+    var file = regular_file.open(io, .cwd(), path, false) catch |err| {
+        if (err == error.NonregularFile) return error.InvalidManifestFile;
+        return err;
+    };
     defer file.close(io);
     const before = try file.stat(io);
     if (before.kind != .file or before.size > maximum_bytes) return error.InvalidManifestFile;
@@ -265,6 +266,9 @@ test "candidate failures preserve input and existing output while repeated prepa
     const root = try temporary.dir.realPathFileAlloc(io, ".", a);
     const input = try std.fs.path.join(a, &.{ root, "input.zon" });
     const output = try std.fs.path.join(a, &.{ root, "output.zon" });
+    var input_file = try Dir.cwd().openFile(io, input, .{});
+    defer input_file.close(io);
+    try input_file.setPermissions(io, .fromMode(0o640));
     const source = try readSource(a, io, input);
     try std.testing.expectError(
         error.InvalidVersion,
@@ -273,6 +277,7 @@ test "candidate failures preserve input and existing output while repeated prepa
     try std.testing.expectError(error.FileNotFound, Dir.cwd().statFile(io, output, .{}));
     _ = try prepareFile(a, io, source, "8.0.1", output);
     const candidate = try readSource(a, io, output);
+    try std.testing.expectEqual(source.permissions, candidate.permissions);
     try std.testing.expectEqualStrings("8.0.1", try read(a, candidate.bytes));
     try std.testing.expectEqualStrings(original, (try readSource(a, io, input)).bytes);
     _ = try prepareFile(a, io, source, "8.0.1", output);
@@ -301,4 +306,91 @@ test "manifest work is bounded before semantic parsing" {
     for (0..65) |_| try nested.writer.writeAll("}");
     const source = try a.dupeSentinel(u8, nested.written(), 0);
     try std.testing.expectError(error.ManifestTooDeep, read(a, source));
+}
+
+fn manifestCommand(
+    a: std.mem.Allocator,
+    io: std.Io,
+    argv: []const []const u8,
+    seconds: i64,
+) !std.process.RunResult {
+    return std.process.run(a, io, .{
+        .argv = argv,
+        .stdout_limit = .limited(65536),
+        .stderr_limit = .limited(65536),
+        .timeout = .{ .duration = .{ .raw = .fromSeconds(seconds), .clock = .awake } },
+    });
+}
+
+fn manifestTestTool(a: std.mem.Allocator, io: std.Io, root: []const u8) ![]const u8 {
+    const zig = try std.testing.environ.getAlloc(a, "RELEASE_TEST_ZIG");
+    if (!std.fs.path.isAbsolute(zig)) return error.AbsolutePathRequired;
+    const main_path = try std.fs.path.join(a, &.{ root, "release_manifest.zig" });
+    const opener_path = try std.fs.path.join(a, &.{ root, "regular_file.zig" });
+    try Dir.cwd().writeFile(io, .{
+        .sub_path = main_path,
+        .data = @embedFile("release_manifest.zig"),
+    });
+    try Dir.cwd().writeFile(io, .{
+        .sub_path = opener_path,
+        .data = @embedFile("regular_file.zig"),
+    });
+    const tool = try std.fs.path.join(a, &.{ root, "manifest-tool" });
+    const emitted = try std.fmt.allocPrint(a, "-femit-bin={s}", .{tool});
+    const compiled = try manifestCommand(a, io, &.{ zig, "build-exe", main_path, emitted }, 60);
+    if (compiled.term != .exited or compiled.term.exited != 0) {
+        std.debug.print("{s}", .{compiled.stderr});
+        return error.ManifestToolCompilationFailed;
+    }
+    return tool;
+}
+
+test "manifest CLI refuses FIFO input and existing FIFO output without a writer" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const root = try temporary.dir.realPathFileAlloc(io, ".", a);
+    const tool = try manifestTestTool(a, io, root);
+    const input = try std.fs.path.join(a, &.{ root, "input.zon" });
+    const fifo = try std.fs.path.join(a, &.{ root, "fifo" });
+    const original = ".{.version=\"8.0.0\",.name=.horos}";
+    try Dir.cwd().writeFile(io, .{ .sub_path = input, .data = original });
+    const created = try manifestCommand(a, io, &.{ "mkfifo", fifo }, 5);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, created.term);
+    const before = try Dir.cwd().statFile(io, fifo, .{ .follow_symlinks = false });
+    const calls = [_][]const []const u8{
+        &.{ tool, "read", fifo },
+        &.{ tool, "prepare", input, "8.0.1", fifo },
+    };
+    for (calls) |argv| {
+        const result = try manifestCommand(a, io, argv, 5);
+        try std.testing.expectEqual(std.process.Child.Term{ .exited = 1 }, result.term);
+        try std.testing.expect(std.mem.indexOf(u8, result.stderr, "InvalidManifestFile") != null);
+        try std.testing.expectEqualStrings("", result.stdout);
+        try std.testing.expectEqualStrings(original, (try readSource(a, io, input)).bytes);
+        const after = try Dir.cwd().statFile(io, fifo, .{ .follow_symlinks = false });
+        try std.testing.expect(stable(before, after));
+    }
+}
+
+test "manifest admission refuses directories and symlinks without changing targets" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const root = try temporary.dir.realPathFileAlloc(io, ".", a);
+    const target = try std.fs.path.join(a, &.{ root, "target" });
+    const link = try std.fs.path.join(a, &.{ root, "link" });
+    try Dir.cwd().writeFile(io, .{ .sub_path = target, .data = ".{.version=\"8.0.0\"}" });
+    try Dir.cwd().symLink(io, target, link, .{});
+    try std.testing.expectError(error.IsDir, readSource(a, io, root));
+    try std.testing.expectError(error.SymLinkLoop, readSource(a, io, link));
+    const source = try readSource(a, io, target);
+    try std.testing.expectError(error.SymLinkLoop, prepareFile(a, io, source, "8.0.1", link));
+    try std.testing.expectEqualStrings(source.bytes, (try readSource(a, io, target)).bytes);
 }

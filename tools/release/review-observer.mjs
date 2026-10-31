@@ -1,3 +1,4 @@
+import {requireSameQualification} from './qualification-binding.mjs';
 import assert from 'node:assert/strict';
 import {GitHubReader, githubCommand} from './github.mjs';
 import {HorosProposalClient} from './proposal-github.mjs';
@@ -94,7 +95,7 @@ export async function observeHorosReview({controlCommit, requestedPull = null}, 
       };
       assert.equal(context.qualification.runId, qualification.run.id);
       assert.equal(context.qualification.workflow.sha256, qualification.workflow.sha256, 'qualification definition changed');
-      assert.equal(context.qualification.evidenceSha256, sha256(qualification.evidence), 'original qualification evidence changed');
+      requireSameQualification(context.qualification, qualification);
       const current = await reader.api(`pulls/${pull.number}`);
       assert.equal(current.head.sha, head); assert.equal(current.base.sha, pull.base.sha); assert.equal(current.state, 'open');
       assert.equal(current.draft, false); assert.ok(!current.labels.some(label => label.name === 'automation-hold'));

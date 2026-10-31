@@ -423,6 +423,14 @@ fn componentChecks(
     return component_step;
 }
 
+fn releaseTestCompiler(run: *std.Build.Step.Run) void {
+    const b = run.step.owner;
+    const command = run.argv.toOwnedSlice(b.allocator) catch @panic("out of memory");
+    run.addArg("env");
+    run.addFileArg2(.zig_exe, .{ .prefix = "RELEASE_TEST_ZIG=", .make_absolute = true });
+    run.argv.appendSlice(b.allocator, command) catch @panic("out of memory");
+}
+
 fn releaseSourceChecks(
     b: *std.Build,
     helper: *std.Build.Step.Compile,
@@ -439,6 +447,7 @@ fn releaseSourceChecks(
         .optimize = optimize,
     }) });
     const run_tests = b.addRunArtifact(tests);
+    releaseTestCompiler(run_tests);
     run_tests.has_side_effects = true;
     b.step("check-release-source", "Reject corrupt source archives against Git identities")
         .dependOn(&run_tests.step);
@@ -479,6 +488,7 @@ fn releaseManifestChecks(
     tools.dependOn(&b.addInstallArtifact(executable, .{}).step);
     const tests = b.addTest(.{ .root_module = module });
     const run = b.addRunArtifact(tests);
+    releaseTestCompiler(run);
     run.has_side_effects = true;
     b.step("check-release-manifest", "Check semantic version preparation and failure preservation")
         .dependOn(&run.step);

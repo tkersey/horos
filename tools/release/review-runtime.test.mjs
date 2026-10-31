@@ -88,6 +88,11 @@ test('original failed CAS execution can be retained for recovery without becomin
   assert.throws(() => authenticate(item(startCommand, invented, {status: 'failed', exit_code: 1}), invented), /cannot establish review verdict/);
 });
 
+test('a fresh attempt reason named help cannot hide an unmatched original outcome', () => {
+  const hidden = item(`${startCommand} --fresh-attempt '--help'`, {...receipt, reviewThreadId: 'unexported-original'}, {id: 'hidden'});
+  assert.throws(() => authenticateReceipts([events(item(), hidden)], new Map([['receipt.json', bytes(receipt)]]), expected), /lacks exact runtime execution evidence/);
+});
+
 test('truncated or decorated output cannot authenticate original receipt', () => {
   for (const aggregated_output of [JSON.stringify(receipt).slice(0, -1), `Warning: truncated\n${JSON.stringify(receipt)}`, `{"output":${JSON.stringify(JSON.stringify(receipt))}}`]) {
     assert.throws(() => authenticate(item(startCommand, receipt, {aggregated_output})), /lacks exact/);
