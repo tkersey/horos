@@ -81,7 +81,7 @@ Zig tools and shared checks over additional tooling dependencies.
 The auditor is a development dependency; it adds no dependency to the Horos
 library, compiler, exported package or data-only consumer.
 
-Run from a clean committed checkout with Zig 0.17.0 and Git available:
+Run from a clean committed checkout with Zig 0.17.1 and Git available:
 
 ```sh
 bash tools/tiger-style.sh --all HEAD
