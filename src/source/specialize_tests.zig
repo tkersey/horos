@@ -2446,7 +2446,11 @@ test "raw callable transport rejects same typed capture swaps and changed bodies
         const op = &@constCast(changed.values)[@intCast(id)].expression.primitive;
         const operands = try b.allocator().dupe(u64, op.operands);
         op.operands = operands;
-        if (mutation == 1) operands[1] = operands[0] else std.mem.swap(u64, &operands[0], &operands[1]);
+        if (mutation == 1) {
+            operands[1] = operands[0];
+        } else {
+            std.mem.swap(u64, &operands[0], &operands[1]);
+        }
         work = 1_000_000;
         try source.admitWithWork(a, changed, &work);
         try std.testing.expectError(error.InvalidRelation, source.relation.validate(

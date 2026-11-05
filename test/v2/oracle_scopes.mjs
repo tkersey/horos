@@ -52,7 +52,7 @@ for (const name of ["strict_arguments", "inlined_strict_arguments"]) {
 }
 
 for (const [kind, value] of [
-  ["raw_capture_order", 15],
+  ["capture_order_lexical", 15],
   ["hyper_constant_peer", 42],
   ["hyper_faulting_peer", 42],
   ["hyper_ignored_argument", 43],
