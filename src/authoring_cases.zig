@@ -37,14 +37,25 @@ pub const Kind = enum {
     state_shared,
     state_recursive_local,
     state_recursive_shared,
+    raw_capture_order,
+    strict_arguments,
+    inlined_strict_arguments,
     hyper_duplicate,
     hyper_configured,
     hyper_lazy,
     hyper_constant_peer,
+    hyper_faulting_peer,
+    hyper_forced_faulting_peer,
     hyper_ignored_argument,
     hyper_unused_query,
     hyper_ignored_successor,
     hyper_demanded_successor,
+    hyper_demanded_faulting_successor,
+    hyper_eager_successor,
+    hyper_task_describe,
+    hyper_task_multishot,
+    hyper_task_cleanup_run,
+    hyper_task_cleanup_dispose,
     hyper_task_obtain,
     hyper_task_run,
     hyper_task_repeated,
@@ -70,7 +81,7 @@ pub const Kind = enum {
     borrow_contexts,
 };
 
-pub fn build(raw: *source.Builder, kind: Kind) !source.Module {
+fn ordinaryCase(raw: *source.Builder, comptime kind: Kind) !source.Module {
     return switch (kind) {
         inline .deep,
         .shallow,
@@ -104,14 +115,41 @@ pub fn build(raw: *source.Builder, kind: Kind) !source.Module {
         .state_shared => @import("source/state_choice_example.zig").shared(raw),
         .state_recursive_local => @import("source/state_choice_example.zig").recursiveLocal(raw),
         .state_recursive_shared => @import("source/state_choice_example.zig").recursiveShared(raw),
+        .raw_capture_order => (try @import("capture_order_case.zig").build(raw, false)).module,
+        .strict_arguments => (try @import("inline_argument_case.zig").build(raw)).before,
+        .inlined_strict_arguments => (try @import("inline_argument_case.zig").build(raw)).after,
+        .capture_order => @import("coalescing_capture_case.zig").build(raw),
+        .handler_duplicate => @import("coalescing_handler_cases.zig").build(raw, .duplicate),
+        .handler_mixed_mode => @import("coalescing_handler_cases.zig").build(raw, .mixed_mode),
+        .handler_effect_duplicate => @import("coalescing_handler_cases.zig").build(
+            raw,
+            .effect_duplicate,
+        ),
+        .borrow_contexts => @import("coalescing_borrow_cases.zig").build(raw, false),
+        else => @compileError("expected an ordinary fixture"),
+    };
+}
+pub fn build(raw: *source.Builder, kind: Kind) !source.Module {
+    return switch (kind) {
         .hyper_duplicate => @import("coalescing_hyper_cases.zig").build(raw, .duplicate),
         .hyper_configured => @import("coalescing_hyper_cases.zig").build(raw, .configured),
         .hyper_lazy => @import("coalescing_hyper_cases.zig").build(raw, .lazy),
         .hyper_constant_peer => @import("hyper_cases.zig").build(raw, .constant_peer),
+        .hyper_faulting_peer => @import("hyper_cases.zig").build(raw, .faulting_peer),
+        .hyper_forced_faulting_peer => @import("hyper_cases.zig").build(raw, .forced_faulting_peer),
         .hyper_ignored_argument => @import("hyper_cases.zig").build(raw, .ignored_argument),
         .hyper_unused_query => @import("hyper_cases.zig").build(raw, .unused_query),
         .hyper_ignored_successor => @import("hyper_cases.zig").build(raw, .ignored_successor),
         .hyper_demanded_successor => @import("hyper_cases.zig").build(raw, .demanded_successor),
+        .hyper_demanded_faulting_successor => @import("hyper_cases.zig").build(
+            raw,
+            .demanded_faulting_successor,
+        ),
+        .hyper_eager_successor => @import("hyper_cases.zig").build(raw, .eager_successor),
+        .hyper_task_describe => @import("hyper_task_cases.zig").build(raw, .describe),
+        .hyper_task_multishot => @import("hyper_task_cases.zig").build(raw, .multishot),
+        .hyper_task_cleanup_run => @import("hyper_task_cases.zig").build(raw, .cleanup_run),
+        .hyper_task_cleanup_dispose => @import("hyper_task_cases.zig").build(raw, .cleanup_dispose),
         .hyper_task_obtain => @import("hyper_task_cases.zig").build(raw, .obtain),
         .hyper_task_run => @import("hyper_task_cases.zig").build(raw, .run),
         .hyper_task_repeated => @import("hyper_task_cases.zig").build(raw, .repeated),
@@ -130,16 +168,10 @@ pub fn build(raw: *source.Builder, kind: Kind) !source.Module {
         .hyper_run_constant => @import("hyper_cases.zig").build(raw, .run_constant),
         .hyper_composition => @import("hyper_composition_cases.zig").build(raw),
         .hyper_nested_need => @import("hyper_need_cases.zig").nested(raw),
-        .capture_order => @import("coalescing_capture_case.zig").build(raw),
-        .handler_duplicate => @import("coalescing_handler_cases.zig").build(raw, .duplicate),
-        .handler_mixed_mode => @import("coalescing_handler_cases.zig").build(raw, .mixed_mode),
-        .handler_effect_duplicate => @import("coalescing_handler_cases.zig").build(
-            raw,
-            .effect_duplicate,
-        ),
-        .borrow_contexts => @import("coalescing_borrow_cases.zig").build(raw, false),
+        inline else => |selected| ordinaryCase(raw, selected),
     };
 }
+
 fn handlerCase(raw: *source.Builder, comptime kind: Kind) !source.Module {
     const c = try a.Context.init(raw);
     const unit = try c.schema(void);

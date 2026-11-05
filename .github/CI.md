@@ -26,6 +26,21 @@ independent source oracle and wasm32 ABI byte/identity observations. The oracle
 has only its exact-value helper and actual semantic cases; optional historical
 experiments and their collectors are removed.
 
+Native relation regressions include source-valid capture mutations, unexplained
+edits in composed successors, scalar boundary folds and unused failing arguments.
+The source oracle independently expects capture subtraction, strict argument
+fault order and delayed/task observations. Shared admission and codecs remain
+trusted inputs to these checks. Finite agreement does not establish arbitrary
+program equivalence, and an exhausted or interrupted run supplies no passing
+evidence.
+
+Downstream comparisons distinguish three contracts: restoration of one guest
+image preserves canonical guest state at corresponding cuts; a transformed image
+preserves contractual behavior through checked mappings without equating its
+image-bound checkpoints; an approved realization switch preserves the same guest
+state and revision without requiring the same runtime artifact or pump count.
+Host authorization remains a separate condition of a live switch.
+
 Compiler cache retention uses ordinary CI filesystem operations. Only a complete
 regular-file/directory tree containing compiler objects and within four GiB is
 saved. Over-budget or unsupported caches are left in place and not uploaded;

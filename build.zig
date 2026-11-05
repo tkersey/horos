@@ -610,14 +610,23 @@ fn hyperFixtures(
     fixtures: *std.Build.Step,
 ) void {
     for ([_][]const u8{
-        "hyper_constant_peer",     "hyper_ignored_argument",   "hyper_unused_query",
-        "hyper_ignored_successor", "hyper_demanded_successor", "hyper_task_obtain",
-        "hyper_task_run",          "hyper_task_repeated",      "hyper_task_dispose",
-        "hyper_lazy_product",      "hyper_lazy_sum",           "hyper_lazy_stream",
-        "hyper_stream_head",       "hyper_identity_project",   "hyper_run_constant",
-        "hyper_composition",       "hyper_nested_need",        "hyper_task_adaptive",
-        "hyper_captured_obtain",   "hyper_captured_resume",    "hyper_captured_repeated",
-        "hyper_captured_dispose",  "hyper_captured_local",
+        "strict_arguments",                  "inlined_strict_arguments",
+        "raw_capture_order",                 "hyper_constant_peer",
+        "hyper_ignored_argument",            "hyper_unused_query",
+        "hyper_ignored_successor",           "hyper_demanded_successor",
+        "hyper_task_obtain",                 "hyper_task_run",
+        "hyper_task_repeated",               "hyper_task_dispose",
+        "hyper_lazy_product",                "hyper_lazy_sum",
+        "hyper_lazy_stream",                 "hyper_stream_head",
+        "hyper_identity_project",            "hyper_run_constant",
+        "hyper_composition",                 "hyper_nested_need",
+        "hyper_task_adaptive",               "hyper_captured_obtain",
+        "hyper_captured_resume",             "hyper_captured_repeated",
+        "hyper_captured_dispose",            "hyper_captured_local",
+        "hyper_faulting_peer",               "hyper_forced_faulting_peer",
+        "hyper_demanded_faulting_successor", "hyper_eager_successor",
+        "hyper_task_describe",               "hyper_task_multishot",
+        "hyper_task_cleanup_run",            "hyper_task_cleanup_dispose",
     }) |name| {
         for ([_][]const u8{ "json", "bpi3" }) |format| {
             const run = b.addRunArtifact(emitter);

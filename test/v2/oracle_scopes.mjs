@@ -37,8 +37,24 @@ for (const [kind, values] of [
 }
 console.log("source oracle preserves nested owned snapshots and deliberately shared cells");
 
+for (const name of ["strict_arguments", "inlined_strict_arguments"]) {
+  const source = parseExactJson(execFileSync(emitter, [name, "json"], {encoding: "utf8"}));
+  for (const [first, second, kind, value] of [
+    [0, 0, "Failed", [11]],
+    [1, 0, "Failed", [22]],
+    [1, 1, "Completed", word(7)],
+  ]) {
+    const expected = {trace: [], kind, value};
+    if (kind === "Failed") expected.cleanupFailures = [];
+    assert.deepEqual(execute(source, [...word(first), ...word(second)]), expected,
+      `${name} first=${first} second=${second}`);
+  }
+}
+
 for (const [kind, value] of [
+  ["raw_capture_order", 15],
   ["hyper_constant_peer", 42],
+  ["hyper_faulting_peer", 42],
   ["hyper_ignored_argument", 43],
   ["hyper_unused_query", 42],
   ["hyper_ignored_successor", 42],
@@ -58,12 +74,23 @@ for (const [kind, value] of [
 }
 console.log("source oracle preserves hyperfunction peer and successor demand boundaries");
 
+for (const kind of ["hyper_forced_faulting_peer", "hyper_demanded_faulting_successor", "hyper_eager_successor"]) {
+  const source = parseExactJson(execFileSync(emitter, [kind, "json"], {encoding: "utf8"}));
+  assert.deepEqual(execute(source, [], []), {
+    trace: [], kind: "Failed", value: [], cleanupFailures: [],
+  }, kind);
+}
+
 for (const [kind, payloads, value] of [
+  ["describe", [], 7],
   ["obtain", [], 7],
   ["run", [20, 10, 21, 205, 215], 35],
   ["repeated", [20, 10, 21, 205, 10, 21, 205, 230], 50],
   ["adaptive", [20, 10, 21, 205, 10, 21, 205, 230], 50],
   ["dispose", [20, 10, 21, 205], 99],
+  ["multishot", [20, 10, 21, 205, 215, 20, 10, 21, 205, 215], 73],
+  ["cleanup_run", [20, 10, 21, 320, 205, 215, 320], 35],
+  ["cleanup_dispose", [20, 10, 21, 320, 205, 320], 99],
 ]) {
   const source = parseExactJson(execFileSync(emitter, [`hyper_task_${kind}`, "json"], {encoding: "utf8"}));
   assert.deepEqual(execute(source, [], payloads.map(() => word(5))), {
