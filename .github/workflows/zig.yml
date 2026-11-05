@@ -1,4 +1,4 @@
-name: Zig 0.17 qualification
+name: Zig 0.17.1 qualification
 on:
   pull_request:
   push:
@@ -23,7 +23,7 @@ jobs:
           fetch-depth: 0
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
         with:
-          version: '0.17.0'
+          version: '0.17.1'
           use-cache: false
       - name: Check source accounting and formatting
         run: |
@@ -54,7 +54,7 @@ jobs:
           node-version: '26.9.0'
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
         with:
-          version: '0.17.0'
+          version: '0.17.1'
           use-cache: false
       - name: Restore complete compiler cache
         id: cache
@@ -63,10 +63,10 @@ jobs:
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
         with:
           path: .zig-cache-upload
-          key: horos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ hashFiles('build.zig.zon') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: horos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ hashFiles('build.zig.zon') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            horos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ hashFiles('build.zig.zon') }}-
-            horos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-
+            horos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ hashFiles('build.zig.zon') }}-
+            horos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.1-
       - name: Select working cache
         if: matrix.lane == 'contracts'
         run: |
@@ -114,7 +114,7 @@ jobs:
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25
         with:
           path: .zig-cache-upload
-          key: horos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ hashFiles('build.zig.zon') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: horos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ hashFiles('build.zig.zon') }}-${{ github.run_id }}-${{ github.run_attempt }}
   native:
     name: native
     needs: [source, qualify]
