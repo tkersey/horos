@@ -14,7 +14,17 @@ const Types = struct {
     effect: *const a.Operation(Effect),
 };
 
-pub const Kind = enum { obtain, run, repeated, adaptive, dispose };
+pub const Kind = enum {
+    describe,
+    obtain,
+    run,
+    repeated,
+    adaptive,
+    dispose,
+    multishot,
+    cleanup_run,
+    cleanup_dispose,
+};
 
 fn types(c: *a.Context) !Types {
     const integer = try c.schema(u64);
@@ -57,6 +67,7 @@ const Step = struct {
     repeated: bool = false,
     adaptive: bool = false,
     dispose: bool = false,
+    cleanup: bool = false,
 
     pub fn emit(
         self: @This(),
@@ -69,12 +80,16 @@ const Step = struct {
         const interpretation = try hyper.demand.interpretWith(body, query, need, t.integer, .{
             .captures = .{ t.integer, t.pair.peerForward(), t.pair.peerBackward() },
             .residual = .{t.effect},
+            .obligations = self.cleanup,
         }, Completion{ .dispose = self.dispose });
         const task = try c.functionFor("participant task", t.task);
         const task_body = try body.closureBody(task);
         const work_function = try c.functionFor("requesting task", interpretation.body());
         const work_body = try task_body.closureBody(work_function);
-        try c.define(work_function, try self.work(work_body, query, need));
+        try c.define(work_function, if (self.cleanup)
+            try self.protectedWork(work_body, query, need)
+        else
+            try self.work(work_body, query, need));
         const handled = try hyper.demand.handle(
             task_body,
             interpretation,
@@ -147,6 +162,38 @@ const Step = struct {
         const done = try body.branch();
         return body.conditional(chosen, try again.ret(total), try done.ret(first));
     }
+
+    fn protectedWork(
+        self: @This(),
+        body: anytype,
+        query: anytype,
+        need: anytype,
+    ) a.Error!*const a.Computation(Integer) {
+        const c = try body.context();
+        const t = self.types;
+        const schema = try c.callable(.{ .capability = need.capability() }, t.integer, .{
+            need.effect(), t.effect,
+        }, .{
+            .use = .linear,
+            .captures = .{ t.integer, t.pair.peerForward(), t.pair.peerBackward() },
+        });
+        const function = try c.functionFor("protected task work", schema);
+        const nested = try body.closureBody(function);
+        try c.define(function, try self.work(nested, query, need));
+        const unit = try c.schema(void);
+        const cleanup_schema = try c.callable(.{ .exit = try c.cleanupInfo(unit) }, unit, .{
+            t.effect,
+        }, .{ .use = .linear });
+        const cleanup = try c.functionFor("task cleanup", cleanup_schema);
+        const finalizer = try c.body(cleanup);
+        _ = try finalizer.perform(t.effect, try finalizer.constant(u64, self.offset + 300));
+        try c.define(cleanup, try finalizer.ret(try finalizer.constant(void, {})));
+        return body.ret(try body.protect(
+            try body.lambda(function, schema),
+            try body.lambda(cleanup, cleanup_schema),
+            .{ .capability = try body.parameter("capability") },
+        ));
+    }
 };
 
 pub fn build(raw: *source.Builder, kind: Kind) !source.Module {
@@ -160,15 +207,62 @@ pub fn build(raw: *source.Builder, kind: Kind) !source.Module {
         .offset = 20,
         .repeated = kind == .repeated,
         .adaptive = kind == .adaptive,
-        .dispose = kind == .dispose,
+        .dispose = kind == .dispose or kind == .cleanup_dispose,
+        .cleanup = kind == .cleanup_run or kind == .cleanup_dispose,
     });
     const state = try body.constant(u64, 0);
     const left = try hyper.start(body, producer, state);
     const right = try hyper.start(body, consumer, state);
     const peer = try hyper.deferValue(body, t.pair.peerForward(), left);
     const answer = try hyper.invoke(body, right, peer);
+    if (kind == .describe) {
+        try c.define(entry, try body.ret(try body.constant(u64, 7)));
+        return c.module(entry, try c.schema(void));
+    }
     const task = try hyper.force(body, answer);
-    const result = if (kind == .obtain) try body.constant(u64, 7) else try body.apply(task, .{});
+    const result = switch (kind) {
+        .obtain => try body.constant(u64, 7),
+        .multishot => try multishot(body, t, task),
+        else => try body.apply(task, .{}),
+    };
     try c.define(entry, try body.ret(result));
     return c.module(entry, try c.schema(void));
+}
+
+fn multishot(body: anytype, t: Types, task: *const a.Value(Task)) !*const a.Value(Integer) {
+    const c = try body.context();
+    const choose = try c.local("task branch", try c.schema(void), t.integer, .multi);
+    const handler = try c.handler(choose, t.integer, t.integer, .{
+        .use = .multi,
+        .mode = .deep,
+        .captures = .{ t.integer, t.task },
+        .body_captures = .{t.task},
+        .residual = .{t.effect},
+        .return_effects = .{},
+    });
+    const returns = try c.returnFunction(handler);
+    const returned = try c.body(returns);
+    try c.define(returns, try returned.ret(try returned.parameter("result")));
+    const clause = try c.clauseFunction(handler);
+    const branch = try c.body(clause);
+    const token = try branch.parameter("resumption");
+    const first = try branch.resumeValue(token, try branch.constant(u64, 1));
+    const second = try branch.resumeValue(token, try branch.constant(u64, 2));
+    const total = try branch.checkedAdd(first, second, try c.literalFailure(void, {}));
+    try c.define(clause, try branch.ret(total));
+    const schema = try c.handledSchema(handler);
+    const function = try c.functionFor("task branch body", schema);
+    const nested = try body.closureBody(function);
+    const choice = try nested.performLocal(
+        choose,
+        try nested.parameter("capability"),
+        try nested.constant(void, {}),
+    );
+    const result = try nested.apply(task, .{});
+    try c.define(function, try nested.ret(try nested.checkedAdd(
+        choice,
+        result,
+        try c.literalFailure(void, {}),
+    )));
+    return body.handleWith(handler, try body.lambda(function, schema), .{});
 }

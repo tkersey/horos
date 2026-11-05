@@ -4,10 +4,14 @@ const hyper = @import("library/hyper.zig");
 
 pub const Kind = enum {
     constant_peer,
+    faulting_peer,
+    forced_faulting_peer,
     ignored_argument,
     unused_query,
     ignored_successor,
     demanded_successor,
+    demanded_faulting_successor,
+    eager_successor,
     lazy_product,
     lazy_sum,
     lazy_stream,
@@ -18,9 +22,14 @@ pub const Kind = enum {
 
 pub fn build(raw: *source.Builder, kind: Kind) !source.Module {
     return switch (kind) {
-        .constant_peer => constantPeer(raw),
+        .constant_peer, .faulting_peer, .forced_faulting_peer => constantPeer(raw, kind),
         .ignored_argument => ignoredArgument(raw),
-        .unused_query, .ignored_successor, .demanded_successor => queryCase(raw, kind),
+        .unused_query,
+        .ignored_successor,
+        .demanded_successor,
+        .demanded_faulting_successor,
+        .eager_successor,
+        => queryCase(raw, kind),
         .lazy_product => lazyProduct(raw),
         .lazy_sum => lazySum(raw),
         .lazy_stream, .stream_head => lazyStream(raw, kind == .stream_head),
@@ -117,7 +126,7 @@ fn diverging(body: anytype, schema: anytype) !*const a.Value(a.ShapeOf(@TypeOf(s
     return body.lambda(function, schema);
 }
 
-fn constantPeer(raw: *source.Builder) !source.Module {
+fn constantPeer(raw: *source.Builder, kind: Kind) !source.Module {
     const c = try a.Context.init(raw);
     const integer = try c.schema(u64);
     const types = try hyper.pair(c, integer, integer, .{});
@@ -125,7 +134,11 @@ fn constantPeer(raw: *source.Builder) !source.Module {
     const b = try c.body(f);
     const answer = try hyper.deferValue(b, types.answerForward(), try b.constant(u64, 42));
     const participant = try hyper.base(b, types, answer);
-    const peer = try diverging(b, types.peerBackward());
+    const peer = if (kind == .constant_peer)
+        try diverging(b, types.peerBackward())
+    else
+        try failing(b, types.peerBackward());
+    if (kind == .forced_faulting_peer) _ = try hyper.force(b, peer);
     try c.define(f, try b.ret(try hyper.force(b, try hyper.invoke(b, participant, peer))));
     return c.module(f, try c.schema(void));
 }
@@ -191,7 +204,12 @@ const QueryStep = struct {
         else
             try nested.fail(try c.schema(u64), try nested.constant(void, {}));
         try c.define(function, successor);
-        const answer = try query.ask(body, try body.lambda(function, self.state_delay));
+        const delayed = try body.lambda(function, self.state_delay);
+        const state = if (self.kind == .eager_successor)
+            try hyper.deferValue(body, self.state_delay, try hyper.force(body, delayed))
+        else
+            delayed;
+        const answer = try query.ask(body, state);
         return if (self.kind == .unused_query)
             body.constant(u64, 42)
         else
@@ -219,8 +237,8 @@ fn queryCase(raw: *source.Builder, kind: Kind) !source.Module {
     if (emissions != 1) return error.ExpectedRetainedDefinition;
     const peer = switch (kind) {
         .unused_query => try diverging(b, types.peerBackward()),
-        .ignored_successor => try constantCounterpart(b, types),
-        .demanded_successor => try demandingCounterpart(b, types),
+        .ignored_successor, .eager_successor => try constantCounterpart(b, types),
+        .demanded_successor, .demanded_faulting_successor => try demandingCounterpart(b, types),
         else => unreachable,
     };
     const answer = try hyper.invoke(b, participant, peer);

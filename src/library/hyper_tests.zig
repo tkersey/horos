@@ -441,6 +441,32 @@ test "typed hyper task and Need fixtures preserve checked construction and admis
     }
 }
 
+test "typed hyper source admission does not authorize eager successor demand" {
+    const cases = @import("../hyper_cases.zig");
+    const allocator = std.testing.allocator;
+    var lazy_builder = source.Builder.init(allocator);
+    defer lazy_builder.deinit();
+    var eager_builder = source.Builder.init(allocator);
+    defer eager_builder.deinit();
+    const lazy = try cases.build(&lazy_builder, .ignored_successor);
+    const eager = try cases.build(&eager_builder, .eager_successor);
+    for ([_]source.Module{ lazy, eager }) |module| {
+        var compiled = try source.lower(allocator, module);
+        defer compiled.deinit();
+        try source.relation.validate(allocator, module, module, &.{.{
+            .successor = module,
+            .rule = .identity,
+        }}, .{});
+    }
+    try std.testing.expectError(error.InvalidRelation, source.relation.validate(
+        allocator,
+        lazy,
+        eager,
+        &.{.{ .successor = eager, .rule = .identity }},
+        .{},
+    ));
+}
+
 test "typed hyper force rejects effectful same shaped callables" {
     var raw = source.Builder.init(std.testing.allocator);
     defer raw.deinit();

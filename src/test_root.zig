@@ -3,6 +3,7 @@ test {
     _ = @import("source/static_value.zig");
     _ = @import("source/specialize.zig");
     _ = @import("source/specialize_tests.zig");
+    _ = @import("source/relation_scalar_tests.zig");
     _ = @import("source/recovery_tests.zig");
     _ = @import("source/relation_inline.zig");
     _ = @import("source/record_tests.zig");

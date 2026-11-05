@@ -14,6 +14,7 @@ src/authoring/runtime.zig
 src/authoring_cases.zig
 src/authoring_tests.zig
 src/cache_key_rejections.zig
+src/capture_order_case.zig
 src/coalescing_allocation_meter.zig
 src/coalescing_baselines.zig
 src/coalescing_borrow_cases.zig
@@ -218,6 +219,7 @@ src/hyper_cases.zig
 src/hyper_composition_cases.zig
 src/hyper_need_cases.zig
 src/hyper_task_cases.zig
+src/inline_argument_case.zig
 src/library/bridge.zig
 src/library/choice.zig
 src/library/generator.zig
@@ -298,6 +300,7 @@ src/source/relation_layout.zig
 src/source/relation_record.zig
 src/source/relation_relocate.zig
 src/source/relation_scalar.zig
+src/source/relation_scalar_tests.zig
 src/source/relation_specialization.zig
 src/source/resource_example.zig
 src/source/retained_scope_example.zig

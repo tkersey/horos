@@ -103,3 +103,18 @@ literal transport, constructor-index permutations, capture ordering, bridge
 removal, work exhaustion and allocation failure. Consumer qualification must
 also execute exported slices and preserve its own private and speculative
 authority checks.
+
+The hardening cases admit signed, same-typed captures with distinct values and
+reject swapped capture operands, repeated origins and substituted bodies through
+the relation path. Composed-chain cases alter an unused declaration in an
+intermediate successor, a final successor or the separately submitted final
+module. Each altered module is valid source; source admission alone cannot
+authorize its relationship to the predecessor.
+
+Scalar relation cases cover move, double complement, both mask positions and
+leaf idempotence across all eight integer schemas. Fold expectations use separate
+widened arithmetic at signed extrema, unsigned maxima and neighboring powers of
+two. A repeated expression identifier is not an evaluated leaf. The source oracle
+also checks original and admitted inlined calls whose unused arguments fail with
+different payloads: argument order decides the observed failure. These are finite
+regression witnesses, not a general equivalence proof.

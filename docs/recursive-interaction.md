@@ -116,7 +116,10 @@ only when the successor is already available. Create its schema with
 that schema and required state captures in the pair's capture bound.
 
 The [demand fixtures](../src/hyper_cases.zig) distinguish an ignored reply, an
-ignored successor and a demanded failing successor. The
+ignored successor and a demanded failing successor. A pure faulting peer returns
+no observation when ignored and fails when forced. A source-valid eager successor
+also fails; ordinary admission accepts that program, while relation validation
+rejects its claimed identity with the lazy program. The
 [emission fixtures](../src/coalescing_hyper_cases.zig) author different runtime
 configurations of one emitter type and reuse the retained definitions without
 re-emitting their steps.
@@ -187,6 +190,14 @@ with the same display name remain distinct nominal capabilities. The
 [task fixtures](../src/hyper_task_cases.zig) and
 [nested Need fixture](../src/hyper_need_cases.zig) exercise these paths through
 ordinary source construction.
+
+Task cases separately construct a description, force it to obtain a task and
+execute that task. Only execution emits the task's external requests. A multi-shot
+outer handler runs two branches with distinct arguments while preserving the
+linear Need contracts inside each branch. Independent oracle expectations retain
+the ordered payloads and multiplicity, including non-tail work after a request.
+Protected task fixtures retain cleanup for both the demanded terminal participant
+and the suspended outer participant, including disposal of the latter.
 
 ## Composition and capture contracts
 

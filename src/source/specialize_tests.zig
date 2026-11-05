@@ -1702,6 +1702,67 @@ test "finite source relation checks scalar composition and rejects unexplained c
     );
 }
 
+test "source relation accounts for unused declarations throughout composed successors" {
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const unit = try b.scalar(void);
+    const word = try b.scalar(u64);
+    const entry = try b.declare(&.{word}, word, &.{}, &.{});
+    const input = try b.reference(b.parameter(entry, 0));
+    const first = try b.primitive(word, .move, &.{input}, 0);
+    const second = try b.primitive(word, .move, &.{first}, 0);
+    try b.define(entry, try b.pure(second));
+    const unused = try b.declare(&.{}, word, &.{}, &.{});
+    try b.define(unused, try b.pure(try b.constant(u64, 19)));
+    const alternative = try b.pure(try b.constant(u64, 4));
+    const before = b.module(entry, unit);
+    const middle = try source.own(source.Module, b.allocator(), before);
+    @constCast(middle.values)[@intCast(first)] = before.values[@intCast(input)];
+    const after = try source.own(source.Module, b.allocator(), middle);
+    @constCast(after.values)[@intCast(second)] = middle.values[@intCast(first)];
+    const steps = [_]source.relation.Step{
+        .{ .successor = middle, .rule = .{ .scalar = .{ .value = first, .rule = .identity } } },
+        .{ .successor = after, .rule = .{ .scalar = .{ .value = second, .rule = .identity } } },
+    };
+    try source.relation.validate(a, before, before, &.{}, .{});
+    try source.relation.validate(a, before, middle, steps[0..1], .{});
+    try source.relation.validate(a, before, after, &steps, .{});
+    for ([_]usize{ 0, 1, 2 }) |position| {
+        const changed = try source.own(source.Module, b.allocator(), if (position == 0)
+            middle
+        else
+            after);
+        @constCast(changed.functions)[@intCast(unused)].body = alternative;
+        var work: u64 = 1_000_000;
+        try source.admitWithWork(a, changed, &work);
+        var submitted = steps;
+        if (position < 2) submitted[position].successor = changed;
+        try std.testing.expectError(error.InvalidRelation, source.relation.validate(
+            a,
+            before,
+            if (position == 0) after else changed,
+            &submitted,
+            .{},
+        ));
+    }
+    try std.testing.expectError(error.InvalidRelation, source.relation.validate(
+        a,
+        after,
+        after,
+        &steps,
+        .{},
+    ));
+    try std.testing.expectError(error.RelationLimit, source.relation.validate(
+        a,
+        before,
+        after,
+        &steps,
+        .{ .work = 1 },
+    ));
+    try source.relation.validate(a, before, after, &steps, .{});
+}
+
 test "private product relation transports literals constructors projections and unpack bindings" {
     const relation = @import("relation.zig");
     const a = std.testing.allocator;
@@ -2357,6 +2418,49 @@ test "source relocation transports raw constructor indices across registration o
         .successor = after,
         .rule = .{ .relocation = maps },
     }}, .{});
+}
+
+test "raw callable transport rejects same typed capture swaps and changed bodies" {
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const fixture = try @import("../capture_order_case.zig").build(&b, true);
+    const before = fixture.module;
+    var work: u64 = 1_000_000;
+    const catalog = try source.constructor_bindings.admit(a, b.allocator(), before, &work);
+    try std.testing.expectEqual(@as(usize, 1), catalog.len);
+    try std.testing.expectEqual(fixture.target, catalog[0].function);
+    try std.testing.expectEqualSlices(u64, before.functions[
+        @intCast(fixture.generator)
+    ].parameters, catalog[0].captures);
+    const maps = try identitySourceMaps(b.allocator(), before);
+    const after = try source.relation.Relocation.relocate(b.allocator(), before, maps);
+    const steps = [_]source.relation.Step{.{
+        .successor = after,
+        .rule = .{ .relocation = maps },
+    }};
+    try source.relation.validate(a, before, after, &steps, .{});
+    for ([_]u8{ 0, 1, 2 }) |mutation| {
+        const changed = try source.own(source.Module, b.allocator(), after);
+        const id = if (mutation == 2) fixture.difference else fixture.raw;
+        const op = &@constCast(changed.values)[@intCast(id)].expression.primitive;
+        const operands = try b.allocator().dupe(u64, op.operands);
+        op.operands = operands;
+        if (mutation == 1) {
+            operands[1] = operands[0];
+        } else {
+            std.mem.swap(u64, &operands[0], &operands[1]);
+        }
+        work = 1_000_000;
+        try source.admitWithWork(a, changed, &work);
+        try std.testing.expectError(error.InvalidRelation, source.relation.validate(
+            a,
+            before,
+            changed,
+            &.{.{ .successor = changed, .rule = .{ .relocation = maps } }},
+            .{},
+        ));
+    }
 }
 
 test "source relation rejects constructor rebinding through scalar handler simplification" {
