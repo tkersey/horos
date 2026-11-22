@@ -273,3 +273,70 @@ test "coalescing bounded work returns exact ordinary image and complete map at i
         try testing.expect(actual_map.map == null);
     }
 }
+
+test "bounded coalescing preserves ordinary local discovery rollback and exact completion" {
+    var stats: pass.Statistics = .{};
+    var reference = try pass.run(testing.allocator, fixture, .{ .statistics = &stats });
+    defer reference.deinit();
+    const limits = [_]u64{ 0, stats.first_selected_work, stats.work.units - 1, stats.work.units };
+    for (limits) |limit| {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        var ordinary_map: MapCapture = .{ .a = arena.allocator() };
+        var ordinary_stats: pass.Statistics = .{};
+        var options = ordinary_map.options();
+        options.work_limit = limit;
+        options.statistics = &ordinary_stats;
+        var ordinary = try pass.run(testing.allocator, fixture, options);
+        defer ordinary.deinit();
+
+        var bounded_map: MapCapture = .{ .a = arena.allocator() };
+        var bounded_stats: pass.Statistics = .{};
+        options.correspondence = bounded_map.options().correspondence;
+        options.statistics = &bounded_stats;
+        const maximum = std.math.maxInt(u64);
+        var remaining: u64 = maximum;
+        var bounded = try pass.runWithWork(testing.allocator, fixture, options, &remaining);
+        defer bounded.deinit();
+        try testing.expectEqual(ordinary_stats.outcome, bounded_stats.outcome);
+        try testing.expectEqual(ordinary_stats.work.units, bounded_stats.work.units);
+        try testing.expect(@import("record.zig").equal(
+            @TypeOf(ordinary.program),
+            ordinary.program,
+            bounded.program,
+        ));
+        try testing.expect(@import("record.zig").equal(
+            pass.Correspondence,
+            ordinary_map.map.?,
+            bounded_map.map.?,
+        ));
+        try testing.expectEqual(
+            if (limit == stats.work.units) pass.Outcome.applied else pass.Outcome.work_limit,
+            bounded_stats.outcome,
+        );
+        const used = maximum - remaining;
+        remaining = used - 1;
+        bounded_map.map = null;
+        try testing.expectError(error.RelationLimit, pass.runWithWork(
+            testing.allocator,
+            fixture,
+            options,
+            &remaining,
+        ));
+        try testing.expect(bounded_map.map == null);
+    }
+}
+
+test "local rollback needs no shared work for a discovery visit it declined" {
+    var stats: pass.Statistics = .{};
+    const options: pass.Options = .{ .work_limit = 0, .statistics = &stats };
+    const maximum = std.math.maxInt(u64);
+    var remaining: u64 = maximum;
+    var first = try pass.runWithWork(testing.allocator, fixture, options, &remaining);
+    defer first.deinit();
+    remaining = maximum - remaining;
+    var exact = try pass.runWithWork(testing.allocator, fixture, options, &remaining);
+    defer exact.deinit();
+    try testing.expectEqual(pass.Outcome.work_limit, stats.outcome);
+    try testing.expectEqual(@as(u64, 0), remaining);
+}

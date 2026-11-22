@@ -6,6 +6,10 @@ const ir = data.activation;
 const a = std.testing.allocator;
 
 fn diamond(b: *source.Builder) !source.Module {
+    return fieldDiamond(b, 1);
+}
+
+fn fieldDiamond(b: *source.Builder, coordinate: u64) !source.Module {
     const unit = try b.scalar(void);
     const boolean = try b.scalar(bool);
     const word = try b.scalar(u64);
@@ -25,10 +29,10 @@ fn diamond(b: *source.Builder) !source.Module {
         .when_true = try b.pure(when_true),
         .when_false = try b.pure(when_false),
     } });
-    const later = try b.primitive(word, .field, &.{aggregate}, 1);
+    const later = try b.primitive(word, .field, &.{aggregate}, coordinate);
     const merged = try b.reference(selected);
     const result = try b.primitive(word, .integer_bit_xor, &.{ merged, later }, 0);
-    const first_projection = try b.primitive(word, .field, &.{aggregate}, 1);
+    const first_projection = try b.primitive(word, .field, &.{aggregate}, coordinate);
     try b.define(f, try b.bind(
         first,
         try b.pure(first_projection),
@@ -176,6 +180,39 @@ fn checkEvidence(
 ) !void {
     const bindings = try optimization.parameters(a, module, program, evidence, policy);
     defer a.free(bindings);
+}
+
+fn compileTransientDiamond(policy: optimization.Options) !optimization.Result {
+    var input = source.Builder.init(a);
+    defer input.deinit();
+    return source.lowerRecoveryOptimized(a, try diamond(&input), policy);
+}
+
+test "applied and fallback results own their program and evidence after source release" {
+    var fresh = source.Builder.init(a);
+    defer fresh.deinit();
+    const module = try diamond(&fresh);
+    var policy = options();
+    for ([_]optimization.Outcome{ .applied, .budget }) |outcome| {
+        if (outcome == .budget) policy.limits.rule.work = 0;
+        var retained = try compileTransientDiamond(policy);
+        defer retained.deinit();
+        try std.testing.expectEqual(outcome, retained.outcome);
+        var expected = try source.lowerRecoveryOptimized(a, module, policy);
+        defer expected.deinit();
+        try std.testing.expectEqualDeep(expected.program, retained.program);
+        try std.testing.expectEqualDeep(expected.evidence, retained.evidence);
+        const bindings = try optimization.parameters(
+            a,
+            module,
+            retained.program,
+            retained.evidence,
+            policy,
+        );
+        defer a.free(bindings);
+        try std.testing.expectEqualDeep(expected.parameters, bindings);
+        try std.testing.expectEqualDeep(bindings, retained.parameters);
+    }
 }
 
 fn formalBinding(
@@ -478,6 +515,28 @@ test "recovery field reuse preserves required phase liveness" {
     try checkEvidence(module, retained.program, retained.evidence, policy);
 }
 
+test "mixed recovery batches retain the checked proposal for either protected diamond" {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const left = (try fieldDiamond(&b, 0)).entry;
+    const right = (try fieldDiamond(&b, 1)).entry;
+    const module = try twoReachableDiamonds(&b, left, right);
+    var original = try @import("activation_lower.zig").lowerRecoveryInput(a, module);
+    defer original.deinit();
+    for ([_]u64{ left, right }, [_]u64{ right, left }) |protected, reusable| {
+        var policy = options();
+        policy.formals = &.{.{ .function = protected, .ordinal = 1 }};
+        var selected = try source.lowerRecoveryOptimized(a, module, policy);
+        defer selected.deinit();
+        try std.testing.expectEqual(.applied, selected.outcome);
+        try std.testing.expectEqual(1, selected.statistics.recovery_liveness);
+        try std.testing.expectEqual(1, selected.evidence.witnesses.len);
+        const expected = try projectionWitness(original.program, reusable);
+        try std.testing.expectEqualDeep(expected, selected.evidence.witnesses[0]);
+        try checkEvidence(module, selected.program, selected.evidence, policy);
+    }
+}
+
 test "a proven singleton liveness rejection survives a budget too small for a second check" {
     var b = source.Builder.init(a);
     defer b.deinit();
@@ -488,18 +547,10 @@ test "a proven singleton liveness rejection survives a budget too small for a se
     defer original.deinit();
     var ordinary = try source.lowerObserved(a, module, .{ .recovery = true });
     defer ordinary.deinit();
-    const block_kind = @backingInt(data.relocation.Kind.block);
-    const blocks = ordinary.recovery_evidence.?.correspondence.maps[block_kind];
     const rule = data.scalar_field_reuse;
     var budget = rule.Budget.init(.{});
     var statistics: rule.Statistics = .{};
-    const found = try rule.discoverReachable(
-        b.allocator(),
-        original.program,
-        blocks,
-        &budget,
-        &statistics,
-    );
+    const found = try rule.discover(b.allocator(), original.program, &budget, &statistics);
     try std.testing.expectEqual(1, found.len);
     const s = try rule.reconstructBorrowedProposal(b.allocator(), original.program, found, &budget);
     const before_check = budget.remaining;
@@ -598,14 +649,21 @@ fn regionDiamond(b: *source.Builder) !source.Module {
 test "selected and fallback recovery evidence transport sparse regions in original ID order" {
     var b = source.Builder.init(a);
     defer b.deinit();
+    _ = try diamond(&b);
     const module = try regionDiamond(&b);
     var policy = options();
+    policy.formals = &.{.{ .function = module.entry, .ordinal = 0 }};
     for ([_]optimization.Outcome{ .applied, .budget }) |outcome| {
         if (outcome == .budget) policy.limits.rule.work = 0;
         var result = try source.lowerRecoveryOptimized(a, module, policy);
         defer result.deinit();
         try std.testing.expectEqual(outcome, result.outcome);
         const regions = result.evidence.correspondence.regions;
+        const map = result.evidence.correspondence;
+        const functions = map.maps[@backingInt(data.relocation.Kind.function)];
+        try std.testing.expectEqual(data.relocation.missing, functions[0]);
+        try std.testing.expectEqual(0, map.locals[0].slots.len);
+        try std.testing.expectEqual(0, map.locals[0].custody.len);
         try std.testing.expectEqual(3, regions.len);
         for (regions, [_]u64{ 0, 1, 1 << 40 }) |pair, original| {
             try std.testing.expectEqual(original, pair.original);
@@ -614,6 +672,14 @@ test "selected and fallback recovery evidence transport sparse regions in origin
         const bytes = try evidenceBytes(result.evidence, &storage);
         var decoded = try optimization.decode(a, bytes, policy.limits);
         defer decoded.deinit();
+        try std.testing.expectEqualDeep(map, decoded.evidence.correspondence);
+        var limited = policy.limits;
+        const work = if (outcome == .applied) &limited.rule.work else &limited.source_work;
+        work.* = bytes.len + regions.len + functions.len;
+        var exact = try optimization.decode(a, bytes, limited);
+        defer exact.deinit();
+        work.* -= 1;
+        try std.testing.expectError(error.ScalarFieldLimit, optimization.decode(a, bytes, limited));
         const bindings = try optimization.parameters(
             a,
             module,
@@ -650,8 +716,14 @@ test "independent recovery validation distinguishes its scratch limit from alloc
     var selected = try source.lowerRecoveryOptimized(a, module, policy);
     defer selected.deinit();
     try std.testing.expectEqual(.applied, selected.outcome);
-    for ([_]usize{ 0, 256, 512, 1024 }) |bytes| {
+    var buffer: [2048]u8 = undefined;
+    const encoded = try evidenceBytes(selected.evidence, &buffer);
+    for ([_]usize{ 0, 32, 256, 512, 1024 }) |bytes| {
         policy.limits.rule.temporary_bytes = bytes;
+        if (bytes <= 32) try std.testing.expectError(
+            error.ScalarFieldLimit,
+            optimization.decode(a, encoded, policy.limits),
+        );
         try std.testing.expectError(
             error.ScalarFieldLimit,
             checkEvidence(module, selected.program, selected.evidence, policy),

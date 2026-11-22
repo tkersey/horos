@@ -395,28 +395,18 @@ pub fn own(
     allocator: std.mem.Allocator,
     value_item: T,
 ) std.mem.Allocator.Error!T {
-    return ownWithScratch(T, allocator, allocator, value_item);
-}
-
-pub fn ownWithScratch(
-    comptime T: type,
-    allocator: std.mem.Allocator,
-    scratch: std.mem.Allocator,
-    value_item: T,
-) std.mem.Allocator.Error!T {
     @setEvalBranchQuota(10000);
     var output = value_item;
     var pending: std.ArrayList(OwnTask) = .empty;
-    defer pending.deinit(scratch);
-    try enqueueOwn(T, scratch, &pending, &output);
-    while (pending.pop()) |task| try task.apply(allocator, scratch, &pending, task.output);
+    defer pending.deinit(allocator);
+    try enqueueOwn(T, allocator, &pending, &output);
+    while (pending.pop()) |task| try task.apply(allocator, &pending, task.output);
     return output;
 }
 
 const OwnTask = struct {
     output: *anyopaque,
     apply: *const fn (
-        std.mem.Allocator,
         std.mem.Allocator,
         *std.ArrayList(OwnTask),
         *anyopaque,
@@ -461,7 +451,6 @@ fn OwnValue(comptime T: type) type {
     return struct {
         fn apply(
             allocator: std.mem.Allocator,
-            scratch: std.mem.Allocator,
             pending: *std.ArrayList(OwnTask),
             address: *anyopaque,
         ) std.mem.Allocator.Error!void {
@@ -472,29 +461,29 @@ fn OwnValue(comptime T: type) type {
                     for (elements, output.*) |*element, input| element.* = input;
                     output.* = elements;
                     for (elements) |*element|
-                        try enqueueOwn(pointer.child, scratch, pending, element);
+                        try enqueueOwn(pointer.child, allocator, pending, element);
                 },
                 .@"struct" => |info| inline for (
                     info.field_names,
                     info.field_types,
                 ) |name, FieldType| {
                     if (comptime ownershipRequired(FieldType))
-                        try enqueueOwn(FieldType, scratch, pending, &@field(output, name));
+                        try enqueueOwn(FieldType, allocator, pending, &@field(output, name));
                 },
                 .@"union" => switch (output.*) {
                     inline else => |*payload| try enqueueOwn(
                         @TypeOf(payload.*),
-                        scratch,
+                        allocator,
                         pending,
                         payload,
                     ),
                 },
                 .optional => |optional| {
                     if (output.*) |*present|
-                        try enqueueOwn(optional.child, scratch, pending, present);
+                        try enqueueOwn(optional.child, allocator, pending, present);
                 },
                 .array => |array| for (output) |*element|
-                    try enqueueOwn(array.child, scratch, pending, element),
+                    try enqueueOwn(array.child, allocator, pending, element),
                 else => {},
             }
         }
@@ -538,26 +527,6 @@ inline fn equal(comptime T: type, left: T, right: T) bool {
         .void => true,
         else => left == right,
     };
-}
-
-test "owned slices retain only their data after traversal scratch is released" {
-    var output = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    var scratch = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    var values = [_]u64{ 5, 8, 13 };
-    const rows: []const []const u64 = &.{ values[0..1], values[1..] };
-    const a = output.allocator();
-    const saved = try ownWithScratch(@TypeOf(rows), a, scratch.allocator(), rows);
-    defer {
-        for (saved) |row| a.free(row);
-        a.free(saved);
-    }
-    try std.testing.expect(scratch.allocated_bytes > 0);
-    try std.testing.expectEqual(scratch.allocated_bytes, scratch.freed_bytes);
-    const data_bytes = @sizeOf([]const u64) * rows.len + @sizeOf(@TypeOf(values));
-    try std.testing.expectEqual(data_bytes, output.allocated_bytes);
-    @memset(&values, 0);
-    try std.testing.expectEqualSlices(u64, &.{5}, saved[0]);
-    try std.testing.expectEqualSlices(u64, &.{ 8, 13 }, saved[1]);
 }
 
 test "row merge preserves the original duplicate policy order and caller storage" {

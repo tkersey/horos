@@ -109,7 +109,7 @@ fn sorted(
     const depth: usize = std.math.log2_int_ceil(usize, items.len);
     const comparisons = std.math.mul(usize, items.len, 4 * depth) catch return error.WorkLimit;
     const total = std.math.mul(usize, comparisons, comparison_width) catch return error.WorkLimit;
-    try work.charge(total);
+    try work.chargeBounded(total);
     std.sort.heap(T, items, context, less);
 }
 
@@ -217,7 +217,7 @@ pub const Blocks = struct {
 
     pub fn index(a: std.mem.Allocator, count: usize, work: *graph.Work) Error!?[]p.Id {
         if (work.remaining == null) return null;
-        try work.charge(count);
+        try work.chargeBounded(count);
         const result = try a.alloc(p.Id, count);
         @memset(result, r.missing);
         return result;

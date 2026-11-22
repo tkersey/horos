@@ -215,13 +215,19 @@ fn select(
         options.diagnostic,
     ) catch |err| switch (err) {
         error.WorkLimit => blk: {
-            if (stats.work.remaining != null) return error.RelationLimit;
+            if (stats.work.remaining != null and !stats.work.local_exhausted)
+                return error.RelationLimit;
             // The attempt may have selected earlier rounds before exhausting
             // its allowance. Returning the baseline also restores its mapping.
             if (trace.*) |*t| {
                 t.deinit();
                 trace.* = null;
-                trace.* = try origins.Trace.init(allocator, original, baseline);
+                trace.* = try origins.Trace.initWithWork(
+                    allocator,
+                    original,
+                    baseline,
+                    stats.work.remaining,
+                );
             }
             stats.outcome = .work_limit;
             stats.selected = stats.baseline;

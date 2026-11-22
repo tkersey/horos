@@ -402,3 +402,27 @@ test "repeated roles charge each input and inspect each distinct formal once" {
         &work,
     ));
 }
+
+test "wide formal normalization preserves submitted order within its work limit" {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const fixture = try wideAliases(&b);
+    var roles: [width + 1]phase.Formal = undefined;
+    for (roles[0..width], 0..) |*role, i| role.* = .{ .function = 1, .ordinal = width - 1 - i };
+    roles[width] = roles[width - 1];
+    const allowance = 1000;
+    var remaining: u64 = allowance;
+    var normalized = try phase.normalize(a, fixture, &roles, &remaining);
+    defer normalized.deinit();
+    try std.testing.expectEqualSlices(phase.Formal, roles[0..width], normalized.formals());
+    const required = allowance - remaining;
+    try std.testing.expect(required > roles.len);
+    remaining = required - 1;
+    const insufficient = phase.normalize(a, fixture, &roles, &remaining);
+    try std.testing.expectError(error.RelationLimit, insufficient);
+    remaining = required;
+    var exact = try phase.normalize(a, fixture, &roles, &remaining);
+    defer exact.deinit();
+    try std.testing.expectEqualSlices(phase.Formal, normalized.formals(), exact.formals());
+    try std.testing.expectEqual(@as(u64, 0), remaining);
+}

@@ -15,10 +15,22 @@ pub const Formal = struct { function: Id, ordinal: usize };
 
 pub const Normalized = struct {
     allocator: std.mem.Allocator,
-    entries: std.AutoArrayHashMapUnmanaged(Formal, void) = .empty,
+    entries: std.ArrayList(Formal) = .empty,
 
     pub fn formals(self: *const Normalized) []const Formal {
-        return self.entries.keys();
+        return self.entries.items;
+    }
+
+    fn include(self: *Normalized, role: Formal, work: *u64) Error!void {
+        const group = 16;
+        for (self.entries.items, 0..) |prior, i| {
+            if (i != 0 and i % group == 0) try spend(work, 1);
+            if (prior.function == role.function and prior.ordinal == role.ordinal) return;
+        }
+        const count = self.entries.items.len;
+        if (count == self.entries.capacity and count >= group)
+            try spend(work, 1 + (count - 1) / group);
+        try self.entries.append(self.allocator, role);
     }
 
     pub fn deinit(self: *Normalized) void {
@@ -40,8 +52,7 @@ pub fn normalize(
         if (role.function >= module.functions.len or
             role.ordinal >= module.functions[@intCast(role.function)].parameters.len)
             return error.InvalidCorrespondence;
-        if (!selected.entries.contains(role))
-            try selected.entries.putNoClobber(a, role, {});
+        try selected.include(role, work);
     }
     return selected;
 }

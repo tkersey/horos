@@ -90,6 +90,7 @@ pub fn indexLivePredecessors(
     live: ?[]const bool,
     budget: *Budget,
 ) Error![]std.ArrayList(Predecessor) {
+    if (budget.strict and !budget.charge(program.blocks.len)) return error.ExpressionWorkLimit;
     const result = try allocator.alloc(std.ArrayList(Predecessor), program.blocks.len);
     for (result) |*items| items.* = .empty;
     for (program.blocks, 0..) |block, id| {
@@ -99,7 +100,10 @@ pub fn indexLivePredecessors(
             if (!budget.tick()) return error.ExpressionWorkLimit;
             const target: usize = @intCast(transfer.edge.block);
             if (live) |blocks| if (!blocks[target]) continue;
-            try result[target].append(
+            const list = &result[target];
+            if (budget.strict and list.items.len == list.capacity and
+                !budget.charge(list.items.len)) return error.ExpressionWorkLimit;
+            try list.append(
                 allocator,
                 .{ .block = id, .transfer = transfer },
             );

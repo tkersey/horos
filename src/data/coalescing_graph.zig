@@ -25,10 +25,13 @@ pub const Work = struct {
     comparisons: u64 = 0,
     rounds: u64 = 0,
     exhausted: bool = false,
+    local_exhausted: bool = false,
     remaining: ?*u64 = null,
 
     pub fn chargeBounded(self: *Work, amount: usize) error{WorkLimit}!void {
-        if (self.remaining != null) try self.charge(amount);
+        if (self.remaining == null) return;
+        if (self.limit == std.math.maxInt(u64)) return self.charge(amount);
+        return self.chargeShared(amount);
     }
 
     pub fn append(
@@ -42,16 +45,22 @@ pub const Work = struct {
     }
 
     pub fn charge(self: *Work, amount: usize) error{WorkLimit}!void {
-        const next = std.math.add(u64, self.units, amount) catch {
+        if (amount > self.limit or self.units > self.limit - amount) {
             self.exhausted = true;
+            self.local_exhausted = self.limit != std.math.maxInt(u64);
             return error.WorkLimit;
-        };
-        if (next > self.limit or (self.remaining != null and amount > self.remaining.?.*)) {
+        }
+        try self.chargeShared(amount);
+        self.units += amount;
+    }
+
+    fn chargeShared(self: *Work, amount: usize) error{WorkLimit}!void {
+        const remaining = self.remaining orelse return;
+        if (amount > remaining.*) {
             self.exhausted = true;
             return error.WorkLimit;
         }
-        self.units = next;
-        if (self.remaining) |remaining| remaining.* -= amount;
+        remaining.* -= amount;
     }
 };
 
@@ -159,7 +168,7 @@ fn refine(
         const pinned = node.pinned or (singletons.len != 0 and singletons[id]);
         var size: wire.Writer = .{};
         try work.chargeBounded(node.edges.len);
-        const compact = !initial and work.remaining != null;
+        const compact = !initial and work.remaining != null and work.limit == std.math.maxInt(u64);
         try writeKey(&size, nodes, node, id, pinned, classes, initial, compact);
         try work.charge(size.position);
         const bytes = try a.alloc(u8, size.position);

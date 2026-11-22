@@ -48,7 +48,29 @@ pub const Statistics = struct {
     unsupported_schema: usize = 0,
 };
 pub const Error = @import("expression_reuse.zig").Error || error{ScalarFieldLimit};
-const Targets = std.AutoHashMapUnmanaged(Site, Site);
+const Range = struct { start: usize = 0, end: usize = 0 };
+const Targets = struct {
+    ranges: []const Range,
+    witnesses: []const Witness,
+
+    fn block(self: Targets, id: usize) []const Witness {
+        if (self.ranges.len == 0) return &.{};
+        const r = self.ranges[id];
+        return self.witnesses[r.start..r.end];
+    }
+
+    fn contains(self: Targets, location: Location, budget: *Budget) Error!bool {
+        var items = self.block(@intCast(location.block));
+        while (items.len != 0) {
+            try spend(budget, 1);
+            const mid = items.len / 2;
+            const position = items[mid].target.instruction;
+            if (position == location.instruction) return true;
+            items = if (position < location.instruction) items[mid + 1 ..] else items[0..mid];
+        }
+        return false;
+    }
+};
 
 fn spend(budget: *Budget, amount: usize) Error!void {
     if (!budget.charge(amount)) return error.ScalarFieldLimit;
@@ -87,9 +109,12 @@ fn index(
 ) Error!Targets {
     if (witnesses.len > budget.limits.witnesses) return error.ScalarFieldLimit;
     try spend(budget, witnesses.len);
-    var targets: Targets = .empty;
+    if (witnesses.len == 0) return .{ .ranges = &.{}, .witnesses = &.{} };
+    try spend(budget, program.blocks.len);
+    const ranges = try a.alloc(Range, program.blocks.len);
+    @memset(ranges, .{});
     var previous: ?Site = null;
-    for (witnesses) |item| {
+    for (witnesses, 0..) |item, i| {
         const w = try item.resolve(program);
         const source = instruction(program, w.source);
         const target = instruction(program, w.target);
@@ -98,10 +123,13 @@ fn index(
             program.blocks[w.source.block].function != program.blocks[w.target.block].function or
             (previous != null and !locationBefore(program, previous.?, w.target)))
             return error.InvalidExpressionReuse;
+        const range = &ranges[w.target.block];
+        if (previous == null or previous.?.block != w.target.block) range.start = i;
+        range.end = i + 1;
         previous = w.target;
-        try targets.put(a, w.target, w.source);
     }
-    for (witnesses) |w| if (targets.contains(try w.source.resolve(program)))
+    const targets: Targets = .{ .ranges = ranges, .witnesses = witnesses };
+    for (witnesses) |w| if (try targets.contains(w.source, budget))
         return error.InvalidExpressionReuse;
     return targets;
 }
@@ -120,12 +148,11 @@ const Context = struct {
         a: Allocator,
         program: ir.Program,
         flow: *const Flow,
-        block_map: ?[]const ir.Id,
         budget: *Budget,
     ) Error!Context {
         const catalog = try admission.schemasWithWork(a, program.schemas, &budget.remaining);
         const permissions = try traits.deriveWithWork(a, program.schemas, &budget.remaining);
-        const live = try liveBlocks(a, program, flow, block_map, budget);
+        const live = try liveBlocks(a, program, flow, budget);
         return .{
             .program = program,
             .flow = flow,
@@ -176,20 +203,10 @@ pub fn discover(
     budget: *Budget,
     stats: *Statistics,
 ) Error![]const Witness {
-    return discoverReachable(arena, original, null, budget, stats);
-}
-
-pub fn discoverReachable(
-    arena: Allocator,
-    original: ir.Program,
-    block_map: ?[]const ir.Id,
-    budget: *Budget,
-    stats: *Statistics,
-) Error![]const Witness {
     var cap: AllocationBudget = .{ .parent = arena, .remaining = &budget.bytes_remaining };
     var observed: Statistics = .{};
     defer stats.* = observed;
-    return find(cap.allocator(), original, block_map, budget, &observed) catch |err|
+    return find(cap.allocator(), original, budget, &observed) catch |err|
         return translated(err, cap, budget);
 }
 
@@ -197,31 +214,26 @@ fn liveBlocks(
     a: Allocator,
     program: ir.Program,
     flow: *const Flow,
-    map: ?[]const ir.Id,
     budget: *Budget,
 ) Error![]const bool {
     try spend(budget, program.blocks.len);
-    const live = if (map) |blocks| mapped: {
-        if (blocks.len != program.blocks.len) return error.InvalidCorrespondence;
-        const result = try a.alloc(bool, blocks.len);
-        for (blocks, result) |block, *out| out.* = block != relocation.missing;
-        break :mapped result;
-    } else try relocation.reachableBlocks(a, program, &budget.remaining);
+    const live = try relocation.reachableBlocks(a, program, &budget.remaining);
     for (flow.positions, live) |positions, *out| out.* = out.* and positions.len != 0;
     return live;
 }
 
 const Candidate = struct {
     site: Site,
-    group: usize = 0,
-    range: usize = 0,
-    state: enum { unmatched, unavailable, capture, producer, replaced } = .unmatched,
+    component: Range = .{},
+    block: Range = .{},
+    state: State = .unmatched,
+
+    const State = enum { unmatched, unavailable, possible_capture, capture, producer, replaced };
 };
 
 fn find(
     a: Allocator,
     program: ir.Program,
-    block_map: ?[]const ir.Id,
     budget: *Budget,
     stats: *Statistics,
 ) Error![]Witness {
@@ -230,7 +242,7 @@ fn find(
     const tmp = scratch.allocator();
     var flow = try analyze(a, program, budget);
     defer flow.deinit();
-    const ctx = try Context.init(tmp, program, &flow, block_map, budget);
+    const ctx = try Context.init(tmp, program, &flow, budget);
     const regions = try proof.transparentRegions(tmp, program, ctx.live, budget);
     try spend(budget, program.functions.len);
     const sites = try tmp.alloc(std.ArrayList(Candidate), program.functions.len);
@@ -246,33 +258,54 @@ fn find(
                 stats.unsupported_schema += 1;
                 continue;
             }
-            try sites[@intCast(block.function)].append(tmp, .{ .site = site });
+            const list = &sites[@intCast(block.function)];
+            try append(Candidate, tmp, budget, list, .{ .site = site });
         }
     }
     var selected: std.ArrayList(Witness) = .empty;
-    for (sites, program.functions) |function, record_function| {
-        const groups = try indexExpressions(tmp, ctx, function.items, regions);
-        const entry = regions[@intCast(record_function.entry)];
-        try selectFunction(tmp, ctx, function.items, groups, entry, &selected, stats);
+    var paths: CapturePaths = .{};
+    for (sites) |function| {
+        defer countRejections(function.items, stats);
+        const ordered = try indexExpressions(tmp, ctx, function.items, regions);
+        try selectFunction(tmp, ctx, function.items, ordered, &selected, stats);
+        try classifyCaptures(tmp, ctx, function.items, ordered, &paths);
     }
+    try spend(budget, selected.items.len);
     return a.dupe(Witness, selected.items);
 }
 
-const Group = struct {
-    region: usize,
-    across_capture: bool = false,
-    members: std.ArrayList(usize) = .empty,
-    ranges: std.ArrayList(struct { block: usize, start: usize, end: usize }) = .empty,
+fn append(
+    comptime T: type,
+    a: Allocator,
+    budget: *Budget,
+    list: *std.ArrayList(T),
+    value: T,
+) Error!void {
+    if (list.items.len == list.capacity) try spend(budget, list.items.len);
+    try list.append(a, value);
+}
 
-    fn append(self: *Group, a: Allocator, block: usize, member: usize) Error!usize {
-        const pos = self.members.items.len;
-        const last = self.ranges.getLastOrNull();
-        if (last == null or last.?.block != block)
-            try self.ranges.append(a, .{ .block = block, .start = pos, .end = pos });
-        try self.members.append(a, member);
-        const index_last = self.ranges.items.len - 1;
-        self.ranges.items[index_last].end = self.members.items.len;
-        return index_last;
+const Ordered = struct {
+    expression: [3]ir.Id,
+    region: usize,
+    site: usize,
+
+    fn before(_: void, left: Ordered, right: Ordered) bool {
+        return switch (std.mem.order(ir.Id, &left.expression, &right.expression)) {
+            .lt => true,
+            .gt => false,
+            .eq => {
+                if (left.region != right.region) return left.region < right.region;
+                return left.site < right.site;
+            },
+        };
+    }
+
+    fn expressionEnd(items: []const Ordered, start: usize) usize {
+        var end = start + 1;
+        while (end < items.len and
+            std.mem.eql(ir.Id, &items[end].expression, &items[start].expression)) end += 1;
+        return end;
     }
 };
 
@@ -281,87 +314,177 @@ fn indexExpressions(
     ctx: Context,
     sites: []Candidate,
     regions: []const usize,
-) Error![]const Group {
-    const Expression = struct { operand: ir.Id, coordinate: ir.Id, schema: ir.Id };
-    const Key = struct { expression: Expression, region: usize };
-    var first_group: std.AutoHashMapUnmanaged(Expression, usize) = .empty;
-    var index_by_key: std.AutoHashMapUnmanaged(Key, usize) = .empty;
-    var groups: std.ArrayList(Group) = .empty;
-    try spend(ctx.budget, sites.len);
-    for (sites, 0..) |*candidate, i| {
+) Error![]const Ordered {
+    const levels: usize = @bitSizeOf(usize) - @clz(sites.len);
+    const bound = std.math.mul(usize, sites.len, 2 * levels + 10) catch
+        return error.ScalarFieldLimit;
+    try spend(ctx.budget, bound);
+    const items = try a.alloc(Ordered, sites.len);
+    for (sites, items, 0..) |candidate, *item, i| {
         const site = candidate.site;
         const block = ctx.program.blocks[site.block];
         const op = block.instructions[site.instruction];
         const slots = ctx.program.functions[@intCast(block.function)].layout.slots;
-        const expression: Expression = .{
-            .operand = op.operands[0],
-            .coordinate = op.immediate,
-            .schema = slots[@intCast(op.destination)],
+        item.* = .{
+            .expression = .{ op.operands[0], op.immediate, slots[@intCast(op.destination)] },
+            .region = regions[site.block],
+            .site = i,
         };
-        const region = regions[site.block];
-        const group = try index_by_key.getOrPut(a, .{ .expression = expression, .region = region });
-        if (!group.found_existing) {
-            const first = try first_group.getOrPut(a, expression);
-            group.value_ptr.* = groups.items.len;
-            if (first.found_existing)
-                groups.items[first.value_ptr.*].across_capture = true
-            else
-                first.value_ptr.* = groups.items.len;
-            try groups.append(a, .{ .region = region, .across_capture = first.found_existing });
-        }
-        candidate.group = group.value_ptr.*;
-        candidate.range = try groups.items[candidate.group].append(a, site.block, i);
     }
-    return groups.items;
+    std.sort.heap(Ordered, items, {}, Ordered.before);
+    var start: usize = 0;
+    while (start < items.len) {
+        const end = Ordered.expressionEnd(items, start);
+        var first = start;
+        while (first < end) {
+            var last = first + 1;
+            while (last < end and items[first].region == items[last].region) last += 1;
+            var low = first;
+            while (low < last) {
+                const bid = sites[items[low].site].site.block;
+                var high = low + 1;
+                while (high < last and sites[items[high].site].site.block == bid) high += 1;
+                for (items[low..high]) |item| {
+                    const site = &sites[item.site];
+                    site.component = .{ .start = first, .end = last };
+                    site.block = .{ .start = low, .end = high };
+                    if (start != first or end != last) site.state = .possible_capture;
+                }
+                low = high;
+            }
+            first = last;
+        }
+        start = end;
+    }
+    return items;
 }
 
 fn selectFunction(
     a: Allocator,
     ctx: Context,
     sites: []Candidate,
-    groups: []const Group,
-    entry: usize,
+    groups: []const Ordered,
     selected: *std.ArrayList(Witness),
     stats: *Statistics,
 ) Error!void {
     try spend(ctx.budget, sites.len);
-    defer for (sites) |candidate| {
-        switch (candidate.state) {
-            .unavailable => stats.unavailable_version += 1,
-            .capture => stats.capture_boundary += 1,
-            else => {},
-        }
-    };
     for (sites) |*target| {
         if (target.state == .producer) continue;
-        const group = groups[target.group];
-        if (group.across_capture)
-            target.state = if (group.region == entry) .unavailable else .capture;
-        const range = group.ranges.items[target.range];
-        const candidates = [_][]const usize{
-            group.members.items[0..range.start],
-            group.members.items[range.end..],
+        const candidates = [_][]const Ordered{
+            groups[target.component.start..target.block.start],
+            groups[target.block.end..target.component.end],
         };
-        ctx.budget.capture_boundary = target.state == .capture;
-        search: for (candidates) |others| for (others) |id| {
+        ctx.budget.capture_boundary = target.state == .possible_capture;
+        search: for (candidates) |others| for (others) |item| {
             try spend(ctx.budget, 1);
-            const source = &sites[id];
+            const source = &sites[item.site];
             if (source.state == .replaced) continue;
             if (!try ctx.matches(.{ .source = source.site, .target = target.site })) {
-                target.state = if (ctx.budget.capture_boundary) .capture else .unavailable;
+                target.state = if (ctx.budget.capture_boundary) .possible_capture else .unavailable;
                 continue;
             }
             source.state = .producer;
             target.state = .replaced;
             stats.proven += 1;
             if (selected.items.len == ctx.budget.limits.witnesses) return error.ScalarFieldLimit;
-            try selected.append(a, .{
+            try append(Witness, a, ctx.budget, selected, .{
                 .source = Location.from(source.site),
                 .target = Location.from(target.site),
             });
             break :search;
         };
     }
+}
+
+const CapturePaths = struct {
+    const Step = struct { block: usize, crossed: bool };
+    seen: [][2]bool = &.{},
+    sources: []bool = &.{},
+    queue: std.ArrayList(Step) = .empty,
+
+    fn prepare(self: *CapturePaths, a: Allocator, ctx: Context) Error!void {
+        if (self.seen.len != 0) return;
+        const count = ctx.live.len;
+        try spend(ctx.budget, count);
+        self.seen = try a.alloc([2]bool, count);
+        self.sources = try a.alloc(bool, count);
+        @memset(self.seen, .{ false, false });
+        @memset(self.sources, false);
+    }
+
+    fn add(self: *CapturePaths, a: Allocator, budget: *Budget, step: Step) Error!void {
+        const visited = &self.seen[step.block][@intFromBool(step.crossed)];
+        if (visited.*) return;
+        visited.* = true;
+        try append(Step, a, budget, &self.queue, step);
+    }
+
+    fn precedes(self: *CapturePaths, a: Allocator, ctx: Context, target: usize) Error!bool {
+        defer {
+            for (self.queue.items) |step|
+                self.seen[step.block][@intFromBool(step.crossed)] = false;
+            self.queue.clearRetainingCapacity();
+        }
+        try self.add(a, ctx.budget, .{ .block = target, .crossed = false });
+        var cursor: usize = 0;
+        while (cursor < self.queue.items.len) : (cursor += 1) {
+            try spend(ctx.budget, 1);
+            const step = self.queue.items[cursor];
+            for (ctx.predecessors[step.block].items) |pred| {
+                try spend(ctx.budget, 1);
+                const crossed = step.crossed or pred.transfer.capture_boundary;
+                if (crossed and pred.block != target and self.sources[pred.block]) return true;
+                try self.add(a, ctx.budget, .{ .block = pred.block, .crossed = crossed });
+            }
+        }
+        return false;
+    }
+};
+
+fn classifyCaptures(
+    a: Allocator,
+    ctx: Context,
+    sites: []Candidate,
+    ordered: []const Ordered,
+    paths: *CapturePaths,
+) Error!void {
+    try spend(ctx.budget, ordered.len);
+    var first: usize = 0;
+    while (first < ordered.len) {
+        const end = Ordered.expressionEnd(ordered, first);
+        const members = ordered[first..end];
+        first = end;
+        for (members) |item| {
+            if (sites[item.site].state == .possible_capture) break;
+        } else continue;
+        try paths.prepare(a, ctx);
+        try spend(ctx.budget, members.len);
+        for (members) |item| {
+            const site = sites[item.site];
+            if (site.state != .replaced) paths.sources[site.site.block] = true;
+        }
+        var previous: ?usize = null;
+        var state: Candidate.State = .unavailable;
+        for (members) |item| {
+            const site = &sites[item.site];
+            if (site.state != .possible_capture) continue;
+            if (previous != site.site.block) {
+                const crossed = try paths.precedes(a, ctx, site.site.block);
+                state = if (crossed) .capture else .unavailable;
+                previous = site.site.block;
+            }
+            site.state = state;
+        }
+        for (members) |item| paths.sources[sites[item.site].site.block] = false;
+    }
+}
+
+fn countRejections(sites: []const Candidate, stats: *Statistics) void {
+    for (sites) |site| switch (site.state) {
+        .unavailable => stats.unavailable_version += 1,
+        .capture => stats.capture_boundary += 1,
+        else => {},
+    };
 }
 
 pub fn reconstructBorrowedProposal(
@@ -463,7 +586,7 @@ fn check(
     try sameDeclarations(original, candidate);
     var baseline = try analyze(a, original, budget);
     errdefer baseline.deinit();
-    const ctx = try Context.init(tmp, original, &baseline, null, budget);
+    const ctx = try Context.init(tmp, original, &baseline, budget);
     for (original.blocks, candidate.blocks, 0..) |before, after, bid| {
         if (before.instructions.len != after.instructions.len) return error.InvalidExpressionReuse;
         var lhs = before;
@@ -471,12 +594,15 @@ fn check(
         lhs.instructions = &.{};
         rhs.instructions = &.{};
         if (!equal(ir.Block, lhs, rhs)) return error.InvalidExpressionReuse;
+        var pending = targets.block(bid);
         for (before.instructions, after.instructions, 0..) |op, replacement, i| {
             const target: Site = .{ .block = bid, .instruction = i };
-            const loc = targets.get(target) orelse {
+            if (pending.len == 0 or pending[0].target.instruction != i) {
                 if (!equal(ir.Instruction, op, replacement)) return error.InvalidExpressionReuse;
                 continue;
-            };
+            }
+            const loc = try pending[0].source.resolve(original);
+            pending = pending[1..];
             const w = proof.Witness{ .source = loc, .target = target };
             if (!ctx.eligible(loc) or !ctx.eligible(target) or !try ctx.matches(w))
                 return error.InvalidExpressionReuse;

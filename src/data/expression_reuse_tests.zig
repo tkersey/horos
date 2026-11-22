@@ -870,7 +870,6 @@ test "recovery discovery counts neither numbering of a successful producer as a 
 }
 
 test "recovery discovery spends the witness quota only on retained blocks" {
-    const missing = @import("relocation.zig").missing;
     var functions = [_]ir.Function{ scalar_diamond.functions[0], scalar_diamond.functions[0] };
     functions[1].entry = 4;
     var blocks = scalar_diamond.blocks[0..4].* ++ scalar_diamond.blocks[0..4].*;
@@ -883,16 +882,14 @@ test "recovery discovery spends the witness quota only on retained blocks" {
     program.functions = &functions;
     program.blocks = &blocks;
     program.roots.entry = 1;
-    const map = [_]ir.Id{ missing, missing, missing, missing, 0, 1, 2, 3 };
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
-    for ([_]?[]const ir.Id{ null, &map }) |supplied| {
+    {
         var budget = scalar.Budget.init(.{ .witnesses = 1 });
         var stats: scalar.Statistics = .{};
-        const ws = try scalar.discoverReachable(
+        const ws = try scalar.discover(
             arena.allocator(),
             program,
-            supplied,
             &budget,
             &stats,
         );
@@ -1028,4 +1025,63 @@ test "recovery discovery keeps reachable literal payload out of scratch" {
     const ws = try scalar.discover(arena.allocator(), program, &budget, &stats);
     try std.testing.expectEqual(1, ws.len);
     try std.testing.expectEqual(1, ws[0].source.instruction);
+}
+
+test "recovery capture counts require an earlier field on the same path" {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var program = scalar_diamond;
+    var blocks = [_]ir.Block{
+        scalar_diamond.blocks[1],
+        scalar_diamond.blocks[0],
+        scalar_diamond.blocks[2],
+        scalar_diamond.blocks[3],
+        scalar_diamond.blocks[3],
+    };
+    program.blocks = &blocks;
+    blocks[0].terminator = .{ .yield_value = .{ .block = 1 } };
+    blocks[1].terminator = .{ .yield_value = .{ .block = 3 } };
+    blocks[2].terminator = .{ .yield_value = .{ .block = 4 } };
+    for ([_]usize{ 1, 0 }) |expected| {
+        if (expected == 0) {
+            blocks[0].terminator = scalar_diamond.blocks[0].terminator;
+            blocks[1].instructions = &.{};
+        }
+        var budget = scalar.Budget.init(.{});
+        var stats: scalar.Statistics = .{};
+        const witnesses = try scalar.discover(arena.allocator(), program, &budget, &stats);
+        try std.testing.expectEqual(0, witnesses.len);
+        try std.testing.expectEqual(expected, stats.capture_boundary);
+        try std.testing.expectEqual(2 - expected, stats.unavailable_version);
+    }
+}
+
+test "recovery proposal charges source membership in a block with indexed targets" {
+    var blocks = scalar_diamond.blocks[0..4].*;
+    var program = scalar_diamond;
+    program.blocks = &blocks;
+    blocks[0].terminator = .{ .jump = .{ .block = 1 } };
+    const fields: [4]ir.Instruction = @splat(scalar_diamond.blocks[0].instructions[0]);
+    blocks[1].instructions = &fields;
+    blocks[1].terminator = .{ .jump = .{ .block = 3 } };
+    var witnesses: [4]scalar.Witness = undefined;
+    for (&witnesses, 0..) |*w, i| w.* = .{
+        .source = field_witness.source,
+        .target = if (i == 3) field_witness.target else .{ .block = 1, .instruction = i },
+    };
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var baseline = scalar.Budget.init(.{});
+    _ = try scalar.reconstructBorrowedProposal(arena.allocator(), program, &witnesses, &baseline);
+    witnesses[3].source = .{ .block = 1, .instruction = 3 };
+    var indexed = scalar.Budget.init(.{});
+    _ = try scalar.reconstructBorrowedProposal(arena.allocator(), program, &witnesses, &indexed);
+    try std.testing.expect(indexed.workUsed() > baseline.workUsed());
+    var tight = scalar.Budget.init(.{ .work = baseline.workUsed() });
+    try std.testing.expectError(error.ScalarFieldLimit, scalar.reconstructBorrowedProposal(
+        arena.allocator(),
+        program,
+        &witnesses,
+        &tight,
+    ));
 }

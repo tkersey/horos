@@ -50,6 +50,7 @@ pub const Statistics = struct {
 };
 pub const Result = struct {
     arena: std.heap.ArenaAllocator,
+    map_arena: std.heap.ArenaAllocator,
     program: Program,
     parameters: []const source.RecoveryBinding,
     evidence: Evidence,
@@ -57,6 +58,7 @@ pub const Result = struct {
     statistics: Statistics,
 
     pub fn deinit(self: *Result) void {
+        self.map_arena.deinit();
         self.arena.deinit();
         self.* = undefined;
     }
@@ -96,6 +98,7 @@ pub fn lower(a: Allocator, module: source.Module, submitted: Options) !Result {
     ) catch |err| switch (err) {
         error.RelationLimit, error.ScalarFieldLimit => null,
         error.OutOfMemory => if (storage.exhausted) null else return err,
+        error.OutputAllocationFailed => return error.OutOfMemory,
         else => return err,
     };
     if (result) |selected| return selected;
@@ -105,9 +108,10 @@ pub fn lower(a: Allocator, module: source.Module, submitted: Options) !Result {
         .correspondence = baseline.map,
     };
     try checkWire(scratch, evidence, options.limits, &source_work);
-    return owned(
+    return publish(
         a,
-        scratch,
+        &baseline.arena,
+        &baseline.map_arena,
         baseline.program,
         original.parameters,
         evidence,
@@ -234,10 +238,9 @@ fn attempt(
         .module = module,
         .budget = &budget,
     };
-    const discovered = reuse.discoverReachable(
+    const discovered = reuse.discover(
         scratch.allocator(),
         original.program,
-        baseline.map.maps[@backingInt(data.relocation.Kind.block)],
         &budget,
         &stats.discovery,
     ) catch |err| {
@@ -251,7 +254,9 @@ fn attempt(
     stats.budget = discovered.len;
     if (limits.p01_work == 0) return null;
     var witnesses = discovered;
-    const s = try checkedBatch(ctx, scratch.allocator(), &witnesses, stats) orelse {
+    var proposal = std.heap.ArenaAllocator.init(work);
+    defer proposal.deinit();
+    const s = try checkedBatch(ctx, &proposal, scratch.allocator(), &witnesses, stats) orelse {
         outcome.* = .recovery_liveness;
         stats.budget = 0;
         return null;
@@ -276,44 +281,52 @@ fn attempt(
 
 fn checkedBatch(
     ctx: Context,
-    arena: Allocator,
+    proposal: *std.heap.ArenaAllocator,
+    scratch: Allocator,
     witnesses: *[]const reuse.Witness,
     stats: *Statistics,
 ) !?Program {
-    const whole = ctx.checked(arena, witnesses.*) catch |err| {
+    return ctx.checked(proposal.allocator(), witnesses.*) catch |err| {
         if (err != error.RecoveryLiveness) return err;
+        _ = proposal.reset(.free_all);
         if (witnesses.len == 1) {
             stats.recovery_liveness += 1;
             return null;
         }
-        witnesses.* = try filterLive(ctx, arena, witnesses.*, stats);
-        if (witnesses.len == 0) return null;
-        return try ctx.checked(arena, witnesses.*);
+        return filterLive(ctx, proposal, scratch, witnesses, stats);
     };
-    return whole;
 }
 
 fn filterLive(
     ctx: Context,
-    arena: Allocator,
-    witnesses: []const reuse.Witness,
+    proposal: *std.heap.ArenaAllocator,
+    scratch: Allocator,
+    witnesses: *[]const reuse.Witness,
     stats: *Statistics,
-) ![]const reuse.Witness {
-    const selected = try arena.alloc(reuse.Witness, witnesses.len);
+) !?Program {
+    const selected = try scratch.alloc(reuse.Witness, witnesses.len);
     var count: usize = 0;
-    for (witnesses) |w| {
+    var best: ?Program = null;
+    for (witnesses.*) |w| {
+        if (count + 1 == witnesses.len) {
+            stats.recovery_liveness += 1;
+            stats.budget -= 1;
+            break;
+        }
         var trial = std.heap.ArenaAllocator.init(ctx.a);
         defer trial.deinit();
         selected[count] = w;
-        _ = ctx.checked(trial.allocator(), selected[0 .. count + 1]) catch |err| {
+        best = ctx.checked(trial.allocator(), selected[0 .. count + 1]) catch |err| {
             if (err != error.RecoveryLiveness) return err;
             stats.recovery_liveness += 1;
             stats.budget -= 1;
             continue;
         };
+        std.mem.swap(std.heap.ArenaAllocator, proposal, &trial);
         count += 1;
     }
-    return selected[0..count];
+    witnesses.* = selected[0..count];
+    return best;
 }
 
 const Capture = struct {
@@ -429,21 +442,23 @@ fn finish(
     try ctx.composed(s, final.program, evidence, remaining);
     var applied = stats.*;
     applied.budget = 0;
-    return owned(
+    return publish(
         a,
-        ctx.a,
+        &final.arena,
+        &scratch,
         final.program,
         ctx.original.parameters,
         evidence,
         .applied,
         applied,
         &ctx.budget.remaining,
-    );
+    ) catch |err| return if (err == error.OutOfMemory) error.OutputAllocationFailed else err;
 }
 
-fn owned(
-    a: Allocator,
-    scratch: Allocator,
+fn publish(
+    parent: Allocator,
+    records: *std.heap.ArenaAllocator,
+    correspondence: *std.heap.ArenaAllocator,
     program: Program,
     origins: []const source.RecoveryBinding,
     evidence: Evidence,
@@ -451,23 +466,27 @@ fn owned(
     stats: Statistics,
     work: *u64,
 ) !Result {
-    var result = std.heap.ArenaAllocator.init(a);
-    errdefer result.deinit();
-    const owner = result.allocator();
-    var measure: data.wire.Writer = .{ .remaining = work };
-    try data.record.write(Program, program, &measure);
-    try data.record.write(Evidence, evidence, &measure);
-    const records = try source.ownWithScratch(Program, owner, scratch, program);
+    try data.admission.spend(work, evidence.witnesses.len);
+    correspondence.child_allocator = parent;
+    const owner = correspondence.allocator();
     const bindings = try relocate(owner, origins, evidence.correspondence, work);
-    const proof = try source.ownWithScratch(Evidence, owner, scratch, evidence);
-    return .{
-        .program = records,
+    const witnesses = try owner.dupe(reuse.Witness, evidence.witnesses);
+    const result: Result = .{
+        .program = program,
         .parameters = bindings,
-        .evidence = proof,
-        .arena = result,
+        .evidence = .{
+            .rule = evidence.rule,
+            .witnesses = witnesses,
+            .correspondence = evidence.correspondence,
+        },
+        .arena = records.state.promote(parent),
+        .map_arena = correspondence.*,
         .outcome = outcome,
         .statistics = stats,
     };
+    records.state = .init;
+    correspondence.state = .init;
+    return result;
 }
 
 fn relocate(
@@ -505,15 +524,11 @@ fn checkWire(a: Allocator, evidence: Evidence, limits: Limits, work: *u64) !void
     else
         limits.evidence_bytes;
     const length = try evidenceSize(evidence, bytes_limit, work);
-    try data.admission.spend(work, length);
     const bytes = try a.alloc(u8, length);
     defer a.free(bytes);
     var writer: data.wire.Writer = .{ .output = bytes, .remaining = work };
     try data.record.write(Evidence, evidence, &writer);
-    var decoded = decode(a, bytes, limits) catch |err| switch (err) {
-        error.Capacity => return error.ScalarFieldLimit,
-        else => return err,
-    };
+    var decoded = try decodeWithWork(a, bytes, limits, work);
     defer decoded.deinit();
 }
 
@@ -547,7 +562,9 @@ pub fn parameters(
         options.limits.structural_evidence_bytes
     else
         options.limits.evidence_bytes;
-    _ = try evidenceSize(evidence, byte_limit, if (fallback) &source_work else &budget.remaining);
+    const check_work = if (fallback) &source_work else &budget.remaining;
+    _ = try evidenceSize(evidence, byte_limit, check_work);
+    try correspondenceShape(evidence.correspondence, check_work);
     var original = try lowering.lowerRecoveryInputWithWork(preparation, module, &source_work);
     defer original.deinit();
     var baseline = try structural(preparation, &original, module, options, &source_work);
@@ -603,7 +620,31 @@ fn proofShape(rule: Rule, witnesses: usize, limits: Limits) !void {
     }
 }
 
+fn correspondenceShape(map: Correspondence, work: *u64) !void {
+    const functions = map.maps[@backingInt(data.relocation.Kind.function)];
+    if (functions.len != map.locals.len) return error.InvalidCorrespondence;
+    try data.admission.spend(work, map.regions.len);
+    var previous: ?u64 = null;
+    for (map.regions) |region| {
+        if (previous) |id| if (region.original <= id) return error.InvalidCorrespondence;
+        previous = region.original;
+    }
+    try data.admission.spend(work, functions.len);
+    for (functions, map.locals) |function, local| {
+        if (function == data.relocation.missing and
+            (local.slots.len != 0 or local.custody.len != 0))
+            return error.InvalidCorrespondence;
+    }
+}
+
 pub fn decode(a: Allocator, bytes: []const u8, limits: Limits) !Decoded {
+    return decodeWithWork(a, bytes, limits, null) catch |err| switch (err) {
+        error.RelationLimit => error.ScalarFieldLimit,
+        else => err,
+    };
+}
+
+fn decodeWithWork(a: Allocator, bytes: []const u8, limits: Limits, shared: ?*u64) !Decoded {
     var reader: data.wire.Reader = .{ .input = bytes };
     const tag = try reader.natural();
     if (tag > std.math.maxInt(u8)) return error.UnsupportedVersion;
@@ -614,8 +655,10 @@ pub fn decode(a: Allocator, bytes: []const u8, limits: Limits) !Decoded {
         else => return error.UnsupportedVersion,
     };
     const byte_limit = if (fallback) limits.structural_evidence_bytes else limits.evidence_bytes;
-    const work = if (fallback) limits.source_work else limits.rule.work;
-    if (bytes.len > byte_limit or bytes.len > work) return error.ScalarFieldLimit;
+    var allowance = if (fallback) limits.source_work else limits.rule.work;
+    const work = shared orelse &allowance;
+    if (bytes.len > byte_limit) return error.ScalarFieldLimit;
+    try data.admission.spend(work, bytes.len);
     try proofShape(rule, try reader.count(), limits);
     reader.position = 0;
     var capacity = if (fallback) limits.lowering_bytes else limits.rule.temporary_bytes;
@@ -628,11 +671,12 @@ pub fn decode(a: Allocator, bytes: []const u8, limits: Limits) !Decoded {
         &reader,
         arena.allocator(),
         &capacity,
-    ) catch |err| return if (err == error.OutOfMemory and cap.exhausted)
-        error.ScalarFieldLimit
-    else
-        err;
+    ) catch |err| switch (err) {
+        error.Capacity => return error.ScalarFieldLimit,
+        else => return validationError(err, cap),
+    };
     try reader.finish();
+    try correspondenceShape(evidence.correspondence, work);
     arena.child_allocator = a;
     return .{ .arena = arena, .evidence = evidence };
 }
