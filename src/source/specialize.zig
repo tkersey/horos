@@ -698,6 +698,7 @@ const Engine = struct {
 };
 
 pub const validate = @import("specialize_validate.zig").validate;
+pub const validateWithWork = @import("specialize_validate.zig").validateWithWork;
 
 pub fn requestEqual(a: std.mem.Allocator, lhs: Request, rhs: Request) Error!bool {
     return data.record.equalAlloc(Request, a, lhs, rhs);

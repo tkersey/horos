@@ -2042,7 +2042,6 @@ test "specialization local allowance excludes admission while relation allowance
 }
 
 test "specialization literal validation retains independent semantic allowances" {
-    const checker = @import("specialize_validate.zig");
     const a = std.testing.allocator;
     var b = source.Builder.init(a);
     defer b.deinit();
@@ -2068,10 +2067,10 @@ test "specialization literal validation retains independent semantic allowances"
     var remaining: u64 = 64;
     try std.testing.expectError(
         error.RelationLimit,
-        checker.validateWithWork(a, before, output.request, &output, &remaining),
+        pe.validateWithWork(a, before, output.request, &output, &remaining),
     );
     remaining = 1_000_000;
-    try checker.validateWithWork(a, before, output.request, &output, &remaining);
+    try pe.validateWithWork(a, before, output.request, &output, &remaining);
     try std.testing.expect(1_000_000 - remaining > bytes.len);
     output.request.policy.work = 1;
     output.key = try pe.identity(a, before, output.request);
