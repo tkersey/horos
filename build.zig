@@ -282,7 +282,7 @@ fn dataChecks(
 ) *std.Build.Step {
     const tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/data/test_root.zig"),
+            .root_source_file = b.path("src/data/contract_tests.zig"),
             .target = host,
             .optimize = optimize,
         }),

@@ -21,7 +21,6 @@ pub const Limits = struct {
 pub const Budget = struct {
     limits: Limits = .{},
     strict: bool = false,
-    capture_boundary: bool = false,
     bytes_remaining: usize = 0,
     remaining: u64,
     exhausted: bool = false,
@@ -252,10 +251,7 @@ const Proof = struct {
             const predecessor = self.program.blocks[indexed.block];
             if (predecessor.function != self.program.blocks[frame.block_id].function) continue;
             frame.count += 1;
-            if (indexed.transfer.capture_boundary) {
-                self.budget.capture_boundary = true;
-                return false;
-            }
+            if (indexed.transfer.capture_boundary) return false;
             if (self.budget.strict and
                 (!self.budget.charge(indexed.transfer.edge.assignments.len) or
                     !self.budget.charge(indexed.transfer.overwritten.len))) return false;

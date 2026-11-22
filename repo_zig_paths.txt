@@ -117,6 +117,7 @@ src/data/contification.zig
 src/data/contification_escape_tests.zig
 src/data/contification_recursive_tests.zig
 src/data/contification_tests.zig
+src/data/contract_tests.zig
 src/data/contracts.zig
 src/data/control_provenance.zig
 src/data/dead_arguments.zig

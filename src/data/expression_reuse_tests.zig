@@ -827,7 +827,8 @@ test "recovery discovery excludes same-block fields from its producer search" {
 
 test "recovery discovery reports proven sites when the witness limit discards the batch" {
     var blocks = scalar_diamond.blocks[0..4].*;
-    blocks[3].instructions = &.{ blocks[3].instructions[0], blocks[3].instructions[0] };
+    const targets: [3]ir.Instruction = @splat(blocks[3].instructions[0]);
+    blocks[3].instructions = &targets;
     var program = scalar_diamond;
     program.blocks = &blocks;
     var arena = std.heap.ArenaAllocator.init(a);
@@ -1086,7 +1087,7 @@ test "recovery proposal charges source membership in a block with indexed target
     ));
 }
 
-fn captureFanOutWork(comptime count: usize, repeated: bool) !u64 {
+fn fieldFanOutWork(comptime count: usize, repeated: bool, capture: bool) !u64 {
     const fields: [count]ir.Id = @splat(0);
     const variants: [count]ir.Id = @splat(2);
     var program = scalar_diamond;
@@ -1101,9 +1102,12 @@ fn captureFanOutWork(comptime count: usize, repeated: bool) !u64 {
         const arm = count + 1 + i;
         const field = arm + count;
         edge.* = .{ .block = arm };
-        blocks[arm] = .{ .function = 0, .instructions = &.{}, .terminator = .{
-            .yield_value = .{ .block = field },
-        } };
+        const next: ir.Edge = .{ .block = field };
+        blocks[arm] = .{
+            .function = 0,
+            .instructions = &.{},
+            .terminator = if (capture) .{ .yield_value = next } else .{ .jump = next },
+        };
         op.* = scalar_diamond.blocks[3].instructions[0];
         op.immediate = if (repeated) 0 else i;
         blocks[field] = .{ .function = 0, .instructions = op[0..1], .terminator = .{
@@ -1128,8 +1132,8 @@ fn captureFanOutWork(comptime count: usize, repeated: bool) !u64 {
 
 test "recovery capture diagnostics share work across mutually exclusive arms" {
     inline for (.{ 64, 128 }) |count| {
-        const distinct = try captureFanOutWork(count, false);
-        const repeated = try captureFanOutWork(count, true);
+        const distinct = try fieldFanOutWork(count, false, true);
+        const repeated = try fieldFanOutWork(count, true, true);
         try std.testing.expect(repeated > distinct);
         try std.testing.expect(repeated - distinct <= 10 * count);
     }
@@ -1158,4 +1162,147 @@ test "recovery capture diagnostics distinguish a block's own returning field" {
             .unavailable_version = 2 - captures,
         }, stats);
     }
+}
+
+test "recovery discovery skips mutually exclusive transparent field blocks" {
+    inline for (.{ 64, 128 }) |count| {
+        const distinct = try fieldFanOutWork(count, false, false);
+        const repeated = try fieldFanOutWork(count, true, false);
+        try std.testing.expect(repeated <= distinct + 10 * count);
+    }
+}
+
+test "recovery capture attribution follows the producer through a bypassed join" {
+    var program = scalar_diamond;
+    var blocks = scalar_diamond.blocks[0..4].*;
+    blocks[1].instructions = blocks[0].instructions;
+    blocks[0].instructions = &.{};
+    program.blocks = &blocks;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    for ([_]bool{ false, true }) |swap| {
+        blocks[0].terminator.branch.when_true.block = if (swap) 2 else 1;
+        blocks[0].terminator.branch.when_false.block = if (swap) 1 else 2;
+        for ([_]usize{ 0, 1, 2 }) |captured_arm| {
+            for (1..3) |arm| {
+                const next: ir.Edge = .{ .block = 3 };
+                blocks[arm].terminator = if (captured_arm == arm)
+                    .{ .yield_value = next }
+                else
+                    .{ .jump = next };
+            }
+            var budget = scalar.Budget.init(.{});
+            var stats: scalar.Statistics = .{};
+            const ws = try scalar.discover(arena.allocator(), program, &budget, &stats);
+            const captures: usize = @intFromBool(captured_arm == 1);
+            try std.testing.expectEqual(0, ws.len);
+            try std.testing.expectEqualDeep(scalar.Statistics{
+                .capture_boundary = captures,
+                .unavailable_version = 2 - captures,
+            }, stats);
+        }
+    }
+}
+
+test "recovery reports an unavailable field whose only other block was replaced" {
+    var program = scalar_diamond;
+    var function = scalar_diamond.functions[0];
+    function.entry = 1;
+    program.functions = &.{function};
+    var second = scalar_diamond.blocks[0].instructions[0];
+    second.destination = 5;
+    program.blocks = &.{
+        scalar_diamond.blocks[3],
+        .{
+            .function = 0,
+            .instructions = &.{ scalar_diamond.blocks[0].instructions[0], second },
+            .terminator = .{ .jump = .{ .block = 0 } },
+        },
+    };
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var budget = scalar.Budget.init(.{});
+    var stats: scalar.Statistics = .{};
+    const ws = try scalar.discover(arena.allocator(), program, &budget, &stats);
+    try std.testing.expectEqual(1, ws.len);
+    try std.testing.expectEqualDeep(scalar.Location{ .block = 1, .instruction = 0 }, ws[0].source);
+    try std.testing.expectEqualDeep(scalar.Statistics{
+        .proven = 1,
+        .unavailable_version = 1,
+    }, stats);
+}
+
+test "recovery chooses the lexicographically first provable ancestor" {
+    var program = scalar_diamond;
+    var function = program.functions[0];
+    function.entry = 1;
+    program.functions = &.{function};
+    var blocks = scalar_diamond.blocks[0..4].*;
+    const field = blocks[0].instructions[0];
+    var fields: [4]ir.Instruction = @splat(field);
+    const destinations = [_]ir.Id{ 4, 3, 5, 4 };
+    const next = [_]ir.Id{ 0, 3, 0, 2 };
+    for (&blocks, &fields, destinations, next) |*block, *op, slot, dest| {
+        op.destination = slot;
+        block.instructions = op[0..1];
+        block.terminator = .{ .jump = .{ .block = dest } };
+    }
+    blocks[0].terminator = .{ .return_value = 4 };
+    program.blocks = &blocks;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    for ([_]usize{ 1, 2 }) |expected| {
+        if (expected == 2) blocks[3].instructions = &.{
+            fields[3],
+            .{ .opcode = .move, .operands = &.{5}, .destination = 3 },
+        };
+        var budget = scalar.Budget.init(.{});
+        var stats: scalar.Statistics = .{};
+        const ws = try scalar.discover(arena.allocator(), program, &budget, &stats);
+        try std.testing.expect(ws.len > 0);
+        try std.testing.expectEqual(0, ws[0].target.block);
+        try std.testing.expectEqual(expected, ws[0].source.block);
+    }
+}
+
+fn fieldTailWork(comptime groups: usize, comptime length: usize, repeated: bool) !u64 {
+    var program = scalar_diamond;
+    const fields: [groups * 2]ir.Id = @splat(0);
+    program.schemas = &.{ .u64, .boolean, .unit, .{ .product = &fields } };
+    var ops: [groups * 2]ir.Instruction = @splat(scalar_diamond.blocks[0].instructions[0]);
+    for (&ops, 0..) |*op, i| op.immediate = if (repeated) i % groups else i;
+    var blocks: [2 + length]ir.Block = undefined;
+    for (&blocks, 0..) |*block, i| {
+        block.* = .{
+            .function = 0,
+            .instructions = if (i < 2) ops[i * groups ..][0..groups] else &.{},
+            .terminator = if (i == 0)
+                .{ .yield_value = .{ .block = 1 } }
+            else if (i + 1 < blocks.len)
+                .{ .jump = .{ .block = i + 1 } }
+            else
+                .{ .return_value = 3 },
+        };
+    }
+    program.blocks = &blocks;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var budget = scalar.Budget.init(.{});
+    var stats: scalar.Statistics = .{};
+    const ws = try scalar.discover(arena.allocator(), program, &budget, &stats);
+    const count: usize = if (repeated) groups else 0;
+    try std.testing.expectEqual(0, ws.len);
+    try std.testing.expectEqualDeep(scalar.Statistics{
+        .capture_boundary = count,
+        .unavailable_version = count,
+    }, stats);
+    return budget.workUsed();
+}
+
+test "recovery capture groups stop before field free tails" {
+    const baseline = try fieldTailWork(64, 0, false);
+    const repeated = try fieldTailWork(64, 0, true);
+    const total = try fieldTailWork(64, 128, false);
+    const total_repeated = try fieldTailWork(64, 128, true);
+    try std.testing.expect(total_repeated - total <= repeated - baseline + 2 * 128);
 }

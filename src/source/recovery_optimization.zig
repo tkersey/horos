@@ -329,20 +329,6 @@ fn filterLive(
     return best;
 }
 
-const Capture = struct {
-    arena: Allocator,
-    work: *u64,
-    map: ?Correspondence = null,
-
-    fn observe(
-        ptr: *anyopaque,
-        trace: *const data.coalescing.OriginsTrace,
-    ) data.coalescing.Error!void {
-        const self: *Capture = @ptrCast(@alignCast(ptr));
-        self.map = try Correspondence.copyCanonical(self.arena, trace, self.work);
-    }
-};
-
 const Baseline = struct {
     arena: std.heap.ArenaAllocator,
     map_arena: std.heap.ArenaAllocator,
@@ -356,7 +342,7 @@ const Baseline = struct {
     }
 };
 
-const SubmittedFallback = struct { program: Program, map: Correspondence };
+const SubmittedFallback = Correspondence.Reconstruction.Submitted;
 
 fn structural(
     a: Allocator,
@@ -368,30 +354,15 @@ fn structural(
 ) !Baseline {
     var map_arena = std.heap.ArenaAllocator.init(a);
     errdefer map_arena.deinit();
-    var capture: Capture = .{ .arena = map_arena.allocator(), .work = work };
-    var final = try data.coalescing.runWithWork(a, original.program, .{
-        .compact_refinement = true,
-        .correspondence = .{ .context = &capture, .receive = Capture.observe },
-    }, work);
-    errdefer final.arena.deinit();
-    final.flow.deinit();
-    const map = capture.map orelse return error.InvalidCorrespondence;
-    var verified = if (submitted) |actual| try data.coalescing.matchingCorrespondenceFlow(
+    var result = try Correspondence.Reconstruction.checked(
         a,
+        &map_arena,
         original.program,
-        final.program,
-        map,
-        actual.program,
-        actual.map,
-        work,
-    ) else try data.coalescing.correspondenceFlow(
-        a,
-        original.program,
-        final.program,
-        map,
+        submitted,
         work,
     );
-    defer verified.deinit();
+    errdefer result.final.arena.deinit();
+    defer result.final.flow.deinit();
     try phases.validateDistinct(
         a,
         module,
@@ -399,12 +370,17 @@ fn structural(
         options.formals,
         original.program,
         &original.flow,
-        final.program,
-        &verified,
-        map,
+        result.final.program,
+        &result.final.flow,
+        result.map,
         work,
     );
-    return .{ .arena = final.arena, .map_arena = map_arena, .program = final.program, .map = map };
+    return .{
+        .arena = result.final.arena,
+        .map_arena = map_arena,
+        .program = result.final.program,
+        .map = result.map,
+    };
 }
 
 fn surviving(ws: []const reuse.Witness, map: Correspondence, budget: *reuse.Budget) !void {
@@ -435,31 +411,27 @@ fn finish(
     defer scratch.deinit();
     const allowance = @min(ctx.options.limits.p01_work, ctx.budget.remaining);
     var remaining = allowance;
-    var capture: Capture = .{ .arena = scratch.allocator(), .work = &remaining };
-    var final = data.coalescing.runWithWork(ctx.a, s, .{
-        .compact_refinement = true,
-        .correspondence = .{ .context = &capture, .receive = Capture.observe },
-    }, &remaining) catch |err| {
+    var result = Correspondence.Reconstruction.run(ctx.a, &scratch, s, &remaining) catch |err| {
         ctx.budget.remaining -= allowance - remaining;
         return err;
     };
     ctx.budget.remaining -= allowance - remaining;
-    defer final.arena.deinit();
-    final.flow.deinit();
+    defer result.final.arena.deinit();
+    result.final.flow.deinit();
     const evidence: Evidence = .{
         .rule = ctx.options.rule,
         .witnesses = witnesses,
-        .correspondence = capture.map orelse return error.InvalidCorrespondence,
+        .correspondence = result.map,
     };
     try checkWire(ctx.a, evidence, ctx.options.limits, &ctx.budget.remaining);
-    try ctx.composed(s, final.program, evidence, remaining);
+    try ctx.composed(s, result.final.program, evidence, remaining);
     var applied = stats.*;
     applied.budget = 0;
     return publish(
         a,
-        &final.arena,
+        &result.final.arena,
         &scratch,
-        final.program,
+        result.final.program,
         ctx.original.parameters,
         evidence,
         .applied,

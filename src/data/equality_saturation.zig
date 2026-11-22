@@ -987,7 +987,7 @@ pub fn run(
     var baseline = try p01.run(
         allocator,
         original,
-        .{ .work_limit = options.coalescing.work_limit },
+        options.coalescing.withoutObservations(),
     );
     defer baseline.deinit();
     if (try image.encodedLength(selected.program) > try image.encodedLength(baseline.program))

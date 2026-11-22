@@ -93,6 +93,14 @@ pub const Options = struct {
         receive: *const fn (*anyopaque, *const origins.Trace) Error!void,
     } = null,
 
+    pub fn withoutObservations(self: Options) Options {
+        var result = self;
+        result.statistics = null;
+        result.diagnostic = null;
+        result.correspondence = null;
+        return result;
+    }
+
     pub fn resetObservations(self: Options) void {
         if (self.statistics) |stats| stats.* = .{ .rounds = stats.rounds };
         if (self.diagnostic) |diagnostic| diagnostic.* = .{};
@@ -134,17 +142,24 @@ fn observe(
     remaining: ?*u64,
 ) Error!Owned {
     options.resetObservations();
-    const result = runInternal(allocator, original, options, remaining) catch |failure| {
-        const err = if (failure == error.WorkLimit and remaining != null)
-            error.RelationLimit
-        else
-            failure;
+    const result = runInternal(allocator, original, options, remaining) catch |err| {
         if (options.diagnostic) |d| d.code = err;
         if (options.statistics) |stats| stats.failed_check = err;
         return err;
     };
     if (options.diagnostic) |d| d.* = .{};
     return result;
+}
+
+fn observerTrace(
+    allocator: std.mem.Allocator,
+    original: ir.Program,
+    projection: r.Projection,
+    remaining: ?*u64,
+) Error!origins.Trace {
+    var trace = try origins.Trace.initWithWork(allocator, original, projection, remaining);
+    trace.remaining = remaining;
+    return trace;
 }
 
 fn runInternal(
@@ -167,7 +182,7 @@ fn runInternal(
         remaining,
     );
     var trace: ?origins.Trace = if (options.diagnostic != null or options.correspondence != null)
-        try origins.Trace.initWithWork(allocator, original, baseline, remaining)
+        try observerTrace(allocator, original, baseline, remaining)
     else
         null;
     defer if (trace) |*value| value.deinit();
@@ -229,7 +244,7 @@ fn select(
             if (trace.*) |*t| {
                 t.deinit();
                 trace.* = null;
-                trace.* = try origins.Trace.initWithWork(
+                trace.* = try observerTrace(
                     allocator,
                     original,
                     baseline,

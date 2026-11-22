@@ -343,11 +343,8 @@ fn RecordOps(comptime T: type, comptime ancestors: []const type) type {
             if (Child == u8) {
                 if (comptime @TypeOf(work) != @TypeOf(null))
                     try @import("admission.zig").spend(work, a.len);
-                if (@typeInfo(@TypeOf(a)).pointer.attrs.@"volatile") {
-                    for (a, b) |left, right| if (left != right) return false;
-                    return true;
-                }
-                return std.mem.eql(u8, a, b);
+                for (a, b) |left, right| if (left != right) return false;
+                return true;
             }
             if (@sizeOf(Child) == 0) return true;
             for (a, b) |left, right| {

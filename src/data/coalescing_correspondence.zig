@@ -10,12 +10,15 @@ const witness = @import("coalescing_witness.zig");
 const validation = @import("coalescing_validation.zig");
 const spend = @import("admission.zig").spend;
 const admission = @import("activation_ownership.zig");
+const coalescing = @import("coalescing.zig");
 pub const Error = admission.Error || witness.Error;
 pub const Region = struct { original: p.Id, current: p.Id };
 pub const Correspondence = struct {
     maps: r.Maps,
     regions: []const Region,
     locals: []const witness.Local,
+
+    pub const Reconstruction = Reconstructed;
 
     pub fn copy(a: std.mem.Allocator, trace: *const origins.Trace) Error!Correspondence {
         return copyWithWork(a, trace, trace.remaining);
@@ -95,6 +98,72 @@ fn require(ok: bool) Error!void {
     if (!ok) return error.InvalidCorrespondence;
 }
 
+const Reconstructed = struct {
+    final: coalescing.Owned,
+    map: Correspondence,
+
+    pub const Submitted = struct { program: ir.Program, map: Correspondence };
+
+    const Capture = struct {
+        arena: *std.heap.ArenaAllocator,
+        work: *u64,
+        map: ?Correspondence = null,
+
+        fn observe(ptr: *anyopaque, trace: *const origins.Trace) coalescing.Error!void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.map = try Correspondence.copyCanonical(self.arena.allocator(), trace, self.work);
+        }
+    };
+
+    pub fn run(
+        a: std.mem.Allocator,
+        arena: *std.heap.ArenaAllocator,
+        original: ir.Program,
+        work: *u64,
+    ) coalescing.Error!Reconstructed {
+        var capture: Capture = .{ .arena = arena, .work = work };
+        var final = try coalescing.runWithWork(a, original, .{
+            .compact_refinement = true,
+            .correspondence = .{ .context = &capture, .receive = Capture.observe },
+        }, work);
+        errdefer final.deinit();
+        return .{ .final = final, .map = capture.map orelse return error.InvalidCorrespondence };
+    }
+
+    pub fn checked(
+        a: std.mem.Allocator,
+        arena: *std.heap.ArenaAllocator,
+        original: ir.Program,
+        submitted: ?Submitted,
+        work: *u64,
+    ) coalescing.Error!Reconstructed {
+        var result = try run(a, arena, original, work);
+        errdefer result.final.deinit();
+        try checkRecords(original, result.final.program, result.map, submitted, work);
+        try checkMap(a, original, result.final.program, result.map, work);
+        return result;
+    }
+};
+
+fn checkRecords(
+    original: ir.Program,
+    candidate: ir.Program,
+    map: Correspondence,
+    submitted: ?Reconstructed.Submitted,
+    work: *u64,
+) Error!void {
+    var records: @import("wire.zig").Writer = .{ .remaining = work };
+    const record = @import("record.zig");
+    try record.write(ir.Program, original, &records);
+    if (submitted) |actual| {
+        try require(try record.equalWithWork(ir.Program, candidate, actual.program, work));
+        try require(try record.equalWithWork(Correspondence, map, actual.map, work));
+    } else {
+        try record.write(ir.Program, candidate, &records);
+        try record.write(Correspondence, map, &records);
+    }
+}
+
 pub fn validate(
     a: std.mem.Allocator,
     original: ir.Program,
@@ -115,13 +184,7 @@ pub fn validateWithFlow(
     map: Correspondence,
     work: ?*u64,
 ) Error!@import("activation_flow.zig").Facts {
-    if (work) |remaining| {
-        var records: @import("wire.zig").Writer = .{ .remaining = remaining };
-        const write = @import("record.zig").write;
-        try write(ir.Program, original, &records);
-        try write(ir.Program, candidate, &records);
-        try write(Correspondence, map, &records);
-    }
+    if (work) |remaining| try checkRecords(original, candidate, map, null, remaining);
     return checkedFlow(a, original, candidate, map, work);
 }
 
@@ -134,11 +197,10 @@ pub fn validateMatchingWithFlow(
     submitted_map: Correspondence,
     work: *u64,
 ) Error!@import("activation_flow.zig").Facts {
-    var records: @import("wire.zig").Writer = .{ .remaining = work };
-    const record = @import("record.zig");
-    try record.write(ir.Program, original, &records);
-    try require(try record.equalWithWork(ir.Program, candidate, submitted_program, work));
-    try require(try record.equalWithWork(Correspondence, map, submitted_map, work));
+    try checkRecords(original, candidate, map, .{
+        .program = submitted_program,
+        .map = submitted_map,
+    }, work);
     return checkedFlow(a, original, candidate, map, work);
 }
 

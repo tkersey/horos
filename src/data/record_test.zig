@@ -351,6 +351,19 @@ test "recursive record equality retains volatile finite byte slice semantics" {
 
 const OptionalRow = struct { next: ?[]const @This() };
 
+test "finite record comparison accepts allowzero byte slices" {
+    const Row = struct { label: []allowzero const u8 };
+    var bytes = [_]u8{ 7, 11 };
+    const original: Row = .{ .label = &bytes };
+    const expected: Row = .{ .label = &.{ 7, 11 } };
+    var work: u64 = 3;
+    try std.testing.expect(try record.equalWithWork(Row, original, expected, &work));
+    try std.testing.expectEqual(0, work);
+    bytes[1] = 12;
+    try std.testing.expect(!record.equal(Row, original, expected));
+    try std.testing.expect(!try record.equalAlloc(Row, std.testing.allocator, original, expected));
+}
+
 fn expectDecoded(comptime T: type, bytes: []const u8, expected: T) !void {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

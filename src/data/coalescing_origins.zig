@@ -103,7 +103,6 @@ pub const Trace = struct {
             .maps = maps,
             .regions = regions,
             .locals = locals,
-            .remaining = remaining,
         };
     }
 

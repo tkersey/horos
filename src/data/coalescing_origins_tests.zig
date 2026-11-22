@@ -48,8 +48,17 @@ test "coalescing diagnostics preserve original aliases across projection and suc
     var facts = try @import("activation_ownership.zig").analyze(testing.allocator, original);
     facts.deinit();
     const baseline = try r.ownReachable(a, a, original);
-    var trace = try origins.Trace.init(testing.allocator, original, baseline);
+    var construction_work: u64 = 100_000;
+    var trace = try origins.Trace.initWithWork(
+        testing.allocator,
+        original,
+        baseline,
+        &construction_work,
+    );
     defer trace.deinit();
+    try testing.expect(construction_work < 100_000);
+    construction_work = 0;
+    _ = try pass.Correspondence.copy(a, &trace);
     var work: graph.Work = .{};
     const analysis = try discovery.analyze(a, baseline.program, &work);
     var first = try candidate.build(testing.allocator, a, baseline.program, analysis, .full, &work);
@@ -62,6 +71,7 @@ test "coalescing diagnostics preserve original aliases across projection and suc
     try testing.expect(diagnostic.origins.ambiguous);
     try testing.expectEqual(@as(?p.Id, 0), diagnostic.original_slot);
     try trace.advance(first.correspondence);
+    try testing.expectEqual(@as(u64, 0), construction_work);
     try testing.expectEqualSlices(p.Id, &.{ 1, 0 }, trace.locals[2].slots);
     try testing.expectEqualSlices(p.Id, &.{ 0, 2, 1, 3 }, trace.locals[2].custody);
     const next_analysis = try discovery.analyze(a, first.program, &work);

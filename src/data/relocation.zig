@@ -55,21 +55,56 @@ pub fn sortIdsWithWork(ids: []p.Id, work: ?*u64) Error!void {
     } else std.mem.sort(p.Id, ids, {}, std.sort.asc(p.Id));
 }
 
+const RegionMap = std.AutoHashMapUnmanaged(p.Id, p.Id);
+
+fn findRegion(map: RegionMap, key: p.Id, work: *u64, cost_per_probe: u64) Error!?p.Id {
+    const keys = map.keyIterator();
+    if (keys.len == 0) return null;
+    const values = map.valueIterator();
+    const mask = keys.len - 1;
+    const hash = std.hash_map.AutoContext(p.Id).hash(.{}, key);
+    var slot: usize = @intCast(hash & mask);
+    for (0..keys.len) |_| {
+        try spend(work, cost_per_probe);
+        const meta = keys.metadata[slot];
+        if (meta.isFree()) return null;
+        if (meta.isUsed() and keys.items[slot] == key) return values.items[slot];
+        slot = (slot + 1) & mask;
+    }
+    return null;
+}
+
 const RegionNames = struct {
     allocator: std.mem.Allocator,
     declared: p.Id,
     work: ?*u64,
-    ids: std.AutoHashMapUnmanaged(p.Id, p.Id) = .empty,
+    ids: RegionMap = .empty,
+
+    fn grow(self: *RegionNames, work: *u64) Error!void {
+        try spend(work, @as(u64, self.ids.capacity()) * 4 + 8);
+        var next: RegionMap = .empty;
+        errdefer next.deinit(self.allocator);
+        try next.ensureTotalCapacity(self.allocator, self.ids.count() + 1);
+        var entries = self.ids.iterator();
+        while (entries.next()) |entry| {
+            _ = try findRegion(next, entry.key_ptr.*, work, 2);
+            next.putAssumeCapacity(entry.key_ptr.*, entry.value_ptr.*);
+        }
+        self.ids.deinit(self.allocator);
+        self.ids = next;
+    }
 
     fn id(self: *RegionNames, old: p.Id) Error!p.Id {
         if (old >= self.declared) return error.InvalidReference;
         if (self.work) |left| {
-            const occupied: u64 = self.ids.count();
-            try spend(left, occupied + 1);
-            if (self.ids.available == 0) {
-                try spend(left, @as(u64, self.ids.capacity()) * 3 + 8);
-                try spend(left, occupied * (occupied + 1));
-            }
+            if (self.ids.available == 0) self.grow(left) catch |err| {
+                if (err != error.OutOfMemory) return err;
+                return try findRegion(self.ids, old, left, 1) orelse err;
+            };
+            if (try findRegion(self.ids, old, left, 2)) |existing| return existing;
+            const next: p.Id = self.ids.count();
+            self.ids.putAssumeCapacity(old, next);
+            return next;
         }
         const entry = try self.ids.getOrPut(self.allocator, old);
         if (!entry.found_existing) entry.value_ptr.* = self.ids.count() - 1;
@@ -361,10 +396,10 @@ pub const Projection = struct {
 
     pub fn mappedWithWork(self: Projection, kind: Kind, old: p.Id, work: ?*u64) Error!p.Id {
         try spend(work, 1);
-        if (kind == .region) {
-            try spend(work, self.regions.count());
-            return self.regions.get(old) orelse error.InvalidReference;
-        }
+        if (kind == .region) return (if (work) |left|
+            try findRegion(self.regions, old, left, 1)
+        else
+            self.regions.get(old)) orelse error.InvalidReference;
         const maps = self.maps orelse return error.InvalidReference;
         const map = maps[@backingInt(kind)];
         if (old >= map.len or map[@intCast(old)] == missing) return error.InvalidReference;

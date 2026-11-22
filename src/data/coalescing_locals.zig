@@ -71,7 +71,7 @@ pub const Names = struct {
                 .{ .schema = schemas[@intCast(schema)], .old = old },
             );
         }
-        try sorted(Slot, remaining.items, {}, Slot.less, self.work, 1);
+        try sorted(Slot, remaining.items, {}, Slot.less, self.work, null);
         for (remaining.items) |item| _ = try self.slot(item.old);
         try self.completeScopes();
     }
@@ -86,7 +86,7 @@ pub const Names = struct {
             const parent = self.scope_order.items[cursor];
             const children = tree.children[@intCast(parent)].items;
             const ranks: []const p.Id = tree.ranks;
-            try sorted(p.Id, children, ranks, ScopeTree.lessChild, self.work, 1);
+            try sorted(p.Id, children, ranks, ScopeTree.lessChild, self.work, null);
             for (children) |child| {
                 try self.work.charge(1);
                 if (self.custody[@intCast(child)] == r.missing) _ = try self.scope(child);
@@ -102,16 +102,47 @@ fn sorted(
     context: anytype,
     comptime less: fn (@TypeOf(context), T, T) bool,
     work: *graph.Work,
-    comparison_width: usize,
+    comptime metered_less: anytype,
 ) Error!void {
     if (work.remaining == null and !work.compact_refinement)
         return std.mem.sort(T, items, context, less);
     if (items.len < 2) return;
-    const depth: usize = std.math.log2_int_ceil(usize, items.len);
-    const comparisons = std.math.mul(usize, items.len, 4 * depth) catch return error.WorkLimit;
-    const total = std.math.mul(usize, comparisons, comparison_width) catch return error.WorkLimit;
-    try work.chargeBounded(total);
-    std.sort.heap(T, items, context, less);
+    const Heap = struct {
+        values: []T,
+        context: @TypeOf(context),
+        work: *graph.Work,
+
+        fn before(self: @This(), i: usize, j: usize) Error!bool {
+            try self.work.chargeBounded(1);
+            if (comptime @TypeOf(metered_less) != @TypeOf(null))
+                return metered_less(self.work, self.values[i], self.values[j]);
+            return less(self.context, self.values[i], self.values[j]);
+        }
+
+        fn sift(self: @This(), start: usize, end: usize) Error!void {
+            var root = start;
+            while (root < end / 2) {
+                var child = 2 * root + 1;
+                if (child + 1 < end and try self.before(child, child + 1)) child += 1;
+                if (!try self.before(root, child)) break;
+                std.mem.swap(T, &self.values[root], &self.values[child]);
+                root = child;
+            }
+        }
+    };
+    const heap: Heap = .{ .values = items, .context = context, .work = work };
+    var start = items.len / 2;
+    while (start > 0) {
+        start -= 1;
+        try heap.sift(start, items.len);
+    }
+    var end = items.len;
+    while (end > 1) {
+        try work.chargeBounded(1);
+        end -= 1;
+        std.mem.swap(T, &items[0], &items[end]);
+        try heap.sift(0, end);
+    }
 }
 
 const Slot = struct {
@@ -122,6 +153,36 @@ const Slot = struct {
     }
 };
 const Shape = struct { old: p.Id, height: usize, children: []const p.Id = &.{} };
+
+test "bounded custody sorting compares child ranks only through their common prefix" {
+    const wide: [256]p.Id = @splat(1);
+    var shapes: [32]Shape = undefined;
+    for (&shapes, 0..) |*shape, index| shape.* = .{
+        .old = shapes.len - index,
+        .height = 1,
+        .children = if (index == 0) &wide else wide[0..1],
+    };
+    var expected = shapes;
+    std.mem.sort(Shape, &expected, {}, ScopeTree.lessShape);
+    var shared: u64 = 1024;
+    var work: graph.Work = .{ .remaining = &shared };
+    try sorted(Shape, &shapes, {}, ScopeTree.lessShape, &work, ScopeTree.lessShapeMetered);
+    try std.testing.expectEqualDeep(expected, shapes);
+    try std.testing.expect(shared < 1024);
+    const differing: [256]p.Id = @splat(2);
+    shared = 1;
+    try std.testing.expectEqual(.lt, try ScopeTree.orderRanks(&work, &wide, &differing));
+    try std.testing.expectEqual(0, shared);
+    try std.testing.expectError(error.WorkLimit, ScopeTree.orderRanks(&work, &wide, &wide));
+    try std.testing.expect(work.exhausted and !work.local_exhausted);
+    var local: graph.Work = .{ .limit = 1, .compact_refinement = true };
+    try std.testing.expectError(
+        error.WorkLimit,
+        sorted(Shape, &shapes, {}, ScopeTree.lessShape, &local, ScopeTree.lessShapeMetered),
+    );
+    try std.testing.expect(local.local_exhausted);
+}
+
 const ScopeTree = struct {
     allocator: std.mem.Allocator,
     work: *graph.Work,
@@ -152,7 +213,7 @@ const ScopeTree = struct {
             } else if (cursor != 0) return error.InvalidProgram;
             shapes[cursor] = .{ .old = cursor, .height = heights[cursor] };
         }
-        try sorted(Shape, shapes, {}, lessHeight, work, 1);
+        try sorted(Shape, shapes, {}, lessHeight, work, null);
         return .{
             .allocator = a,
             .work = work,
@@ -166,27 +227,26 @@ const ScopeTree = struct {
         var next_rank: p.Id = 0;
         while (first < self.shapes.len) {
             var end = first;
-            var comparison_width: usize = 1;
             while (end < self.shapes.len and
                 self.shapes[end].height == self.shapes[first].height) : (end += 1)
             {
                 const shape = &self.shapes[end];
                 const children = self.children[@intCast(shape.old)].items;
-                comparison_width = @max(comparison_width, children.len);
+                try self.work.chargeBounded(1);
                 const ranks = try self.allocator.alloc(p.Id, children.len);
                 for (children, ranks) |child, *target| {
                     try self.work.charge(1);
                     target.* = self.ranks[@intCast(child)];
                 }
-                try sorted(p.Id, ranks, {}, std.sort.asc(p.Id), self.work, 1);
+                try sorted(p.Id, ranks, {}, std.sort.asc(p.Id), self.work, null);
                 shape.children = ranks;
             }
-            try sorted(Shape, self.shapes[first..end], {}, lessShape, self.work, comparison_width);
+            try sorted(Shape, self.shapes[first..end], {}, lessShape, self.work, lessShapeMetered);
             for (self.shapes[first..end], first..) |shape, index| {
                 try self.work.charge(1);
-                try self.work.chargeBounded(shape.children.len);
                 const different = index == first or
-                    !std.mem.eql(p.Id, self.shapes[index - 1].children, shape.children);
+                    self.shapes[index - 1].children.len != shape.children.len or
+                    try self.childOrder(self.shapes[index - 1].children, shape.children) != .eq;
                 if (different) next_rank += 1;
                 self.ranks[@intCast(shape.old)] = next_rank;
             }
@@ -199,6 +259,23 @@ const ScopeTree = struct {
     fn lessShape(_: void, a: Shape, b: Shape) bool {
         const order = std.mem.order(p.Id, a.children, b.children);
         return if (order == .eq) a.old < b.old else order == .lt;
+    }
+    fn lessShapeMetered(work: *graph.Work, a: Shape, b: Shape) Error!bool {
+        const order = try orderRanks(work, a.children, b.children);
+        return if (order == .eq) a.old < b.old else order == .lt;
+    }
+    fn childOrder(self: ScopeTree, a: []const p.Id, b: []const p.Id) Error!std.math.Order {
+        if (self.work.remaining == null and !self.work.compact_refinement)
+            return std.mem.order(p.Id, a, b);
+        return orderRanks(self.work, a, b);
+    }
+    fn orderRanks(work: *graph.Work, a: []const p.Id, b: []const p.Id) Error!std.math.Order {
+        for (0..@min(a.len, b.len)) |i| {
+            try work.chargeBounded(1);
+            const order = std.math.order(a[i], b[i]);
+            if (order != .eq) return order;
+        }
+        return std.math.order(a.len, b.len);
     }
     fn lessChild(ranks: []const p.Id, a: p.Id, b: p.Id) bool {
         const left = ranks[@intCast(a)];

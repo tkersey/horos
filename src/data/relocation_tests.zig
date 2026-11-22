@@ -126,3 +126,66 @@ test "bounded closure follows authorities independently of literal byte length" 
         &materialize,
     ));
 }
+
+const SparseCosts = struct { projection: u64, lookup: u64 };
+
+fn sparseProjectionCosts(comptime width: usize) !SparseCosts {
+    const maximum = std.math.maxInt(u64);
+    var even: [width]u64 = undefined;
+    var odd: [width]u64 = undefined;
+    for (&even, &odd, 0..) |*left, *right, i| {
+        left.* = maximum - 4 * width + 4 * i;
+        right.* = left.* + 1;
+    }
+    var functions = fixture.functions[0..3].*;
+    functions[2].regions = &even;
+    functions[1].regions = &odd;
+    var input = fixture;
+    input.functions = &functions;
+    input.scopes.region_count = maximum;
+    var admitted = try d.activation_ownership.analyze(testing.allocator, input);
+    admitted.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ordinary = try d.relocation.ownReachable(a, a, input);
+    var work: u64 = maximum;
+    const bounded = try d.relocation.ownReachableWithWork(a, a, input, &work);
+    const projection = maximum - work;
+    if (width == 32) {
+        var exact = projection;
+        _ = try d.relocation.ownReachableWithWork(a, a, input, &exact);
+        try testing.expectEqual(0, exact);
+        var short = projection - 1;
+        try testing.expectError(error.RelationLimit, d.relocation.ownReachableWithWork(
+            a,
+            a,
+            input,
+            &short,
+        ));
+    }
+    try testing.expectEqualDeep(ordinary.program, bounded.program);
+    try testing.expectEqual(2 * width, bounded.program.scopes.region_count);
+    var expected = ordinary.regions.iterator();
+    var actual = bounded.regions.iterator();
+    while (expected.next()) |entry| {
+        const received = actual.next().?;
+        try testing.expectEqual(entry.key_ptr.*, received.key_ptr.*);
+        try testing.expectEqual(entry.value_ptr.*, received.value_ptr.*);
+    }
+    try testing.expect(actual.next() == null);
+    const before = work;
+    for (even, odd, 0..) |left, right, i| {
+        try testing.expectEqual(i, try bounded.mappedWithWork(.region, left, &work));
+        try testing.expectEqual(width + i, try bounded.mappedWithWork(.region, right, &work));
+    }
+    try testing.expectError(error.InvalidReference, bounded.mappedWithWork(.region, 0, &work));
+    return .{ .projection = projection, .lookup = before - work };
+}
+
+test "bounded sparse region projection preserves numbering and legacy order at scale" {
+    const small = try sparseProjectionCosts(32);
+    const wide = try sparseProjectionCosts(1024);
+    try testing.expect(wide.projection < 64 * small.projection);
+    try testing.expect(wide.lookup < 64 * small.lookup);
+}

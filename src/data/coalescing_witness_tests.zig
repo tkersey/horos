@@ -352,3 +352,42 @@ test "composed correspondence checks its actual output under the shared work all
         evidence.validateMatchingWithFlow(a, original, candidate, map, candidate, other, &work),
     );
 }
+
+test "canonical reconstruction checks its map with the fresh admissions it already owns" {
+    const evidence = @import("coalescing_correspondence.zig");
+    const ownership = @import("activation_ownership.zig");
+    const Reconstruction = evidence.Correspondence.Reconstruction;
+    const a = testing.allocator;
+    var maps = std.heap.ArenaAllocator.init(a);
+    defer maps.deinit();
+    const limit: u64 = 1_000_000;
+    var left = limit;
+    var generated = try Reconstruction.run(a, &maps, original, &left);
+    defer generated.final.deinit();
+    const submitted: Reconstruction.Submitted = .{
+        .program = generated.final.program,
+        .map = generated.map,
+    };
+    var independent = try evidence.validateMatchingWithFlow(
+        a,
+        original,
+        generated.final.program,
+        generated.map,
+        submitted.program,
+        submitted.map,
+        &left,
+    );
+    independent.deinit();
+    var admission_left = limit;
+    for ([_]ir.Program{ original, generated.final.program }) |program| {
+        var facts = try ownership.analyzeObservedWithWork(a, program, null, null, &admission_left);
+        facts.deinit();
+    }
+    try testing.expect(admission_left < limit);
+    var exact = admission_left - left;
+    var checked = try Reconstruction.checked(a, &maps, original, submitted, &exact);
+    defer checked.final.deinit();
+    try testing.expectEqual(0, exact);
+    try testing.expectEqualDeep(generated.final.program, checked.final.program);
+    try testing.expectEqualDeep(generated.map, checked.map);
+}

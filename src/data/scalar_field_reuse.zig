@@ -224,12 +224,88 @@ fn liveBlocks(
 
 const Candidate = struct {
     site: Site,
-    component: Range = .{},
     block: Range = .{},
+    parent: ?usize = null,
+    least: ?usize = null,
     state: State = .unmatched,
 
-    const State = enum { unmatched, unavailable, possible_capture, capture, producer, replaced };
+    const State = enum {
+        unmatched,
+        repeated,
+        pending_capture,
+        unavailable,
+        capture,
+        producer,
+        replaced,
+    };
 };
+
+const TreeBlock = struct {
+    order: usize = 0,
+    end: usize = 0,
+    segment: usize = 0,
+    parent: ?usize = null,
+    next_edge: usize = 0,
+    reaches_field: bool = false,
+    has_capture: bool = false,
+};
+
+fn spanningTree(a: Allocator, ctx: Context) Error![]TreeBlock {
+    try spend(ctx.budget, ctx.live.len);
+    const tree = try a.alloc(TreeBlock, ctx.live.len);
+    @memset(tree, .{});
+    var order: usize = 0;
+    try spend(ctx.budget, ctx.program.functions.len);
+    for (ctx.program.functions) |function| {
+        const entry: usize = @intCast(function.entry);
+        if (!ctx.live[entry]) continue;
+        order += 1;
+        tree[entry] = .{ .order = order, .segment = entry };
+        var current: ?usize = entry;
+        while (current) |id| {
+            try spend(ctx.budget, 1);
+            const block = &tree[id];
+            const term = ctx.program.blocks[id].terminator;
+            const edge = proof.successor(term, block.next_edge) orelse {
+                block.end = order;
+                current = block.parent;
+                continue;
+            };
+            block.next_edge += 1;
+            const target: usize = @intCast(edge.edge.block);
+            if (!ctx.live[target]) continue;
+            if (edge.capture_boundary) tree[entry].has_capture = true;
+            if (tree[target].order != 0) continue;
+            order += 1;
+            tree[target] = .{
+                .order = order,
+                .segment = if (edge.capture_boundary) target else block.segment,
+                .parent = id,
+            };
+            current = target;
+        }
+    }
+    return tree;
+}
+
+fn markFieldPaths(a: Allocator, ctx: Context, tree: []TreeBlock) Error!void {
+    var queue: std.ArrayList(usize) = .empty;
+    defer queue.deinit(a);
+    try spend(ctx.budget, tree.len);
+    for (tree, 0..) |block, i| {
+        if (block.reaches_field) try append(usize, a, ctx.budget, &queue, i);
+    }
+    var cursor: usize = 0;
+    while (cursor < queue.items.len) : (cursor += 1) {
+        const incoming = ctx.predecessors[queue.items[cursor]].items;
+        try spend(ctx.budget, incoming.len + 1);
+        for (incoming) |edge| {
+            if (tree[edge.block].reaches_field) continue;
+            tree[edge.block].reaches_field = true;
+            try append(usize, a, ctx.budget, &queue, edge.block);
+        }
+    }
+}
 
 fn find(
     a: Allocator,
@@ -243,7 +319,7 @@ fn find(
     var flow = try analyze(a, program, budget);
     defer flow.deinit();
     const ctx = try Context.init(tmp, program, &flow, budget);
-    const regions = try proof.transparentRegions(tmp, program, ctx.live, budget);
+    const tree = try spanningTree(tmp, ctx);
     try spend(budget, program.functions.len);
     const sites = try tmp.alloc(std.ArrayList(Candidate), program.functions.len);
     for (sites) |*list| list.* = .empty;
@@ -260,15 +336,19 @@ fn find(
             }
             const list = &sites[@intCast(block.function)];
             try append(Candidate, tmp, budget, list, .{ .site = site });
+            tree[bid].reaches_field = true;
         }
     }
     var selected: std.ArrayList(Witness) = .empty;
     var paths: CapturePaths = .{};
-    for (sites) |function| {
+    try markFieldPaths(tmp, ctx, tree);
+    for (sites, program.functions) |function, declaration| {
         defer countRejections(function.items, stats);
-        const ordered = try indexExpressions(tmp, ctx, function.items, regions);
-        try selectFunction(tmp, ctx, function.items, ordered, &selected, stats);
-        try classifyCaptures(tmp, ctx, function.items, ordered, &paths);
+        const ordered = try indexExpressions(tmp, ctx, function.items, tree);
+        const has_capture = tree[@intCast(declaration.entry)].has_capture;
+        try selectFunction(tmp, ctx, function.items, ordered, &selected, stats, has_capture);
+        if (has_capture)
+            try classifyCaptures(tmp, ctx, function.items, ordered, &paths, tree);
     }
     try spend(budget, selected.items.len);
     return a.dupe(Witness, selected.items);
@@ -288,6 +368,7 @@ fn append(
 const Ordered = struct {
     expression: [3]ir.Id,
     region: usize,
+    order: usize,
     site: usize,
 
     fn before(_: void, left: Ordered, right: Ordered) bool {
@@ -296,6 +377,7 @@ const Ordered = struct {
             .gt => false,
             .eq => {
                 if (left.region != right.region) return left.region < right.region;
+                if (left.order != right.order) return left.order < right.order;
                 return left.site < right.site;
             },
         };
@@ -313,7 +395,7 @@ fn indexExpressions(
     a: Allocator,
     ctx: Context,
     sites: []Candidate,
-    regions: []const usize,
+    tree: []const TreeBlock,
 ) Error![]const Ordered {
     const levels: usize = @bitSizeOf(usize) - @clz(sites.len);
     const bound = std.math.mul(usize, sites.len, 2 * levels + 10) catch
@@ -327,7 +409,8 @@ fn indexExpressions(
         const slots = ctx.program.functions[@intCast(block.function)].layout.slots;
         item.* = .{
             .expression = .{ op.operands[0], op.immediate, slots[@intCast(op.destination)] },
-            .region = regions[site.block],
+            .region = tree[site.block].segment,
+            .order = tree[site.block].order,
             .site = i,
         };
     }
@@ -335,28 +418,90 @@ fn indexExpressions(
     var start: usize = 0;
     while (start < items.len) {
         const end = Ordered.expressionEnd(items, start);
-        var first = start;
-        while (first < end) {
-            var last = first + 1;
-            while (last < end and items[first].region == items[last].region) last += 1;
-            var low = first;
-            while (low < last) {
-                const bid = sites[items[low].site].site.block;
-                var high = low + 1;
-                while (high < last and sites[items[high].site].site.block == bid) high += 1;
-                for (items[low..high]) |item| {
-                    const site = &sites[item.site];
-                    site.component = .{ .start = first, .end = last };
-                    site.block = .{ .start = low, .end = high };
-                    if (start != first or end != last) site.state = .possible_capture;
-                }
-                low = high;
-            }
-            first = last;
-        }
+        try indexAncestors(sites, items, start, end, tree, ctx.budget);
         start = end;
     }
     return items;
+}
+
+fn indexAncestors(
+    sites: []Candidate,
+    items: []const Ordered,
+    start: usize,
+    end: usize,
+    tree: []const TreeBlock,
+    budget: *Budget,
+) Error!void {
+    const repeated = sites[items[start].site].site.block != sites[items[end - 1].site].site.block;
+    var low = start;
+    var parent: ?usize = null;
+    while (low < end) {
+        const first = items[low];
+        if (low > start and items[low - 1].region != first.region) parent = null;
+        while (parent) |p| {
+            try spend(budget, 1);
+            if (tree[sites[p].site.block].end >= first.order) break;
+            parent = sites[p].parent;
+        }
+        var high = low + 1;
+        while (high < end and items[high].order == first.order) high += 1;
+        const least = if (parent) |p| @min(p, sites[p].least orelse p) else null;
+        for (items[low..high]) |item| {
+            const candidate = &sites[item.site];
+            candidate.block = .{ .start = low, .end = high };
+            candidate.parent = parent;
+            candidate.least = least;
+            if (repeated) candidate.state = .repeated;
+        }
+        parent = first.site;
+        low = high;
+    }
+}
+
+fn matchingBlock(
+    ctx: Context,
+    sites: []Candidate,
+    groups: []const Ordered,
+    block: Range,
+    target: Site,
+) Error!?usize {
+    for (groups[block.start..block.end]) |item| {
+        try spend(ctx.budget, 1);
+        const source = sites[item.site];
+        if (source.state == .replaced) continue;
+        if (try ctx.matches(.{ .source = source.site, .target = target })) return item.site;
+    }
+    return null;
+}
+
+fn findSource(
+    a: Allocator,
+    ctx: Context,
+    sites: []Candidate,
+    groups: []const Ordered,
+    target: Candidate,
+    alternatives: *std.ArrayList(usize),
+) Error!?usize {
+    const least = target.least orelse return null;
+    if (try matchingBlock(ctx, sites, groups, sites[least].block, target.site)) |source|
+        return source;
+    alternatives.clearRetainingCapacity();
+    var ancestor = target.parent;
+    while (ancestor) |p| {
+        try spend(ctx.budget, 1);
+        if (p != least) try append(usize, a, ctx.budget, alternatives, p);
+        ancestor = sites[p].parent;
+    }
+    const items = alternatives.items;
+    const levels: usize = @bitSizeOf(usize) - @clz(items.len);
+    const sorting = std.math.mul(usize, items.len, 2 * levels) catch return error.ScalarFieldLimit;
+    try spend(ctx.budget, sorting);
+    std.sort.heap(usize, items, {}, std.sort.asc(usize));
+    for (items) |p| {
+        if (try matchingBlock(ctx, sites, groups, sites[p].block, target.site)) |source|
+            return source;
+    }
+    return null;
 }
 
 fn selectFunction(
@@ -366,33 +511,27 @@ fn selectFunction(
     groups: []const Ordered,
     selected: *std.ArrayList(Witness),
     stats: *Statistics,
+    has_capture: bool,
 ) Error!void {
+    var alternatives: std.ArrayList(usize) = .empty;
+    defer alternatives.deinit(a);
     try spend(ctx.budget, sites.len);
     for (sites) |*target| {
         if (target.state == .producer) continue;
-        const candidates = [_][]const Ordered{
-            groups[target.component.start..target.block.start],
-            groups[target.block.end..target.component.end],
+        const i = try findSource(a, ctx, sites, groups, target.*, &alternatives) orelse {
+            if (target.state == .repeated)
+                target.state = if (has_capture) .pending_capture else .unavailable;
+            continue;
         };
-        ctx.budget.capture_boundary = target.state == .possible_capture;
-        search: for (candidates) |others| for (others) |item| {
-            try spend(ctx.budget, 1);
-            const source = &sites[item.site];
-            if (source.state == .replaced) continue;
-            if (!try ctx.matches(.{ .source = source.site, .target = target.site })) {
-                target.state = if (ctx.budget.capture_boundary) .possible_capture else .unavailable;
-                continue;
-            }
-            source.state = .producer;
-            target.state = .replaced;
-            stats.proven += 1;
-            if (selected.items.len == ctx.budget.limits.witnesses) return error.ScalarFieldLimit;
-            try append(Witness, a, ctx.budget, selected, .{
-                .source = Location.from(source.site),
-                .target = Location.from(target.site),
-            });
-            break :search;
-        };
+        const source = &sites[i];
+        source.state = .producer;
+        target.state = .replaced;
+        stats.proven += 1;
+        if (selected.items.len == ctx.budget.limits.witnesses) return error.ScalarFieldLimit;
+        try append(Witness, a, ctx.budget, selected, .{
+            .source = Location.from(source.site),
+            .target = Location.from(target.site),
+        });
     }
 }
 
@@ -443,6 +582,7 @@ const CapturePaths = struct {
         ctx: Context,
         sites: []Candidate,
         members: []const Ordered,
+        tree: []const TreeBlock,
     ) Error!void {
         if (self.blocks.len == 0) {
             try spend(ctx.budget, ctx.live.len);
@@ -472,7 +612,7 @@ const CapturePaths = struct {
             while (proof.successor(terminator, edge)) |transfer| : (edge += 1) {
                 try spend(ctx.budget, 1);
                 const target: usize = @intCast(transfer.edge.block);
-                if (!ctx.live[target]) continue;
+                if (!tree[target].reaches_field) continue;
                 const crossed = transfer.capture_boundary;
                 const after = if (crossed) state.after.join(state.before) else state.after;
                 try self.merge(a, ctx.budget, target, if (crossed) .none else state.before, after);
@@ -480,7 +620,7 @@ const CapturePaths = struct {
         }
         for (members) |item| {
             const site = &sites[item.site];
-            if (site.state != .possible_capture) continue;
+            if (site.state != .pending_capture) continue;
             const target = site.site.block;
             const earlier = self.blocks[target].after;
             site.state = if (earlier.containsOther(target)) .capture else .unavailable;
@@ -494,6 +634,7 @@ fn classifyCaptures(
     sites: []Candidate,
     ordered: []const Ordered,
     paths: *CapturePaths,
+    tree: []const TreeBlock,
 ) Error!void {
     try spend(ctx.budget, ordered.len);
     var first: usize = 0;
@@ -502,9 +643,9 @@ fn classifyCaptures(
         const members = ordered[first..end];
         first = end;
         for (members) |item| {
-            if (sites[item.site].state == .possible_capture) break;
+            if (sites[item.site].state == .pending_capture) break;
         } else continue;
-        try paths.classify(a, ctx, sites, members);
+        try paths.classify(a, ctx, sites, members, tree);
     }
 }
 

@@ -235,6 +235,42 @@ const MapCapture = struct {
     }
 };
 
+fn limitedObserver(context: *anyopaque, _: *const pass.OriginsTrace) pass.Error!void {
+    const calls: *usize = @ptrCast(@alignCast(context));
+    calls.* += 1;
+    return error.WorkLimit;
+}
+
+test "observer errors retain their own budget identity on both coalescing routes" {
+    var calls: usize = 0;
+    var stats: pass.Statistics = .{};
+    var diagnostic: pass.Diagnostic = .{};
+    var remaining: u64 = 100_000_000;
+    const options: pass.Options = .{
+        .compact_refinement = true,
+        .work_limit = 500_000,
+        .statistics = &stats,
+        .diagnostic = &diagnostic,
+        .correspondence = .{ .context = &calls, .receive = limitedObserver },
+    };
+    const quiet = options.withoutObservations();
+    try testing.expectEqual(options.work_limit, quiet.work_limit);
+    try testing.expect(quiet.compact_refinement);
+    try testing.expect(quiet.statistics == null and quiet.diagnostic == null);
+    try testing.expect(quiet.correspondence == null);
+    for ([_]bool{ false, true }) |bounded| {
+        const result = if (bounded)
+            pass.runWithWork(testing.allocator, fixture, options, &remaining)
+        else
+            pass.run(testing.allocator, fixture, options);
+        try testing.expectError(error.WorkLimit, result);
+        try testing.expectEqual(error.WorkLimit, diagnostic.code.?);
+        try testing.expectEqual(error.WorkLimit, stats.failed_check.?);
+    }
+    try testing.expectEqual(@as(usize, 2), calls);
+    try testing.expect(remaining > 0);
+}
+
 test "coalescing bounded work returns exact ordinary image and complete map at its work boundary" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
