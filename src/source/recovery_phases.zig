@@ -169,30 +169,6 @@ fn positions(
     }
 }
 
-fn continuation(control: ir.Terminator) ?ir.Edge {
-    return switch (control) {
-        inline .call,
-        .perform,
-        .apply,
-        .handle,
-        .resume_value,
-        .resume_with,
-        .resume_computation,
-        .dispose,
-        .protect,
-        .with_region,
-        => |operation| operation.next,
-        .branch,
-        .return_value,
-        .jump,
-        .yield_value,
-        .fail,
-        .switch_variant,
-        .unpack_product,
-        => null,
-    };
-}
-
 fn caller(
     before: *const Facts,
     block: ir.Block,
@@ -202,8 +178,9 @@ fn caller(
     target_slot: Id,
     work: *u64,
 ) Error!void {
-    const edge = continuation(block.terminator) orelse return;
-    const candidate = continuation(target.terminator) orelse return error.InvalidCorrespondence;
+    const edge = data.state_admission.next(block.terminator) orelse return;
+    const candidate = data.state_admission.next(target.terminator) orelse
+        return error.InvalidCorrespondence;
     if ((try retained(before, edge, slot, work)) !=
         (try retained(after, candidate, target_slot, work))) return error.RecoveryLiveness;
 }
@@ -223,6 +200,85 @@ fn retained(facts: *const Facts, edge: ir.Edge, slot: Id, work: *u64) Error!bool
     return unchanged or transferred;
 }
 
+const Pair = struct { forward: Id = missing, reverse: Id = missing };
+
+const Bijection = struct {
+    pairs: []Pair,
+
+    fn init(a: std.mem.Allocator, count: usize, work: *u64) Error!Bijection {
+        try spend(work, count);
+        const pairs = try a.alloc(Pair, count);
+        @memset(pairs, .{});
+        return .{ .pairs = pairs };
+    }
+
+    fn bind(self: Bijection, old: Id, new: Id) Error!void {
+        if (old >= self.pairs.len or new >= self.pairs.len) return error.InvalidCorrespondence;
+        const forward = &self.pairs[@intCast(old)].forward;
+        const reverse = &self.pairs[@intCast(new)].reverse;
+        if ((forward.* != missing and forward.* != new) or
+            (reverse.* != missing and reverse.* != old)) return error.RecoveryLiveness;
+        forward.* = new;
+        reverse.* = old;
+    }
+
+    fn matches(self: Bijection, old: Id, new: Id) Error!bool {
+        if ((old != missing and old >= self.pairs.len) or
+            (new != missing and new >= self.pairs.len)) return error.InvalidCorrespondence;
+        const forward = if (old == missing) missing else self.pairs[@intCast(old)].forward;
+        const reverse = if (new == missing) missing else self.pairs[@intCast(new)].reverse;
+        if (forward == missing and reverse == missing) return false;
+        if (forward != new or reverse != old) return error.RecoveryLiveness;
+        return true;
+    }
+};
+
+const Protected = struct { old: Id, new: Id, previous: ?usize };
+
+const AliasClass = struct {
+    head: ?usize = null,
+    origin: usize = 0,
+    slots: ?Bijection = null,
+
+    fn member(
+        self: *AliasClass,
+        a: std.mem.Allocator,
+        protected: []const Protected,
+        baseline: Map,
+        candidate: Map,
+        id: usize,
+        work: *u64,
+    ) Error!void {
+        if (id == self.origin) return;
+        if (self.slots == null) {
+            const slots = try Bijection.init(a, baseline.locals[self.origin].slots.len, work);
+            var index = self.head;
+            while (index) |i| {
+                try spend(work, 1);
+                try slots.bind(protected[i].old, protected[i].new);
+                index = protected[i].previous;
+            }
+            try checkSlots(slots, baseline, candidate, self.origin, work);
+            self.slots = slots;
+        }
+        try checkSlots(self.slots.?, baseline, candidate, id, work);
+    }
+
+    fn checkSlots(
+        slots: Bijection,
+        baseline: Map,
+        candidate: Map,
+        id: usize,
+        work: *u64,
+    ) Error!void {
+        const old = baseline.locals[id].slots;
+        const new = candidate.locals[id].slots;
+        if (old.len != slots.pairs.len or old.len != new.len) return error.InvalidCorrespondence;
+        try spend(work, old.len);
+        for (old, new) |from, to| _ = try slots.matches(from, to);
+    }
+};
+
 pub fn validateAliases(
     a: std.mem.Allocator,
     module: ast.Module,
@@ -235,45 +291,62 @@ pub fn validateAliases(
 ) Error!void {
     try spend(work, 1);
     if (formals.len == 0) return;
-    const functions = try indexFunctions(a, module, original, parameters, work);
-    defer a.free(functions);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+    const functions = try indexFunctions(scratch, module, original, parameters, work);
     const before = baseline.maps[@backingInt(data.relocation.Kind.function)];
     const after = candidate.maps[@backingInt(data.relocation.Kind.function)];
     if (before.len != functions.len or after.len != functions.len or
         baseline.locals.len != functions.len or candidate.locals.len != functions.len)
         return error.InvalidCorrespondence;
+    const labels = try Bijection.init(scratch, functions.len, work);
+    try spend(work, functions.len);
+    const classes = try scratch.alloc(AliasClass, functions.len);
+    @memset(classes, .{});
     try spend(work, formals.len);
-    var shared = false;
-    for (formals, 0..) |role, index| {
+    const protected = try scratch.alloc(Protected, formals.len);
+    for (formals, protected, 0..) |role, *slots, index| {
         const bound = (try origin(module, parameters, functions, original, role)).binding;
         const id: usize = @intCast(bound.function);
-        if ((before[id] == missing) != (after[id] == missing)) return error.RecoveryLiveness;
-        if (before[id] == missing) continue;
-        const old_slot = try lookup(baseline.locals[id].slots, bound.slot);
-        const new_slot = try lookup(candidate.locals[id].slots, bound.slot);
-        try spend(work, functions.len);
-        for (before, after, functions, 0..) |old, new, *function, i| {
-            if ((old == before[id]) != (new == after[id])) return error.RecoveryLiveness;
-            if (old != before[id] or i == id) continue;
-            shared = true;
-            functions[id].first = index;
-            function.first = index;
-            const old_slots = baseline.locals[i].slots;
-            const new_slots = candidate.locals[i].slots;
-            if (old_slots.len != new_slots.len) return error.InvalidCorrespondence;
-            try spend(work, old_slots.len);
-            for (old_slots, new_slots) |previous, next| {
-                if ((previous == old_slot) != (next == new_slot)) return error.RecoveryLiveness;
-            }
-        }
+        const old = before[id];
+        const new = after[id];
+        if ((old == missing) != (new == missing)) return error.RecoveryLiveness;
+        if (old == missing) continue;
+        try labels.bind(old, new);
+        const class = &classes[@intCast(old)];
+        if (class.head == null) class.origin = id;
+        slots.* = .{
+            .old = try lookup(baseline.locals[id].slots, bound.slot),
+            .new = try lookup(candidate.locals[id].slots, bound.slot),
+            .previous = class.head,
+        };
+        class.head = index;
     }
-    if (shared) try blockAliases(a, original.blocks, functions, baseline, candidate, work);
+    try spend(work, functions.len);
+    var shared = false;
+    for (before, after, 0..) |old, new, id| {
+        if (!try labels.matches(old, new)) continue;
+        const class = &classes[@intCast(old)];
+        try class.member(scratch, protected, baseline, candidate, id, work);
+        shared = shared or class.slots != null;
+    }
+    if (shared) try blockAliases(
+        scratch,
+        original.blocks,
+        before,
+        classes,
+        baseline,
+        candidate,
+        work,
+    );
 }
 
 fn blockAliases(
     a: std.mem.Allocator,
     blocks: []const ir.Block,
-    functions: []const Function,
+    functions: []const Id,
+    classes: []const AliasClass,
     baseline: Map,
     candidate: Map,
     work: *u64,
@@ -281,24 +354,12 @@ fn blockAliases(
     const before = baseline.maps[@backingInt(data.relocation.Kind.block)];
     const after = candidate.maps[@backingInt(data.relocation.Kind.block)];
     if (before.len != blocks.len or after.len != blocks.len) return error.InvalidCorrespondence;
+    const labels = try Bijection.init(a, blocks.len, work);
     try spend(work, blocks.len);
-    const old_to_new = try a.alloc(Id, blocks.len);
-    defer a.free(old_to_new);
-    try spend(work, blocks.len);
-    const new_to_old = try a.alloc(Id, blocks.len);
-    defer a.free(new_to_old);
-    @memset(old_to_new, missing);
-    @memset(new_to_old, missing);
     for (blocks, before, after) |block, old, new| {
-        if (functions[@intCast(block.function)].first == null) continue;
+        const class = functions[@intCast(block.function)];
+        if (class == missing or classes[@intCast(class)].slots == null) continue;
         if ((old == missing) != (new == missing)) return error.RecoveryLiveness;
-        if (old == missing) continue;
-        if (old >= old_to_new.len or new >= new_to_old.len) return error.InvalidCorrespondence;
-        const next = &old_to_new[@intCast(old)];
-        const previous = &new_to_old[@intCast(new)];
-        if ((next.* != missing and next.* != new) or (previous.* != missing and previous.* != old))
-            return error.RecoveryLiveness;
-        next.* = new;
-        previous.* = old;
+        if (old != missing) try labels.bind(old, new);
     }
 }

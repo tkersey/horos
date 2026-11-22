@@ -40,6 +40,9 @@ pub fn build(b: *std.Build) void {
     const native_linker = compiler(b, target, public_data, data, optimize);
     const component_step = componentChecks(b, horos, native_linker, optimize);
     const authoring_checks = authoringChecks(b, data, static_authoring, optimize);
+    const recovery = recoveryOptimizationChecks(b, data, optimize);
+    data_step.dependOn(recovery.expressions);
+    authoring_checks.step.dependOn(recovery.source);
     const native = b.step(
         "check-native",
         "Check native authoring, data and linker contracts without an interpreter",
@@ -47,9 +50,10 @@ pub fn build(b: *std.Build) void {
     native.dependOn(data_step);
     native.dependOn(authoring_checks.step);
     native.dependOn(component_step);
-    native.dependOn(recoveryOptimizationChecks(b, data, optimize));
+    native.dependOn(recovery.step);
     const wasm_checks = wasmChecks(b, compactProbe(b), compactEmitter(b, horos, optimize));
     const semantics = semanticsChecks(b, data, horos, authoring_checks.run, optimize);
+    semantics.dependOn(recovery.source);
     const aggregate = b.step(
         "check",
         "Check native contracts and independent source/wasm observations",
@@ -63,11 +67,17 @@ pub fn build(b: *std.Build) void {
     b.default_step = aggregate;
 }
 
+const RecoveryChecks = struct {
+    step: *std.Build.Step,
+    expressions: *std.Build.Step,
+    source: *std.Build.Step,
+};
+
 fn recoveryOptimizationChecks(
     b: *std.Build,
     data: *std.Build.Module,
     optimize: std.lang.Optimize,
-) *std.Build.Step {
+) RecoveryChecks {
     const check = b.step("check-recovery-optimization", "Check source-bound scalar field reuse");
     const tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -79,7 +89,6 @@ fn recoveryOptimizationChecks(
         .filters = &.{
             "recovery_optimization_tests",
             "recovery_phase_tests",
-            "protected coalesced",
         },
     });
     const run = b.addRunArtifact(tests);
@@ -91,12 +100,12 @@ fn recoveryOptimizationChecks(
             .target = data.resolved_target,
             .optimize = optimize,
         }),
-        .filters = &.{ "recovery field reuse", "recovery evidence" },
+        .filters = &.{"expression_reuse_tests"},
     });
     const run_rule = b.addRunArtifact(rule_tests);
     run_rule.has_side_effects = true;
     check.dependOn(&run_rule.step);
-    return check;
+    return .{ .step = check, .expressions = &run_rule.step, .source = &run.step };
 }
 
 fn qualificationHost(b: *std.Build) std.Build.ResolvedTarget {

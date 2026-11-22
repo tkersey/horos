@@ -247,3 +247,87 @@ test "recovery alias checks reject gaining or losing an unprotected caller frame
         &work,
     ));
 }
+
+const width = 64;
+
+fn wideAliases(b: *source.Builder) !source.Module {
+    const unit = try b.scalar(void);
+    const word = try b.scalar(u64);
+    const entry = try b.declare(&.{word}, word, &.{}, &.{});
+    const inputs: [width]u64 = @splat(word);
+    const first = try b.declare(&inputs, word, &.{}, &.{});
+    const second = try b.declare(&inputs, word, &.{}, &.{});
+    for ([_]u64{ first, second }) |function| {
+        try b.define(function, try b.pure(try b.reference(b.parameter(function, 0))));
+    }
+    const unused_body = try b.pure(try b.constant(u64, 0));
+    for (0..width) |_| {
+        const unused = try b.declare(&.{word}, word, &.{}, &.{});
+        try b.define(unused, unused_body);
+    }
+    const value = try b.variable(word);
+    const initial = try b.reference(b.parameter(entry, 0));
+    const next = try b.reference(value);
+    const left_arguments: [width]u64 = @splat(initial);
+    const right_arguments: [width]u64 = @splat(next);
+    const left = try b.term(.{ .call = .{ .function = first, .arguments = &left_arguments } });
+    const right = try b.term(.{ .call = .{ .function = second, .arguments = &right_arguments } });
+    try b.define(entry, try b.bind(value, left, right));
+    return b.module(entry, unit);
+}
+
+test "recovery checks a shared slot bijection once for many role ordinals" {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const fixture = try wideAliases(&b);
+    var input = try @import("activation_lower.zig").lowerRecoveryInput(a, fixture);
+    defer input.deinit();
+    var output = try source.lowerObserved(a, fixture, .{ .recovery = true });
+    defer output.deinit();
+    try source.recovery.validate(a, fixture, &output);
+    const map = output.recovery_evidence.?.correspondence;
+    const functions = map.maps[@backingInt(data.relocation.Kind.function)];
+    try std.testing.expectEqual(functions[1], functions[2]);
+    try std.testing.expect(functions[1] != data.relocation.missing);
+    try std.testing.expectEqual(data.relocation.missing, functions[3]);
+    var roles: [width - 1]phase.Formal = undefined;
+    for (roles[0 .. width - 2], 0..) |*role, i| role.* = .{ .function = 1 + i % 2, .ordinal = i };
+    roles[width - 2] = .{ .function = 3, .ordinal = 0 };
+    var work: u64 = 1000;
+    try phase.validateAliases(a, fixture, input.parameters, &roles, input.program, map, map, &work);
+    const Local = @TypeOf(map.locals[0]);
+    const locals = try b.allocator().dupe(Local, map.locals);
+    const slots = try b.allocator().dupe(u64, locals[2].slots);
+    locals[2].slots = slots;
+    var candidate = map;
+    candidate.locals = locals;
+    const local = input.program.functions[2].inputs;
+    const unused_a: usize = @intCast(local[width - 1]);
+    const unused_b: usize = @intCast(local[width - 2]);
+    std.mem.swap(u64, &slots[unused_a], &slots[unused_b]);
+    work = 1000;
+    try phase.validateAliases(
+        a,
+        fixture,
+        input.parameters,
+        &roles,
+        input.program,
+        map,
+        candidate,
+        &work,
+    );
+    std.mem.swap(u64, &slots[unused_a], &slots[@intCast(local[0])]);
+    inline for (.{ false, true }) |reversed| {
+        work = 1000;
+        try std.testing.expectError(error.RecoveryLiveness, phase.validateAliases(
+            a,
+            fixture,
+            input.parameters,
+            &roles,
+            input.program,
+            if (reversed) candidate else map,
+            if (reversed) map else candidate,
+            &work,
+        ));
+    }
+}

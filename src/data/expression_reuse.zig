@@ -110,7 +110,7 @@ pub fn run(
     var stats: Statistics = .{};
     var budget: Budget = .{ .remaining = options.work_limit };
     defer if (statistics) |out| {
-        stats.work = budget.used;
+        stats.work = options.work_limit - budget.remaining;
         out.* = stats;
     };
     var flow = try ownership.analyze(allocator, original);

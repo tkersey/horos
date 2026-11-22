@@ -178,6 +178,234 @@ fn checkEvidence(
     defer a.free(bindings);
 }
 
+fn formalBinding(
+    bindings: []const source.RecoveryBinding,
+    function: source.Id,
+) !source.RecoveryBinding {
+    for (bindings) |binding| if (binding.source_function == function) return binding;
+    return error.MissingFormal;
+}
+
+test "recovery field reuse retains protected coalesced aliases through an applied rewrite" {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const repeated = (try diamond(&b)).entry;
+    const fixture = try @import("recovery_tests.zig").coalescedBindingModule(&b, repeated);
+    const module = fixture.module;
+    var policy = options();
+    policy.formals = &.{.{ .function = fixture.first, .ordinal = 0 }};
+    var ordinary = try source.lowerObserved(a, module, .{ .recovery = true });
+    defer ordinary.deinit();
+    const first = try formalBinding(ordinary.parameters, fixture.first);
+    const second = try formalBinding(ordinary.parameters, fixture.second);
+    try std.testing.expectEqual(first.function, second.function);
+    try std.testing.expectEqual(first.slot, second.slot);
+    try std.testing.expect(first.variable != second.variable);
+    var optimized = try source.lowerRecoveryOptimized(a, module, policy);
+    defer optimized.deinit();
+    try std.testing.expectEqual(.applied, optimized.outcome);
+    try std.testing.expectEqual(1, optimized.evidence.witnesses.len);
+    const w = optimized.evidence.witnesses[0];
+    const maps = optimized.evidence.correspondence.maps;
+    const functions = maps[@backingInt(data.relocation.Kind.function)];
+    const blocks = maps[@backingInt(data.relocation.Kind.block)];
+    const target = optimized.program.blocks[blocks[w.target.block]];
+    try std.testing.expectEqual(functions[repeated], target.function);
+    try std.testing.expectEqual(.move, target.instructions[w.target.instruction].opcode);
+    const verified = try optimization.parameters(
+        a,
+        module,
+        optimized.program,
+        optimized.evidence,
+        policy,
+    );
+    defer a.free(verified);
+    try std.testing.expectEqualDeep(optimized.parameters, verified);
+    const lhs = try formalBinding(verified, fixture.first);
+    const rhs = try formalBinding(verified, fixture.second);
+    try std.testing.expectEqual(first.variable, lhs.variable);
+    try std.testing.expectEqual(second.variable, rhs.variable);
+    try std.testing.expectEqual(lhs.function, rhs.function);
+    try std.testing.expectEqual(lhs.slot, rhs.slot);
+}
+
+test "exhausted candidate P01 cannot split ordinary protected frame aliases" {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const repeated = (try diamond(&b)).entry;
+    const fixture = try @import("recovery_tests.zig").coalescedBindingModule(&b, repeated);
+    const module = fixture.module;
+    var policy = options();
+    policy.formals = &.{.{ .function = fixture.first, .ordinal = 0 }};
+    policy.limits.p01_work = 0;
+    var ordinary = try source.lowerObserved(a, module, .{ .recovery = true });
+    defer ordinary.deinit();
+    var retained = try source.lowerRecoveryOptimized(a, module, policy);
+    defer retained.deinit();
+    try std.testing.expectEqual(.budget, retained.outcome);
+    try expectStructuralFallback(module, policy, &ordinary, &retained);
+    var unmerged = try source.lowerObserved(a, module, .{
+        .recovery = true,
+        .coalescing = .{ .work_limit = 0 },
+    });
+    defer unmerged.deinit();
+    const lhs = try formalBinding(unmerged.parameters, fixture.first);
+    const rhs = try formalBinding(unmerged.parameters, fixture.second);
+    try std.testing.expect(lhs.function != rhs.function);
+    var forged = retained.evidence;
+    forged.correspondence = unmerged.recovery_evidence.?.correspondence;
+    try std.testing.expectError(
+        error.InvalidCorrespondence,
+        checkEvidence(module, unmerged.program, forged, policy),
+    );
+}
+
+test "no eligible field retains ordinary protected aliases" {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    _ = try diamond(&b);
+    const fixture = try @import("recovery_tests.zig").coalescedBindingModule(&b, null);
+    var policy = options();
+    policy.formals = &.{.{ .function = fixture.first, .ordinal = 0 }};
+    var ordinary = try source.lowerObserved(a, fixture.module, .{ .recovery = true });
+    defer ordinary.deinit();
+    var retained = try source.lowerRecoveryOptimized(a, fixture.module, policy);
+    defer retained.deinit();
+    try std.testing.expectEqual(.no_sites, retained.outcome);
+    try expectStructuralFallback(fixture.module, policy, &ordinary, &retained);
+}
+
+fn twoReachableDiamonds(b: *source.Builder, first: u64, second: u64) !source.Module {
+    const word = try b.scalar(u64);
+    const pair = try b.schema(.{ .product = &.{ word, word } });
+    const entry = try b.declare(&.{ try b.scalar(bool), pair, word, word }, word, &.{}, &.{});
+    var arguments: [4]u64 = undefined;
+    for (&arguments, 0..) |*argument, i| argument.* = try b.reference(b.parameter(entry, i));
+    const left = try b.variable(word);
+    const right = try b.variable(word);
+    const lhs = try b.term(.{ .call = .{ .function = first, .arguments = &arguments } });
+    const rhs = try b.term(.{ .call = .{ .function = second, .arguments = &arguments } });
+    const result = try b.primitive(
+        word,
+        .integer_bit_xor,
+        &.{ try b.reference(left), try b.reference(right) },
+        0,
+    );
+    try b.define(entry, try b.bind(left, lhs, try b.bind(right, rhs, try b.pure(result))));
+    return b.module(entry, try b.scalar(void));
+}
+
+fn projectionWitness(program: ir.Program, function: u64) !data.scalar_field_reuse.Witness {
+    const Location = data.scalar_field_reuse.Location;
+    var early: ?Location = null;
+    var late: ?Location = null;
+    const entry = program.functions[function].entry;
+    for (program.blocks, 0..) |block, block_id| {
+        if (block.function != function) continue;
+        for (block.instructions, 0..) |op, i| {
+            if (op.opcode != .field) continue;
+            const at: Location = .{ .block = block_id, .instruction = i };
+            if (block_id == entry) early = at else late = at;
+        }
+    }
+    return .{
+        .source = early orelse return error.MissingProjection,
+        .target = late orelse return error.MissingProjection,
+    };
+}
+
+test "only surviving field replacements consume the witness allowance" {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const dead = (try diamond(&b)).entry;
+    const live = (try diamond(&b)).entry;
+    const both = try twoReachableDiamonds(&b, dead, live);
+    var module = both;
+    module.entry = live;
+    var policy = options();
+    policy.limits.rule.witnesses = 1;
+    policy.formals = &.{};
+    var original = try @import("activation_lower.zig").lowerRecoveryInput(a, module);
+    defer original.deinit();
+    const wasted = try projectionWitness(original.program, dead);
+    const demanded = try projectionWitness(original.program, live);
+    var result = try source.lowerRecoveryOptimized(a, module, policy);
+    defer result.deinit();
+    try std.testing.expectEqual(.applied, result.outcome);
+    try std.testing.expectEqual(1, result.evidence.witnesses.len);
+    try std.testing.expectEqualDeep(demanded, result.evidence.witnesses[0]);
+    const maps = result.evidence.correspondence.maps[@backingInt(data.relocation.Kind.block)];
+    try std.testing.expectEqual(data.relocation.missing, maps[wasted.target.block]);
+    const emitted = result.program.blocks[maps[demanded.target.block]];
+    try std.testing.expectEqual(.move, emitted.instructions[demanded.target.instruction].opcode);
+    try checkEvidence(module, result.program, result.evidence, policy);
+    var extra = result.evidence;
+    extra.witnesses = &.{ wasted, demanded };
+    policy.limits.rule.witnesses = 2;
+    try std.testing.expectError(
+        error.InvalidCorrespondence,
+        checkEvidence(module, result.program, extra, policy),
+    );
+    policy.limits.rule.witnesses = 1;
+    var retained = try source.lowerRecoveryOptimized(a, both, policy);
+    defer retained.deinit();
+    try std.testing.expectEqual(.budget, retained.outcome);
+    try std.testing.expectEqual(2, retained.statistics.budget);
+    var ordinary = try source.lowerObserved(a, both, .{ .recovery = true });
+    defer ordinary.deinit();
+    try expectStructuralFallback(both, policy, &ordinary, &retained);
+}
+
+test "independent recovery validation enforces the actual encoded growth of a split function" {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const first = (try diamond(&b)).entry;
+    const second = (try diamond(&b)).entry;
+    const module = try twoReachableDiamonds(&b, first, second);
+    var original = try @import("activation_lower.zig").lowerRecoveryInput(a, module);
+    defer original.deinit();
+    const w = try projectionWitness(original.program, first);
+    var policy = options();
+    policy.formals = &.{};
+    const rule = data.scalar_field_reuse;
+    var budget = rule.Budget.init(.{});
+    const modified = try rule.reconstruct(b.allocator(), original.program, &.{w}, &budget);
+    const Capture = struct {
+        arena: std.mem.Allocator,
+        map: ?data.coalescing.Correspondence = null,
+
+        fn receive(
+            ptr: *anyopaque,
+            trace: *const data.coalescing.OriginsTrace,
+        ) data.coalescing.Error!void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.map = try data.coalescing.Correspondence.copy(self.arena, trace);
+        }
+    };
+    var capture: Capture = .{ .arena = b.allocator() };
+    var final = try data.coalescing.run(a, modified, .{
+        .correspondence = .{ .context = &capture, .receive = Capture.receive },
+    });
+    defer final.deinit();
+    const evidence: optimization.Evidence = .{
+        .rule = .scalar_field_reuse_v1,
+        .witnesses = &.{w},
+        .correspondence = capture.map.?,
+    };
+    var ordinary = try source.lowerObserved(a, module, .{ .recovery = true });
+    defer ordinary.deinit();
+    const before = try data.program_image.encodedLength(ordinary.program);
+    const after = try data.program_image.encodedLength(final.program);
+    try std.testing.expect(after > before);
+    policy.limits.image_growth_bytes = after - before;
+    try checkEvidence(module, final.program, evidence, policy);
+    policy.limits.image_growth_bytes -= 1;
+    try std.testing.expectError(
+        error.ImageSizeLimit,
+        checkEvidence(module, final.program, evidence, policy),
+    );
+}
+
 test "recovery field reuse preserves required phase liveness" {
     var b = source.Builder.init(a);
     defer b.deinit();
@@ -260,6 +488,135 @@ fn evidenceBytes(evidence: optimization.Evidence, output: []u8) ![]u8 {
     return output[0..writer.position];
 }
 
+fn expectStructuralFallback(
+    module: source.Module,
+    policy: optimization.Options,
+    ordinary: *const source.Compiled,
+    retained: *const optimization.Result,
+) !void {
+    try std.testing.expectEqual(.structural_fallback, retained.evidence.rule);
+    try std.testing.expectEqual(0, retained.evidence.witnesses.len);
+    try std.testing.expectEqualDeep(ordinary.program, retained.program);
+    try std.testing.expectEqualDeep(ordinary.parameters, retained.parameters);
+    try std.testing.expectEqualDeep(
+        ordinary.recovery_evidence.?.correspondence,
+        retained.evidence.correspondence,
+    );
+    var bytes: [2048]u8 = undefined;
+    const encoded = try evidenceBytes(retained.evidence, &bytes);
+    var decoded = try optimization.decode(a, encoded, policy.limits);
+    defer decoded.deinit();
+    const bindings = try optimization.parameters(
+        a,
+        module,
+        retained.program,
+        decoded.evidence,
+        policy,
+    );
+    defer a.free(bindings);
+    try std.testing.expectEqualDeep(ordinary.parameters, bindings);
+}
+
+test "encoded recovery evidence round trips at its exact wire limit" {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const module = try diamond(&b);
+    var policy = options();
+    var discovered = try source.lowerRecoveryOptimized(a, module, policy);
+    defer discovered.deinit();
+    try std.testing.expectEqual(.applied, discovered.outcome);
+    var storage: [2048]u8 = undefined;
+    policy.limits.evidence_bytes = (try evidenceBytes(discovered.evidence, &storage)).len;
+    var fitting = try source.lowerRecoveryOptimized(a, module, policy);
+    defer fitting.deinit();
+    try std.testing.expectEqual(.applied, fitting.outcome);
+    const bytes = try evidenceBytes(fitting.evidence, &storage);
+    try std.testing.expectEqual(policy.limits.evidence_bytes, bytes.len);
+    var checked = try optimization.decode(a, bytes, policy.limits);
+    defer checked.deinit();
+    try checkEvidence(module, fitting.program, checked.evidence, policy);
+    policy.limits.evidence_bytes -= 1;
+    var retained = try source.lowerRecoveryOptimized(a, module, policy);
+    defer retained.deinit();
+    try std.testing.expectEqual(.budget, retained.outcome);
+    var ordinary = try source.lowerObserved(a, module, .{ .recovery = true });
+    defer ordinary.deinit();
+    try expectStructuralFallback(module, policy, &ordinary, &retained);
+}
+
+test "both recovery entry points bound the formal policy before inspecting its entries" {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const module = try diamond(&b);
+    var policy = options();
+    var selected = try source.lowerRecoveryOptimized(a, module, policy);
+    defer selected.deinit();
+    policy.formals = &.{
+        .{ .function = module.entry, .ordinal = 0 },
+        .{ .function = module.entry, .ordinal = 1 },
+        .{ .function = module.functions.len, .ordinal = 0 },
+    };
+    for ([_]u64{ policy.formals.len - 1, policy.formals.len }) |work| {
+        policy.limits.source_work = work;
+        const reason = if (work < policy.formals.len)
+            error.RelationLimit
+        else
+            error.InvalidCorrespondence;
+        try std.testing.expectError(reason, source.lowerRecoveryOptimized(a, module, policy));
+        try std.testing.expectError(
+            reason,
+            checkEvidence(module, selected.program, selected.evidence, policy),
+        );
+    }
+}
+
+test "the evidence rule determines admissible witness counts and fallback ceilings" {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const module = try diamond(&b);
+    var policy = options();
+    var selected = try source.lowerRecoveryOptimized(a, module, policy);
+    defer selected.deinit();
+    var wrong = selected.evidence;
+    wrong.rule = .structural_fallback;
+    var bytes: [2048]u8 = undefined;
+    try std.testing.expectError(
+        error.InvalidCorrespondence,
+        optimization.decode(a, try evidenceBytes(wrong, &bytes), policy.limits),
+    );
+    try std.testing.expectError(
+        error.InvalidCorrespondence,
+        checkEvidence(module, selected.program, wrong, policy),
+    );
+    policy.limits.rule.work = 0;
+    var retained = try source.lowerRecoveryOptimized(a, module, policy);
+    defer retained.deinit();
+    wrong = retained.evidence;
+    wrong.rule = .scalar_field_reuse_v1;
+    try std.testing.expectError(
+        error.InvalidCorrespondence,
+        optimization.decode(a, try evidenceBytes(wrong, &bytes), options().limits),
+    );
+    try std.testing.expectError(
+        error.InvalidCorrespondence,
+        checkEvidence(module, retained.program, wrong, options()),
+    );
+    const encoded = try evidenceBytes(retained.evidence, &bytes);
+    policy.limits.structural_evidence_bytes = encoded.len - 1;
+    try std.testing.expectError(
+        error.ScalarFieldLimit,
+        optimization.decode(a, encoded, policy.limits),
+    );
+    try std.testing.expectError(
+        error.RelationLimit,
+        source.lowerRecoveryOptimized(a, module, policy),
+    );
+    try std.testing.expectError(
+        error.RelationLimit,
+        checkEvidence(module, retained.program, retained.evidence, policy),
+    );
+}
+
 fn decodeWithFailures(allocator: std.mem.Allocator, bytes: []const u8) !void {
     var decoded = try optimization.decode(allocator, bytes, options().limits);
     defer decoded.deinit();
@@ -323,6 +680,11 @@ test "recovery lowering policies retain their original meaning" {
         checkEvidence(module, baseline.program, selected.evidence, options()),
     );
     var unknown = options();
+    unknown.rule = .structural_fallback;
+    try std.testing.expectError(
+        error.UnsupportedVersion,
+        source.lowerRecoveryOptimized(a, module, unknown),
+    );
     unknown.rule = @fromBackingInt(@intCast(2));
     try std.testing.expectError(
         error.UnsupportedVersion,
@@ -396,10 +758,7 @@ test "recovery optimization rolls back every bounded failure" {
         try std.testing.expectEqual(.budget, retained.outcome);
         if (limit.rule.work == 0) try std.testing.expectEqual(0, retained.statistics.budget);
         if (limit.evidence_bytes == 1) try std.testing.expectEqual(1, retained.statistics.budget);
-        try std.testing.expectEqual(0, retained.evidence.witnesses.len);
-        try std.testing.expectEqualDeep(baseline.program, retained.program);
-        try std.testing.expectEqualDeep(baseline.parameters, retained.parameters);
-        try checkEvidence(module, retained.program, retained.evidence, options());
+        try expectStructuralFallback(module, policy, &baseline, &retained);
     }
     const allocations = @import("../allocation_testing.zig");
     try allocations.check(std.heap.smp_allocator, compileWithFailures, .{module});

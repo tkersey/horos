@@ -603,7 +603,13 @@ test "recovery field reuse stops at capture boundaries" {
             .mode = .deep,
             .use = .multi,
         } } };
-        program.schemas = &(scalar_diamond.schemas[0..4].* ++ [_]Schema{token});
+        const resource: Schema = .{ .internal = .{ .abstract_resource = 0 } };
+        program.schemas = &(scalar_diamond.schemas[0..4].* ++ [_]Schema{ token, resource });
+        program.scopes.resources = &.{.{
+            .representation = 0,
+            .introducers = &.{0},
+            .eliminators = &.{},
+        }};
         program.effects = &.{.{
             .identity = "field/reuse",
             .payload = 0,
@@ -617,7 +623,7 @@ test "recovery field reuse stops at capture boundaries" {
         program.functions = &.{ fun, .{
             .entry = 4,
             .inputs = &.{0},
-            .layout = .{ .slots = &.{0} },
+            .layout = .{ .slots = &.{ 0, 5 } },
             .result = 0,
         } };
         var blocks = scalar_diamond.blocks[0..4].* ++ [_]ir.Block{.{
@@ -692,12 +698,18 @@ test "recovery field reuse excludes nested copyable internal schemas" {
         .{ .product = &.{ 0, 4 } },
         .{ .seq = 5 },
         region,
+        .{ .internal = .{ .abstract_resource = 0 } },
     };
     program.scopes.region_count = 1;
+    program.scopes.resources = &.{.{
+        .representation = 0,
+        .introducers = &.{0},
+        .eliminators = &.{},
+    }};
     var functions = [_]ir.Function{ scalar_diamond.functions[0], .{
         .entry = 4,
         .inputs = &.{0},
-        .layout = .{ .slots = &.{0} },
+        .layout = .{ .slots = &.{ 0, 6 } },
         .result = 0,
     } };
     functions[0].regions = &.{0};
@@ -763,4 +775,138 @@ test "recovery field reuse bounds predecessor depth and rejects an unresolved cy
     } };
     cyclic.blocks = &blocks;
     _ = try expectRetained(cyclic);
+}
+
+test "recovery discovery excludes same-block fields from its producer search" {
+    var program = scalar_diamond;
+    var operations: [512]ir.Instruction = undefined;
+    @memset(&operations, scalar_diamond.blocks[0].instructions[0]);
+    program.blocks = &.{.{
+        .function = 0,
+        .instructions = &operations,
+        .terminator = .{ .return_value = operations[0].destination },
+    }};
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var budget = scalar.Budget.init(.{ .work = operations.len * operations.len / 2 });
+    var stats: scalar.Statistics = .{};
+    try std.testing.expectEqual(0, (try scalar.discover(
+        arena.allocator(),
+        program,
+        &budget,
+        &stats,
+    )).len);
+    try std.testing.expectEqual(budget.limits.work - budget.remaining, budget.workUsed());
+    try std.testing.expect(budget.workUsed() > operations.len);
+    try std.testing.expectEqual(0, stats.proven);
+    try std.testing.expectEqual(0, stats.unavailable_version);
+    budget = scalar.Budget.init(.{ .work = 0 });
+    try std.testing.expectError(error.ScalarFieldLimit, scalar.discover(
+        arena.allocator(),
+        program,
+        &budget,
+        &stats,
+    ));
+    try std.testing.expect(budget.exhausted);
+}
+
+test "recovery discovery reports proven sites when the witness limit discards the batch" {
+    var blocks = scalar_diamond.blocks[0..4].*;
+    blocks[3].instructions = &.{ blocks[3].instructions[0], blocks[3].instructions[0] };
+    var program = scalar_diamond;
+    program.blocks = &blocks;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var budget = scalar.Budget.init(.{ .witnesses = 1 });
+    var stats: scalar.Statistics = .{};
+    try std.testing.expectError(error.ScalarFieldLimit, scalar.discover(
+        arena.allocator(),
+        program,
+        &budget,
+        &stats,
+    ));
+    try std.testing.expectEqual(2, stats.proven);
+    try std.testing.expectEqual(0, stats.unavailable_version);
+    try std.testing.expect(budget.exhausted);
+}
+
+test "recovery discovery counts neither numbering of a successful producer as a rejection" {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    for (0..2) |early| {
+        const late = 1 - early;
+        var blocks: [2]ir.Block = undefined;
+        blocks[early] = scalar_diamond.blocks[0];
+        blocks[early].terminator = .{ .jump = .{ .block = late } };
+        blocks[late] = scalar_diamond.blocks[3];
+        var function = scalar_diamond.functions[0];
+        function.entry = early;
+        var program = scalar_diamond;
+        program.functions = &.{function};
+        program.blocks = &blocks;
+        var budget = scalar.Budget.init(.{});
+        var stats: scalar.Statistics = .{};
+        const ws = try scalar.discover(arena.allocator(), program, &budget, &stats);
+        try std.testing.expectEqual(1, ws.len);
+        try std.testing.expectEqual(early, ws[0].source.block);
+        try std.testing.expectEqual(late, ws[0].target.block);
+        try std.testing.expectEqualDeep(scalar.Statistics{ .proven = 1 }, stats);
+    }
+}
+
+test "recovery discovery spends the witness quota only on retained blocks" {
+    const missing = @import("relocation.zig").missing;
+    var functions = [_]ir.Function{ scalar_diamond.functions[0], scalar_diamond.functions[0] };
+    functions[1].entry = 4;
+    var blocks = scalar_diamond.blocks[0..4].* ++ scalar_diamond.blocks[0..4].*;
+    for (blocks[4..]) |*block| block.function = 1;
+    blocks[4].terminator.branch.when_true.block = 5;
+    blocks[4].terminator.branch.when_false.block = 6;
+    blocks[5].terminator.jump.block = 7;
+    blocks[6].terminator.jump.block = 7;
+    var program = scalar_diamond;
+    program.functions = &functions;
+    program.blocks = &blocks;
+    program.roots.entry = 1;
+    const map = [_]ir.Id{ missing, missing, missing, missing, 0, 1, 2, 3 };
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    for ([_]?[]const ir.Id{ null, &map }) |supplied| {
+        var budget = scalar.Budget.init(.{ .witnesses = 1 });
+        var stats: scalar.Statistics = .{};
+        const ws = try scalar.discoverReachable(
+            arena.allocator(),
+            program,
+            supplied,
+            &budget,
+            &stats,
+        );
+        try std.testing.expectEqual(1, ws.len);
+        try std.testing.expectEqual(4, ws[0].source.block);
+        try std.testing.expectEqual(7, ws[0].target.block);
+        try std.testing.expectEqual(1, stats.proven);
+    }
+}
+
+test "recovery witness coordinates decode at full width before program range checking" {
+    const witness: scalar.Witness = .{
+        .source = .{ .block = @as(u64, 1) << 40, .instruction = @as(u64, 1) << 33 },
+        .target = field_witness.target,
+    };
+    const wire = @import("wire.zig");
+    const record = @import("record.zig");
+    var bytes: [32]u8 = undefined;
+    var writer: wire.Writer = .{ .output = &bytes };
+    try record.write(scalar.Witness, witness, &writer);
+    var reader: wire.Reader = .{ .input = bytes[0..writer.position] };
+    const decoded = try record.read(scalar.Witness, &reader, a);
+    try reader.finish();
+    try std.testing.expectEqualDeep(witness, decoded);
+    var budget = scalar.Budget.init(.{});
+    try std.testing.expectError(error.InvalidExpressionReuse, scalar.reconstruct(
+        a,
+        scalar_diamond,
+        &.{decoded},
+        &budget,
+    ));
 }

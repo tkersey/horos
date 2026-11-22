@@ -47,7 +47,6 @@ test {
     _ = @import("coalescing_tests.zig");
     _ = @import("application_specialization_tests.zig");
     _ = @import("aggregate_reduction_tests.zig");
-    _ = @import("expression_reuse_tests.zig");
     _ = @import("cell_reduction_tests.zig");
     _ = @import("capture_reduction_tests.zig");
     _ = @import("capture_summary_tests.zig");

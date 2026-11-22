@@ -24,7 +24,6 @@ pub const Budget = struct {
     capture_boundary: bool = false,
     bytes_remaining: usize = 0,
     remaining: u64,
-    used: u64 = 0,
     exhausted: bool = false,
 
     pub fn init(limits: Limits) Budget {
@@ -35,13 +34,15 @@ pub const Budget = struct {
             .strict = true,
         };
     }
+    pub fn workUsed(self: Budget) u64 {
+        return self.limits.work - self.remaining;
+    }
     pub fn charge(self: *Budget, amount: usize) bool {
         if (self.remaining < amount) {
             self.exhausted = true;
             return false;
         }
         self.remaining -= amount;
-        self.used += amount;
         return true;
     }
     pub fn tick(self: *Budget) bool {

@@ -10,24 +10,52 @@ const equal = @import("record_equal.zig").equal;
 const record = @import("record.zig");
 const wire = @import("wire.zig");
 const Allocator = std.mem.Allocator;
-pub const Location = proof.Location;
-pub const Witness = proof.Witness;
+const relocation = @import("relocation.zig");
+const Site = proof.Location;
+pub const Location = struct {
+    block: u64,
+    instruction: u64,
+
+    fn resolve(self: Location, program: ir.Program) Error!Site {
+        if (self.block >= program.blocks.len) return error.InvalidExpressionReuse;
+        const block: usize = @intCast(self.block);
+        if (self.instruction >= program.blocks[block].instructions.len)
+            return error.InvalidExpressionReuse;
+        return .{ .block = block, .instruction = @intCast(self.instruction) };
+    }
+
+    fn from(site: Site) Location {
+        return .{ .block = site.block, .instruction = site.instruction };
+    }
+};
+pub const Witness = struct {
+    target: Location,
+    source: Location,
+
+    fn resolve(self: Witness, program: ir.Program) Error!proof.Witness {
+        return .{
+            .source = try self.source.resolve(program),
+            .target = try self.target.resolve(program),
+        };
+    }
+};
 pub const Limits = proof.Limits;
 pub const Budget = proof.Budget;
 pub const Statistics = struct {
+    proven: usize = 0,
     unavailable_version: usize = 0,
     capture_boundary: usize = 0,
     unsupported_schema: usize = 0,
 };
 pub const Error = @import("expression_reuse.zig").Error || error{ScalarFieldLimit};
-const Targets = std.AutoHashMapUnmanaged(Location, Location);
+const Targets = std.AutoHashMapUnmanaged(Site, Site);
 
 fn spend(budget: *Budget, amount: usize) Error!void {
     if (!budget.charge(amount)) return error.ScalarFieldLimit;
 }
 
-fn translated(err: Error, cap: AllocationBudget) Error {
-    return switch (err) {
+fn translated(err: Error, cap: AllocationBudget, budget: *Budget) Error {
+    const result: Error = switch (err) {
         error.OutOfMemory => if (cap.exhausted) error.ScalarFieldLimit else err,
         error.RelationLimit,
         error.ExpressionWorkLimit,
@@ -35,9 +63,11 @@ fn translated(err: Error, cap: AllocationBudget) Error {
         => error.ScalarFieldLimit,
         else => err,
     };
+    if (result == error.ScalarFieldLimit) budget.exhausted = true;
+    return result;
 }
 
-fn locationBefore(program: ir.Program, lhs: Location, rhs: Location) bool {
+fn locationBefore(program: ir.Program, lhs: Site, rhs: Site) bool {
     const lfun = program.blocks[lhs.block].function;
     const rfun = program.blocks[rhs.block].function;
     if (lfun != rfun) return lfun < rfun;
@@ -45,11 +75,8 @@ fn locationBefore(program: ir.Program, lhs: Location, rhs: Location) bool {
     return lhs.instruction < rhs.instruction;
 }
 
-fn instruction(program: ir.Program, loc: Location) Error!ir.Instruction {
-    if (loc.block >= program.blocks.len) return error.InvalidExpressionReuse;
-    const instructions = program.blocks[loc.block].instructions;
-    if (loc.instruction >= instructions.len) return error.InvalidExpressionReuse;
-    return instructions[loc.instruction];
+fn instruction(program: ir.Program, site: Site) ir.Instruction {
+    return program.blocks[site.block].instructions[site.instruction];
 }
 
 fn index(
@@ -61,17 +88,21 @@ fn index(
     if (witnesses.len > budget.limits.witnesses) return error.ScalarFieldLimit;
     try spend(budget, witnesses.len);
     var targets: Targets = .empty;
-    for (witnesses, 0..) |w, i| {
-        const source = try instruction(program, w.source);
-        const target = try instruction(program, w.target);
+    var previous: ?Site = null;
+    for (witnesses) |item| {
+        const w = try item.resolve(program);
+        const source = instruction(program, w.source);
+        const target = instruction(program, w.target);
         if (source.opcode != .field or target.opcode != .field or
             w.source.block == w.target.block or
             program.blocks[w.source.block].function != program.blocks[w.target.block].function or
-            (i != 0 and !locationBefore(program, witnesses[i - 1].target, w.target)))
+            (previous != null and !locationBefore(program, previous.?, w.target)))
             return error.InvalidExpressionReuse;
+        previous = w.target;
         try targets.put(a, w.target, w.source);
     }
-    for (witnesses) |w| if (targets.contains(w.source)) return error.InvalidExpressionReuse;
+    for (witnesses) |w| if (targets.contains(try w.source.resolve(program)))
+        return error.InvalidExpressionReuse;
     return targets;
 }
 
@@ -99,7 +130,7 @@ const Context = struct {
         };
     }
 
-    fn eligible(self: Context, loc: Location) bool {
+    fn eligible(self: Context, loc: Site) bool {
         const block = self.program.blocks[loc.block];
         const op = block.instructions[loc.instruction];
         if (op.opcode != .field or op.operands.len != 1 or op.failures.len != 0 or
@@ -112,9 +143,9 @@ const Context = struct {
             self.permissions.copy[input] and self.permissions.drop[input];
     }
 
-    fn matches(self: Context, w: Witness) Error!bool {
-        const earlier = try instruction(self.program, w.source);
-        const later = try instruction(self.program, w.target);
+    fn matches(self: Context, w: proof.Witness) Error!bool {
+        const earlier = instruction(self.program, w.source);
+        const later = instruction(self.program, w.target);
         const block = self.program.blocks[w.target.block];
         const slots = self.program.functions[@intCast(block.function)].layout.slots;
         if (slots[@intCast(earlier.destination)] != slots[@intCast(later.destination)] or
@@ -136,63 +167,162 @@ pub fn discover(
     budget: *Budget,
     stats: *Statistics,
 ) Error![]const Witness {
+    return discoverReachable(arena, original, null, budget, stats);
+}
+
+pub fn discoverReachable(
+    arena: Allocator,
+    original: ir.Program,
+    block_map: ?[]const ir.Id,
+    budget: *Budget,
+    stats: *Statistics,
+) Error![]const Witness {
     var cap: AllocationBudget = .{ .parent = arena, .remaining = &budget.bytes_remaining };
     var observed: Statistics = .{};
     defer stats.* = observed;
-    return find(cap.allocator(), original, budget, &observed) catch |err|
-        return translated(err, cap);
+    return find(cap.allocator(), original, block_map, budget, &observed) catch |err|
+        return translated(err, cap, budget);
 }
 
-fn find(a: Allocator, program: ir.Program, budget: *Budget, stats: *Statistics) Error![]Witness {
+fn reachable(a: Allocator, program: ir.Program, budget: *Budget) Error![]const ir.Id {
+    var measure: wire.Writer = .{ .remaining = &budget.remaining };
+    try record.write(ir.Program, program, &measure);
+    const projection = try relocation.ownReachable(a, a, program);
+    return projection.maps.?[@backingInt(relocation.Kind.block)];
+}
+
+const Candidate = struct {
+    site: Site,
+    group: usize = 0,
+    range: usize = 0,
+    state: enum { unmatched, unavailable, capture, producer, replaced } = .unmatched,
+};
+
+fn find(
+    a: Allocator,
+    program: ir.Program,
+    block_map: ?[]const ir.Id,
+    budget: *Budget,
+    stats: *Statistics,
+) Error![]Witness {
     var scratch = std.heap.ArenaAllocator.init(a);
     defer scratch.deinit();
     const tmp = scratch.allocator();
     var flow = try analyze(a, program, budget);
     defer flow.deinit();
+    const blocks = block_map orelse try reachable(tmp, program, budget);
+    if (blocks.len != program.blocks.len) return error.InvalidCorrespondence;
     const ctx = try Context.init(tmp, program, &flow, budget);
     try spend(budget, program.functions.len);
-    const sites = try tmp.alloc(std.ArrayList(Location), program.functions.len);
+    const sites = try tmp.alloc(std.ArrayList(Candidate), program.functions.len);
     for (sites) |*list| list.* = .empty;
-    for (program.blocks, 0..) |block, bid| {
-        try spend(budget, block.instructions.len +| 1);
+    for (program.blocks, blocks, 0..) |block, kept, bid| {
+        try spend(budget, 1);
+        if (kept == relocation.missing or flow.positions[bid].len == 0) continue;
+        try spend(budget, block.instructions.len);
         for (block.instructions, 0..) |op, i| {
             if (op.opcode != .field) continue;
-            const loc = Location{ .block = bid, .instruction = i };
-            if (!ctx.eligible(loc)) {
+            const site: Site = .{ .block = bid, .instruction = i };
+            if (!ctx.eligible(site)) {
                 stats.unsupported_schema += 1;
                 continue;
             }
-            try sites[@intCast(block.function)].append(tmp, loc);
+            try sites[@intCast(block.function)].append(tmp, .{ .site = site });
         }
     }
     var selected: std.ArrayList(Witness) = .empty;
-    var targets: Targets = .empty;
-    var producers: std.AutoHashMapUnmanaged(Location, void) = .empty;
-    for (sites) |function| for (function.items) |target| {
-        if (producers.contains(target)) continue;
-        var repeated = false;
-        budget.capture_boundary = false;
-        for (function.items) |source| {
-            try spend(budget, 1);
-            if (source.block == target.block or targets.contains(source)) continue;
-            const early = try instruction(program, source);
-            const late = try instruction(program, target);
-            if (!proof.sameExpression(early, late)) continue;
-            repeated = true;
-            const w: Witness = .{ .source = source, .target = target };
-            if (!try ctx.matches(w)) continue;
-            if (selected.items.len == budget.limits.witnesses) return error.ScalarFieldLimit;
-            try selected.append(tmp, w);
-            try targets.put(tmp, target, source);
-            try producers.put(tmp, source, {});
-            break;
-        } else if (repeated) {
-            if (budget.capture_boundary) {
-                stats.capture_boundary += 1;
-            } else stats.unavailable_version += 1;
+    for (sites) |function| {
+        const groups = try indexExpressions(tmp, ctx, function.items);
+        try selectFunction(tmp, ctx, function.items, groups, &selected, stats);
+    }
+    return a.dupe(Witness, selected.items);
+}
+
+const Group = struct {
+    members: std.ArrayList(usize) = .empty,
+    ranges: std.ArrayList(struct { block: usize, start: usize, end: usize }) = .empty,
+
+    fn append(self: *Group, a: Allocator, block: usize, member: usize) Error!usize {
+        const pos = self.members.items.len;
+        const last = self.ranges.getLastOrNull();
+        if (last == null or last.?.block != block)
+            try self.ranges.append(a, .{ .block = block, .start = pos, .end = pos });
+        try self.members.append(a, member);
+        const index_last = self.ranges.items.len - 1;
+        self.ranges.items[index_last].end = self.members.items.len;
+        return index_last;
+    }
+};
+
+fn indexExpressions(a: Allocator, ctx: Context, sites: []Candidate) Error![]const Group {
+    const Key = struct { operand: ir.Id, coordinate: ir.Id, schema: ir.Id };
+    var index_by_key: std.AutoHashMapUnmanaged(Key, usize) = .empty;
+    var groups: std.ArrayList(Group) = .empty;
+    try spend(ctx.budget, sites.len);
+    for (sites, 0..) |*candidate, i| {
+        const site = candidate.site;
+        const block = ctx.program.blocks[site.block];
+        const op = block.instructions[site.instruction];
+        const slots = ctx.program.functions[@intCast(block.function)].layout.slots;
+        const group = try index_by_key.getOrPut(a, .{
+            .operand = op.operands[0],
+            .coordinate = op.immediate,
+            .schema = slots[@intCast(op.destination)],
+        });
+        if (!group.found_existing) {
+            group.value_ptr.* = groups.items.len;
+            try groups.append(a, .{});
+        }
+        candidate.group = group.value_ptr.*;
+        candidate.range = try groups.items[candidate.group].append(a, site.block, i);
+    }
+    return groups.items;
+}
+
+fn selectFunction(
+    a: Allocator,
+    ctx: Context,
+    sites: []Candidate,
+    groups: []const Group,
+    selected: *std.ArrayList(Witness),
+    stats: *Statistics,
+) Error!void {
+    try spend(ctx.budget, sites.len);
+    defer for (sites) |candidate| {
+        switch (candidate.state) {
+            .unavailable => stats.unavailable_version += 1,
+            .capture => stats.capture_boundary += 1,
+            else => {},
         }
     };
-    return a.dupe(Witness, selected.items);
+    for (sites) |*target| {
+        if (target.state == .producer) continue;
+        const group = groups[target.group];
+        const range = group.ranges.items[target.range];
+        const candidates = [_][]const usize{
+            group.members.items[0..range.start],
+            group.members.items[range.end..],
+        };
+        ctx.budget.capture_boundary = false;
+        search: for (candidates) |others| for (others) |id| {
+            try spend(ctx.budget, 1);
+            const source = &sites[id];
+            if (source.state == .replaced) continue;
+            if (!try ctx.matches(.{ .source = source.site, .target = target.site })) {
+                target.state = if (ctx.budget.capture_boundary) .capture else .unavailable;
+                continue;
+            }
+            source.state = .producer;
+            target.state = .replaced;
+            stats.proven += 1;
+            if (selected.items.len == ctx.budget.limits.witnesses) return error.ScalarFieldLimit;
+            try selected.append(a, .{
+                .source = Location.from(source.site),
+                .target = Location.from(target.site),
+            });
+            break :search;
+        };
+    }
 }
 
 pub fn reconstruct(
@@ -203,7 +333,7 @@ pub fn reconstruct(
 ) Error!ir.Program {
     var cap: AllocationBudget = .{ .parent = arena, .remaining = &budget.bytes_remaining };
     return rewritten(cap.allocator(), original, witnesses, budget) catch |err|
-        return translated(err, cap);
+        return translated(err, cap, budget);
 }
 
 fn rewritten(
@@ -228,7 +358,8 @@ fn rewritten(
     result.blocks = blocks;
     var prior: ?usize = null;
     var instructions: []ir.Instruction = &.{};
-    for (ws) |w| {
+    for (ws) |item| {
+        const w = try item.resolve(original);
         const block = &blocks[w.target.block];
         if (prior != w.target.block) {
             try spend(budget, block.instructions.len);
@@ -267,11 +398,14 @@ pub fn validateObserved(
 ) !void {
     var cap: AllocationBudget = .{ .parent = allocator, .remaining = &budget.bytes_remaining };
     var facts = check(cap.allocator(), original, candidate, witnesses, budget) catch |err|
-        return translated(err, cap);
+        return translated(err, cap, budget);
     defer facts.original.deinit();
     defer facts.candidate.deinit();
     if (comptime @TypeOf(observer) != @TypeOf(null))
-        try observer.checked(&facts.original, &facts.candidate);
+        observer.checked(&facts.original, &facts.candidate) catch |err| {
+            if (@as(anyerror, err) == error.RelationLimit) budget.exhausted = true;
+            return err;
+        };
 }
 
 fn check(
@@ -299,15 +433,15 @@ fn check(
         rhs.instructions = &.{};
         if (!equal(ir.Block, lhs, rhs)) return error.InvalidExpressionReuse;
         for (before.instructions, after.instructions, 0..) |op, replacement, i| {
-            const target: Location = .{ .block = bid, .instruction = i };
+            const target: Site = .{ .block = bid, .instruction = i };
             const loc = targets.get(target) orelse {
                 if (!equal(ir.Instruction, op, replacement)) return error.InvalidExpressionReuse;
                 continue;
             };
-            const w = Witness{ .source = loc, .target = target };
+            const w = proof.Witness{ .source = loc, .target = target };
             if (!ctx.eligible(loc) or !ctx.eligible(target) or !try ctx.matches(w))
                 return error.InvalidExpressionReuse;
-            const earlier = try instruction(original, loc);
+            const earlier = instruction(original, loc);
             const expected: ir.Instruction = .{
                 .destination = op.destination,
                 .opcode = .move,
