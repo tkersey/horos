@@ -323,9 +323,32 @@ test "composed correspondence checks its actual output under the shared work all
     const a = testing.allocator;
     var flow = try evidence.validateWithFlow(a, original, candidate, map, &left);
     flow.deinit();
+    var exact = limit - left;
+    flow = try evidence.validateMatchingWithFlow(
+        a,
+        original,
+        candidate,
+        map,
+        candidate,
+        map,
+        &exact,
+    );
+    flow.deinit();
+    try testing.expectEqual(0, exact);
     var short = limit - left - 1;
     try testing.expectError(
         error.RelationLimit,
         evidence.validateWithFlow(a, original, candidate, map, &short),
+    );
+    var work = limit;
+    try testing.expectError(
+        error.InvalidCorrespondence,
+        evidence.validateMatchingWithFlow(a, original, candidate, map, original, map, &work),
+    );
+    var other = map;
+    other.locals = map.locals[0..1];
+    try testing.expectError(
+        error.InvalidCorrespondence,
+        evidence.validateMatchingWithFlow(a, original, candidate, map, candidate, other, &work),
     );
 }

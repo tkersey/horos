@@ -375,3 +375,66 @@ test "coalescing origin composition retains sparse nominal regions without dense
     try testing.expectError(error.InvalidCorrespondence, trace.advance(stale));
     try testing.expectEqual(@as(?p.Id, 0), trace.resolve(.region, large));
 }
+
+test "optional coalescing attribution preserves the primary allocation error at exact work" {
+    const maximum = std.math.maxInt(u64);
+    var measured: u64 = maximum;
+    var first = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    try testing.expectError(error.OutOfMemory, pass.runWithWork(
+        first.allocator(),
+        typed_constructors,
+        .{},
+        &measured,
+    ));
+    var exact = maximum - measured;
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    var diagnostic: pass.Diagnostic = .{};
+    try testing.expectError(error.OutOfMemory, pass.runWithWork(
+        failing.allocator(),
+        typed_constructors,
+        .{ .diagnostic = &diagnostic },
+        &exact,
+    ));
+    try testing.expectEqual(error.OutOfMemory, diagnostic.code.?);
+    try testing.expectEqual(@as(u64, 0), exact);
+
+    diagnostic = .{ .target = .{ .function = 0, .capture = 0, .slot = 1 } };
+    origins.explainOriginalWithWork(typed_constructors, &diagnostic, &exact);
+    try testing.expectEqualSlices(p.Id, &.{0}, diagnostic.origins.items());
+    try testing.expectEqual(@as(?p.Id, 1), diagnostic.original_slot);
+    try testing.expect(!diagnostic.origins.truncated);
+
+    diagnostic = .{ .target = .{ .capture = 0 } };
+    origins.explainOriginalWithWork(typed_constructors, &diagnostic, &exact);
+    try testing.expect(diagnostic.origins.truncated);
+    exact = typed_constructors.constructors.len;
+    origins.explainOriginalWithWork(typed_constructors, &diagnostic, &exact);
+    try testing.expectEqualSlices(p.Id, &.{ 0, 1 }, diagnostic.origins.items());
+    try testing.expect(!diagnostic.origins.truncated);
+    try testing.expectEqual(@as(u64, 0), exact);
+}
+
+test "coalescing diagnostic charges only selected origin, slot and block scans" {
+    var scratch = std.heap.ArenaAllocator.init(testing.allocator);
+    defer scratch.deinit();
+    const a = scratch.allocator();
+    const baseline = try r.ownReachable(a, a, fixture);
+    var trace = try origins.Trace.init(testing.allocator, fixture, baseline);
+    defer trace.deinit();
+    var remaining: u64 = fixture.functions.len + 2;
+    trace.remaining = &remaining;
+    var diagnostic: pass.Diagnostic = .{ .target = .{ .function = 0, .block = 0, .slot = 0 } };
+    try trace.explainWithWork(null, &diagnostic);
+    try testing.expectEqualSlices(p.Id, &.{0}, diagnostic.origins.items());
+    try testing.expectEqual(@as(?p.Id, 0), diagnostic.original_slot);
+    try testing.expectEqual(@as(?p.Id, 0), diagnostic.original_block);
+    try testing.expectEqual(@as(u64, 0), remaining);
+
+    diagnostic = .{};
+    try trace.explainWithWork(null, &diagnostic);
+    try testing.expect(!diagnostic.origins.truncated);
+    diagnostic.target.function = 0;
+    trace.explain(null, &diagnostic);
+    try testing.expect(diagnostic.origins.truncated);
+    try testing.expectEqual(@as(usize, 0), diagnostic.origins.count);
+}

@@ -153,22 +153,22 @@ pub const Trace = struct {
         }
     }
 
-    pub fn explainWithWork(
-        self: *const Trace,
-        next: ?witness.Witness,
-        diagnostic: *Diagnostic,
-    ) Error!void {
-        try self.chargeTraversal();
-        self.explain(next, diagnostic);
+    pub fn explain(self: *const Trace, next: ?witness.Witness, diagnostic: *Diagnostic) void {
+        self.explainWithWork(next, diagnostic) catch return;
     }
 
     /// `next` is supplied only after raw-record validation, for an admission
     /// failure in a not-yet-selected candidate. No provisional discovery is trusted.
-    pub fn explain(self: *const Trace, next: ?witness.Witness, diagnostic: *Diagnostic) void {
+    pub fn explainWithWork(
+        self: *const Trace,
+        next: ?witness.Witness,
+        diagnostic: *Diagnostic,
+    ) error{RelationLimit}!void {
         diagnostic.origins = .{};
         diagnostic.original_slot = null;
         diagnostic.original_block = null;
         if (diagnostic.target.phase == .constructor) {
+            try diagnosticScan(diagnostic, self.remaining, self.original.constructors.len);
             for (self.original.constructors, self.map(.constructor)) |constructor, live| {
                 if (live == r.missing) continue;
                 if (self.matches(
@@ -182,11 +182,13 @@ pub const Trace = struct {
                     diagnostic.origins.add(constructor.function);
             }
         } else if (diagnostic.target.function) |actual| {
+            try diagnosticScan(diagnostic, self.remaining, self.map(.function).len);
             for (self.map(.function), 0..) |current, original| {
                 if (current == r.missing or finalId(next, .function, current) != actual) continue;
                 diagnostic.origins.add(original);
             }
         } else if (diagnostic.target.capture) |actual| {
+            try diagnosticScan(diagnostic, self.remaining, self.original.constructors.len);
             for (self.original.constructors, self.map(.constructor)) |constructor, live| {
                 if (live == r.missing) continue;
                 if (constructor.capture >= self.map(.capture).len) continue;
@@ -197,11 +199,12 @@ pub const Trace = struct {
                 diagnostic.origins.add(constructor.function);
             }
         }
-        self.explainSlot(next, diagnostic);
+        try self.explainSlot(next, diagnostic);
         if (diagnostic.target.block) |actual| {
             if (diagnostic.origins.count == 0) return;
             const function = diagnostic.origins.functions[0];
             for (self.map(.block), self.original.blocks, 0..) |current, block, old| {
+                try admission.spend(self.remaining, 1);
                 if (block.function == function and current != r.missing and
                     finalId(next, .block, current) == actual)
                 {
@@ -223,12 +226,17 @@ pub const Trace = struct {
         const final = finalId(next, kind, ids[@intCast(old)]) orelse return false;
         return expected == null or final == expected.?;
     }
-    fn explainSlot(self: *const Trace, next: ?witness.Witness, diagnostic: *Diagnostic) void {
+    fn explainSlot(
+        self: *const Trace,
+        next: ?witness.Witness,
+        diagnostic: *Diagnostic,
+    ) error{RelationLimit}!void {
         const actual = diagnostic.target.slot orelse return;
         if (diagnostic.origins.count == 0) return;
         const original: usize = @intCast(diagnostic.origins.functions[0]);
         const current = self.map(.function)[original];
         for (self.locals[original].slots, 0..) |slot, input_slot| {
+            try admission.spend(self.remaining, 1);
             const final = if (next) |step| blk: {
                 if (current >= step.locals.len) return;
                 const locals = step.locals[@intCast(current)].slots;
@@ -259,15 +267,36 @@ fn finalId(next: ?witness.Witness, kind: r.Kind, old: p.Id) ?p.Id {
     return if (next) |map| mapped(map.final, kind, old) catch null else old;
 }
 
+fn diagnosticScan(
+    diagnostic: *Diagnostic,
+    remaining: ?*u64,
+    count: usize,
+) error{RelationLimit}!void {
+    admission.spend(remaining, count) catch |err| {
+        diagnostic.origins.truncated = true;
+        diagnostic.origins.ambiguous = true;
+        return err;
+    };
+}
+
 pub fn explainOriginal(original: ir.Program, diagnostic: *Diagnostic) void {
+    explainOriginalWithWork(original, diagnostic, null);
+}
+
+pub fn explainOriginalWithWork(
+    original: ir.Program,
+    diagnostic: *Diagnostic,
+    remaining: ?*u64,
+) void {
     diagnostic.origins = .{};
+    diagnostic.original_slot = diagnostic.target.slot;
+    diagnostic.original_block = diagnostic.target.block;
     if (diagnostic.target.function) |function| {
         if (function < original.functions.len) diagnostic.origins.add(function);
     } else if (diagnostic.target.capture) |capture| {
+        diagnosticScan(diagnostic, remaining, original.constructors.len) catch return;
         for (original.constructors) |constructor|
             if (constructor.capture == capture and constructor.function < original.functions.len)
                 diagnostic.origins.add(constructor.function);
     }
-    diagnostic.original_slot = diagnostic.target.slot;
-    diagnostic.original_block = diagnostic.target.block;
 }

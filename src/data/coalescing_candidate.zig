@@ -174,7 +174,7 @@ fn candidateFlow(
         remaining,
     ) catch |err| {
         if (err != error.RelationLimit) if (diagnostic) |d| {
-            if (trace) |t| try t.explainWithWork(correspondence, d);
+            if (trace) |t| t.explain(correspondence, d);
         };
         return err;
     };
@@ -199,7 +199,7 @@ fn checkTransformation(
         remaining,
     ) catch |err| {
         if (err != error.RelationLimit) if (diagnostic) |d| {
-            if (trace) |t| try t.explainWithWork(null, d);
+            if (trace) |t| t.explain(null, d);
         };
         return err;
     };

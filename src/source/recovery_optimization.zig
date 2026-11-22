@@ -80,7 +80,7 @@ pub fn lower(a: Allocator, module: source.Module, submitted: Options) !Result {
     options.formals = protected.formals();
     var original = try lowering.lowerRecoveryInputWithWork(scratch, module, &source_work);
     defer original.deinit();
-    var baseline = try structural(scratch, &original, module, options, &source_work);
+    var baseline = try structural(scratch, &original, module, options, null, &source_work);
     defer baseline.deinit();
     var remaining = options.limits.rule.temporary_bytes;
     var storage: data.AllocationBudget = .{ .parent = a, .remaining = &remaining };
@@ -356,23 +356,35 @@ const Baseline = struct {
     }
 };
 
+const SubmittedFallback = struct { program: Program, map: Correspondence };
+
 fn structural(
     a: Allocator,
     original: *const source.Compiled,
     module: source.Module,
     options: Options,
+    submitted: ?SubmittedFallback,
     work: *u64,
 ) !Baseline {
     var map_arena = std.heap.ArenaAllocator.init(a);
     errdefer map_arena.deinit();
     var capture: Capture = .{ .arena = map_arena.allocator(), .work = work };
     var final = try data.coalescing.runWithWork(a, original.program, .{
+        .compact_refinement = true,
         .correspondence = .{ .context = &capture, .receive = Capture.observe },
     }, work);
     errdefer final.arena.deinit();
     final.flow.deinit();
     const map = capture.map orelse return error.InvalidCorrespondence;
-    var verified = try data.coalescing.correspondenceFlow(
+    var verified = if (submitted) |actual| try data.coalescing.matchingCorrespondenceFlow(
+        a,
+        original.program,
+        final.program,
+        map,
+        actual.program,
+        actual.map,
+        work,
+    ) else try data.coalescing.correspondenceFlow(
         a,
         original.program,
         final.program,
@@ -425,6 +437,7 @@ fn finish(
     var remaining = allowance;
     var capture: Capture = .{ .arena = scratch.allocator(), .work = &remaining };
     var final = data.coalescing.runWithWork(ctx.a, s, .{
+        .compact_refinement = true,
         .correspondence = .{ .context = &capture, .receive = Capture.observe },
     }, &remaining) catch |err| {
         ctx.budget.remaining -= allowance - remaining;
@@ -567,16 +580,20 @@ pub fn parameters(
     try correspondenceShape(evidence.correspondence, check_work);
     var original = try lowering.lowerRecoveryInputWithWork(preparation, module, &source_work);
     defer original.deinit();
-    var baseline = try structural(preparation, &original, module, options, &source_work);
+    const submitted_fallback: ?SubmittedFallback = if (fallback)
+        .{ .program = program, .map = evidence.correspondence }
+    else
+        null;
+    var baseline = try structural(
+        preparation,
+        &original,
+        module,
+        options,
+        submitted_fallback,
+        &source_work,
+    );
     defer baseline.deinit();
-    if (fallback) {
-        var measure: data.wire.Writer = .{ .remaining = &source_work };
-        try data.record.write(Program, baseline.program, &measure);
-        if (!data.record.equal(Program, baseline.program, program) or
-            !data.record.equal(Correspondence, baseline.map, evidence.correspondence))
-            return error.InvalidCorrespondence;
-        return relocate(a, original.parameters, baseline.map, &source_work);
-    }
+    if (fallback) return relocate(a, original.parameters, baseline.map, &source_work);
     var scratch = std.heap.ArenaAllocator.init(work);
     defer scratch.deinit();
     const ctx: Context = .{

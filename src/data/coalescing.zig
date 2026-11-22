@@ -15,6 +15,8 @@ pub const OriginsTrace = origins.Trace;
 pub const Correspondence = @import("coalescing_correspondence.zig").Correspondence;
 pub const validateCorrespondence = @import("coalescing_correspondence.zig").validate;
 pub const correspondenceFlow = @import("coalescing_correspondence.zig").validateWithFlow;
+pub const matchingCorrespondenceFlow =
+    @import("coalescing_correspondence.zig").validateMatchingWithFlow;
 pub const Outcome = enum {
     not_run,
     deferred_open_component,
@@ -83,6 +85,7 @@ pub const Options = struct {
     diagnostic: ?*Diagnostic = null,
     /// Deterministic discovery-work units; unlimited unless a caller selects a bound.
     work_limit: u64 = std.math.maxInt(u64),
+    compact_refinement: bool = false,
     /// Borrowed final provenance from independently checked selected rounds.
     /// No provisional candidate is reported. Copy needed fields in the callback.
     correspondence: ?struct {
@@ -178,7 +181,11 @@ fn runInternal(
         .baseline = counts,
         .selected = counts,
         .rounds = round_storage,
-        .work = .{ .limit = options.work_limit, .remaining = remaining },
+        .work = .{
+            .limit = options.work_limit,
+            .remaining = remaining,
+            .compact_refinement = options.compact_refinement,
+        },
     };
     defer {
         stats.work.remaining = null;
@@ -369,8 +376,7 @@ fn admitOriginal(
         remaining,
     ) catch |err| {
         if (err != error.RelationLimit) if (options.diagnostic) |d| {
-            try spend(remaining, original.constructors.len);
-            origins.explainOriginal(original, d);
+            origins.explainOriginalWithWork(original, d, remaining);
         };
         return err;
     };
@@ -392,7 +398,7 @@ fn baselineFlow(
         remaining,
     ) catch |err| {
         if (err != error.RelationLimit) if (options.diagnostic) |d| {
-            if (trace.*) |*t| try t.explainWithWork(null, d);
+            if (trace.*) |*t| t.explain(null, d);
         };
         return err;
     };

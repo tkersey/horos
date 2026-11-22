@@ -11,7 +11,14 @@ const spend = data.admission.spend;
 const missing = data.relocation.missing;
 const Error = error{ RecoveryLiveness, InvalidCorrespondence, RelationLimit, OutOfMemory };
 
-pub const Formal = struct { function: Id, ordinal: usize };
+pub const Formal = struct {
+    function: Id,
+    ordinal: usize,
+
+    fn key(self: Formal) u128 {
+        return (@as(u128, self.function) << 64) | self.ordinal;
+    }
+};
 
 pub const Normalized = struct {
     allocator: std.mem.Allocator,
@@ -21,21 +28,59 @@ pub const Normalized = struct {
         return self.entries.items;
     }
 
-    fn include(self: *Normalized, role: Formal, work: *u64) Error!void {
-        const group = 16;
-        for (self.entries.items, 0..) |prior, i| {
-            if (i != 0 and i % group == 0) try spend(work, 1);
-            if (prior.function == role.function and prior.ordinal == role.ordinal) return;
-        }
-        const count = self.entries.items.len;
-        if (count == self.entries.capacity and count >= group)
-            try spend(work, 1 + (count - 1) / group);
-        try self.entries.append(self.allocator, role);
-    }
-
     pub fn deinit(self: *Normalized) void {
         self.entries.deinit(self.allocator);
         self.* = undefined;
+    }
+};
+
+const FormalIndex = struct {
+    const Link = union(enum) { entry: usize, branch: usize };
+    const Branch = struct { mask: u128, children: [2]Link };
+    const work_group = 16;
+
+    root: Link = .{ .entry = 0 },
+    branches: std.ArrayList(Branch) = .empty,
+
+    fn edge(self: *FormalIndex, key: u128, stop: u128, work: *u64) Error!*Link {
+        var link = &self.root;
+        var depth: usize = 0;
+        while (link.* == .branch) {
+            const branch = &self.branches.items[link.branch];
+            if (branch.mask <= stop) break;
+            if (depth != 0 and depth % work_group == 0) try spend(work, 1);
+            link = &branch.children[@intFromBool(key & branch.mask != 0)];
+            depth += 1;
+        }
+        return link;
+    }
+
+    fn reserve(a: std.mem.Allocator, list: anytype, work: *u64) Error!void {
+        const count = list.items.len;
+        if (count == list.capacity and count >= work_group)
+            try spend(work, 1 + (count - 1) / work_group);
+        try list.ensureUnusedCapacity(a, 1);
+    }
+
+    fn include(self: *FormalIndex, selected: *Normalized, role: Formal, work: *u64) Error!void {
+        const entries = &selected.entries;
+        if (entries.items.len == 0) {
+            try entries.append(selected.allocator, role);
+            return;
+        }
+        const key = role.key();
+        const leaf = (try self.edge(key, 0, work)).entry;
+        const different = key ^ entries.items[leaf].key();
+        if (different == 0) return;
+        try reserve(selected.allocator, entries, work);
+        try reserve(selected.allocator, &self.branches, work);
+        const mask = std.math.floorPowerOfTwo(u128, different);
+        const link = try self.edge(key, mask, work);
+        var children = [2]Link{ link.*, link.* };
+        children[@intFromBool(key & mask != 0)] = .{ .entry = entries.items.len };
+        link.* = .{ .branch = self.branches.items.len };
+        self.branches.appendAssumeCapacity(.{ .mask = mask, .children = children });
+        entries.appendAssumeCapacity(role);
     }
 };
 
@@ -48,11 +93,13 @@ pub fn normalize(
     try spend(work, submitted.len);
     var selected: Normalized = .{ .allocator = a };
     errdefer selected.deinit();
+    var index: FormalIndex = .{};
+    defer index.branches.deinit(a);
     for (submitted) |role| {
         if (role.function >= module.functions.len or
             role.ordinal >= module.functions[@intCast(role.function)].parameters.len)
             return error.InvalidCorrespondence;
-        try selected.include(role, work);
+        try index.include(&selected, role, work);
     }
     return selected;
 }

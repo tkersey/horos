@@ -1085,3 +1085,77 @@ test "recovery proposal charges source membership in a block with indexed target
         &tight,
     ));
 }
+
+fn captureFanOutWork(comptime count: usize, repeated: bool) !u64 {
+    const fields: [count]ir.Id = @splat(0);
+    const variants: [count]ir.Id = @splat(2);
+    var program = scalar_diamond;
+    program.schemas = &.{ .u64, .{ .sum = &variants }, .unit, .{ .product = &fields } };
+    var blocks: [count * 3 + 1]ir.Block = undefined;
+    var cases: [count]ir.Edge = undefined;
+    var ops: [count]ir.Instruction = undefined;
+    for (&cases, &ops, 0..) |*edge, *op, i| {
+        blocks[i] = .{ .function = 0, .instructions = &.{}, .terminator = .{
+            .jump = .{ .block = i + 1 },
+        } };
+        const arm = count + 1 + i;
+        const field = arm + count;
+        edge.* = .{ .block = arm };
+        blocks[arm] = .{ .function = 0, .instructions = &.{}, .terminator = .{
+            .yield_value = .{ .block = field },
+        } };
+        op.* = scalar_diamond.blocks[3].instructions[0];
+        op.immediate = if (repeated) 0 else i;
+        blocks[field] = .{ .function = 0, .instructions = op[0..1], .terminator = .{
+            .return_value = op.destination,
+        } };
+    }
+    blocks[count] = .{ .function = 0, .instructions = &.{}, .terminator = .{
+        .switch_variant = .{ .value = 2, .cases = &cases },
+    } };
+    program.blocks = &blocks;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var budget = scalar.Budget.init(.{});
+    var stats: scalar.Statistics = .{};
+    const ws = try scalar.discover(arena.allocator(), program, &budget, &stats);
+    try std.testing.expectEqual(0, ws.len);
+    try std.testing.expectEqualDeep(scalar.Statistics{
+        .unavailable_version = if (repeated) count else 0,
+    }, stats);
+    return budget.workUsed();
+}
+
+test "recovery capture diagnostics share work across mutually exclusive arms" {
+    inline for (.{ 64, 128 }) |count| {
+        const distinct = try captureFanOutWork(count, false);
+        const repeated = try captureFanOutWork(count, true);
+        try std.testing.expect(repeated > distinct);
+        try std.testing.expect(repeated - distinct <= 10 * count);
+    }
+}
+
+test "recovery capture diagnostics distinguish a block's own returning field" {
+    var program = scalar_diamond;
+    var blocks = scalar_diamond.blocks[0..4].*;
+    blocks[0].instructions = &.{};
+    blocks[0].terminator.branch.when_true.block = 2;
+    blocks[0].terminator.branch.when_false.block = 3;
+    blocks[2].terminator = .{ .yield_value = .{ .block = 1 } };
+    blocks[1].instructions = scalar_diamond.blocks[0].instructions;
+    blocks[1].terminator = .{ .yield_value = .{ .block = 1 } };
+    program.blocks = &blocks;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    for ([_]usize{ 0, 1 }) |captures| {
+        if (captures == 1) blocks[1].terminator.yield_value.block = 3;
+        var budget = scalar.Budget.init(.{});
+        var stats: scalar.Statistics = .{};
+        const ws = try scalar.discover(arena.allocator(), program, &budget, &stats);
+        try std.testing.expectEqual(0, ws.len);
+        try std.testing.expectEqualDeep(scalar.Statistics{
+            .capture_boundary = captures,
+            .unavailable_version = 2 - captures,
+        }, stats);
+    }
+}

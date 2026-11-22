@@ -41,7 +41,7 @@ fn check(nodes: []const Node) !void {
     const classes = try graph.discover(testing.allocator, nodes, &.{}, &work);
     defer testing.allocator.free(classes);
     var remaining: u64 = 1_000_000;
-    var bounded: graph.Work = .{ .remaining = &remaining };
+    var bounded: graph.Work = .{ .remaining = &remaining, .compact_refinement = true };
     const compact = try graph.discover(testing.allocator, nodes, &.{}, &bounded);
     defer testing.allocator.free(compact);
     try testing.expectEqualSlices(usize, classes, compact);
@@ -149,7 +149,7 @@ test "coalescing profile singleton restriction propagates to parents and recursi
     defer testing.allocator.free(restricted);
     try testing.expectEqualSlices(usize, &.{ 0, 1, 2, 3 }, restricted);
     var remaining: u64 = 4096;
-    var bounded: graph.Work = .{ .remaining = &remaining };
+    var bounded: graph.Work = .{ .remaining = &remaining, .compact_refinement = true };
     const compact = try graph.discover(
         testing.allocator,
         &nodes,

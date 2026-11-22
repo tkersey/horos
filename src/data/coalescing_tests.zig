@@ -340,3 +340,53 @@ test "local rollback needs no shared work for a discovery visit it declined" {
     try testing.expectEqual(pass.Outcome.work_limit, stats.outcome);
     try testing.expectEqual(@as(u64, 0), remaining);
 }
+
+test "reported coalescing work replays both refinement strategies with long static labels" {
+    var program = fixture;
+    var functions = fixture.functions[0..3].*;
+    const slots: [512]@import("program.zig").Id = @splat(0);
+    for (functions[0..2]) |*function| function.layout.slots = &slots;
+    program.functions = &functions;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ordinary_map: MapCapture = .{ .a = arena.allocator() };
+    var ordinary = try pass.run(testing.allocator, program, ordinary_map.options());
+    defer ordinary.deinit();
+    const record = @import("record.zig");
+    for ([_]bool{ false, true }) |compact| {
+        var capture: MapCapture = .{ .a = arena.allocator() };
+        var options = capture.options();
+        options.compact_refinement = compact;
+        var stats: pass.Statistics = .{};
+        options.statistics = &stats;
+        var remaining: u64 = std.math.maxInt(u64);
+        var measured = try pass.runWithWork(testing.allocator, program, options, &remaining);
+        defer measured.deinit();
+        try testing.expectEqual(pass.Outcome.applied, stats.outcome);
+        try testing.expect(record.equal(@TypeOf(program), ordinary.program, measured.program));
+        const shared_work = std.math.maxInt(u64) - remaining;
+        const local_work = stats.work.units;
+        const selected_work = stats.first_selected_work;
+        try testing.expect(selected_work < local_work);
+        options.work_limit = local_work;
+        remaining = shared_work;
+        capture.map = null;
+        var replayed = try pass.runWithWork(testing.allocator, program, options, &remaining);
+        defer replayed.deinit();
+        try testing.expectEqual(@as(u64, 0), remaining);
+        try testing.expectEqual(local_work, stats.work.units);
+        try testing.expectEqual(pass.Outcome.applied, stats.outcome);
+        try testing.expect(record.equal(@TypeOf(program), ordinary.program, replayed.program));
+        try testing.expect(record.equal(pass.Correspondence, ordinary_map.map.?, capture.map.?));
+        var local = try pass.run(testing.allocator, program, options);
+        defer local.deinit();
+        try testing.expectEqual(local_work, stats.work.units);
+        try testing.expectEqual(pass.Outcome.applied, stats.outcome);
+        remaining = std.math.maxInt(u64);
+        options.work_limit = selected_work;
+        var rolled_back = try pass.runWithWork(testing.allocator, program, options, &remaining);
+        defer rolled_back.deinit();
+        try testing.expectEqual(pass.Outcome.work_limit, stats.outcome);
+        try testing.expectEqual(selected_work, stats.first_selected_work);
+    }
+}

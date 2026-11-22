@@ -104,7 +104,8 @@ fn sorted(
     work: *graph.Work,
     comparison_width: usize,
 ) Error!void {
-    if (work.remaining == null) return std.mem.sort(T, items, context, less);
+    if (work.remaining == null and !work.compact_refinement)
+        return std.mem.sort(T, items, context, less);
     if (items.len < 2) return;
     const depth: usize = std.math.log2_int_ceil(usize, items.len);
     const comparisons = std.math.mul(usize, items.len, 4 * depth) catch return error.WorkLimit;
@@ -216,7 +217,7 @@ pub const Blocks = struct {
     direct: ?[]p.Id = null,
 
     pub fn index(a: std.mem.Allocator, count: usize, work: *graph.Work) Error!?[]p.Id {
-        if (work.remaining == null) return null;
+        if (work.remaining == null and !work.compact_refinement) return null;
         try work.chargeBounded(count);
         const result = try a.alloc(p.Id, count);
         @memset(result, r.missing);

@@ -403,6 +403,19 @@ test "repeated roles charge each input and inspect each distinct formal once" {
     ));
 }
 
+fn normalizeWithFailures(
+    allocator: std.mem.Allocator,
+    fixture: source.Module,
+    roles: []const phase.Formal,
+    limit: u64,
+) !void {
+    var work = limit;
+    var normalized = try phase.normalize(allocator, fixture, roles, &work);
+    defer normalized.deinit();
+    const expected = roles[0 .. roles.len - 1];
+    try std.testing.expectEqualSlices(phase.Formal, expected, normalized.formals());
+}
+
 test "wide formal normalization preserves submitted order within its work limit" {
     var b = source.Builder.init(a);
     defer b.deinit();
@@ -425,4 +438,33 @@ test "wide formal normalization preserves submitted order within its work limit"
     defer exact.deinit();
     try std.testing.expectEqualSlices(phase.Formal, normalized.formals(), exact.formals());
     try std.testing.expectEqual(@as(u64, 0), remaining);
+    try @import("../allocation_testing.zig").check(a, normalizeWithFailures, .{
+        fixture, &roles, required,
+    });
+}
+
+test "wide formal dictionary admits distinct roles and reverse repeats with linear work" {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const unit = try b.scalar(void);
+    const word = try b.scalar(u64);
+    const entry = try b.declare(&.{word}, word, &.{}, &.{});
+    const arity = 1024;
+    const inputs: [arity]u64 = @splat(word);
+    const first = try b.declare(&inputs, word, &.{}, &.{});
+    const second = try b.declare(&inputs, word, &.{}, &.{});
+    for ([_]u64{ entry, first, second }) |function|
+        try b.define(function, try b.pure(try b.reference(b.parameter(function, 0))));
+    const fixture = b.module(entry, unit);
+    const count = 2 * arity;
+    var submitted: [2 * count]phase.Formal = undefined;
+    for (submitted[0..count], 0..) |*role, i| role.* = .{
+        .function = if (i % 2 == 0) first else second,
+        .ordinal = (i / 2 * 37) % arity,
+    };
+    for (submitted[count..], 0..) |*role, i| role.* = submitted[count - 1 - i];
+    var work: u64 = 3 * submitted.len;
+    var normalized = try phase.normalize(a, fixture, &submitted, &work);
+    defer normalized.deinit();
+    try std.testing.expectEqualSlices(phase.Formal, submitted[0..count], normalized.formals());
 }

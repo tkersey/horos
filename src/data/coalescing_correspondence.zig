@@ -122,6 +122,33 @@ pub fn validateWithFlow(
         try write(ir.Program, candidate, &records);
         try write(Correspondence, map, &records);
     }
+    return checkedFlow(a, original, candidate, map, work);
+}
+
+pub fn validateMatchingWithFlow(
+    a: std.mem.Allocator,
+    original: ir.Program,
+    candidate: ir.Program,
+    map: Correspondence,
+    submitted_program: ir.Program,
+    submitted_map: Correspondence,
+    work: *u64,
+) Error!@import("activation_flow.zig").Facts {
+    var records: @import("wire.zig").Writer = .{ .remaining = work };
+    const record = @import("record.zig");
+    try record.write(ir.Program, original, &records);
+    try require(try record.equalWithWork(ir.Program, candidate, submitted_program, work));
+    try require(try record.equalWithWork(Correspondence, map, submitted_map, work));
+    return checkedFlow(a, original, candidate, map, work);
+}
+
+fn checkedFlow(
+    a: std.mem.Allocator,
+    original: ir.Program,
+    candidate: ir.Program,
+    map: Correspondence,
+    work: ?*u64,
+) Error!@import("activation_flow.zig").Facts {
     var original_facts = try admission.analyzeObservedWithWork(a, original, null, null, work);
     original_facts.deinit();
     var actual = try admission.analyzeObservedWithWork(a, candidate, null, null, work);

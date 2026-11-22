@@ -396,48 +396,95 @@ fn selectFunction(
     }
 }
 
+const Origins = enum(usize) {
+    none = std.math.maxInt(usize),
+    several = std.math.maxInt(usize) - 1,
+    _,
+
+    fn join(self: Origins, other: Origins) Origins {
+        if (self == .none) return other;
+        if (other == .none or self == other) return self;
+        return .several;
+    }
+
+    fn containsOther(self: Origins, block: usize) bool {
+        return self != .none and self != @as(Origins, @fromBackingInt(@intCast(block)));
+    }
+};
+
 const CapturePaths = struct {
-    const Step = struct { block: usize, crossed: bool };
-    seen: [][2]bool = &.{},
-    sources: []bool = &.{},
-    queue: std.ArrayList(Step) = .empty,
+    const Block = struct { before: Origins = .none, after: Origins = .none, queued: bool = false };
+    blocks: []Block = &.{},
+    queue: std.ArrayList(usize) = .empty,
 
-    fn prepare(self: *CapturePaths, a: Allocator, ctx: Context) Error!void {
-        if (self.seen.len != 0) return;
-        const count = ctx.live.len;
-        try spend(ctx.budget, count);
-        self.seen = try a.alloc([2]bool, count);
-        self.sources = try a.alloc(bool, count);
-        @memset(self.seen, .{ false, false });
-        @memset(self.sources, false);
+    fn merge(
+        self: *CapturePaths,
+        a: Allocator,
+        budget: *Budget,
+        target: usize,
+        before: Origins,
+        after: Origins,
+    ) Error!void {
+        const block = &self.blocks[target];
+        const plain = block.before.join(before);
+        const crossed = block.after.join(after);
+        if (plain == block.before and crossed == block.after) return;
+        block.before = plain;
+        block.after = crossed;
+        if (!block.queued) {
+            try append(usize, a, budget, &self.queue, target);
+            block.queued = true;
+        }
     }
 
-    fn add(self: *CapturePaths, a: Allocator, budget: *Budget, step: Step) Error!void {
-        const visited = &self.seen[step.block][@intFromBool(step.crossed)];
-        if (visited.*) return;
-        visited.* = true;
-        try append(Step, a, budget, &self.queue, step);
-    }
-
-    fn precedes(self: *CapturePaths, a: Allocator, ctx: Context, target: usize) Error!bool {
+    fn classify(
+        self: *CapturePaths,
+        a: Allocator,
+        ctx: Context,
+        sites: []Candidate,
+        members: []const Ordered,
+    ) Error!void {
+        if (self.blocks.len == 0) {
+            try spend(ctx.budget, ctx.live.len);
+            self.blocks = try a.alloc(Block, ctx.live.len);
+            @memset(self.blocks, .{});
+        }
         defer {
-            for (self.queue.items) |step|
-                self.seen[step.block][@intFromBool(step.crossed)] = false;
+            for (self.queue.items) |id| self.blocks[id] = .{};
             self.queue.clearRetainingCapacity();
         }
-        try self.add(a, ctx.budget, .{ .block = target, .crossed = false });
+        try spend(ctx.budget, members.len);
+        for (members) |item| {
+            const site = sites[item.site];
+            if (site.state != .replaced) {
+                const source = site.site.block;
+                try self.merge(a, ctx.budget, source, @fromBackingInt(@intCast(source)), .none);
+            }
+        }
         var cursor: usize = 0;
         while (cursor < self.queue.items.len) : (cursor += 1) {
             try spend(ctx.budget, 1);
-            const step = self.queue.items[cursor];
-            for (ctx.predecessors[step.block].items) |pred| {
+            const id = self.queue.items[cursor];
+            self.blocks[id].queued = false;
+            const state = self.blocks[id];
+            const terminator = ctx.program.blocks[id].terminator;
+            var edge: usize = 0;
+            while (proof.successor(terminator, edge)) |transfer| : (edge += 1) {
                 try spend(ctx.budget, 1);
-                const crossed = step.crossed or pred.transfer.capture_boundary;
-                if (crossed and pred.block != target and self.sources[pred.block]) return true;
-                try self.add(a, ctx.budget, .{ .block = pred.block, .crossed = crossed });
+                const target: usize = @intCast(transfer.edge.block);
+                if (!ctx.live[target]) continue;
+                const crossed = transfer.capture_boundary;
+                const after = if (crossed) state.after.join(state.before) else state.after;
+                try self.merge(a, ctx.budget, target, if (crossed) .none else state.before, after);
             }
         }
-        return false;
+        for (members) |item| {
+            const site = &sites[item.site];
+            if (site.state != .possible_capture) continue;
+            const target = site.site.block;
+            const earlier = self.blocks[target].after;
+            site.state = if (earlier.containsOther(target)) .capture else .unavailable;
+        }
     }
 };
 
@@ -457,25 +504,7 @@ fn classifyCaptures(
         for (members) |item| {
             if (sites[item.site].state == .possible_capture) break;
         } else continue;
-        try paths.prepare(a, ctx);
-        try spend(ctx.budget, members.len);
-        for (members) |item| {
-            const site = sites[item.site];
-            if (site.state != .replaced) paths.sources[site.site.block] = true;
-        }
-        var previous: ?usize = null;
-        var state: Candidate.State = .unavailable;
-        for (members) |item| {
-            const site = &sites[item.site];
-            if (site.state != .possible_capture) continue;
-            if (previous != site.site.block) {
-                const crossed = try paths.precedes(a, ctx, site.site.block);
-                state = if (crossed) .capture else .unavailable;
-                previous = site.site.block;
-            }
-            site.state = state;
-        }
-        for (members) |item| paths.sources[sites[item.site].site.block] = false;
+        try paths.classify(a, ctx, sites, members);
     }
 }
 

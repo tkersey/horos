@@ -382,6 +382,7 @@ test "candidate P01 selection and independent checking share a single work allow
     var work = full;
     var capture: CanonicalMap = .{ .arena = b.allocator(), .work = &work };
     var selected = try data.coalescing.runWithWork(a, s, .{
+        .compact_refinement = true,
         .correspondence = .{ .context = &capture, .receive = CanonicalMap.receive },
     }, &work);
     defer selected.deinit();
@@ -469,6 +470,7 @@ test "independent recovery validation enforces the actual encoded growth of a sp
     var work = policy.limits.p01_work;
     var capture: CanonicalMap = .{ .arena = b.allocator(), .work = &work };
     var final = try data.coalescing.runWithWork(a, modified, .{
+        .compact_refinement = true,
         .correspondence = .{ .context = &capture, .receive = CanonicalMap.receive },
     }, &work);
     defer final.deinit();
@@ -971,6 +973,44 @@ test "recovery lowering policies retain their original meaning" {
     limited = options().limits;
     limited.rule.witnesses = 0;
     try std.testing.expectError(error.ScalarFieldLimit, optimization.decode(a, encoded, limited));
+}
+
+test "ordinary literal fallback validates at its minimum publishing allowance" {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const bytes_type = try b.schema(.bytes);
+    const entry = try b.declare(&.{}, bytes_type, &.{}, &.{});
+    const payload: [4096]u8 = @splat(42);
+    var encoded: [payload.len + 2]u8 = undefined;
+    var writer: data.wire.Writer = .{ .output = &encoded };
+    try writer.bytes(&payload);
+    const literal = try b.literal(.{ .schema = bytes_type, .bytes = encoded[0..writer.position] });
+    try b.define(entry, try b.pure(literal));
+    const module = b.module(entry, try b.scalar(void));
+    var ordinary = try source.lowerObserved(a, module, .{ .recovery = true });
+    defer ordinary.deinit();
+    var policy = options();
+    policy.formals = &.{};
+    policy.limits.rule.work = 0;
+    var low: u64 = 0;
+    var high = policy.limits.source_work;
+    while (low < high) {
+        const middle = low + (high - low) / 2;
+        policy.limits.source_work = middle;
+        var result = source.lowerRecoveryOptimized(a, module, policy) catch |err| switch (err) {
+            error.RelationLimit, error.ScalarFieldLimit => {
+                low = middle + 1;
+                continue;
+            },
+            else => return err,
+        };
+        result.deinit();
+        high = middle;
+    }
+    policy.limits.source_work = low;
+    var retained = try source.lowerRecoveryOptimized(a, module, policy);
+    defer retained.deinit();
+    try expectStructuralFallback(module, policy, &ordinary, &retained);
 }
 
 fn compileWithFailures(allocator: std.mem.Allocator, module: source.Module) !void {

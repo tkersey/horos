@@ -22,6 +22,7 @@ pub const Work = struct {
     /// Charged key bytes, node/edge visits, and exact comparison byte bounds.
     limit: u64 = std.math.maxInt(u64),
     units: u64 = 0,
+    compact_refinement: bool = false,
     comparisons: u64 = 0,
     rounds: u64 = 0,
     exhausted: bool = false,
@@ -29,8 +30,7 @@ pub const Work = struct {
     remaining: ?*u64 = null,
 
     pub fn chargeBounded(self: *Work, amount: usize) error{WorkLimit}!void {
-        if (self.remaining == null) return;
-        if (self.limit == std.math.maxInt(u64)) return self.charge(amount);
+        if (self.compact_refinement) return self.charge(amount);
         return self.chargeShared(amount);
     }
 
@@ -47,7 +47,7 @@ pub const Work = struct {
     pub fn charge(self: *Work, amount: usize) error{WorkLimit}!void {
         if (amount > self.limit or self.units > self.limit - amount) {
             self.exhausted = true;
-            self.local_exhausted = self.limit != std.math.maxInt(u64);
+            self.local_exhausted = true;
             return error.WorkLimit;
         }
         try self.chargeShared(amount);
@@ -168,7 +168,7 @@ fn refine(
         const pinned = node.pinned or (singletons.len != 0 and singletons[id]);
         var size: wire.Writer = .{};
         try work.chargeBounded(node.edges.len);
-        const compact = !initial and work.remaining != null and work.limit == std.math.maxInt(u64);
+        const compact = !initial and work.compact_refinement;
         try writeKey(&size, nodes, node, id, pinned, classes, initial, compact);
         try work.charge(size.position);
         const bytes = try a.alloc(u8, size.position);
