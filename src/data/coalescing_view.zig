@@ -28,11 +28,30 @@ pub fn function(
     fixed: r.Maps,
     work: *graph.Work,
 ) Error!View {
+    const block_names = try names.Blocks.index(a, program.blocks.len, work);
+    return functionWithBlocks(a, program, id, fixed, work, block_names);
+}
+
+pub fn functionWithBlocks(
+    a: std.mem.Allocator,
+    program: ir.Program,
+    id: p.Id,
+    fixed: r.Maps,
+    work: *graph.Work,
+    block_names: ?[]p.Id,
+) Error!View {
     if (id >= program.functions.len) return error.InvalidReference;
+    if (block_names) |ids| if (ids.len != program.blocks.len) return error.InvalidReference;
     var body: Body = .{
         .sink = .{ .allocator = a, .program = program, .fixed = fixed, .work = work },
         .locals = try names.Names.init(a, program.functions[@intCast(id)], work),
-        .blocks = .{ .allocator = a, .work = work, .program = program, .function = id },
+        .blocks = .{
+            .allocator = a,
+            .work = work,
+            .program = program,
+            .function = id,
+            .direct = block_names,
+        },
     };
     try body.blocks.collect();
     try body.write();
@@ -101,7 +120,10 @@ const Sink = struct {
         const target = std.math.add(usize, offset, @intCast(id)) catch
             return error.InvalidLength;
         try self.natural(self.edges.items.len);
-        try self.edges.append(self.allocator, .{ .role = self.edges.items.len, .target = target });
+        try self.work.append(self.allocator, &self.edges, .{
+            .role = self.edges.items.len,
+            .target = target,
+        });
     }
     fn globals(self: *Sink, kind: r.Kind, values: []const p.Id) Error!void {
         try self.natural(values.len);
@@ -210,7 +232,7 @@ const Body = struct {
             .handler => try self.sink.global(.handler, value),
             .region => try self.sink.global(.region, value),
             .block => try self.sink.natural(
-                self.blocks.names.get(value) orelse return error.InvalidReference,
+                self.blocks.name(value) orelse return error.InvalidReference,
             ),
             .edge => try roles.visitEdge(value, self),
             .assignment => try roles.visitAssignment(value, self),

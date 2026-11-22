@@ -4,6 +4,7 @@ const std = @import("std");
 const p = @import("program.zig");
 const ir = @import("activation.zig");
 const roles = @import("reference_roles.zig");
+const spend = @import("admission.zig").spend;
 pub const Kind = enum(u8) {
     schema,
     constant,
@@ -24,10 +25,19 @@ pub const Maps = [kind_count][]const p.Id;
 
 /// Caller owns each returned slice. No partial allocation escapes on failure.
 pub fn identityMaps(a: std.mem.Allocator, counts: [kind_count]usize) Error!Maps {
+    return identityMapsWithWork(a, counts, null);
+}
+
+pub fn identityMapsWithWork(
+    a: std.mem.Allocator,
+    counts: [kind_count]usize,
+    work: ?*u64,
+) Error!Maps {
     var result: Maps = undefined;
     var initialized: usize = 0;
     errdefer for (result[0..initialized]) |map| a.free(map);
     for (&result, counts) |*map, count| {
+        try spend(work, count);
         const values = try a.alloc(p.Id, count);
         for (values, 0..) |*value, index| value.* = index;
         map.* = values;
@@ -36,13 +46,31 @@ pub fn identityMaps(a: std.mem.Allocator, counts: [kind_count]usize) Error!Maps 
     return result;
 }
 
+pub fn sortIdsWithWork(ids: []p.Id, work: ?*u64) Error!void {
+    if (work) |left| {
+        const levels: u64 = @bitSizeOf(usize) - @clz(ids.len);
+        const visits = std.math.mul(u64, ids.len, 2 * levels + 3) catch return error.RelationLimit;
+        try spend(left, visits);
+        std.sort.heap(p.Id, ids, {}, std.sort.asc(p.Id));
+    } else std.mem.sort(p.Id, ids, {}, std.sort.asc(p.Id));
+}
+
 const RegionNames = struct {
     allocator: std.mem.Allocator,
     declared: p.Id,
+    work: ?*u64,
     ids: std.AutoHashMapUnmanaged(p.Id, p.Id) = .empty,
 
     fn id(self: *RegionNames, old: p.Id) Error!p.Id {
         if (old >= self.declared) return error.InvalidReference;
+        if (self.work) |left| {
+            const occupied: u64 = self.ids.count();
+            try spend(left, occupied + 1);
+            if (self.ids.available == 0) {
+                try spend(left, @as(u64, self.ids.capacity()) * 3 + 8);
+                try spend(left, occupied * (occupied + 1));
+            }
+        }
         const entry = try self.ids.getOrPut(self.allocator, old);
         if (!entry.found_existing) entry.value_ptr.* = self.ids.count() - 1;
         return entry.value_ptr.*;
@@ -69,22 +97,31 @@ pub const Mapper = struct {
     maps: Maps,
     region_names: ?*RegionNames = null,
     references: ?*std.ArrayList(Reference) = null,
+    work: ?*u64 = null,
+    collect_only: bool = false,
 
     pub fn id(self: Mapper, kind: Kind, value: p.Id) Error!p.Id {
-        if (self.references) |found| try found.append(
-            self.allocator,
-            .{ .kind = kind, .id = value },
-        );
+        try spend(self.work, 1);
+        if (self.references) |found| {
+            if (found.items.len == found.capacity) try spend(self.work, found.items.len);
+            try found.append(self.allocator, .{ .kind = kind, .id = value });
+        }
         if (kind == .region) if (self.region_names) |names| return names.id(value);
+        if (self.collect_only) return value;
         const map = self.maps[@backingInt(kind)];
         if (value >= map.len or map[@intCast(value)] == missing) return error.InvalidReference;
         return map[@intCast(value)];
     }
     fn ids(self: Mapper, kind: Kind, values: []const p.Id, set: bool) Error![]const p.Id {
+        if (self.collect_only) {
+            for (values) |value| _ = try self.id(kind, value);
+            return values;
+        }
+        try spend(self.work, values.len);
         const result = try self.allocator.alloc(p.Id, values.len);
         for (result, values) |*target, value| target.* = try self.id(kind, value);
         if (!set) return result;
-        std.mem.sort(p.Id, result, {}, std.sort.asc(p.Id));
+        try sortIdsWithWork(result, self.work);
         var count: usize = 0;
         for (result) |value| if (count == 0 or result[count - 1] != value) {
             result[count] = value;
@@ -93,6 +130,8 @@ pub const Mapper = struct {
         return result[0..count];
     }
     fn local(self: Mapper, comptime T: type, values: []const T) Error![]const T {
+        if (self.collect_only) return values;
+        try spend(self.work, values.len);
         return self.allocator.dupe(T, values);
     }
     pub fn schema(self: Mapper, value: p.Schema) Error!p.Schema {
@@ -175,15 +214,26 @@ pub const Mapper = struct {
             .regions = try self.ids(.region, value.regions, true),
         };
     }
+    fn records(
+        self: Mapper,
+        comptime T: type,
+        values: []const T,
+        comptime map: fn (Mapper, T) Error!T,
+    ) Error![]const T {
+        try spend(self.work, values.len);
+        if (self.collect_only) {
+            for (values) |value| _ = try map(self, value);
+            return values;
+        }
+        const result = try self.allocator.alloc(T, values.len);
+        for (values, result) |value, *target| target.* = try map(self, value);
+        return result;
+    }
+    fn failure(self: Mapper, value: p.InstructionFailure) Error!p.InstructionFailure {
+        return .{ .kind = value.kind, .value = try self.id(.constant, value.value) };
+    }
     fn instruction(self: Mapper, value: ir.Instruction) Error!ir.Instruction {
-        const failures = try self.allocator.alloc(p.InstructionFailure, value.failures.len);
-        for (
-            failures,
-            value.failures,
-        ) |*target, failure| target.* = .{
-            .kind = failure.kind,
-            .value = try self.id(.constant, failure.value),
-        };
+        const failures = try self.records(p.InstructionFailure, value.failures, failure);
         return .{
             .destination = value.destination,
             .opcode = value.opcode,
@@ -199,11 +249,7 @@ pub const Mapper = struct {
         };
     }
     pub fn block(self: Mapper, value: ir.Block) Error!ir.Block {
-        const instructions = try self.allocator.alloc(ir.Instruction, value.instructions.len);
-        for (
-            instructions,
-            value.instructions,
-        ) |*target, operation| target.* = try self.instruction(operation);
+        const instructions = try self.records(ir.Instruction, value.instructions, instruction);
         return .{
             .function = try self.id(.function, value.function),
             .custody = value.custody,
@@ -215,17 +261,16 @@ pub const Mapper = struct {
         var control: ControlMapper = .{ .mapper = self };
         return roles.mapTerminator(value, &control);
     }
-    pub fn handler(self: Mapper, value: ir.Handler) Error!ir.Handler {
-        const clauses = try self.allocator.alloc(ir.Clause, value.clauses.len);
-        for (
-            clauses,
-            value.clauses,
-        ) |*target, clause| target.* = .{
-            .effect = try self.id(.effect, clause.effect),
-            .function = try self.id(.function, clause.function),
-            .resumption = try self.id(.schema, clause.resumption),
-            .strategy = clause.strategy,
+    fn clause(self: Mapper, value: ir.Clause) Error!ir.Clause {
+        return .{
+            .effect = try self.id(.effect, value.effect),
+            .function = try self.id(.function, value.function),
+            .resumption = try self.id(.schema, value.resumption),
+            .strategy = value.strategy,
         };
+    }
+    pub fn handler(self: Mapper, value: ir.Handler) Error!ir.Handler {
+        const clauses = try self.records(ir.Clause, value.clauses, clause);
         return .{
             .mode = value.mode,
             .input = try self.id(.schema, value.input),
@@ -275,6 +320,14 @@ const ControlMapper = struct {
             present,
         ) else null;
         if (comptime cardinality == .list) {
+            if (self.mapper.collect_only) {
+                if (role == .slot_read or role == .slot_write or role == .nonreference)
+                    return value;
+                try spend(self.mapper.work, value.len);
+                for (value) |item| _ = try self.reference(role, .one, item);
+                return value;
+            }
+            try spend(self.mapper.work, value.len);
             const Child = @typeInfo(@TypeOf(value)).pointer.child;
             const result = try self.mapper.allocator.alloc(Child, value.len);
             for (value, result) |item, *out| out.* = try self.reference(role, .one, item);
@@ -303,7 +356,15 @@ pub const Projection = struct {
     regions: std.AutoHashMapUnmanaged(p.Id, p.Id) = .empty,
 
     pub fn mapped(self: Projection, kind: Kind, old: p.Id) Error!p.Id {
-        if (kind == .region) return self.regions.get(old) orelse error.InvalidReference;
+        return self.mappedWithWork(kind, old, null);
+    }
+
+    pub fn mappedWithWork(self: Projection, kind: Kind, old: p.Id, work: ?*u64) Error!p.Id {
+        try spend(work, 1);
+        if (kind == .region) {
+            try spend(work, self.regions.count());
+            return self.regions.get(old) orelse error.InvalidReference;
+        }
         const maps = self.maps orelse return error.InvalidReference;
         const map = maps[@backingInt(kind)];
         if (old >= map.len or map[@intCast(old)] == missing) return error.InvalidReference;
@@ -319,15 +380,43 @@ pub fn ownReachable(
     scratch: std.mem.Allocator,
     input: ir.Program,
 ) Error!Projection {
-    var selection = try Selection.init(scratch, input);
+    return ownReachableWithWork(output, scratch, input, null);
+}
+
+pub fn reachableBlocks(
+    scratch: std.mem.Allocator,
+    input: ir.Program,
+    work: *u64,
+) Error![]bool {
+    var arena = std.heap.ArenaAllocator.init(scratch);
+    defer arena.deinit();
+    var selection = try Selection.init(arena.allocator(), input, work);
+    try selection.scan(input);
+    const live = selection.seen[@backingInt(Kind.block)];
+    try spend(work, live.len);
+    return scratch.dupe(bool, live);
+}
+
+pub fn ownReachableWithWork(
+    output: std.mem.Allocator,
+    scratch: std.mem.Allocator,
+    input: ir.Program,
+    work: ?*u64,
+) Error!Projection {
+    var selection = try Selection.init(scratch, input, work);
     try selection.scan(input);
     var orders: [kind_count][]p.Id = undefined;
-    for (&selection.maps, selection.seen, &orders) |*map, seen, *order| {
+    var maps: Maps = undefined;
+    for (&maps, selection.seen, &orders) |*map, seen, *order| {
+        try spend(work, seen.len);
+        try spend(work, seen.len);
+        const ids = try scratch.alloc(p.Id, seen.len);
+        map.* = ids;
         var count: usize = 0;
         for (seen) |live| count += @intFromBool(live);
         order.* = try scratch.alloc(p.Id, count);
         count = 0;
-        for (map.*, seen, 0..) |*id, live, old| {
+        for (ids, seen, 0..) |*id, live, old| {
             id.* = if (live) count else missing;
             if (live) {
                 order.*[count] = old;
@@ -337,14 +426,15 @@ pub fn ownReachable(
     }
     const mapper: Mapper = .{
         .allocator = output,
-        .maps = selection.maps,
+        .maps = maps,
         .region_names = &selection.regions,
+        .work = work,
     };
     const result = try copySelected(mapper, input, orders, selection.regions.ids.count());
     return .{
         .program = result,
         .function_origins = orders[@backingInt(Kind.function)],
-        .maps = selection.maps,
+        .maps = maps,
         .regions = selection.regions.ids,
     };
 }
@@ -358,9 +448,22 @@ pub fn ownQuotient(
     representatives: Maps,
     final: Maps,
 ) Error!ir.Program {
+    return ownQuotientWithWork(output, scratch, input, representatives, final, null);
+}
+
+pub fn ownQuotientWithWork(
+    output: std.mem.Allocator,
+    scratch: std.mem.Allocator,
+    input: ir.Program,
+    representatives: Maps,
+    final: Maps,
+    work: ?*u64,
+) Error!ir.Program {
     var orders: [kind_count][]p.Id = undefined;
     for (representatives, &orders, try sizes(input)) |map, *order, size| {
         if (map.len != size) return error.InvalidReference;
+        try spend(work, size);
+        try spend(work, size);
         var count: usize = 0;
         for (map, 0..) |representative, id| {
             if (representative >= size or map[@intCast(representative)] != representative)
@@ -374,7 +477,7 @@ pub fn ownQuotient(
             count += 1;
         };
     }
-    const mapper: Mapper = .{ .allocator = output, .maps = final };
+    const mapper: Mapper = .{ .allocator = output, .maps = final, .work = work };
     return copySelected(mapper, input, orders, orders[@backingInt(Kind.region)].len);
 }
 
@@ -385,6 +488,7 @@ fn copySelected(
     regions: p.Id,
 ) Error!ir.Program {
     const output = mapper.allocator;
+    for (orders) |order| try spend(mapper.work, order.len);
     var result = input;
     result.roots = .{
         .entry = try mapper.id(.function, input.roots.entry),
@@ -421,16 +525,20 @@ fn copySelected(
 
 const Selection = struct {
     allocator: std.mem.Allocator,
-    maps: [kind_count][]p.Id,
+    work: ?*u64,
     seen: [kind_count][]bool,
     regions: RegionNames,
 
-    fn init(allocator: std.mem.Allocator, input: ir.Program) Error!Selection {
+    fn init(allocator: std.mem.Allocator, input: ir.Program, work: ?*u64) Error!Selection {
         var result: Selection = .{
             .allocator = allocator,
-            .maps = undefined,
+            .work = work,
             .seen = undefined,
-            .regions = .{ .allocator = allocator, .declared = input.scopes.region_count },
+            .regions = .{
+                .allocator = allocator,
+                .declared = input.scopes.region_count,
+                .work = work,
+            },
         };
         // Region names are sparse nominal IDs, not a dense allocation bound.
         const counts = [_]usize{
@@ -445,9 +553,8 @@ const Selection = struct {
             input.scopes.resources.len,
             input.constructors.len,
         };
-        for (&result.maps, &result.seen, counts) |*map, *seen, count| {
-            map.* = try allocator.alloc(p.Id, count);
-            for (map.*, 0..) |*id, index| id.* = index;
+        for (&result.seen, counts) |*seen, count| {
+            try spend(work, count);
             seen.* = try allocator.alloc(bool, count);
             @memset(seen.*, false);
         }
@@ -455,6 +562,7 @@ const Selection = struct {
     }
 
     fn scan(self: *Selection, input: ir.Program) Error!void {
+        try spend(self.work, 3);
         var pending: std.ArrayList(Reference) = .empty;
         try pending.appendSlice(
             self.allocator,
@@ -474,16 +582,13 @@ const Selection = struct {
             const id: usize = @intCast(reference.id);
             if (self.seen[kind][id]) continue;
             self.seen[kind][id] = true;
-            // Reference discovery and rewriting use the same record methods.
-            // Per-record copies are discarded; no scan storage escapes.
-            var temporary = std.heap.ArenaAllocator.init(self.allocator);
-            defer temporary.deinit();
-            var found: std.ArrayList(Reference) = .empty;
             const mapper: Mapper = .{
-                .allocator = temporary.allocator(),
-                .maps = self.maps,
+                .allocator = self.allocator,
+                .maps = @splat(&.{}),
                 .region_names = &self.regions,
-                .references = &found,
+                .references = &pending,
+                .work = self.work,
+                .collect_only = true,
             };
             switch (reference.kind) {
                 .schema => _ = try mapper.schema(input.schemas[id]),
@@ -497,7 +602,6 @@ const Selection = struct {
                 .constructor => _ = try mapper.constructor(input.constructors[id]),
                 .region => unreachable,
             }
-            try pending.appendSlice(self.allocator, found.items);
         }
     }
 };

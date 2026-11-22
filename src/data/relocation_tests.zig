@@ -83,3 +83,46 @@ test "closed projection follows resource authority and owns remapped output afte
 test "closed projection releases partial owners at every allocation failure" {
     try @import("allocation_testing.zig").check(testing.allocator, projectionCase, .{});
 }
+
+test "bounded closure follows authorities independently of literal byte length" {
+    var input = fixture;
+    var literals = fixture.constants[0..3].*;
+    var schemas = fixture.schemas[0..4].*;
+    schemas[0] = .bytes;
+    input.schemas = &schemas;
+    for (&literals) |*literal| literal.bytes = &.{0};
+    input.constants = &literals;
+    var remaining: u64 = 10000;
+    const expected = try d.relocation.reachableBlocks(testing.allocator, input, &remaining);
+    defer testing.allocator.free(expected);
+    try testing.expectEqualSlices(bool, &.{ false, true, true }, expected);
+    const cost = 10000 - remaining;
+    const payload = 1024 * 1024;
+    const bytes = try testing.allocator.alloc(u8, d.wire.naturalLength(payload) + payload);
+    defer testing.allocator.free(bytes);
+    @memset(bytes, 0);
+    var writer: d.wire.Writer = .{ .output = bytes };
+    try writer.natural(payload);
+    literals[2].bytes = bytes;
+    var admitted = try d.activation_ownership.analyze(testing.allocator, input);
+    admitted.deinit();
+    var exact = cost;
+    const actual = try d.relocation.reachableBlocks(testing.allocator, input, &exact);
+    defer testing.allocator.free(actual);
+    try testing.expectEqualSlices(bool, expected, actual);
+    try testing.expectEqual(0, exact);
+    var short = cost - 1;
+    try testing.expectError(
+        error.RelationLimit,
+        d.relocation.reachableBlocks(testing.allocator, input, &short),
+    );
+    var output = std.heap.ArenaAllocator.init(testing.allocator);
+    defer output.deinit();
+    var materialize: u64 = bytes.len - 1;
+    try testing.expectError(error.RelationLimit, d.relocation.ownReachableWithWork(
+        output.allocator(),
+        output.allocator(),
+        input,
+        &materialize,
+    ));
+}

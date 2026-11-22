@@ -16,9 +16,9 @@ pub fn allocator(self: *AllocationBudget) std.mem.Allocator {
 }
 
 fn permits(self: *AllocationBudget, bytes: usize) bool {
-    if (bytes <= self.remaining.*) return true;
-    self.exhausted = true;
-    return false;
+    if (bytes == 0) return true;
+    self.exhausted = bytes > self.remaining.*;
+    return !self.exhausted;
 }
 
 fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
@@ -69,4 +69,27 @@ fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ra: usize) 
 
 fn release(self: *AllocationBudget, bytes: usize) void {
     if (self.accounting == .live) self.remaining.* += bytes;
+}
+
+test "allocation refusal tracks the current growth request through recovery and cleanup" {
+    var backing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 2 });
+    var remaining: usize = 12;
+    var cap: AllocationBudget = .{
+        .parent = backing.allocator(),
+        .remaining = &remaining,
+        .accounting = .live,
+    };
+    const a = cap.allocator();
+    const first = try a.alloc(u8, 4);
+    defer a.free(first);
+    try std.testing.expect(!a.resize(first, 13));
+    try std.testing.expect(cap.exhausted);
+    const second = try a.alloc(u8, 4);
+    try std.testing.expect(!cap.exhausted);
+    try std.testing.expectError(error.OutOfMemory, a.alloc(u8, 5));
+    try std.testing.expect(cap.exhausted);
+    a.free(second);
+    try std.testing.expect(cap.exhausted);
+    try std.testing.expectError(error.OutOfMemory, a.alloc(u8, 5));
+    try std.testing.expect(!cap.exhausted);
 }

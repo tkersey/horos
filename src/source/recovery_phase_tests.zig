@@ -331,3 +331,74 @@ test "recovery checks a shared slot bijection once for many role ordinals" {
         ));
     }
 }
+
+fn protectedWork(
+    fixture: source.Module,
+    original: *const source.Compiled,
+    output: *const source.Compiled,
+    submitted: []const phase.Formal,
+) !u64 {
+    var storage: [8192]u8 align(64) = undefined;
+    var limited = std.heap.FixedBufferAllocator.init(&storage);
+    const scratch = limited.allocator();
+    const allowance = 10_000;
+    var work: u64 = allowance;
+    const map = output.recovery_evidence.?.correspondence;
+    try phase.validate(
+        scratch,
+        fixture,
+        original.parameters,
+        submitted,
+        original.program,
+        &original.flow,
+        output.program,
+        &output.flow,
+        map,
+        &work,
+    );
+    try phase.validateAliases(
+        scratch,
+        fixture,
+        original.parameters,
+        submitted,
+        original.program,
+        map,
+        map,
+        &work,
+    );
+    return allowance - work;
+}
+
+test "repeated roles charge each input and inspect each distinct formal once" {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const fixture = try aliasModule(&b, true);
+    var original = try @import("activation_lower.zig").lowerRecoveryInput(a, fixture);
+    defer original.deinit();
+    var output = try source.lowerObserved(a, fixture, .{ .recovery = true });
+    defer output.deinit();
+    const roles = [_]phase.Formal{
+        .{ .function = 2, .ordinal = 0 },
+        .{ .function = 1, .ordinal = 0 },
+    };
+    var repeated: [4096]phase.Formal = undefined;
+    for (&repeated, 0..) |*role, i| role.* = roles[i % roles.len];
+    const distinct_work = try protectedWork(fixture, &original, &output, &roles);
+    const repeated_work = try protectedWork(fixture, &original, &output, &repeated);
+    try std.testing.expectEqual(2 * (repeated.len - roles.len), repeated_work - distinct_work);
+    var work: u64 = repeated.len;
+    var normalized = try phase.normalize(a, fixture, &repeated, &work);
+    defer normalized.deinit();
+    try std.testing.expectEqualSlices(phase.Formal, &roles, normalized.formals());
+    try std.testing.expectEqual(@as(u64, 0), work);
+    work = repeated.len - 1;
+    try std.testing.expectError(error.RelationLimit, phase.normalize(a, fixture, &repeated, &work));
+    repeated[repeated.len - 1].ordinal = 1;
+    work = repeated.len;
+    try std.testing.expectError(error.InvalidCorrespondence, phase.normalize(
+        a,
+        fixture,
+        &repeated,
+        &work,
+    ));
+}

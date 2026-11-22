@@ -89,18 +89,6 @@ pub fn canNumber(opcode: p.Opcode) bool {
         else => false,
     };
 }
-fn representative(parents: []usize, start: usize) usize {
-    var root = start;
-    while (parents[root] != root) root = parents[root];
-    var cursor = start;
-    while (parents[cursor] != cursor) {
-        const next = parents[cursor];
-        parents[cursor] = root;
-        cursor = next;
-    }
-    return root;
-}
-
 pub fn run(
     allocator: std.mem.Allocator,
     original: ir.Program,
@@ -185,19 +173,7 @@ const Search = struct {
     fn indexRegions(self: *Search) Error!void {
         // A capture boundary kills every reuse fact. Build only the transparent
         // control-flow components in which a producer can possibly justify a use.
-        self.regions = try self.a.alloc(usize, self.original.blocks.len);
-        for (self.regions, 0..) |*region, id| region.* = id;
-        for (self.original.blocks, 0..) |block, id| {
-            var edge_index: usize = 0;
-            while (successor(block.terminator, edge_index)) |transfer| : (edge_index += 1) {
-                if (!self.budget.tick()) return error.ExpressionWorkLimit;
-                if (transfer.capture_boundary) continue;
-                const left = representative(self.regions, id);
-                const right = representative(self.regions, @intCast(transfer.edge.block));
-                self.regions[@max(left, right)] = @min(left, right);
-            }
-        }
-        for (0..self.regions.len) |id| self.regions[id] = representative(self.regions, id);
+        self.regions = try proof.transparentRegions(self.a, self.original, null, self.budget);
         self.region_defs = try self.a.alloc(std.ArrayList(Definition), self.original.blocks.len);
         self.predecessors = try indexPredecessors(self.a, self.original, self.budget);
         for (self.region_defs) |*items| items.* = .empty;

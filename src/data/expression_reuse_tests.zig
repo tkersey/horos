@@ -556,7 +556,12 @@ fn expectRetained(program: ir.Program) !scalar.Statistics {
     var stats: scalar.Statistics = .{};
     const witnesses = try scalar.discover(arena.allocator(), program, &budget, &stats);
     try std.testing.expectEqual(0, witnesses.len);
-    const forged = try scalar.reconstruct(arena.allocator(), program, &.{field_witness}, &budget);
+    const forged = try scalar.reconstructBorrowedProposal(
+        arena.allocator(),
+        program,
+        &.{field_witness},
+        &budget,
+    );
     try std.testing.expectError(
         error.InvalidExpressionReuse,
         scalar.validate(a, program, forged, &.{field_witness}, &budget),
@@ -644,7 +649,12 @@ test "recovery evidence accounts for complete records" {
     var budget = scalar.Budget.init(.{});
     const ws = &.{field_witness};
     const original = scalar_diamond;
-    const candidate = try scalar.reconstruct(arena.allocator(), original, ws, &budget);
+    const candidate = try scalar.reconstructBorrowedProposal(
+        arena.allocator(),
+        original,
+        ws,
+        &budget,
+    );
     try scalar.validate(a, original, candidate, ws, &budget);
     var changed = candidate;
     changed.constants = &.{.{ .schema = 0, .bytes = &.{ 0, 0, 0, 0, 0, 0, 0, 0 } }};
@@ -735,7 +745,12 @@ test "recovery field reuse rejects unordered duplicate and irrelevant proof coor
     var second = field_witness;
     second.target.instruction = 1;
     const valid = [_]scalar.Witness{ field_witness, second };
-    const candidate = try scalar.reconstruct(arena.allocator(), program, &valid, &budget);
+    const candidate = try scalar.reconstructBorrowedProposal(
+        arena.allocator(),
+        program,
+        &valid,
+        &budget,
+    );
     try scalar.validate(a, program, candidate, &valid, &budget);
     const wrong = [_][]const scalar.Witness{
         &.{ second, field_witness },
@@ -756,7 +771,7 @@ test "recovery field reuse bounds predecessor depth and rejects an unresolved cy
     defer arena.deinit();
     var budget = scalar.Budget.init(.{ .depth = 1 });
     const program = scalar_diamond;
-    const candidate = try scalar.reconstruct(
+    const candidate = try scalar.reconstructBorrowedProposal(
         arena.allocator(),
         program,
         &.{field_witness},
@@ -886,6 +901,20 @@ test "recovery discovery spends the witness quota only on retained blocks" {
         try std.testing.expectEqual(7, ws[0].target.block);
         try std.testing.expectEqual(1, stats.proven);
     }
+    var budget = scalar.Budget.init(.{});
+    const dead = try scalar.reconstructBorrowedProposal(
+        arena.allocator(),
+        program,
+        &.{field_witness},
+        &budget,
+    );
+    try std.testing.expectError(error.InvalidExpressionReuse, scalar.validate(
+        a,
+        program,
+        dead,
+        &.{field_witness},
+        &budget,
+    ));
 }
 
 test "recovery witness coordinates decode at full width before program range checking" {
@@ -903,10 +932,100 @@ test "recovery witness coordinates decode at full width before program range che
     try reader.finish();
     try std.testing.expectEqualDeep(witness, decoded);
     var budget = scalar.Budget.init(.{});
-    try std.testing.expectError(error.InvalidExpressionReuse, scalar.reconstruct(
+    try std.testing.expectError(error.InvalidExpressionReuse, scalar.reconstructBorrowedProposal(
         a,
         scalar_diamond,
         &.{decoded},
         &budget,
     ));
+}
+
+test "recovery proofs ignore an unreachable predecessor at a reachable join" {
+    var blocks = scalar_diamond.blocks[0..4].*;
+    var program = scalar_diamond;
+    program.blocks = &blocks;
+    blocks[0].terminator = .{ .jump = .{ .block = 3 } };
+    blocks[1].terminator = .{ .yield_value = .{ .block = 3 } };
+    blocks[2].terminator = .{ .jump = .{ .block = 1 } };
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var budget = scalar.Budget.init(.{ .depth = 2 });
+    var stats: scalar.Statistics = .{};
+    const ws = try scalar.discover(arena.allocator(), program, &budget, &stats);
+    try std.testing.expectEqualDeep(@as([]const scalar.Witness, &.{field_witness}), ws);
+    try std.testing.expectEqualDeep(scalar.Statistics{ .proven = 1 }, stats);
+    const proposal = try scalar.reconstructBorrowedProposal(
+        arena.allocator(),
+        program,
+        ws,
+        &budget,
+    );
+    try scalar.validate(a, program, proposal, ws, &budget);
+}
+
+test "recovery discovery indexes repeated fields within transparent components" {
+    const count = 128;
+    var blocks: [count]ir.Block = undefined;
+    var ops: [count]ir.Instruction = undefined;
+    const fields: [count]ir.Id = @splat(0);
+    var program = scalar_diamond;
+    program.schemas = &.{ .u64, .boolean, .unit, .{ .product = &fields } };
+    program.blocks = &blocks;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var distinct_work: u64 = 0;
+    for ([_]bool{ false, true }) |repeated| {
+        for (&blocks, &ops, 0..) |*block, *op, i| {
+            op.* = scalar_diamond.blocks[0].instructions[0];
+            op.immediate = if (repeated) 0 else i;
+            block.* = .{
+                .function = 0,
+                .instructions = op[0..1],
+                .terminator = if (i + 1 == count)
+                    .{ .return_value = op.destination }
+                else
+                    .{ .yield_value = .{ .block = i + 1 } },
+            };
+        }
+        var budget = scalar.Budget.init(.{});
+        var stats: scalar.Statistics = .{};
+        const ws = try scalar.discover(arena.allocator(), program, &budget, &stats);
+        try std.testing.expectEqual(0, ws.len);
+        if (repeated) {
+            try std.testing.expectEqual(count - 1, stats.capture_boundary);
+            try std.testing.expectEqual(1, stats.unavailable_version);
+            try std.testing.expect(budget.workUsed() < distinct_work + count * 8);
+        } else {
+            try std.testing.expectEqualDeep(scalar.Statistics{}, stats);
+            distinct_work = budget.workUsed();
+        }
+    }
+}
+
+test "recovery discovery keeps reachable literal payload out of scratch" {
+    const length = 1 << 20;
+    const bytes = try a.alloc(u8, length + 3);
+    defer a.free(bytes);
+    var writer: @import("wire.zig").Writer = .{ .output = bytes };
+    try writer.natural(length);
+    @memset(bytes[writer.position..], 0);
+    var program = scalar_diamond;
+    program.schemas = &(scalar_diamond.schemas[0..4].* ++ [_]Schema{.bytes});
+    program.constants = &.{.{ .schema = 4, .bytes = bytes }};
+    var function = scalar_diamond.functions[0];
+    function.layout.slots = &(function.layout.slots[0..6].* ++ [_]ir.Id{4});
+    program.functions = &.{function};
+    var blocks = scalar_diamond.blocks[0..4].*;
+    blocks[0].instructions = &.{
+        .{ .opcode = .constant, .immediate = 0, .destination = 6 },
+        scalar_diamond.blocks[0].instructions[0],
+    };
+    program.blocks = &blocks;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var budget = scalar.Budget.init(.{ .temporary_bytes = length / 2 });
+    var stats: scalar.Statistics = .{};
+    const ws = try scalar.discover(arena.allocator(), program, &budget, &stats);
+    try std.testing.expectEqual(1, ws.len);
+    try std.testing.expectEqual(1, ws[0].source.instruction);
 }

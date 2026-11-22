@@ -220,3 +220,56 @@ test "coalescing preserves duplicate sum alternatives and old duplicate-containi
         );
     }
 }
+
+const MapCapture = struct {
+    a: std.mem.Allocator,
+    map: ?pass.Correspondence = null,
+
+    fn receive(context: *anyopaque, trace: *const pass.OriginsTrace) pass.Error!void {
+        const self: *MapCapture = @ptrCast(@alignCast(context));
+        self.map = try pass.Correspondence.copy(self.a, trace);
+    }
+
+    fn options(self: *MapCapture) pass.Options {
+        return .{ .correspondence = .{ .context = self, .receive = receive } };
+    }
+};
+
+test "coalescing bounded work returns exact ordinary image and complete map at its work boundary" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ordinary_map: MapCapture = .{ .a = arena.allocator() };
+    var ordinary = try pass.run(testing.allocator, fixture, ordinary_map.options());
+    defer ordinary.deinit();
+    const expected = try bytes(ordinary.program);
+    defer testing.allocator.free(expected);
+    const maximum = std.math.maxInt(u64);
+    var remaining: u64 = maximum;
+    var actual_map: MapCapture = .{ .a = arena.allocator() };
+    var actual = try pass.runWithWork(testing.allocator, fixture, actual_map.options(), &remaining);
+    defer actual.deinit();
+    const used = maximum - remaining;
+    const encoded = try bytes(actual.program);
+    defer testing.allocator.free(encoded);
+    try testing.expectEqualSlices(u8, expected, encoded);
+    try testing.expect(@import("record.zig").equal(
+        pass.Correspondence,
+        ordinary_map.map.?,
+        actual_map.map.?,
+    ));
+    var exact = used;
+    var repeated = try pass.runWithWork(testing.allocator, fixture, actual_map.options(), &exact);
+    defer repeated.deinit();
+    try testing.expectEqual(@as(u64, 0), exact);
+    for ([_]u64{ 0, used - 1 }) |limit| {
+        remaining = limit;
+        actual_map.map = null;
+        try testing.expectError(error.RelationLimit, pass.runWithWork(
+            testing.allocator,
+            fixture,
+            actual_map.options(),
+            &remaining,
+        ));
+        try testing.expect(actual_map.map == null);
+    }
+}

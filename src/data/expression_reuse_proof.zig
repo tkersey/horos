@@ -82,19 +82,69 @@ pub fn indexPredecessors(
     program: ir.Program,
     budget: *Budget,
 ) Error![]std.ArrayList(Predecessor) {
+    return indexLivePredecessors(allocator, program, null, budget);
+}
+pub fn indexLivePredecessors(
+    allocator: std.mem.Allocator,
+    program: ir.Program,
+    live: ?[]const bool,
+    budget: *Budget,
+) Error![]std.ArrayList(Predecessor) {
     const result = try allocator.alloc(std.ArrayList(Predecessor), program.blocks.len);
     for (result) |*items| items.* = .empty;
     for (program.blocks, 0..) |block, id| {
+        if (live) |blocks| if (!blocks[id]) continue;
         var edge_index: usize = 0;
         while (successor(block.terminator, edge_index)) |transfer| : (edge_index += 1) {
             if (!budget.tick()) return error.ExpressionWorkLimit;
-            try result[@intCast(transfer.edge.block)].append(
+            const target: usize = @intCast(transfer.edge.block);
+            if (live) |blocks| if (!blocks[target]) continue;
+            try result[target].append(
                 allocator,
                 .{ .block = id, .transfer = transfer },
             );
         }
     }
     return result;
+}
+pub fn transparentRegions(
+    a: std.mem.Allocator,
+    program: ir.Program,
+    live: ?[]const bool,
+    budget: *Budget,
+) Error![]usize {
+    if (budget.strict and !budget.charge(program.blocks.len)) return error.ExpressionWorkLimit;
+    const parents = try a.alloc(usize, program.blocks.len);
+    for (parents, 0..) |*parent, id| parent.* = id;
+    for (program.blocks, 0..) |block, id| {
+        if (live) |blocks| if (!blocks[id]) continue;
+        var edge: usize = 0;
+        while (successor(block.terminator, edge)) |transfer| : (edge += 1) {
+            if (!budget.tick()) return error.ExpressionWorkLimit;
+            if (transfer.capture_boundary) continue;
+            const target: usize = @intCast(transfer.edge.block);
+            if (live) |blocks| if (!blocks[target]) continue;
+            const left = try representative(parents, id, budget);
+            const right = try representative(parents, target, budget);
+            parents[@max(left, right)] = @min(left, right);
+        }
+    }
+    for (0..parents.len) |id| parents[id] = try representative(parents, id, budget);
+    return parents;
+}
+fn representative(parents: []usize, start: usize, budget: *Budget) Error!usize {
+    var root = start;
+    while (parents[root] != root) {
+        if (budget.strict and !budget.tick()) return error.ExpressionWorkLimit;
+        root = parents[root];
+    }
+    var cursor = start;
+    while (parents[cursor] != cursor) {
+        const next = parents[cursor];
+        parents[cursor] = root;
+        cursor = next;
+    }
+    return root;
 }
 pub fn successor(term: ir.Terminator, index: usize) ?Incoming {
     return switch (term) {

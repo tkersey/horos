@@ -18,6 +18,8 @@ pub const Names = struct {
 
     /// All allocations belong to the caller's scratch arena, including on failure.
     pub fn init(a: std.mem.Allocator, function: ir.Function, work: *graph.Work) Error!Names {
+        try work.chargeBounded(function.layout.slots.len);
+        try work.chargeBounded(function.custody.len);
         const slots = try a.alloc(p.Id, function.layout.slots.len);
         const custody = try a.alloc(p.Id, function.custody.len);
         @memset(slots, r.missing);
@@ -36,7 +38,7 @@ pub const Names = struct {
         const result = &self.slots[@intCast(old)];
         if (result.* == r.missing) {
             result.* = self.slot_order.items.len;
-            try self.slot_order.append(self.allocator, old);
+            try self.work.append(self.allocator, &self.slot_order, old);
         }
         return result.*;
     }
@@ -47,14 +49,14 @@ pub const Names = struct {
         var cursor = old;
         while (self.custody[@intCast(cursor)] == r.missing) {
             try self.work.charge(1);
-            try chain.append(self.allocator, cursor);
+            try self.work.append(self.allocator, &chain, cursor);
             const parent = self.function.custody[@intCast(cursor)].parent orelse break;
             if (parent >= cursor) return error.InvalidReference;
             cursor = parent;
         }
         while (chain.pop()) |id| {
             self.custody[@intCast(id)] = self.scope_order.items.len;
-            try self.scope_order.append(self.allocator, id);
+            try self.work.append(self.allocator, &self.scope_order, id);
         }
         return self.custody[@intCast(old)];
     }
@@ -63,12 +65,13 @@ pub const Names = struct {
         for (self.function.layout.slots, self.slots, 0..) |schema, name, old| {
             try self.work.charge(1);
             if (schema >= schemas.len) return error.InvalidReference;
-            if (name == r.missing) try remaining.append(
+            if (name == r.missing) try self.work.append(
                 self.allocator,
+                &remaining,
                 .{ .schema = schemas[@intCast(schema)], .old = old },
             );
         }
-        std.mem.sort(Slot, remaining.items, {}, Slot.less);
+        try sorted(Slot, remaining.items, {}, Slot.less, self.work, 1);
         for (remaining.items) |item| _ = try self.slot(item.old);
         try self.completeScopes();
     }
@@ -82,7 +85,8 @@ pub const Names = struct {
         while (cursor < self.scope_order.items.len) : (cursor += 1) {
             const parent = self.scope_order.items[cursor];
             const children = tree.children[@intCast(parent)].items;
-            std.mem.sort(p.Id, children, @as([]const p.Id, tree.ranks), ScopeTree.lessChild);
+            const ranks: []const p.Id = tree.ranks;
+            try sorted(p.Id, children, ranks, ScopeTree.lessChild, self.work, 1);
             for (children) |child| {
                 try self.work.charge(1);
                 if (self.custody[@intCast(child)] == r.missing) _ = try self.scope(child);
@@ -91,6 +95,23 @@ pub const Names = struct {
         if (self.scope_order.items.len != n) return error.InvalidProgram;
     }
 };
+
+fn sorted(
+    comptime T: type,
+    items: []T,
+    context: anytype,
+    comptime less: fn (@TypeOf(context), T, T) bool,
+    work: *graph.Work,
+    comparison_width: usize,
+) Error!void {
+    if (work.remaining == null) return std.mem.sort(T, items, context, less);
+    if (items.len < 2) return;
+    const depth: usize = std.math.log2_int_ceil(usize, items.len);
+    const comparisons = std.math.mul(usize, items.len, 4 * depth) catch return error.WorkLimit;
+    const total = std.math.mul(usize, comparisons, comparison_width) catch return error.WorkLimit;
+    try work.charge(total);
+    std.sort.heap(T, items, context, less);
+}
 
 const Slot = struct {
     schema: p.Id,
@@ -112,6 +133,7 @@ const ScopeTree = struct {
         scopes: []const ir.CustodyScope,
         work: *graph.Work,
     ) Error!ScopeTree {
+        try work.chargeBounded(scopes.len);
         const children = try a.alloc(std.ArrayList(p.Id), scopes.len);
         @memset(children, .empty);
         const shapes = try a.alloc(Shape, scopes.len);
@@ -125,11 +147,11 @@ const ScopeTree = struct {
                 if (parent >= cursor) return error.InvalidReference;
                 const index: usize = @intCast(parent);
                 heights[index] = @max(heights[index], heights[cursor] + 1);
-                try children[index].append(a, cursor);
+                try work.append(a, &children[index], cursor);
             } else if (cursor != 0) return error.InvalidProgram;
             shapes[cursor] = .{ .old = cursor, .height = heights[cursor] };
         }
-        std.mem.sort(Shape, shapes, {}, lessHeight);
+        try sorted(Shape, shapes, {}, lessHeight, work, 1);
         return .{
             .allocator = a,
             .work = work,
@@ -143,22 +165,25 @@ const ScopeTree = struct {
         var next_rank: p.Id = 0;
         while (first < self.shapes.len) {
             var end = first;
+            var comparison_width: usize = 1;
             while (end < self.shapes.len and
                 self.shapes[end].height == self.shapes[first].height) : (end += 1)
             {
                 const shape = &self.shapes[end];
                 const children = self.children[@intCast(shape.old)].items;
+                comparison_width = @max(comparison_width, children.len);
                 const ranks = try self.allocator.alloc(p.Id, children.len);
                 for (children, ranks) |child, *target| {
                     try self.work.charge(1);
                     target.* = self.ranks[@intCast(child)];
                 }
-                std.mem.sort(p.Id, ranks, {}, std.sort.asc(p.Id));
+                try sorted(p.Id, ranks, {}, std.sort.asc(p.Id), self.work, 1);
                 shape.children = ranks;
             }
-            std.mem.sort(Shape, self.shapes[first..end], {}, lessShape);
+            try sorted(Shape, self.shapes[first..end], {}, lessShape, self.work, comparison_width);
             for (self.shapes[first..end], first..) |shape, index| {
                 try self.work.charge(1);
+                try self.work.chargeBounded(shape.children.len);
                 const different = index == first or
                     !std.mem.eql(p.Id, self.shapes[index - 1].children, shape.children);
                 if (different) next_rank += 1;
@@ -188,6 +213,24 @@ pub const Blocks = struct {
     function: p.Id,
     names: std.AutoHashMapUnmanaged(p.Id, p.Id) = .empty,
     order: std.ArrayList(p.Id) = .empty,
+    direct: ?[]p.Id = null,
+
+    pub fn index(a: std.mem.Allocator, count: usize, work: *graph.Work) Error!?[]p.Id {
+        if (work.remaining == null) return null;
+        try work.charge(count);
+        const result = try a.alloc(p.Id, count);
+        @memset(result, r.missing);
+        return result;
+    }
+
+    pub fn name(self: Blocks, id: p.Id) ?p.Id {
+        if (self.direct) |slots| {
+            if (id >= slots.len or slots[@intCast(id)] == r.missing) return null;
+            if (self.program.blocks[@intCast(id)].function != self.function) return null;
+            return slots[@intCast(id)];
+        }
+        return self.names.get(id);
+    }
 
     pub fn collect(self: *Blocks) Error!void {
         if (self.function >= self.program.functions.len) return error.InvalidReference;
@@ -203,6 +246,14 @@ pub const Blocks = struct {
         if (old >= self.program.blocks.len or
             self.program.blocks[@intCast(old)].function != self.function)
             return error.InvalidReference;
+        if (self.direct) |slots| {
+            const slot = &slots[@intCast(old)];
+            if (slot.* == r.missing) {
+                slot.* = self.order.items.len;
+                try self.work.append(self.allocator, &self.order, old);
+            }
+            return slot.*;
+        }
         const entry = try self.names.getOrPut(self.allocator, old);
         if (!entry.found_existing) {
             entry.value_ptr.* = self.order.items.len;

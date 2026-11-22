@@ -260,3 +260,72 @@ test "coalescing witness domains reject local nonbijections and authority merges
         );
     }
 }
+
+test "raw transformation consumes the same exact bounded work on replay" {
+    const a = testing.allocator;
+    const ceiling: u64 = 1_000_000;
+    var left = ceiling;
+    try validation.validateDiagnosedWithWork(a, original, candidate, witness, null, &left);
+    const cost = ceiling - left;
+    try testing.expect(cost > 0);
+    var exact = cost;
+    try validation.validateDiagnosedWithWork(a, original, candidate, witness, null, &exact);
+    try testing.expectEqual(0, exact);
+    var short = cost - 1;
+    try testing.expectError(
+        error.RelationLimit,
+        validation.validateDiagnosedWithWork(a, original, candidate, witness, null, &short),
+    );
+}
+
+test "canonical bounded correspondence copy orders regions without changing the trace" {
+    const Trace = @import("coalescing_origins.zig").Trace;
+    const evidence = @import("coalescing_correspondence.zig");
+    var regions = [_]std.meta.Elem(@FieldType(Trace, "regions")){
+        .{ .original = 1234, .current = 1 },
+        .{ .original = 16, .current = 0 },
+    };
+    var trace: Trace = .{
+        .arena = std.heap.ArenaAllocator.init(testing.allocator),
+        .original = original,
+        .maps = @splat(&.{}),
+        .regions = &regions,
+        .locals = &.{},
+    };
+    defer trace.deinit();
+    const arena = trace.arena.allocator();
+    const legacy = try evidence.Correspondence.copy(arena, &trace);
+    try testing.expectEqual(@as(u64, 1234), legacy.regions[0].original);
+    const ceiling: u64 = 1_000;
+    var left = ceiling;
+    const canonical = try evidence.Correspondence.copyCanonical(arena, &trace, &left);
+    try testing.expectEqualSlices(evidence.Region, &.{
+        .{ .original = 16, .current = 0 },
+        .{ .original = 1234, .current = 1 },
+    }, canonical.regions);
+    try testing.expectEqual(@as(u64, 1234), trace.regions[0].original);
+    var short = ceiling - left - 1;
+    try testing.expectError(
+        error.RelationLimit,
+        evidence.Correspondence.copyCanonical(testing.allocator, &trace, &short),
+    );
+}
+
+test "composed correspondence checks its actual output under the shared work allowance" {
+    const evidence = @import("coalescing_correspondence.zig");
+    const map: evidence.Correspondence = .{
+        .maps = witness.final,
+        .regions = &.{},
+        .locals = witness.locals,
+    };
+    const limit: u64 = 1_000_000;
+    var left = limit;
+    const a = testing.allocator;
+    var flow = try evidence.validateWithFlow(a, original, candidate, map, &left);
+    flow.deinit();
+    var short = limit - left - 1;
+    try testing.expectError(
+        error.RelationLimit,
+        evidence.validateWithFlow(a, original, candidate, map, &short),
+    );
+}

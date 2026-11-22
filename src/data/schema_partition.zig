@@ -8,6 +8,7 @@ const relocate = @import("relocation.zig");
 const equal = @import("record.zig").equal;
 const record = @import("record.zig");
 const wire = @import("wire.zig");
+const graph = @import("coalescing_graph.zig");
 const Kind = relocate.Kind;
 const Id = p.Id;
 const Error = relocate.Error;
@@ -22,7 +23,15 @@ pub fn computeObserved(
     program: ir.Program,
     statistics: ?*Statistics,
 ) Error![]const Id {
-    return computeImpl(a, program, statistics, false, 0);
+    return computeImpl(a, program, statistics, false, 0, null);
+}
+
+pub fn computeWithWork(
+    a: std.mem.Allocator,
+    program: ir.Program,
+    work: ?*u64,
+) Error![]const Id {
+    return computeImpl(a, program, null, false, 0, work);
 }
 fn KeyContext(comptime collide: bool, comptime seed: u64) type {
     return struct {
@@ -36,11 +45,11 @@ fn KeyContext(comptime collide: bool, comptime seed: u64) type {
         }
     };
 }
-fn encodeKey(a: std.mem.Allocator, shape: p.Schema) Error![]const u8 {
-    var size: wire.Writer = .{};
+fn encodeKey(a: std.mem.Allocator, shape: p.Schema, work: ?*u64) Error![]const u8 {
+    var size: wire.Writer = .{ .remaining = work };
     try record.write(p.Schema, shape, &size);
     const bytes = try a.alloc(u8, size.position);
-    var writer: wire.Writer = .{ .output = bytes };
+    var writer: wire.Writer = .{ .output = bytes, .remaining = work };
     try record.write(p.Schema, shape, &writer);
     return bytes;
 }
@@ -50,44 +59,72 @@ fn computeImpl(
     statistics: ?*Statistics,
     comptime collide: bool,
     comptime seed: u64,
+    work: ?*u64,
 ) Error![]const Id {
     var stats: Statistics = .{};
     defer if (statistics) |out| {
         out.* = stats;
     };
+    const spend = @import("admission.zig").spend;
+    try spend(work, program.schemas.len);
     var classes = try a.alloc(Id, program.schemas.len);
     var next = try a.alloc(Id, classes.len);
     @memset(classes, 0);
-    var maps = try relocate.identityMaps(a, try relocate.sizes(program));
+    var maps = try relocate.identityMapsWithWork(a, try relocate.sizes(program), work);
     var changed = true;
     while (changed) {
         stats.rounds += 1;
         var pass = std.heap.ArenaAllocator.init(a);
         defer pass.deinit();
         maps[@backingInt(Kind.schema)] = classes;
-        const mapper: relocate.Mapper = .{ .allocator = pass.allocator(), .maps = maps };
-        const shapes = try pass.allocator().alloc(p.Schema, classes.len);
-        try partitionPass(
+        const mapper: relocate.Mapper = .{
+            .allocator = pass.allocator(),
+            .maps = maps,
+            .work = work,
+        };
+        if (work) |remaining| {
+            try partitionBounded(mapper, program.schemas, next, remaining);
+        } else try partitionPass(
             collide,
             seed,
             pass.allocator(),
             mapper,
-            shapes,
+            try pass.allocator().alloc(p.Schema, classes.len),
             program.schemas,
             next,
             &stats,
         );
+        try spend(work, classes.len);
         changed = !std.mem.eql(Id, classes, next);
         if (changed) std.mem.swap([]Id, &classes, &next);
     }
+    try spend(work, classes.len);
     const representatives = try a.alloc(Id, classes.len);
     var count: Id = 0;
     for (classes, 0..) |class, i| if (class == i) {
         representatives[i] = count;
         count += 1;
     };
+    try spend(work, classes.len);
     for (classes) |*class| class.* = representatives[@intCast(class.*)];
     return classes;
+}
+
+fn partitionBounded(
+    mapper: relocate.Mapper,
+    schemas: []const p.Schema,
+    next: []Id,
+    remaining: *u64,
+) Error!void {
+    try @import("admission.zig").spend(remaining, schemas.len);
+    const keys = try mapper.allocator.alloc(graph.Key, schemas.len);
+    for (schemas, keys, 0..) |schema, *key, index| {
+        const mapped = try mapper.schema(schema);
+        key.* = .{ .bytes = try encodeKey(mapper.allocator, mapped, remaining), .original = index };
+    }
+    var comparison: graph.Work = .{ .remaining = remaining };
+    graph.assignRepresentatives(mapper.allocator, keys, next, &comparison) catch |err|
+        return if (err == error.WorkLimit) error.RelationLimit else error.OutOfMemory;
 }
 
 fn partitionPass(
@@ -127,13 +164,13 @@ fn partitionPass(
                 0..,
             ) |prior, j| if (next[j] == j) try index.putContext(
                 allocator,
-                try encodeKey(allocator, prior),
+                try encodeKey(allocator, prior, null),
                 next[j],
                 context,
             );
             indexed = true;
         }
-        const encoded = try encodeKey(allocator, shape.*);
+        const encoded = try encodeKey(allocator, shape.*, null);
         const entry = try index.getOrPutContext(allocator, encoded, context);
         if (entry.found_existing) {
             next[i] = entry.value_ptr.*;
@@ -192,7 +229,12 @@ test "indexed partition agrees with pairwise reference under forced hash collisi
     admitted.deinit();
     const expected = try reference(a, program);
     try std.testing.expectEqualSlices(Id, expected, try compute(a, program));
-    try std.testing.expectEqualSlices(Id, expected, try computeImpl(a, program, null, true, 0));
+    const collisions = try computeImpl(a, program, null, true, 0, null);
+    try std.testing.expectEqualSlices(Id, expected, collisions);
+    var remaining: u64 = 100_000_000;
+    try std.testing.expectEqualSlices(Id, expected, try computeWithWork(a, program, &remaining));
+    var insufficient = 100_000_000 - remaining - 1;
+    try std.testing.expectError(error.RelationLimit, computeWithWork(a, program, &insufficient));
     const seeds = comptime blk: {
         var random = std.Random.DefaultPrng.init(0x473334);
         var values: [8]u64 = undefined;
@@ -203,7 +245,7 @@ test "indexed partition agrees with pairwise reference under forced hash collisi
         try std.testing.expectEqualSlices(
             Id,
             expected,
-            try computeImpl(a, program, null, false, seed),
+            try computeImpl(a, program, null, false, seed, null),
         );
 }
 test "recursive definitions and nominal leaves are reindexed from each current input" {
@@ -221,12 +263,15 @@ test "recursive definitions and nominal leaves are reindexed from each current i
     var admitted = try @import("activation_ownership.zig").analyze(a, program);
     admitted.deinit();
     const before = try compute(a, program);
+    var remaining: u64 = 100_000;
+    try std.testing.expectEqualSlices(Id, before, try computeWithWork(a, program, &remaining));
     try std.testing.expectEqual(before[1], before[2]);
     try std.testing.expect(before[3] != before[4]);
     // A completed recursive binder receives a different definition before the
     // next invocation. No fingerprint or equivalence survives across calls.
     schemas[2] = .{ .sum = &.{ 0, 0 } };
     const after = try compute(a, program);
+    try std.testing.expectEqualSlices(Id, after, try computeWithWork(a, program, &remaining));
     try std.testing.expect(after[1] != after[2]);
     try std.testing.expectEqualSlices(Id, try reference(a, program), after);
     schemas[2] = .{ .sum = &.{ 0, 2 } };

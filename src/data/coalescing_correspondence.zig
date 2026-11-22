@@ -8,6 +8,7 @@ const r = @import("relocation.zig");
 const origins = @import("coalescing_origins.zig");
 const witness = @import("coalescing_witness.zig");
 const validation = @import("coalescing_validation.zig");
+const spend = @import("admission.zig").spend;
 const admission = @import("activation_ownership.zig");
 pub const Error = admission.Error || witness.Error;
 pub const Region = struct { original: p.Id, current: p.Id };
@@ -17,24 +18,78 @@ pub const Correspondence = struct {
     locals: []const witness.Local,
 
     pub fn copy(a: std.mem.Allocator, trace: *const origins.Trace) Error!Correspondence {
+        return copyWithWork(a, trace, trace.remaining);
+    }
+
+    pub fn copyWithWork(
+        a: std.mem.Allocator,
+        trace: *const origins.Trace,
+        work: ?*u64,
+    ) Error!Correspondence {
+        return copyTrace(a, trace, work, false);
+    }
+
+    pub fn copyCanonical(
+        a: std.mem.Allocator,
+        trace: *const origins.Trace,
+        work: *u64,
+    ) Error!Correspondence {
+        return copyTrace(a, trace, work, true);
+    }
+
+    fn copyTrace(
+        a: std.mem.Allocator,
+        trace: *const origins.Trace,
+        work: ?*u64,
+        canonical: bool,
+    ) Error!Correspondence {
         var maps: r.Maps = undefined;
-        for (trace.maps, &maps) |before, *after| after.* = try a.dupe(p.Id, before);
+        var maps_ready: usize = 0;
+        errdefer for (maps[0..maps_ready]) |map| a.free(map);
+        for (trace.maps, &maps) |before, *after| {
+            try spend(work, before.len);
+            after.* = try a.dupe(p.Id, before);
+            maps_ready += 1;
+        }
+        try spend(work, trace.regions.len);
         const regions = try a.alloc(Region, trace.regions.len);
+        errdefer a.free(regions);
         for (
             trace.regions,
             regions,
         ) |before, *after| after.* = .{ .original = before.original, .current = before.current };
+        if (canonical) try sortRegions(regions, work);
+        try spend(work, trace.locals.len);
         const locals = try a.alloc(witness.Local, trace.locals.len);
-        for (
-            trace.locals,
-            locals,
-        ) |before, *after| after.* = .{
-            .slots = try a.dupe(p.Id, before.slots),
-            .custody = try a.dupe(p.Id, before.custody),
+        errdefer a.free(locals);
+        var locals_ready: usize = 0;
+        errdefer for (locals[0..locals_ready]) |local| {
+            a.free(local.slots);
+            a.free(local.custody);
         };
+        for (trace.locals, locals) |before, *after| {
+            try spend(work, before.slots.len);
+            try spend(work, before.custody.len);
+            const slots = try a.dupe(p.Id, before.slots);
+            errdefer a.free(slots);
+            after.* = .{ .slots = slots, .custody = try a.dupe(p.Id, before.custody) };
+            locals_ready += 1;
+        }
         return .{ .maps = maps, .regions = regions, .locals = locals };
     }
 };
+
+fn sortRegions(regions: []Region, work: ?*u64) Error!void {
+    if (regions.len < 2) return;
+    const levels: u64 = @bitSizeOf(usize) - @as(u64, @clz(regions.len));
+    const cost = std.math.mul(u64, regions.len, 4 * (levels + 1)) catch return error.RelationLimit;
+    try spend(work, cost);
+    std.sort.heap(Region, regions, {}, regionLess);
+}
+
+fn regionLess(_: void, lhs: Region, rhs: Region) bool {
+    return lhs.original < rhs.original;
+}
 
 fn require(ok: bool) Error!void {
     if (!ok) return error.InvalidCorrespondence;
@@ -50,7 +105,7 @@ pub fn validate(
     original_facts.deinit();
     var candidate_facts = try admission.analyze(a, candidate);
     candidate_facts.deinit();
-    return checkMap(a, original, candidate, map);
+    return checkMap(a, original, candidate, map, null);
 }
 
 pub fn validateWithFlow(
@@ -71,7 +126,7 @@ pub fn validateWithFlow(
     original_facts.deinit();
     var actual = try admission.analyzeObservedWithWork(a, candidate, null, null, work);
     errdefer actual.deinit();
-    try checkMap(a, original, candidate, map);
+    try checkMap(a, original, candidate, map, work);
     return actual;
 }
 
@@ -80,11 +135,12 @@ fn checkMap(
     original: ir.Program,
     candidate: ir.Program,
     map: Correspondence,
+    work: ?*u64,
 ) Error!void {
     var scratch = std.heap.ArenaAllocator.init(a);
     defer scratch.deinit();
     const storage = scratch.allocator();
-    const live = try r.ownReachable(storage, storage, original);
+    const live = try r.ownReachableWithWork(storage, storage, original, work);
     const projection = live.maps orelse return error.InvalidCorrespondence;
     const counts = try r.sizes(live.program);
     const targets = try r.sizes(candidate);
@@ -92,18 +148,21 @@ fn checkMap(
     // Establish this before allocating indexes by a submitted target domain;
     // in particular, a nominal region bound is not a stored-record count.
     for (counts, targets) |count, target| try require(target <= count);
-    const projected_maps = try projectMaps(storage, live, projection, map, counts, targets);
+    const projected_maps = try projectMaps(storage, live, projection, map, counts, targets, work);
     const final = projected_maps.final;
     var representatives = projected_maps.representatives;
     try require(map.locals.len == original.functions.len);
+    try spend(work, live.program.functions.len);
     const locals = try storage.alloc(witness.Local, live.program.functions.len);
     for (live.function_origins, locals) |origin, *local| local.* = map.locals[@intCast(origin)];
-    try blockRepresentatives(storage, live.program, candidate, final, &representatives);
-    try validation.validate(
+    try blockRepresentatives(storage, live.program, candidate, final, &representatives, work);
+    try validation.validateDiagnosedWithWork(
         a,
         live.program,
         candidate,
         .{ .representatives = representatives, .final = final, .locals = locals },
+        null,
+        work,
     );
 }
 
@@ -113,11 +172,15 @@ fn blockRepresentatives(
     candidate: ir.Program,
     final: r.Maps,
     representatives: *r.Maps,
+    work: ?*u64,
 ) Error!void {
     // Blocks are owned by whole functions. Select the representative's block
     // rather than assuming arbitrary input block order follows function order.
     const block_kind = @backingInt(r.Kind.block);
     const function_kind = @backingInt(r.Kind.function);
+    try spend(work, original.blocks.len);
+    try spend(work, original.blocks.len);
+    try spend(work, candidate.blocks.len);
     const block_reps = try storage.alloc(p.Id, original.blocks.len);
     const block_owners = try storage.alloc(p.Id, candidate.blocks.len);
     @memset(block_owners, r.missing);
@@ -142,31 +205,39 @@ fn projectMaps(
     map: Correspondence,
     counts: [r.kind_count]usize,
     targets: [r.kind_count]usize,
+    work: ?*u64,
 ) Error!ProjectedMaps {
     var final: r.Maps = undefined;
     var representatives: r.Maps = undefined;
     for (projection, map.maps, 0..) |projected, submitted, kind| {
         try require(projected.len == submitted.len);
+        try spend(work, counts[kind]);
         const mapped = try storage.alloc(p.Id, counts[kind]);
         @memset(mapped, r.missing);
         if (kind == @backingInt(r.Kind.region)) {
             try require(map.regions.len == live.regions.count());
+            try spend(work, map.regions.len);
             for (map.regions) |region| {
-                const index = live.regions.get(
-                    region.original,
-                ) orelse return error.InvalidCorrespondence;
+                const index = live.mappedWithWork(.region, region.original, work) catch |err|
+                    return if (err == error.InvalidReference) error.InvalidCorrespondence else err;
                 try require(index < mapped.len and region.current < targets[kind]);
                 try require(mapped[@intCast(index)] == r.missing);
                 mapped[@intCast(index)] = region.current;
             }
-        } else for (projected, submitted) |index, target| {
-            if (index == r.missing) {
-                try require(target == r.missing);
-                continue;
+        } else {
+            try spend(work, projected.len);
+            for (projected, submitted) |index, target| {
+                if (index == r.missing) {
+                    try require(target == r.missing);
+                    continue;
+                }
+                try require(index < mapped.len and target < targets[kind]);
+                mapped[@intCast(index)] = target;
             }
-            try require(index < mapped.len and target < targets[kind]);
-            mapped[@intCast(index)] = target;
         }
+        try spend(work, targets[kind]);
+        try spend(work, mapped.len);
+        try spend(work, targets[kind]);
         const owners = try storage.alloc(p.Id, targets[kind]);
         @memset(owners, r.missing);
         const reps = try storage.alloc(p.Id, mapped.len);

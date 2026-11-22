@@ -111,26 +111,35 @@ const Context = struct {
     flow: *const Flow,
     permissions: traits.Facts,
     exportable: []const bool,
+    live: []const bool,
     predecessors: []const std.ArrayList(proof.Predecessor),
     budget: *Budget,
     workspace: proof.Workspace,
 
-    fn init(a: Allocator, program: ir.Program, flow: *const Flow, budget: *Budget) Error!Context {
+    fn init(
+        a: Allocator,
+        program: ir.Program,
+        flow: *const Flow,
+        block_map: ?[]const ir.Id,
+        budget: *Budget,
+    ) Error!Context {
         const catalog = try admission.schemasWithWork(a, program.schemas, &budget.remaining);
         const permissions = try traits.deriveWithWork(a, program.schemas, &budget.remaining);
-        try spend(budget, program.blocks.len);
+        const live = try liveBlocks(a, program, flow, block_map, budget);
         return .{
             .program = program,
             .flow = flow,
             .exportable = catalog.exportable,
             .permissions = permissions,
-            .predecessors = try proof.indexPredecessors(a, program, budget),
+            .live = live,
+            .predecessors = try proof.indexLivePredecessors(a, program, live, budget),
             .budget = budget,
             .workspace = try proof.Workspace.init(a, program, budget),
         };
     }
 
     fn eligible(self: Context, loc: Site) bool {
+        if (!self.live[loc.block]) return false;
         const block = self.program.blocks[loc.block];
         const op = block.instructions[loc.instruction];
         if (op.opcode != .field or op.operands.len != 1 or op.failures.len != 0 or
@@ -184,11 +193,22 @@ pub fn discoverReachable(
         return translated(err, cap, budget);
 }
 
-fn reachable(a: Allocator, program: ir.Program, budget: *Budget) Error![]const ir.Id {
-    var measure: wire.Writer = .{ .remaining = &budget.remaining };
-    try record.write(ir.Program, program, &measure);
-    const projection = try relocation.ownReachable(a, a, program);
-    return projection.maps.?[@backingInt(relocation.Kind.block)];
+fn liveBlocks(
+    a: Allocator,
+    program: ir.Program,
+    flow: *const Flow,
+    map: ?[]const ir.Id,
+    budget: *Budget,
+) Error![]const bool {
+    try spend(budget, program.blocks.len);
+    const live = if (map) |blocks| mapped: {
+        if (blocks.len != program.blocks.len) return error.InvalidCorrespondence;
+        const result = try a.alloc(bool, blocks.len);
+        for (blocks, result) |block, *out| out.* = block != relocation.missing;
+        break :mapped result;
+    } else try relocation.reachableBlocks(a, program, &budget.remaining);
+    for (flow.positions, live) |positions, *out| out.* = out.* and positions.len != 0;
+    return live;
 }
 
 const Candidate = struct {
@@ -210,15 +230,14 @@ fn find(
     const tmp = scratch.allocator();
     var flow = try analyze(a, program, budget);
     defer flow.deinit();
-    const blocks = block_map orelse try reachable(tmp, program, budget);
-    if (blocks.len != program.blocks.len) return error.InvalidCorrespondence;
-    const ctx = try Context.init(tmp, program, &flow, budget);
+    const ctx = try Context.init(tmp, program, &flow, block_map, budget);
+    const regions = try proof.transparentRegions(tmp, program, ctx.live, budget);
     try spend(budget, program.functions.len);
     const sites = try tmp.alloc(std.ArrayList(Candidate), program.functions.len);
     for (sites) |*list| list.* = .empty;
-    for (program.blocks, blocks, 0..) |block, kept, bid| {
+    for (program.blocks, ctx.live, 0..) |block, live, bid| {
         try spend(budget, 1);
-        if (kept == relocation.missing or flow.positions[bid].len == 0) continue;
+        if (!live) continue;
         try spend(budget, block.instructions.len);
         for (block.instructions, 0..) |op, i| {
             if (op.opcode != .field) continue;
@@ -231,14 +250,17 @@ fn find(
         }
     }
     var selected: std.ArrayList(Witness) = .empty;
-    for (sites) |function| {
-        const groups = try indexExpressions(tmp, ctx, function.items);
-        try selectFunction(tmp, ctx, function.items, groups, &selected, stats);
+    for (sites, program.functions) |function, record_function| {
+        const groups = try indexExpressions(tmp, ctx, function.items, regions);
+        const entry = regions[@intCast(record_function.entry)];
+        try selectFunction(tmp, ctx, function.items, groups, entry, &selected, stats);
     }
     return a.dupe(Witness, selected.items);
 }
 
 const Group = struct {
+    region: usize,
+    across_capture: bool = false,
     members: std.ArrayList(usize) = .empty,
     ranges: std.ArrayList(struct { block: usize, start: usize, end: usize }) = .empty,
 
@@ -254,8 +276,15 @@ const Group = struct {
     }
 };
 
-fn indexExpressions(a: Allocator, ctx: Context, sites: []Candidate) Error![]const Group {
-    const Key = struct { operand: ir.Id, coordinate: ir.Id, schema: ir.Id };
+fn indexExpressions(
+    a: Allocator,
+    ctx: Context,
+    sites: []Candidate,
+    regions: []const usize,
+) Error![]const Group {
+    const Expression = struct { operand: ir.Id, coordinate: ir.Id, schema: ir.Id };
+    const Key = struct { expression: Expression, region: usize };
+    var first_group: std.AutoHashMapUnmanaged(Expression, usize) = .empty;
     var index_by_key: std.AutoHashMapUnmanaged(Key, usize) = .empty;
     var groups: std.ArrayList(Group) = .empty;
     try spend(ctx.budget, sites.len);
@@ -264,14 +293,21 @@ fn indexExpressions(a: Allocator, ctx: Context, sites: []Candidate) Error![]cons
         const block = ctx.program.blocks[site.block];
         const op = block.instructions[site.instruction];
         const slots = ctx.program.functions[@intCast(block.function)].layout.slots;
-        const group = try index_by_key.getOrPut(a, .{
+        const expression: Expression = .{
             .operand = op.operands[0],
             .coordinate = op.immediate,
             .schema = slots[@intCast(op.destination)],
-        });
+        };
+        const region = regions[site.block];
+        const group = try index_by_key.getOrPut(a, .{ .expression = expression, .region = region });
         if (!group.found_existing) {
+            const first = try first_group.getOrPut(a, expression);
             group.value_ptr.* = groups.items.len;
-            try groups.append(a, .{});
+            if (first.found_existing)
+                groups.items[first.value_ptr.*].across_capture = true
+            else
+                first.value_ptr.* = groups.items.len;
+            try groups.append(a, .{ .region = region, .across_capture = first.found_existing });
         }
         candidate.group = group.value_ptr.*;
         candidate.range = try groups.items[candidate.group].append(a, site.block, i);
@@ -284,6 +320,7 @@ fn selectFunction(
     ctx: Context,
     sites: []Candidate,
     groups: []const Group,
+    entry: usize,
     selected: *std.ArrayList(Witness),
     stats: *Statistics,
 ) Error!void {
@@ -298,12 +335,14 @@ fn selectFunction(
     for (sites) |*target| {
         if (target.state == .producer) continue;
         const group = groups[target.group];
+        if (group.across_capture)
+            target.state = if (group.region == entry) .unavailable else .capture;
         const range = group.ranges.items[target.range];
         const candidates = [_][]const usize{
             group.members.items[0..range.start],
             group.members.items[range.end..],
         };
-        ctx.budget.capture_boundary = false;
+        ctx.budget.capture_boundary = target.state == .capture;
         search: for (candidates) |others| for (others) |id| {
             try spend(ctx.budget, 1);
             const source = &sites[id];
@@ -325,7 +364,7 @@ fn selectFunction(
     }
 }
 
-pub fn reconstruct(
+pub fn reconstructBorrowedProposal(
     arena: Allocator,
     original: ir.Program,
     witnesses: []const Witness,
@@ -424,7 +463,7 @@ fn check(
     try sameDeclarations(original, candidate);
     var baseline = try analyze(a, original, budget);
     errdefer baseline.deinit();
-    const ctx = try Context.init(tmp, original, &baseline, budget);
+    const ctx = try Context.init(tmp, original, &baseline, null, budget);
     for (original.blocks, candidate.blocks, 0..) |before, after, bid| {
         if (before.instructions.len != after.instructions.len) return error.InvalidExpressionReuse;
         var lhs = before;

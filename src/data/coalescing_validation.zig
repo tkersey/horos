@@ -6,6 +6,7 @@ const ir = @import("activation.zig");
 const r = @import("relocation.zig");
 const witness = @import("coalescing_witness.zig");
 const equal = @import("record.zig").equal;
+const spend = @import("admission.zig").spend;
 const Diagnostic = @import("admission.zig").Diagnostic;
 pub const Error = witness.Error;
 
@@ -42,13 +43,25 @@ pub fn validateDiagnosed(
     map: witness.Witness,
     diagnostic: ?*Diagnostic,
 ) Error!void {
+    return validateDiagnosedWithWork(allocator, original, candidate, map, diagnostic, null);
+}
+
+pub fn validateDiagnosedWithWork(
+    allocator: std.mem.Allocator,
+    original: ir.Program,
+    candidate: ir.Program,
+    map: witness.Witness,
+    diagnostic: ?*Diagnostic,
+    work: ?*u64,
+) Error!void {
     if (diagnostic) |d| d.* = .{};
-    try witness.checkDomains(allocator, original, candidate, map);
+    try witness.checkDomainsWithWork(allocator, original, candidate, map, work);
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const check: Check = .{
         .allocator = arena.allocator(),
         .maps = map.final,
+        .work = work,
         .diagnostic = diagnostic,
     };
     comptime fields(ir.Program, &.{
@@ -110,9 +123,11 @@ fn checkCatalogues(check: Check, original: ir.Program, candidate: ir.Program) Er
 const Check = struct {
     allocator: std.mem.Allocator,
     maps: r.Maps,
+    work: ?*u64,
     diagnostic: ?*Diagnostic = null,
 
     fn id(self: Check, kind: r.Kind, old: p.Id) Error!usize {
+        try spend(self.work, 1);
         const map = self.maps[@backingInt(kind)];
         if (old >= map.len) return error.InvalidCorrespondence;
         return std.math.cast(usize, map[@intCast(old)]) orelse error.InvalidCorrespondence;
@@ -121,17 +136,22 @@ const Check = struct {
         try require(try self.id(kind, old) == new);
     }
     fn ids(self: Check, kind: r.Kind, old: []const p.Id, new: []const p.Id, set: bool) Error!void {
+        if (!set) {
+            try require(old.len == new.len);
+            for (old, new) |left, right| try self.ref(kind, left, right);
+            return;
+        }
+        try spend(self.work, old.len);
         const mapped = try self.allocator.alloc(p.Id, old.len);
         for (mapped, old) |*target, source| target.* = try self.id(kind, source);
-        var length = mapped.len;
-        if (set) {
-            std.mem.sort(p.Id, mapped, {}, std.sort.asc(p.Id));
-            length = 0;
-            for (mapped) |value| if (length == 0 or mapped[length - 1] != value) {
-                mapped[length] = value;
-                length += 1;
-            };
-        }
+        try r.sortIdsWithWork(mapped, self.work);
+        var length: usize = 0;
+        for (mapped) |value| if (length == 0 or mapped[length - 1] != value) {
+            mapped[length] = value;
+            length += 1;
+        };
+        try require(length == new.len);
+        try spend(self.work, length);
         try require(std.mem.eql(p.Id, mapped[0..length], new));
     }
     fn schema(self: Check, old: p.Schema, new: p.Schema) Error!void {
@@ -151,8 +171,12 @@ const Check = struct {
             .text,
             .bounded_bytes,
             .bounded_text,
-            .enumeration,
             => try require(equal(p.Schema, old, new)),
+            .enumeration => |v| {
+                try require(v.len == new.enumeration.len);
+                try spend(self.work, v.len);
+                try require(std.mem.eql(u32, v, new.enumeration));
+            },
             .product => |v| try self.ids(.schema, v, new.product, false),
             .sum => |v| try self.ids(.schema, v, new.sum, false),
             .seq => |v| try self.ref(.schema, v, new.seq),
@@ -220,6 +244,8 @@ const Check = struct {
     fn literal(self: Check, old: p.Literal, new: p.Literal) Error!void {
         comptime fields(p.Literal, &.{ "schema", "bytes" });
         try self.ref(.schema, old.schema, new.schema);
+        try require(old.bytes.len == new.bytes.len);
+        try spend(self.work, old.bytes.len);
         try require(std.mem.eql(u8, old.bytes, new.bytes));
     }
     fn effect(self: Check, old: p.Effect, new: p.Effect) Error!void {
@@ -228,6 +254,8 @@ const Check = struct {
             "use_site_effects", "bodies",  "control_use",
             "external",
         });
+        try require(old.identity.len == new.identity.len);
+        try spend(self.work, old.identity.len);
         try require(std.mem.eql(u8, old.identity, new.identity) and
             old.control_use == new.control_use and old.external == new.external);
         try self.ref(.schema, old.payload, new.payload);
@@ -291,6 +319,7 @@ const Check = struct {
         try self.ids(.region, old.regions, new.regions, true);
         for (old.layout.slots, local.slots) |schema_id, slot|
             try self.ref(.schema, schema_id, new.layout.slots[@intCast(slot)]);
+        try spend(self.work, old.custody.len);
         for (old.custody, local.custody) |scope, scope_id| {
             const target = new.custody[@intCast(scope_id)].parent;
             try require((scope.parent == null) == (target == null));
@@ -310,6 +339,7 @@ const Body = struct {
     local: witness.Local,
 
     fn slot(self: Body, old: p.Id, new: p.Id) Error!void {
+        try spend(self.check.work, 1);
         if (self.check.diagnostic) |d| d.slot = old;
         try require(try localId(self.local.slots, old) == new);
         if (self.check.diagnostic) |d| d.slot = null;

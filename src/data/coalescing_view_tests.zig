@@ -6,6 +6,7 @@ const ir = @import("activation.zig");
 const r = @import("relocation.zig");
 const graph = @import("coalescing_graph.zig");
 const view = @import("coalescing_view.zig");
+const Blocks = @import("coalescing_locals.zig").Blocks;
 
 const fixture: ir.Program = .{
     .roots = .{ .entry = 0, .result = 0, .failure = 2 },
@@ -77,6 +78,19 @@ test "coalescing views identify renamed cyclic CFGs slots and unused custody sub
     admitted.deinit();
     try renamedCase(testing.allocator);
     try @import("allocation_testing.zig").check(testing.allocator, renamedCase, .{});
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ordinary: graph.Work = .{};
+    var remaining: u64 = 50_000;
+    var bounded: graph.Work = .{ .remaining = &remaining };
+    const maps = try r.identityMaps(a, try r.sizes(fixture));
+    const index = try Blocks.index(a, fixture.blocks.len, &bounded);
+    for (0..fixture.functions.len) |id| {
+        const expected = try view.function(a, fixture, id, maps, &ordinary);
+        const actual = try view.functionWithBlocks(a, fixture, id, maps, &bounded, index);
+        try testing.expectEqualDeep(expected, actual);
+    }
 }
 
 test "coalescing views retain input order branch order and unused slot multiplicity" {

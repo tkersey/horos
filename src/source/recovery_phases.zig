@@ -13,6 +13,39 @@ const Error = error{ RecoveryLiveness, InvalidCorrespondence, RelationLimit, Out
 
 pub const Formal = struct { function: Id, ordinal: usize };
 
+pub const Normalized = struct {
+    allocator: std.mem.Allocator,
+    entries: std.AutoArrayHashMapUnmanaged(Formal, void) = .empty,
+
+    pub fn formals(self: *const Normalized) []const Formal {
+        return self.entries.keys();
+    }
+
+    pub fn deinit(self: *Normalized) void {
+        self.entries.deinit(self.allocator);
+        self.* = undefined;
+    }
+};
+
+pub fn normalize(
+    a: std.mem.Allocator,
+    module: ast.Module,
+    submitted: []const Formal,
+    work: *u64,
+) Error!Normalized {
+    try spend(work, submitted.len);
+    var selected: Normalized = .{ .allocator = a };
+    errdefer selected.deinit();
+    for (submitted) |role| {
+        if (role.function >= module.functions.len or
+            role.ordinal >= module.functions[@intCast(role.function)].parameters.len)
+            return error.InvalidCorrespondence;
+        if (!selected.entries.contains(role))
+            try selected.entries.putNoClobber(a, role, {});
+    }
+    return selected;
+}
+
 const Function = struct {
     offset: usize,
     first: ?usize = null,
@@ -87,6 +120,34 @@ fn mapped(map: ?Map, comptime kind: data.relocation.Kind, id: Id) Error!Id {
 }
 
 pub fn validate(
+    a: std.mem.Allocator,
+    module: ast.Module,
+    parameters: []const Binding,
+    formals: []const Formal,
+    original: ir.Program,
+    before: *const Facts,
+    candidate: ir.Program,
+    after: *const Facts,
+    correspondence: ?Map,
+    work: *u64,
+) Error!void {
+    var selected = try normalize(a, module, formals, work);
+    defer selected.deinit();
+    return validateDistinct(
+        a,
+        module,
+        parameters,
+        selected.formals(),
+        original,
+        before,
+        candidate,
+        after,
+        correspondence,
+        work,
+    );
+}
+
+pub fn validateDistinct(
     a: std.mem.Allocator,
     module: ast.Module,
     parameters: []const Binding,
@@ -280,6 +341,30 @@ const AliasClass = struct {
 };
 
 pub fn validateAliases(
+    a: std.mem.Allocator,
+    module: ast.Module,
+    parameters: []const Binding,
+    formals: []const Formal,
+    original: ir.Program,
+    baseline: Map,
+    candidate: Map,
+    work: *u64,
+) Error!void {
+    var selected = try normalize(a, module, formals, work);
+    defer selected.deinit();
+    return validateDistinctAliases(
+        a,
+        module,
+        parameters,
+        selected.formals(),
+        original,
+        baseline,
+        candidate,
+        work,
+    );
+}
+
+pub fn validateDistinctAliases(
     a: std.mem.Allocator,
     module: ast.Module,
     parameters: []const Binding,

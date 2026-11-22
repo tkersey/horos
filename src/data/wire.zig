@@ -86,11 +86,15 @@ pub const Writer = struct {
     hasher: ?*std.crypto.hash.sha2.Sha256 = null,
     position: usize = 0,
 
-    pub fn put(self: *Writer, input: []const u8) Error!void {
+    pub fn charge(self: *Writer, amount: usize) Error!void {
         if (self.remaining) |left| {
-            if (input.len > left.*) return error.RelationLimit;
-            left.* -= @intCast(input.len);
+            if (amount > left.*) return error.RelationLimit;
+            left.* -= @intCast(amount);
         }
+    }
+
+    pub fn put(self: *Writer, input: []const u8) Error!void {
+        try self.charge(input.len);
         const end = std.math.add(usize, self.position, input.len) catch
             return error.InvalidLength;
         if (self.expected) |expected| {

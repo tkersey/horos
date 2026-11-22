@@ -19,11 +19,8 @@ pub fn encodedLength(program: ir.Program) Error!usize {
 }
 
 pub fn encodedLengthWithWork(program: ir.Program, work: ?*u64) Error!usize {
-    if (work) |left| {
-        if (left.* < wire.header_length) return error.RelationLimit;
-        left.* -= wire.header_length;
-    }
     var writer: wire.Writer = .{ .position = wire.header_length, .remaining = work };
+    try writer.charge(wire.header_length);
     var context: body_record.Context = .{};
     try body_record.write(ir.Program, program, &writer, &context);
     return writer.position;

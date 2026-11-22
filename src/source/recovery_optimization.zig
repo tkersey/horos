@@ -62,19 +62,10 @@ pub const Result = struct {
     }
 };
 
-fn requirements(module: source.Module, options: Options, work: *u64) !void {
-    if (options.rule != .scalar_field_reuse_v1) return error.UnsupportedVersion;
-    try data.admission.spend(work, options.formals.len);
-    for (options.formals) |formal| {
-        if (formal.function >= module.functions.len or
-            formal.ordinal >= module.functions[@intCast(formal.function)].parameters.len)
-            return error.InvalidCorrespondence;
-    }
-}
-
-pub fn lower(a: Allocator, module: source.Module, options: Options) !Result {
+pub fn lower(a: Allocator, module: source.Module, submitted: Options) !Result {
+    if (submitted.rule != .scalar_field_reuse_v1) return error.UnsupportedVersion;
+    var options = submitted;
     var source_work = options.limits.source_work;
-    try requirements(module, options, &source_work);
     var lowering_bytes = options.limits.lowering_bytes;
     var mandatory: data.AllocationBudget = .{
         .parent = a,
@@ -82,6 +73,9 @@ pub fn lower(a: Allocator, module: source.Module, options: Options) !Result {
         .accounting = .live,
     };
     const scratch = mandatory.allocator();
+    var protected = try phases.normalize(scratch, module, options.formals, &source_work);
+    defer protected.deinit();
+    options.formals = protected.formals();
     var original = try lowering.lowerRecoveryInputWithWork(scratch, module, &source_work);
     defer original.deinit();
     var baseline = try structural(scratch, &original, module, options, &source_work);
@@ -111,21 +105,30 @@ pub fn lower(a: Allocator, module: source.Module, options: Options) !Result {
         .correspondence = baseline.map,
     };
     try checkWire(scratch, evidence, options.limits, &source_work);
-    var measure: data.wire.Writer = .{ .remaining = &source_work };
-    try data.record.write(Program, baseline.program, &measure);
-    return owned(a, baseline.program, original.parameters, evidence, outcome, stats);
+    return owned(
+        a,
+        scratch,
+        baseline.program,
+        original.parameters,
+        evidence,
+        outcome,
+        stats,
+        &source_work,
+    );
 }
 
 const Context = struct {
     a: Allocator,
     original: *const source.Compiled,
+    baseline: *const Baseline,
     module: source.Module,
     options: Options,
     budget: *reuse.Budget,
 
     fn checked(self: Context, arena: Allocator, witnesses: []const reuse.Witness) !Program {
+        try surviving(witnesses, self.baseline.map, self.budget);
         const r = self.original.program;
-        const s = try reuse.reconstruct(arena, r, witnesses, self.budget);
+        const s = try reuse.reconstructBorrowedProposal(arena, r, witnesses, self.budget);
         try reuse.validateObserved(self.a, r, s, witnesses, self.budget, PhaseCheck{
             .ctx = self,
             .candidate = s,
@@ -135,15 +138,14 @@ const Context = struct {
 
     fn composed(
         self: Context,
-        baseline: *const Baseline,
         s: Program,
         t: Program,
         evidence: Evidence,
+        p01_remaining: u64,
     ) !void {
-        try surviving(evidence.witnesses, baseline.map, self.budget);
         try surviving(evidence.witnesses, evidence.correspondence, self.budget);
-        try imageGuard(baseline.program, t, self.options.limits, &self.budget.remaining);
-        const allowance = @min(self.options.limits.p01_work, self.budget.remaining);
+        try imageGuard(self.baseline.program, t, self.options.limits, &self.budget.remaining);
+        const allowance = @min(p01_remaining, self.budget.remaining);
         var remaining = allowance;
         var flow = data.coalescing.correspondenceFlow(
             self.a,
@@ -157,7 +159,7 @@ const Context = struct {
         };
         self.budget.remaining -= allowance - remaining;
         defer flow.deinit();
-        try phases.validate(
+        try phases.validateDistinct(
             self.a,
             self.module,
             self.original.parameters,
@@ -169,13 +171,13 @@ const Context = struct {
             evidence.correspondence,
             &self.budget.remaining,
         );
-        try phases.validateAliases(
+        try phases.validateDistinctAliases(
             self.a,
             self.module,
             self.original.parameters,
             self.options.formals,
             self.original.program,
-            baseline.map,
+            self.baseline.map,
             evidence.correspondence,
             &self.budget.remaining,
         );
@@ -192,7 +194,7 @@ const PhaseCheck = struct {
         after: *const data.activation_flow.Facts,
     ) !void {
         const ctx = self.ctx;
-        try phases.validate(
+        try phases.validateDistinct(
             ctx.a,
             ctx.module,
             ctx.original.parameters,
@@ -227,6 +229,7 @@ fn attempt(
     const ctx: Context = .{
         .a = work,
         .original = original,
+        .baseline = baseline,
         .options = options,
         .module = module,
         .budget = &budget,
@@ -248,17 +251,12 @@ fn attempt(
     stats.budget = discovered.len;
     if (limits.p01_work == 0) return null;
     var witnesses = discovered;
-    const s = ctx.checked(scratch.allocator(), witnesses) catch |err| blk: {
-        if (err != error.RecoveryLiveness) return err;
-        witnesses = try filterLive(ctx, scratch.allocator(), witnesses, stats);
-        if (witnesses.len == 0) {
-            outcome.* = .recovery_liveness;
-            stats.budget = 0;
-            return null;
-        }
-        break :blk try ctx.checked(scratch.allocator(), witnesses);
+    const s = try checkedBatch(ctx, scratch.allocator(), &witnesses, stats) orelse {
+        outcome.* = .recovery_liveness;
+        stats.budget = 0;
+        return null;
     };
-    const selected = finish(parent, ctx, s, witnesses, baseline, stats) catch |err| {
+    const selected = finish(parent, ctx, s, witnesses, stats) catch |err| {
         switch (err) {
             error.RecoveryLiveness => {
                 stats.recovery_liveness += witnesses.len;
@@ -274,6 +272,25 @@ fn attempt(
         return null;
     };
     return selected;
+}
+
+fn checkedBatch(
+    ctx: Context,
+    arena: Allocator,
+    witnesses: *[]const reuse.Witness,
+    stats: *Statistics,
+) !?Program {
+    const whole = ctx.checked(arena, witnesses.*) catch |err| {
+        if (err != error.RecoveryLiveness) return err;
+        if (witnesses.len == 1) {
+            stats.recovery_liveness += 1;
+            return null;
+        }
+        witnesses.* = try filterLive(ctx, arena, witnesses.*, stats);
+        if (witnesses.len == 0) return null;
+        return try ctx.checked(arena, witnesses.*);
+    };
+    return whole;
 }
 
 fn filterLive(
@@ -301,6 +318,7 @@ fn filterLive(
 
 const Capture = struct {
     arena: Allocator,
+    work: *u64,
     map: ?Correspondence = null,
 
     fn observe(
@@ -308,16 +326,18 @@ const Capture = struct {
         trace: *const data.coalescing.OriginsTrace,
     ) data.coalescing.Error!void {
         const self: *Capture = @ptrCast(@alignCast(ptr));
-        self.map = try Correspondence.copy(self.arena, trace);
+        self.map = try Correspondence.copyCanonical(self.arena, trace, self.work);
     }
 };
 
 const Baseline = struct {
     arena: std.heap.ArenaAllocator,
+    map_arena: std.heap.ArenaAllocator,
     program: Program,
     map: Correspondence,
 
     fn deinit(self: *Baseline) void {
+        self.map_arena.deinit();
         self.arena.deinit();
         self.* = undefined;
     }
@@ -330,19 +350,14 @@ fn structural(
     options: Options,
     work: *u64,
 ) !Baseline {
-    var scratch = std.heap.ArenaAllocator.init(a);
-    defer scratch.deinit();
-    var capture: Capture = .{ .arena = scratch.allocator() };
-    var stats: data.coalescing.Statistics = .{};
-    var final = try data.coalescing.run(a, original.program, .{
-        .work_limit = work.*,
-        .statistics = &stats,
+    var map_arena = std.heap.ArenaAllocator.init(a);
+    errdefer map_arena.deinit();
+    var capture: Capture = .{ .arena = map_arena.allocator(), .work = work };
+    var final = try data.coalescing.runWithWork(a, original.program, .{
         .correspondence = .{ .context = &capture, .receive = Capture.observe },
-    });
+    }, work);
     errdefer final.arena.deinit();
-    defer final.flow.deinit();
-    if (stats.outcome == .work_limit) return error.RelationLimit;
-    work.* -= stats.work.units;
+    final.flow.deinit();
     const map = capture.map orelse return error.InvalidCorrespondence;
     var verified = try data.coalescing.correspondenceFlow(
         a,
@@ -352,7 +367,7 @@ fn structural(
         work,
     );
     defer verified.deinit();
-    try phases.validate(
+    try phases.validateDistinct(
         a,
         module,
         original.parameters,
@@ -364,8 +379,7 @@ fn structural(
         map,
         work,
     );
-    const proof = try source.own(Correspondence, final.arena.allocator(), map);
-    return .{ .arena = final.arena, .program = final.program, .map = proof };
+    return .{ .arena = final.arena, .map_arena = map_arena, .program = final.program, .map = map };
 }
 
 fn surviving(ws: []const reuse.Witness, map: Correspondence, budget: *reuse.Budget) !void {
@@ -390,45 +404,62 @@ fn finish(
     ctx: Context,
     s: Program,
     witnesses: []const reuse.Witness,
-    baseline: *const Baseline,
     stats: *Statistics,
 ) !Result {
     var scratch = std.heap.ArenaAllocator.init(ctx.a);
     defer scratch.deinit();
-    var capture: Capture = .{ .arena = scratch.allocator() };
-    var p01: data.coalescing.Statistics = .{};
-    var final = try data.coalescing.run(ctx.a, s, .{
-        .statistics = &p01,
-        .work_limit = ctx.options.limits.p01_work,
+    const allowance = @min(ctx.options.limits.p01_work, ctx.budget.remaining);
+    var remaining = allowance;
+    var capture: Capture = .{ .arena = scratch.allocator(), .work = &remaining };
+    var final = data.coalescing.runWithWork(ctx.a, s, .{
         .correspondence = .{ .context = &capture, .receive = Capture.observe },
-    });
-    defer final.deinit();
-    if (p01.outcome == .work_limit) return error.ScalarFieldLimit;
+    }, &remaining) catch |err| {
+        ctx.budget.remaining -= allowance - remaining;
+        return err;
+    };
+    ctx.budget.remaining -= allowance - remaining;
+    defer final.arena.deinit();
+    final.flow.deinit();
     const evidence: Evidence = .{
         .rule = ctx.options.rule,
         .witnesses = witnesses,
         .correspondence = capture.map orelse return error.InvalidCorrespondence,
     };
     try checkWire(ctx.a, evidence, ctx.options.limits, &ctx.budget.remaining);
-    try ctx.composed(baseline, s, final.program, evidence);
-    stats.budget = 0;
-    return owned(a, final.program, ctx.original.parameters, evidence, .applied, stats.*);
+    try ctx.composed(s, final.program, evidence, remaining);
+    var applied = stats.*;
+    applied.budget = 0;
+    return owned(
+        a,
+        ctx.a,
+        final.program,
+        ctx.original.parameters,
+        evidence,
+        .applied,
+        applied,
+        &ctx.budget.remaining,
+    );
 }
 
 fn owned(
     a: Allocator,
+    scratch: Allocator,
     program: Program,
     origins: []const source.RecoveryBinding,
     evidence: Evidence,
     outcome: Outcome,
     stats: Statistics,
+    work: *u64,
 ) !Result {
     var result = std.heap.ArenaAllocator.init(a);
     errdefer result.deinit();
     const owner = result.allocator();
-    const records = try source.own(Program, owner, program);
-    const bindings = try relocate(owner, origins, evidence.correspondence);
-    const proof = try source.own(Evidence, owner, evidence);
+    var measure: data.wire.Writer = .{ .remaining = work };
+    try data.record.write(Program, program, &measure);
+    try data.record.write(Evidence, evidence, &measure);
+    const records = try source.ownWithScratch(Program, owner, scratch, program);
+    const bindings = try relocate(owner, origins, evidence.correspondence, work);
+    const proof = try source.ownWithScratch(Evidence, owner, scratch, evidence);
     return .{
         .program = records,
         .parameters = bindings,
@@ -443,21 +474,28 @@ fn relocate(
     a: Allocator,
     parameters_in: []const source.RecoveryBinding,
     map: Correspondence,
+    work: *u64,
 ) ![]const source.RecoveryBinding {
-    var bindings: std.ArrayList(source.RecoveryBinding) = .empty;
-    errdefer bindings.deinit(a);
+    try data.admission.spend(work, parameters_in.len);
+    var count: usize = 0;
+    for (parameters_in) |binding| count += @intFromBool(try binding.relocated(map) != null);
+    try data.admission.spend(work, parameters_in.len);
+    const bindings = try a.alloc(source.RecoveryBinding, count);
+    errdefer a.free(bindings);
+    var index: usize = 0;
     for (parameters_in) |binding| if (try binding.relocated(map)) |mapped| {
-        try bindings.append(a, mapped);
+        bindings[index] = mapped;
+        index += 1;
     };
-    return bindings.toOwnedSlice(a);
+    return bindings;
 }
 
 fn evidenceSize(evidence: Evidence, limit: usize, work: *u64) !usize {
     const available = @min(limit, work.*);
     var remaining: u64 = available;
     var size: data.wire.Writer = .{ .remaining = &remaining };
+    defer work.* -= available - remaining;
     try data.record.write(Evidence, evidence, &size);
-    work.* -= available - remaining;
     return size.position;
 }
 
@@ -484,10 +522,11 @@ pub fn parameters(
     module: source.Module,
     program: Program,
     evidence: Evidence,
-    options: Options,
+    submitted: Options,
 ) ![]const source.RecoveryBinding {
+    if (submitted.rule != .scalar_field_reuse_v1) return error.UnsupportedVersion;
+    var options = submitted;
     var source_work = options.limits.source_work;
-    try requirements(module, options, &source_work);
     try proofShape(evidence.rule, evidence.witnesses.len, options.limits);
     var lowering_bytes = options.limits.lowering_bytes;
     var mandatory: data.AllocationBudget = .{
@@ -496,6 +535,9 @@ pub fn parameters(
         .accounting = .live,
     };
     const preparation = mandatory.allocator();
+    var protected = try phases.normalize(preparation, module, options.formals, &source_work);
+    defer protected.deinit();
+    options.formals = protected.formals();
     var remaining = options.limits.rule.temporary_bytes;
     var storage: data.AllocationBudget = .{ .parent = a, .remaining = &remaining };
     const work = storage.allocator();
@@ -516,20 +558,27 @@ pub fn parameters(
         if (!data.record.equal(Program, baseline.program, program) or
             !data.record.equal(Correspondence, baseline.map, evidence.correspondence))
             return error.InvalidCorrespondence;
-        return relocate(a, original.parameters, baseline.map);
+        return relocate(a, original.parameters, baseline.map, &source_work);
     }
     var scratch = std.heap.ArenaAllocator.init(work);
     defer scratch.deinit();
     const ctx: Context = .{
         .a = work,
         .original = &original,
+        .baseline = &baseline,
         .options = options,
         .module = module,
         .budget = &budget,
     };
-    const s = try ctx.checked(scratch.allocator(), evidence.witnesses);
-    try ctx.composed(&baseline, s, program, evidence);
-    return relocate(a, original.parameters, evidence.correspondence);
+    const s = ctx.checked(scratch.allocator(), evidence.witnesses) catch |err|
+        return validationError(err, storage);
+    ctx.composed(s, program, evidence, options.limits.p01_work) catch |err|
+        return validationError(err, storage);
+    return relocate(a, original.parameters, evidence.correspondence, &budget.remaining);
+}
+
+fn validationError(err: anyerror, storage: data.AllocationBudget) anyerror {
+    return if (err == error.OutOfMemory and storage.exhausted) error.ScalarFieldLimit else err;
 }
 
 pub const Decoded = struct {
@@ -559,7 +608,11 @@ pub fn decode(a: Allocator, bytes: []const u8, limits: Limits) !Decoded {
     const tag = try reader.natural();
     if (tag > std.math.maxInt(u8)) return error.UnsupportedVersion;
     const rule: Rule = @fromBackingInt(@intCast(@as(u8, @intCast(tag))));
-    const fallback = rule == .structural_fallback;
+    const fallback = switch (rule) {
+        .structural_fallback => true,
+        .scalar_field_reuse_v1 => false,
+        else => return error.UnsupportedVersion,
+    };
     const byte_limit = if (fallback) limits.structural_evidence_bytes else limits.evidence_bytes;
     const work = if (fallback) limits.source_work else limits.rule.work;
     if (bytes.len > byte_limit or bytes.len > work) return error.ScalarFieldLimit;

@@ -29,6 +29,21 @@ const golden = "ABL_BPI3".* ++ [_]u8{
     0, 0, 0, 0, 0, // handlers, captures, regions, resources, constructors
 };
 
+test "bounded image sizing charges compact logical IDs before choosing their spelling" {
+    const slots: [1024]p.Id = @splat(0);
+    var program = example;
+    var function = example.functions[0];
+    function.layout.slots = &slots;
+    program.functions = &.{function};
+    const size = try image.encodedLength(program);
+    try testing.expect(size < slots.len);
+    var work: u64 = size;
+    try testing.expectError(error.RelationLimit, image.encodedLengthWithWork(program, &work));
+    work = size + slots.len;
+    try testing.expectEqual(size, try image.encodedLengthWithWork(program, &work));
+    try testing.expectEqual(0, work);
+}
+
 test "immutable admitted images share facts without accepting mutable lookalikes" {
     var bytes = golden;
     const admitted = try image.Admitted.decode(testing.allocator, &bytes);

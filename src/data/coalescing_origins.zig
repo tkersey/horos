@@ -27,6 +27,7 @@ pub const Trace = struct {
     maps: [r.kind_count][]p.Id,
     regions: []Region,
     locals: []Local,
+    remaining: ?*u64 = null,
 
     pub fn map(self: *const Trace, kind: r.Kind) []const p.Id {
         return self.maps[@backingInt(kind)];
@@ -46,6 +47,15 @@ pub const Trace = struct {
         allocator: std.mem.Allocator,
         original: ir.Program,
         projection: r.Projection,
+    ) Error!Trace {
+        return initWithWork(allocator, original, projection, null);
+    }
+
+    pub fn initWithWork(
+        allocator: std.mem.Allocator,
+        original: ir.Program,
+        projection: r.Projection,
+        remaining: ?*u64,
     ) Error!Trace {
         var arena = std.heap.ArenaAllocator.init(allocator);
         errdefer arena.deinit();
@@ -68,19 +78,24 @@ pub const Trace = struct {
         var maps: [r.kind_count][]p.Id = undefined;
         for (&maps, projected, counts) |*owned, old, count| {
             if (old.len != count) return error.InvalidCorrespondence;
+            try admission.spend(remaining, old.len);
             owned.* = try a.dupe(p.Id, old);
         }
+        try admission.spend(remaining, projection.regions.capacity());
         const regions = try a.alloc(Region, projection.regions.count());
         var iterator = projection.regions.iterator();
         var index: usize = 0;
         while (iterator.next()) |entry| : (index += 1) {
             regions[index] = .{ .original = entry.key_ptr.*, .current = entry.value_ptr.* };
         }
+        try admission.spend(remaining, original.functions.len);
         const locals = try a.alloc(Local, original.functions.len);
         const functions = maps[@backingInt(r.Kind.function)];
         for (locals, functions, original.functions) |*local, function, code| {
-            local.slots = try identity(a, if (function == r.missing) 0 else code.layout.slots.len);
-            local.custody = try identity(a, if (function == r.missing) 0 else code.custody.len);
+            const slots = if (function == r.missing) 0 else code.layout.slots.len;
+            local.slots = try identity(a, slots, remaining);
+            const custody = if (function == r.missing) 0 else code.custody.len;
+            local.custody = try identity(a, custody, remaining);
         }
         return .{
             .arena = arena,
@@ -88,6 +103,7 @@ pub const Trace = struct {
             .maps = maps,
             .regions = regions,
             .locals = locals,
+            .remaining = remaining,
         };
     }
 
@@ -98,6 +114,8 @@ pub const Trace = struct {
     /// Validate the entire transition before mutating a diagnostic map. The
     /// selected witness is already checked, but stale context remains an error.
     pub fn advance(self: *Trace, next: witness.Witness) Error!void {
+        try self.chargeTraversal();
+        try self.chargeTraversal();
         for (self.map(.function), self.locals) |function, local| {
             if (function == r.missing) continue;
             if (function >= next.locals.len) return error.InvalidCorrespondence;
@@ -124,6 +142,26 @@ pub const Trace = struct {
         for (self.regions) |*region|
             region.current = next.final[@backingInt(r.Kind.region)][@intCast(region.current)];
     }
+    fn chargeTraversal(self: *const Trace) Error!void {
+        const left = self.remaining orelse return;
+        for (self.maps) |ids| try admission.spend(left, ids.len);
+        try admission.spend(left, self.regions.len);
+        try admission.spend(left, self.locals.len);
+        for (self.locals) |local| {
+            try admission.spend(left, local.slots.len);
+            try admission.spend(left, local.custody.len);
+        }
+    }
+
+    pub fn explainWithWork(
+        self: *const Trace,
+        next: ?witness.Witness,
+        diagnostic: *Diagnostic,
+    ) Error!void {
+        try self.chargeTraversal();
+        self.explain(next, diagnostic);
+    }
+
     /// `next` is supplied only after raw-record validation, for an admission
     /// failure in a not-yet-selected candidate. No provisional discovery is trusted.
     pub fn explain(self: *const Trace, next: ?witness.Witness, diagnostic: *Diagnostic) void {
@@ -205,7 +243,8 @@ pub const Trace = struct {
     }
 };
 
-fn identity(a: std.mem.Allocator, count: usize) Error![]p.Id {
+fn identity(a: std.mem.Allocator, count: usize, remaining: ?*u64) Error![]p.Id {
+    try admission.spend(remaining, count);
     const result = try a.alloc(p.Id, count);
     for (result, 0..) |*id, index| id.* = index;
     return result;
