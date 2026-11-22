@@ -13,6 +13,7 @@ pub const Diagnostic = origins.Diagnostic;
 pub const OriginsTrace = origins.Trace;
 pub const Correspondence = @import("coalescing_correspondence.zig").Correspondence;
 pub const validateCorrespondence = @import("coalescing_correspondence.zig").validate;
+pub const correspondenceFlow = @import("coalescing_correspondence.zig").validateWithFlow;
 pub const Outcome = enum {
     not_run,
     deferred_open_component,

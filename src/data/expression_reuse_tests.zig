@@ -515,3 +515,252 @@ test "equal expressions separated by capture boundaries do not share availabilit
     try std.testing.expectEqual(@as(usize, 0), stats.expressions_reused);
     try std.testing.expect(!stats.work_limit);
 }
+
+const scalar = @import("scalar_field_reuse.zig");
+const Schema = @import("program.zig").Schema;
+const field_witness: scalar.Witness = .{
+    .source = .{ .block = 0, .instruction = 0 },
+    .target = .{ .block = 3, .instruction = 0 },
+};
+const scalar_diamond: ir.Program = .{
+    .roots = .{ .entry = 0, .result = 0, .failure = 2 },
+    .schemas = &.{ .u64, .boolean, .unit, .{ .product = &.{ 0, 0 } } },
+    .constants = &.{},
+    .effects = &.{},
+    .functions = &.{.{
+        .entry = 0,
+        .inputs = &.{ 0, 1, 2, 5 },
+        .layout = .{ .slots = &.{ 3, 3, 1, 0, 0, 0 } },
+        .result = 0,
+    }},
+    .blocks = &.{
+        .{
+            .function = 0,
+            .instructions = &.{.{ .opcode = .field, .operands = &.{0}, .destination = 3 }},
+            .terminator = diamond.blocks[0].terminator,
+        },
+        diamond.blocks[1],
+        diamond.blocks[2],
+        .{
+            .function = 0,
+            .instructions = &.{.{ .opcode = .field, .operands = &.{0}, .destination = 4 }},
+            .terminator = .{ .return_value = 4 },
+        },
+    },
+};
+
+fn expectRetained(program: ir.Program) !scalar.Statistics {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var budget = scalar.Budget.init(.{});
+    var stats: scalar.Statistics = .{};
+    const witnesses = try scalar.discover(arena.allocator(), program, &budget, &stats);
+    try std.testing.expectEqual(0, witnesses.len);
+    const forged = try scalar.reconstruct(arena.allocator(), program, &.{field_witness}, &budget);
+    try std.testing.expectError(
+        error.InvalidExpressionReuse,
+        scalar.validate(a, program, forged, &.{field_witness}, &budget),
+    );
+    return stats;
+}
+
+test "recovery field reuse rejects overwritten versions" {
+    for ([_][2]ir.Id{ .{ 0, 1 }, .{ 3, 5 } }) |pair| {
+        var blocks = scalar_diamond.blocks[0..4].*;
+        var program = scalar_diamond;
+        program.blocks = &blocks;
+        blocks[1].instructions = &.{.{
+            .opcode = .move,
+            .destination = pair[0],
+            .operands = &.{pair[1]},
+        }};
+        _ = try expectRetained(program);
+        blocks[1].instructions = &.{};
+        blocks[1].terminator.jump.assignments = &.{
+            .{ .destination = pair[0], .source = .{ .slot = pair[1] } },
+            .{ .destination = pair[1], .source = .{ .slot = pair[0] } },
+        };
+        _ = try expectRetained(program);
+    }
+}
+
+test "recovery field reuse stops at capture boundaries" {
+    const next: ir.Edge = .{ .block = 3 };
+    const terms = [_]ir.Terminator{
+        .{ .call = .{ .function = 1, .arguments = &.{3}, .next = next } },
+        .{ .perform = .{ .effect = 0, .payload = 3, .next = next } },
+        .{ .yield_value = next },
+        .{ .resume_value = .{ .resumption = 6, .argument = 3, .next = next } },
+    };
+    for (terms) |term| {
+        var program = scalar_diamond;
+        program.roots.entry = 1;
+        const token: Schema = .{ .internal = .{ .resumption = .{
+            .effect = 0,
+            .input = 0,
+            .answer = 0,
+            .handled = &.{0},
+            .mode = .deep,
+            .use = .multi,
+        } } };
+        program.schemas = &(scalar_diamond.schemas[0..4].* ++ [_]Schema{token});
+        program.effects = &.{.{
+            .identity = "field/reuse",
+            .payload = 0,
+            .result = 0,
+            .control_use = .multi,
+        }};
+        var fun = scalar_diamond.functions[0];
+        fun.layout.slots = &.{ 3, 3, 1, 0, 0, 0, 4 };
+        fun.inputs = &.{ 0, 1, 2, 5, 6 };
+        fun.effects = &.{0};
+        program.functions = &.{ fun, .{
+            .entry = 4,
+            .inputs = &.{0},
+            .layout = .{ .slots = &.{0} },
+            .result = 0,
+        } };
+        var blocks = scalar_diamond.blocks[0..4].* ++ [_]ir.Block{.{
+            .function = 1,
+            .instructions = &.{},
+            .terminator = .{ .return_value = 0 },
+        }};
+        blocks[1].terminator = term;
+        program.blocks = &blocks;
+        const stats = try expectRetained(program);
+        try std.testing.expect(stats.capture_boundary > 0);
+    }
+}
+
+test "recovery evidence accounts for complete records" {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var budget = scalar.Budget.init(.{});
+    const ws = &.{field_witness};
+    const original = scalar_diamond;
+    const candidate = try scalar.reconstruct(arena.allocator(), original, ws, &budget);
+    try scalar.validate(a, original, candidate, ws, &budget);
+    var changed = candidate;
+    changed.constants = &.{.{ .schema = 0, .bytes = &.{ 0, 0, 0, 0, 0, 0, 0, 0 } }};
+    try std.testing.expectError(error.InvalidExpressionReuse, scalar.validate(
+        a,
+        original,
+        changed,
+        ws,
+        &budget,
+    ));
+    changed = candidate;
+    var blocks = candidate.blocks[0..4].*;
+    changed.blocks = &blocks;
+    blocks[2].terminator.jump.assignments = &.{.{ .destination = 3, .source = .{ .slot = 5 } }};
+    try std.testing.expectError(error.InvalidExpressionReuse, scalar.validate(
+        a,
+        original,
+        changed,
+        ws,
+        &budget,
+    ));
+    blocks[2] = candidate.blocks[2];
+    var op = blocks[3].instructions[0];
+    op.failures = &.{.{ .kind = .arithmetic_overflow, .value = 0 }};
+    blocks[3].instructions = &.{op};
+    try std.testing.expectError(error.InvalidExpressionReuse, scalar.validate(
+        a,
+        original,
+        changed,
+        ws,
+        &budget,
+    ));
+    changed = candidate;
+    changed.constructors = &.{.{ .function = 0, .capture = 0, .schema = 0 }};
+    try std.testing.expectError(error.InvalidExpressionReuse, scalar.validate(
+        a,
+        original,
+        changed,
+        ws,
+        &budget,
+    ));
+}
+
+test "recovery field reuse excludes nested copyable internal schemas" {
+    const region: Schema = .{ .internal = .{ .region = 0 } };
+    var program = scalar_diamond;
+    program.schemas = &.{
+        .u64,
+        .boolean,
+        .unit,
+        .{ .product = &.{ 0, 4 } },
+        .{ .seq = 5 },
+        region,
+    };
+    program.scopes.region_count = 1;
+    var functions = [_]ir.Function{ scalar_diamond.functions[0], .{
+        .entry = 4,
+        .inputs = &.{0},
+        .layout = .{ .slots = &.{0} },
+        .result = 0,
+    } };
+    functions[0].regions = &.{0};
+    program.functions = &functions;
+    program.roots.entry = 1;
+    program.blocks = &(scalar_diamond.blocks[0..4].* ++ [_]ir.Block{.{
+        .function = 1,
+        .instructions = &.{},
+        .terminator = .{ .return_value = 0 },
+    }});
+    const stats = try expectRetained(program);
+    try std.testing.expectEqual(2, stats.unsupported_schema);
+}
+
+test "recovery field reuse rejects unordered duplicate and irrelevant proof coordinates" {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var budget = scalar.Budget.init(.{});
+    var blocks = scalar_diamond.blocks[0..4].*;
+    blocks[3].instructions = &.{ blocks[3].instructions[0], blocks[3].instructions[0] };
+    var program = scalar_diamond;
+    program.blocks = &blocks;
+    var second = field_witness;
+    second.target.instruction = 1;
+    const valid = [_]scalar.Witness{ field_witness, second };
+    const candidate = try scalar.reconstruct(arena.allocator(), program, &valid, &budget);
+    try scalar.validate(a, program, candidate, &valid, &budget);
+    const wrong = [_][]const scalar.Witness{
+        &.{ second, field_witness },
+        &.{ field_witness, field_witness },
+        &.{field_witness},
+        &.{.{ .source = .{ .block = 4, .instruction = 0 }, .target = field_witness.target }},
+        &.{.{ .source = field_witness.source, .target = .{ .block = 3, .instruction = 2 } }},
+    };
+    for (wrong) |ws|
+        try std.testing.expectError(
+            error.InvalidExpressionReuse,
+            scalar.validate(a, program, candidate, ws, &budget),
+        );
+}
+
+test "recovery field reuse bounds predecessor depth and rejects an unresolved cycle" {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var budget = scalar.Budget.init(.{ .depth = 1 });
+    const program = scalar_diamond;
+    const candidate = try scalar.reconstruct(
+        arena.allocator(),
+        program,
+        &.{field_witness},
+        &budget,
+    );
+    try std.testing.expectError(
+        error.ScalarFieldLimit,
+        scalar.validate(a, program, candidate, &.{field_witness}, &budget),
+    );
+    var cyclic = program;
+    var blocks = scalar_diamond.blocks[0..4].*;
+    blocks[1].terminator = .{ .branch = .{
+        .condition = 2,
+        .when_true = .{ .block = 1 },
+        .when_false = .{ .block = 3 },
+    } };
+    cyclic.blocks = &blocks;
+    _ = try expectRetained(cyclic);
+}

@@ -53,6 +53,7 @@ src/data/affine_validate.zig
 src/data/aggregate_admission.zig
 src/data/aggregate_reduction.zig
 src/data/aggregate_reduction_tests.zig
+src/data/allocation_budget.zig
 src/data/allocation_testing.zig
 src/data/analysis_sets.zig
 src/data/analysis_sets_tests.zig
@@ -127,6 +128,7 @@ src/data/equality_saturation_tests.zig
 src/data/evidence_forwarding.zig
 src/data/evidence_forwarding_tests.zig
 src/data/expression_reuse.zig
+src/data/expression_reuse_proof.zig
 src/data/expression_reuse_tests.zig
 src/data/function_inputs.zig
 src/data/graph.zig
@@ -187,6 +189,7 @@ src/data/relocation_tests.zig
 src/data/resource_admission.zig
 src/data/root.zig
 src/data/scalar.zig
+src/data/scalar_field_reuse.zig
 src/data/schema.zig
 src/data/schema_partition.zig
 src/data/schema_partition_bench.zig
@@ -248,6 +251,7 @@ src/library/scheduler.zig
 src/library/search.zig
 src/library/state.zig
 src/library/writer.zig
+src/recovery_optimization_test_root.zig
 src/root.zig
 src/source.zig
 src/source/abort_example.zig
@@ -289,6 +293,10 @@ src/source/projection_tests.zig
 src/source/queens_example.zig
 src/source/record_tests.zig
 src/source/recovery.zig
+src/source/recovery_optimization.zig
+src/source/recovery_optimization_tests.zig
+src/source/recovery_phase_tests.zig
+src/source/recovery_phases.zig
 src/source/recovery_tests.zig
 src/source/reentrant_example.zig
 src/source/reference_roles.zig

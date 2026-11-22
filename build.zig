@@ -47,6 +47,7 @@ pub fn build(b: *std.Build) void {
     native.dependOn(data_step);
     native.dependOn(authoring_checks.step);
     native.dependOn(component_step);
+    native.dependOn(recoveryOptimizationChecks(b, data, optimize));
     const wasm_checks = wasmChecks(b, compactProbe(b), compactEmitter(b, horos, optimize));
     const semantics = semanticsChecks(b, data, horos, authoring_checks.run, optimize);
     const aggregate = b.step(
@@ -60,6 +61,42 @@ pub fn build(b: *std.Build) void {
     aggregate.dependOn(wasm_checks.invocation);
     publicExamples(b, horos, native, optimize);
     b.default_step = aggregate;
+}
+
+fn recoveryOptimizationChecks(
+    b: *std.Build,
+    data: *std.Build.Module,
+    optimize: std.lang.Optimize,
+) *std.Build.Step {
+    const check = b.step("check-recovery-optimization", "Check source-bound scalar field reuse");
+    const tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/recovery_optimization_test_root.zig"),
+            .target = data.resolved_target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "horos_data", .module = data }},
+        }),
+        .filters = &.{
+            "recovery_optimization_tests",
+            "recovery_phase_tests",
+            "protected coalesced",
+        },
+    });
+    const run = b.addRunArtifact(tests);
+    run.has_side_effects = true;
+    check.dependOn(&run.step);
+    const rule_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/data/expression_reuse_tests.zig"),
+            .target = data.resolved_target,
+            .optimize = optimize,
+        }),
+        .filters = &.{ "recovery field reuse", "recovery evidence" },
+    });
+    const run_rule = b.addRunArtifact(rule_tests);
+    run_rule.has_side_effects = true;
+    check.dependOn(&run_rule.step);
+    return check;
 }
 
 fn qualificationHost(b: *std.Build) std.Build.ResolvedTarget {

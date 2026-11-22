@@ -220,6 +220,43 @@ test "source recovery retains binding aliases through checked function coalescin
     try rejectForgedBindingParameters(module, compiled);
 }
 
+test "source recovery retains protected coalesced aliases under scalar field reuse" {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const fixture = try coalescedBindingModule(&b);
+    const options: source.recovery_optimization.Options = .{
+        .rule = .scalar_field_reuse_v1,
+        .limits = .{},
+        .formals = &.{
+            .{ .function = fixture.first, .ordinal = 0 },
+            .{ .function = fixture.second, .ordinal = 0 },
+        },
+    };
+    var baseline = try source.lowerObserved(a, fixture.module, .{ .recovery = true });
+    defer baseline.deinit();
+    var optimized = try source.lowerRecoveryOptimized(a, fixture.module, options);
+    defer optimized.deinit();
+    const actual = try source.recovery_optimization.parameters(
+        a,
+        fixture.module,
+        optimized.program,
+        optimized.evidence,
+        options,
+    );
+    defer a.free(actual);
+    try std.testing.expectEqualDeep(baseline.parameters, actual);
+    var first: ?source.RecoveryBinding = null;
+    var second: ?source.RecoveryBinding = null;
+    for (actual) |binding| {
+        if (binding.source_function == fixture.first) first = binding;
+        if (binding.source_function == fixture.second) second = binding;
+    }
+    try std.testing.expect(first != null and second != null);
+    try std.testing.expectEqual(first.?.function, second.?.function);
+    try std.testing.expectEqual(first.?.slot, second.?.slot);
+    try std.testing.expect(first.?.variable != second.?.variable);
+}
+
 test "source recovery derives formal parameters after captured inputs" {
     var b = source.Builder.init(a);
     defer b.deinit();

@@ -50,6 +50,37 @@ pub fn validate(
     original_facts.deinit();
     var candidate_facts = try admission.analyze(a, candidate);
     candidate_facts.deinit();
+    return checkMap(a, original, candidate, map);
+}
+
+pub fn validateWithFlow(
+    a: std.mem.Allocator,
+    original: ir.Program,
+    candidate: ir.Program,
+    map: Correspondence,
+    work: ?*u64,
+) Error!@import("activation_flow.zig").Facts {
+    if (work) |remaining| {
+        var records: @import("wire.zig").Writer = .{ .remaining = remaining };
+        const write = @import("record.zig").write;
+        try write(ir.Program, original, &records);
+        try write(ir.Program, candidate, &records);
+        try write(Correspondence, map, &records);
+    }
+    var original_facts = try admission.analyzeObservedWithWork(a, original, null, null, work);
+    original_facts.deinit();
+    var actual = try admission.analyzeObservedWithWork(a, candidate, null, null, work);
+    errdefer actual.deinit();
+    try checkMap(a, original, candidate, map);
+    return actual;
+}
+
+fn checkMap(
+    a: std.mem.Allocator,
+    original: ir.Program,
+    candidate: ir.Program,
+    map: Correspondence,
+) Error!void {
     var scratch = std.heap.ArenaAllocator.init(a);
     defer scratch.deinit();
     const storage = scratch.allocator();

@@ -25,28 +25,18 @@ pub const Statistics = struct {
         validation,
     } = .discovery,
 };
-pub const Location = struct { block: usize, instruction: usize };
-pub const Witness = struct { target: Location, source: Location };
-const Definition = struct {
-    location: Location,
-    function: p.Id,
-    instruction: ir.Instruction,
-    schema: p.Id,
-};
-const Budget = struct {
-    remaining: u64,
-    used: u64 = 0,
-    exhausted: bool = false,
-    fn tick(self: *Budget) bool {
-        if (self.remaining == 0) {
-            self.exhausted = true;
-            return false;
-        }
-        self.remaining -= 1;
-        self.used += 1;
-        return true;
-    }
-};
+const proof = @import("expression_reuse_proof.zig");
+pub const Location = proof.Location;
+pub const Witness = proof.Witness;
+const Definition = proof.Definition;
+const Budget = proof.Budget;
+const Predecessor = proof.Predecessor;
+const sameExpression = proof.sameExpression;
+const relevant = proof.relevant;
+const edgePreserves = proof.edgePreserves;
+const indexPredecessors = proof.indexPredecessors;
+const successor = proof.successor;
+const proves = proof.proves;
 
 fn eligible(
     program: ir.Program,
@@ -97,69 +87,6 @@ pub fn canNumber(opcode: p.Opcode) bool {
         .select,
         => true,
         else => false,
-    };
-}
-fn sameExpression(left: ir.Instruction, right: ir.Instruction) bool {
-    var normalized = right;
-    normalized.destination = left.destination;
-    return equal(ir.Instruction, left, normalized);
-}
-fn relevant(definition: Definition, slot: p.Id) bool {
-    return definition.instruction.destination == slot or std.mem.indexOfScalar(
-        p.Id,
-        definition.instruction.operands,
-        slot,
-    ) != null;
-}
-fn edgePreserves(definition: Definition, edge: ir.Edge, overwritten: []const p.Id) bool {
-    for (overwritten) |slot| if (relevant(definition, slot)) return false;
-    for (edge.assignments) |assignment| {
-        if (!relevant(definition, assignment.destination)) continue;
-        if (assignment.source != .slot or
-            assignment.source.slot != assignment.destination)
-            return false;
-    }
-    return true;
-}
-const Incoming = struct {
-    edge: ir.Edge,
-    overwritten: []const p.Id = &.{},
-    capture_boundary: bool = false,
-};
-const Predecessor = struct { block: usize, transfer: Incoming };
-fn indexPredecessors(
-    allocator: std.mem.Allocator,
-    program: ir.Program,
-    budget: *Budget,
-) Error![]std.ArrayList(Predecessor) {
-    const result = try allocator.alloc(std.ArrayList(Predecessor), program.blocks.len);
-    for (result) |*items| items.* = .empty;
-    for (program.blocks, 0..) |block, id| {
-        var edge_index: usize = 0;
-        while (successor(block.terminator, edge_index)) |transfer| : (edge_index += 1) {
-            if (!budget.tick()) return error.ExpressionWorkLimit;
-            try result[@intCast(transfer.edge.block)].append(
-                allocator,
-                .{ .block = id, .transfer = transfer },
-            );
-        }
-    }
-    return result;
-}
-fn successor(term: ir.Terminator, index: usize) ?Incoming {
-    return switch (term) {
-        .return_value, .fail => null,
-        .branch => |v| if (index == 0) .{ .edge = v.when_true } else if (index == 1) .{
-            .edge = v.when_false,
-        } else null,
-        .switch_variant => |v| if (index < v.cases.len) .{ .edge = v.cases[index] } else null,
-        .jump => |v| if (index == 0) .{ .edge = v } else null,
-        .yield_value => |v| if (index == 0) .{ .edge = v, .capture_boundary = true } else null,
-        .unpack_product => |v| if (index == 0) .{
-            .edge = v.next,
-            .overwritten = v.destinations,
-        } else null,
-        inline else => |v| if (index == 0) .{ .edge = v.next, .capture_boundary = true } else null,
     };
 }
 fn representative(parents: []usize, start: usize) usize {
@@ -512,140 +439,6 @@ fn rollback(
     stats.expressions_reused = 0;
     stats.across_blocks = 0;
     return coalescing.run(allocator, original, options.coalescing);
-}
-
-const Proof = struct {
-    program: ir.Program,
-    definition: Definition,
-    cache: []enum { unseen, active, yes, no },
-    budget: *Budget,
-    predecessors: []const std.ArrayList(Predecessor),
-    const Frame = struct {
-        block_id: usize,
-        next: usize = 0,
-        count: usize = 0,
-        full: bool,
-    };
-    const Resolution = enum { pending, yes, no };
-    fn enter(self: *Proof, frame: Frame, before: usize, depth: usize) Resolution {
-        if (!self.budget.tick()) return .no;
-        if (depth == 256) return .no;
-        if (frame.full) switch (self.cache[frame.block_id]) {
-            .active, .no => return .no,
-            .yes => return .yes,
-            .unseen => {},
-        };
-        if (frame.full) self.cache[frame.block_id] = .active;
-        var result: Resolution = .no;
-        defer if (frame.full and result != .pending) {
-            self.cache[frame.block_id] = if (result == .yes) .yes else .no;
-        };
-        const block = self.program.blocks[frame.block_id];
-        var cursor = before;
-        while (cursor != 0) {
-            if (!self.budget.tick()) return .no;
-            cursor -= 1;
-            if (self.definition.location.block == frame.block_id and
-                self.definition.location.instruction == cursor)
-            {
-                result = .yes;
-                return result;
-            }
-            if (relevant(self.definition, block.instructions[cursor].destination)) return .no;
-        }
-        if (self.program.functions[@intCast(block.function)].entry == frame.block_id) return .no;
-        result = .pending;
-        return result;
-    }
-    fn resolve(self: *Proof, block_id: usize, before: usize) bool {
-        var frames: [256]Frame = undefined;
-        frames[0] = .{
-            .block_id = block_id,
-            .full = before == self.program.blocks[block_id].instructions.len,
-        };
-        switch (self.enter(frames[0], before, 0)) {
-            .yes => return true,
-            .no => return false,
-            .pending => {},
-        }
-        var count: usize = 1;
-        defer for (frames[0..count]) |frame| {
-            if (frame.full) self.cache[frame.block_id] = .no;
-        };
-        while (count != 0) {
-            const frame = &frames[count - 1];
-            const incoming = self.predecessors[frame.block_id].items;
-            if (frame.next == incoming.len) {
-                if (frame.count == 0) return false;
-                if (frame.full) self.cache[frame.block_id] = .yes;
-                count -= 1;
-                continue;
-            }
-            if (!self.budget.tick()) return false;
-            const indexed = incoming[frame.next];
-            frame.next += 1;
-            const predecessor = self.program.blocks[indexed.block];
-            if (predecessor.function != self.program.blocks[frame.block_id].function) continue;
-            frame.count += 1;
-            if (indexed.transfer.capture_boundary or !edgePreserves(
-                self.definition,
-                indexed.transfer.edge,
-                indexed.transfer.overwritten,
-            )) return false;
-            const child: Frame = .{ .block_id = indexed.block, .full = true };
-            switch (self.enter(child, predecessor.instructions.len, count)) {
-                .no => return false,
-                .yes => continue,
-                .pending => {
-                    frames[count] = child;
-                    count += 1;
-                },
-            }
-        }
-        return true;
-    }
-};
-fn proves(
-    allocator: std.mem.Allocator,
-    program: ir.Program,
-    witness: Witness,
-    predecessors: []const std.ArrayList(Predecessor),
-    budget: *Budget,
-) std.mem.Allocator.Error!bool {
-    if (witness.source.block >= program.blocks.len or
-        witness.target.block >= program.blocks.len)
-        return false;
-    const source = program.blocks[witness.source.block];
-    const target = program.blocks[witness.target.block];
-    if (source.function != target.function or
-        witness.source.instruction >= source.instructions.len or
-        witness.target.instruction >= target.instructions.len)
-        return false;
-    const op = source.instructions[witness.source.instruction];
-    if (!sameExpression(op, target.instructions[witness.target.instruction])) return false;
-    var proof: Proof = .{
-        .program = program,
-        .definition = .{
-            .location = witness.source,
-            .function = source.function,
-            .instruction = op,
-            .schema = program.functions[
-                @intCast(source.function)
-            ].layout.slots[
-                @intCast(op.destination)
-            ],
-        },
-        .cache = undefined,
-        .budget = budget,
-        .predecessors = predecessors,
-    };
-    proof.cache = try allocator.alloc(
-        @typeInfo(@TypeOf(proof.cache)).pointer.child,
-        program.blocks.len,
-    );
-    defer allocator.free(proof.cache);
-    @memset(proof.cache, .unseen);
-    return proof.resolve(witness.target.block, witness.target.instruction);
 }
 
 pub fn validate(
