@@ -73,15 +73,18 @@ const Binding = struct { before: p.Id, after: p.Id, knowledge: Knowledge };
 const Env = []const Binding;
 const Value = struct { id: p.Id, knowledge: Knowledge, total: bool, proof: usize };
 const Term = struct { id: p.Id, knowledge: Knowledge = .dynamic, proof: usize };
-fn binding(env: Env, id: p.Id) Error!Binding {
+fn binding(env: Env, id: p.Id, work: *u64) Error!Binding {
     var i = env.len;
     while (i > 0) {
+        try data.admission.spend(work, 1);
         i -= 1;
         if (env[i].before == id) return env[i];
     }
     return error.UnboundVariable;
 }
-fn extend(a: std.mem.Allocator, env: Env, item: Binding) !Env {
+fn extend(a: std.mem.Allocator, env: Env, item: Binding, work: *u64) Error!Env {
+    try data.admission.spend(work, env.len);
+    try data.admission.spend(work, 1);
     const result = try a.alloc(Binding, env.len + 1);
     @memcpy(result[0..env.len], env);
     result[env.len] = item;
@@ -141,6 +144,17 @@ test "specialization request encoding preserves field order and allocation failu
 /// A policy limit rejects this candidate; the unchanged source remains usable.
 /// No effect is performed and no unchecked partial result is returned.
 pub fn specialize(a: std.mem.Allocator, original: ast.Module, requested: Request) Error!Output {
+    var unbounded: u64 = std.math.maxInt(u64);
+    return specializeWithWork(a, original, requested, &unbounded) catch |err|
+        return if (err == error.RelationLimit) error.SpecializationLimit else err;
+}
+
+pub fn specializeWithWork(
+    a: std.mem.Allocator,
+    original: ast.Module,
+    requested: Request,
+    work: *u64,
+) Error!Output {
     var out: Output = .{
         .builder = source.Builder.init(a),
         .original = undefined,
@@ -167,34 +181,41 @@ pub fn specialize(a: std.mem.Allocator, original: ast.Module, requested: Request
         try @field(out.builder, name).appendSlice(storage, @field(m, name));
     }
     out.builder.region_count = m.region_count;
-    try derive(a, &out, requested);
-    out.key = try identity(a, original, requested);
-    try @import("specialize_validate.zig").validateByAdmission(a, original, requested, &out);
+    try derive(a, &out, requested, work);
+    out.key = try identityWithWork(a, original, requested, work);
+    try validateWithWork(a, original, requested, &out, work);
     return out;
 }
-fn derive(a: std.mem.Allocator, out: *Output, requested: Request) Error!void {
+fn derive(a: std.mem.Allocator, out: *Output, requested: Request, work: *u64) Error!void {
     const storage = out.builder.allocator();
     const m = out.original;
     var scratch = std.heap.ArenaAllocator.init(a);
     defer scratch.deinit();
-    var admission_work: u64 = std.math.maxInt(u64);
-    try source.admitObservedWithWork(a, m, &admission_work, .{
+    try source.admitObservedWithWork(a, m, work, .{
         .context = out,
         .receive = retainEmittedConstants,
     });
-    const checked = try @import("check.zig").analyze(scratch.allocator(), m);
-    const schema_facts = try data.admission.schemas(storage, m.schemas);
+    const checked = try @import("check.zig").analyzeWithWork(scratch.allocator(), m, work);
+    const schema_facts = try data.admission.schemasWithWork(storage, m.schemas, work);
     if (requested.function >= m.functions.len) return error.InvalidReference;
     const f = m.functions[@intCast(requested.function)];
     if (requested.arguments.len != f.parameters.len) return error.TypeMismatch;
     for (
         requested.arguments,
         f.parameters,
-    ) |k, param| try values.validate(storage, m, schema_facts, m.variables[@intCast(param)], k);
+    ) |k, param| try values.validateWithWork(
+        storage,
+        m,
+        schema_facts,
+        m.variables[@intCast(param)],
+        k,
+        work,
+    );
     var engine: Engine = .{
         .out = out,
         .captures = checked.functions,
         .left = requested.policy.work,
+        .work = work,
         .reads = .{ .module = m, .facts = schema_facts },
     };
     defer engine.reads.deinit(storage);
@@ -223,6 +244,7 @@ const Engine = struct {
     out: *Output,
     captures: []const @import("check.zig").Set,
     left: u64,
+    work: *u64,
     reads: values.ReadCache,
     fn a(self: *Engine) std.mem.Allocator {
         return self.out.builder.allocator();
@@ -231,7 +253,27 @@ const Engine = struct {
         if (self.left == 0 or
             depth > self.out.request.policy.depth)
             return error.SpecializationLimit;
+        try data.admission.spend(self.work, 1);
         self.left -= 1;
+    }
+    fn normalize(self: *Engine, raw: Knowledge) Error!Knowledge {
+        var evaluation = values.EvaluationWork.init(&self.left, self.work);
+        defer evaluation.finish();
+        return values.normalize(self.a(), raw, &evaluation.left);
+    }
+    fn primitive(self: *Engine, expression: ast.Value, known: []const Knowledge) Error!Knowledge {
+        var evaluation = values.EvaluationWork.init(&self.left, self.work);
+        defer evaluation.finish();
+        return values.normalize(
+            self.a(),
+            try self.reads.primitive(self.a(), expression, known, &evaluation.left),
+            &evaluation.left,
+        );
+    }
+    fn field(self: *Engine, knowledge: Knowledge, index: usize) Error!Knowledge {
+        var evaluation = values.EvaluationWork.init(&self.left, self.work);
+        defer evaluation.finish();
+        return self.reads.field(self.a(), knowledge, index, &evaluation.left);
     }
     const SupportedTask = struct { id: p.Id, depth: usize };
     fn supported(self: *Engine, id: p.Id, depth: usize) Error!bool {
@@ -275,13 +317,14 @@ const Engine = struct {
         for (
             raw_arguments,
             arguments,
-        ) |raw, *canonical| canonical.* = try values.normalize(self.a(), raw, &self.left);
+        ) |raw, *canonical| canonical.* = try self.normalize(raw);
         var count: usize = 0;
+        try data.admission.spend(self.work, self.out.functions.items.len);
         for (self.out.functions.items, 0..) |f, i| if (f.before == id) {
             count += 1;
             var same = f.arguments.len == arguments.len;
             if (same) for (f.arguments, arguments) |x, y| {
-                if (!try values.equal(self.a(), x, y)) {
+                if (!try values.equalWithWork(self.a(), x, y, self.work)) {
                     same = false;
                     break;
                 }
@@ -339,7 +382,12 @@ const Engine = struct {
         for (original.parameters, proof.arguments) |before, k| {
             const after = if (k == .known) before else residual.parameters[cursor];
             if (k != .known) cursor += 1;
-            env = try extend(self.a(), env, .{ .before = before, .after = after, .knowledge = k });
+            env = try extend(
+                self.a(),
+                env,
+                .{ .before = before, .after = after, .knowledge = k },
+                self.work,
+            );
         }
         const body = try self.term(original.body.?, env, 0);
         try self.out.builder.define(proof.after, body.id);
@@ -361,7 +409,7 @@ const Engine = struct {
         var frame: ValueFrame = .{ .before = id, .expression = before };
         switch (before.expression) {
             .variable => |v| {
-                const bound = try binding(env, v);
+                const bound = try binding(env, v, self.work);
                 frame.expression.expression = .{ .variable = bound.after };
                 frame.knowledge = bound.knowledge;
             },
@@ -385,12 +433,7 @@ const Engine = struct {
         if (frame.expression.expression == .primitive) {
             const before = frame.expression;
             frame.expression.expression.primitive.operands = frame.args;
-            frame.knowledge = try values.normalize(self.a(), try self.reads.primitive(
-                self.a(),
-                before,
-                frame.known,
-                &self.left,
-            ), &self.left);
+            frame.knowledge = try self.primitive(before, frame.known);
             frame.total = frame.total and frame.knowledge == .known;
         }
         const folded = frame.total and frame.knowledge == .known;
@@ -541,7 +584,7 @@ const Engine = struct {
                 .before = v.variable,
                 .after = frame.variable,
                 .knowledge = result.knowledge,
-            });
+            }, self.work);
             frame.phase = 2;
             return childInput(frame, v.next, env);
         }
@@ -583,7 +626,12 @@ const Engine = struct {
             .when_true = frame.first.id,
             .when_false = result.id,
         } };
-        if (try values.equal(self.a(), frame.first.knowledge, result.knowledge)) {
+        if (try values.equalWithWork(
+            self.a(),
+            frame.first.knowledge,
+            result.knowledge,
+            self.work,
+        )) {
             frame.knowledge = frame.first.knowledge;
         }
         return null;
@@ -634,13 +682,8 @@ const Engine = struct {
                 env = try extend(self.a(), env, .{
                     .before = before,
                     .after = after.*,
-                    .knowledge = try self.reads.field(
-                        self.a(),
-                        x.knowledge,
-                        i,
-                        &self.left,
-                    ),
-                });
+                    .knowledge = try self.field(x.knowledge, i),
+                }, self.work);
             }
             frame.residual = .{ .unpack_product = .{
                 .value = x.id,
@@ -696,7 +739,7 @@ const Engine = struct {
             .before = branch.variable,
             .after = frame.variable,
             .knowledge = frame.payload,
-        });
+        }, self.work);
         frame.phase += 1;
         return childInput(frame, branch.body, env);
     }

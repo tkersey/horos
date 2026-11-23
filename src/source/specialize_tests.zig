@@ -856,6 +856,21 @@ fn literalProofWork(output: *const pe.Output) !u64 {
     return 1_000_000_000 - remaining;
 }
 
+fn valueRecordWork(output: *const pe.Output) !u64 {
+    const residual = output.module();
+    var remaining: u64 = std.math.maxInt(u64);
+    for (output.value_proofs.items) |proof| {
+        const value = residual.values[@intCast(proof.after)];
+        try std.testing.expect(try @import("horos_data").record.equalWithWork(
+            source.ast.Value,
+            value,
+            value,
+            &remaining,
+        ));
+    }
+    return std.math.maxInt(u64) - remaining;
+}
+
 fn rejectLiteralProofWork(output: *const pe.Output, budget: u64) !void {
     var remaining = budget;
     try std.testing.expectError(
@@ -877,7 +892,7 @@ test "distinct folded literal proofs charge every content comparison" {
     try duplicateLiteralProof(&output, 8);
     const folded = try literalProofWork(&output);
     for (output.value_proofs.items) |*proof| proof.folded = false;
-    const unfolded = try literalProofWork(&output);
+    const unfolded = try literalProofWork(&output) - try valueRecordWork(&output);
     try std.testing.expect(folded - unfolded >= 8 * bytes.len);
     for (output.value_proofs.items) |*proof| proof.folded = true;
     try rejectLiteralProofWork(&output, unfolded + 8 * bytes.len - 1);
@@ -1477,6 +1492,41 @@ test "standalone specialization needs only its output and ordinary admission sto
     try pe.validate(full.allocator(), fixture.module, fixture.request, &output);
     try std.testing.expect(full.peak >= compiled.peak);
     try std.testing.expectEqual(@as(usize, 0), full.live);
+}
+test "specialization charges admission, derivation and self-validation to the caller" {
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    var bytes: [8]u8 = undefined;
+    const fixture = try recursiveFactor(&b, &bytes);
+    var remaining: u64 = std.math.maxInt(u64);
+    var output = try pe.specializeWithWork(a, fixture.module, fixture.request, &remaining);
+    defer output.deinit();
+    const spent = std.math.maxInt(u64) - remaining;
+    var unbounded = try pe.specialize(a, fixture.module, fixture.request);
+    defer unbounded.deinit();
+    try std.testing.expectEqualSlices(u8, &unbounded.key, &output.key);
+    var validation: u64 = std.math.maxInt(u64);
+    try pe.validateWithWork(a, fixture.module, fixture.request, &output, &validation);
+    var admission: u64 = std.math.maxInt(u64);
+    try source.admitWithWork(a, fixture.module, &admission);
+    const checked = std.math.maxInt(u64) - validation;
+    const admitted = std.math.maxInt(u64) - admission;
+    try std.testing.expect(spent >= checked + admitted);
+    var exact = spent;
+    var repeated = try pe.specializeWithWork(a, fixture.module, fixture.request, &exact);
+    repeated.deinit();
+    try std.testing.expectEqual(@as(u64, 0), exact);
+    for ([_]u64{ 0, admitted - 1, admitted, spent - checked, spent - 1 }) |budget| {
+        var short = budget;
+        if (pe.specializeWithWork(a, fixture.module, fixture.request, &short)) |unexpected| {
+            var leaked = unexpected;
+            leaked.deinit();
+            return error.TestUnexpectedResult;
+        } else |err| try std.testing.expect(
+            err == error.RelationLimit or err == error.SpecializationLimit,
+        );
+    }
 }
 test "source specialization selects known condition and checks forged literal" {
     const a = std.testing.allocator;
