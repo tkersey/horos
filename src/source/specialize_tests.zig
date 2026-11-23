@@ -1330,10 +1330,9 @@ test "non-exportable aggregate constructors remain residual" {
     }
 }
 
-test "source specialization reserves recursive keys and retains dynamic arithmetic" {
-    const a = std.testing.allocator;
-    var b = source.Builder.init(a);
-    defer b.deinit();
+const RecursiveFactor = struct { module: source.Module, request: pe.Request };
+
+fn recursiveFactor(b: *source.Builder, bytes: *[8]u8) !RecursiveFactor {
     const unit = try b.scalar(void);
     const u64_type = try b.scalar(u64);
     const bool_type = try b.scalar(bool);
@@ -1362,13 +1361,24 @@ test "source specialization reserves recursive keys and retains dynamic arithmet
             .when_false = recurse,
         } }),
     );
-    var bytes: [8]u8 = undefined;
-    const request: pe.Request = .{
-        .context = context,
-        .function = f,
-        .arguments = &.{ .dynamic, known(7, &bytes, u64_type) },
+    const arguments = try b.allocator().dupe(pe.Knowledge, &.{
+        .dynamic,
+        known(7, bytes, u64_type),
+    });
+    return .{
+        .module = b.module(f, unit),
+        .request = .{ .context = context, .function = f, .arguments = arguments },
     };
-    var result = try pe.specialize(a, b.module(f, unit), request);
+}
+
+test "source specialization reserves recursive keys and retains dynamic arithmetic" {
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    var bytes: [8]u8 = undefined;
+    const fixture = try recursiveFactor(&b, &bytes);
+    const request = fixture.request;
+    var result = try pe.specialize(a, fixture.module, request);
     defer result.deinit();
     try std.testing.expectEqual(@as(usize, 1), result.functions.items.len);
     try std.testing.expectEqual(
@@ -1382,15 +1392,83 @@ test "source specialization reserves recursive keys and retains dynamic arithmet
     proof.before = 0;
     try std.testing.expectError(
         error.InvalidSpecialization,
-        pe.validate(a, b.module(f, unit), request, &result),
+        pe.validate(a, fixture.module, request, &result),
     );
     proof.before = saved;
     var changed = request;
     changed.context.guest[0] ^= 1;
     try std.testing.expectError(
         error.InvalidSpecialization,
-        pe.validate(a, b.module(f, unit), changed, &result),
+        pe.validate(a, fixture.module, changed, &result),
     );
+}
+
+const Peak = struct {
+    parent: std.mem.Allocator,
+    live: usize = 0,
+    peak: usize = 0,
+
+    fn allocator(self: *Peak) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn grow(self: *Peak, before: usize, after: usize) void {
+        self.live = self.live - before + after;
+        self.peak = @max(self.peak, self.live);
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *Peak = @ptrCast(@alignCast(ctx));
+        const memory = self.parent.rawAlloc(len, alignment, ra) orelse return null;
+        self.grow(0, len);
+        return memory;
+    }
+
+    fn resize(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) bool {
+        return false;
+    }
+
+    fn remap(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) ?[*]u8 {
+        return null;
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const self: *Peak = @ptrCast(@alignCast(ctx));
+        self.parent.rawFree(memory, alignment, ra);
+        self.grow(memory.len, 0);
+    }
+};
+
+fn admissionPeak(module: source.Module) !usize {
+    var meter: Peak = .{ .parent = std.testing.allocator };
+    var work: u64 = std.math.maxInt(u64);
+    try source.admitWithWork(meter.allocator(), module, &work);
+    return meter.peak;
+}
+
+test "standalone specialization needs only its output and ordinary admission storage" {
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    var bytes: [8]u8 = undefined;
+    const fixture = try recursiveFactor(&b, &bytes);
+    var producer: Peak = .{ .parent = a };
+    var output = try pe.specialize(producer.allocator(), fixture.module, fixture.request);
+    defer output.deinit();
+    const admission = @max(
+        try admissionPeak(fixture.module),
+        try admissionPeak(output.module()),
+    );
+    try std.testing.expect(producer.peak <= producer.live + admission);
+    var checker: Peak = .{ .parent = a };
+    try pe.validate(checker.allocator(), fixture.module, fixture.request, &output);
+    try std.testing.expect(checker.peak <= admission);
+    try std.testing.expectEqual(@as(usize, 0), checker.live);
 }
 test "source specialization selects known condition and checks forged literal" {
     const a = std.testing.allocator;

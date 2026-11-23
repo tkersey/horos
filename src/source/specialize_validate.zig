@@ -83,6 +83,16 @@ fn validateBody(
     out: *const pe.Output,
     work: ?*u64,
 ) Error!void {
+    try checkDerivation(a, original, request, out, work);
+    try admit(a, out.module(), work);
+}
+fn checkDerivation(
+    a: std.mem.Allocator,
+    original: ast.Module,
+    request: pe.Request,
+    out: *const pe.Output,
+    work: ?*u64,
+) Error!void {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const storage = arena.allocator();
@@ -125,12 +135,10 @@ fn validateBody(
     };
     defer checker.reads.deinit(storage);
     for (out.functions.items, 0..) |f, i| try checker.function(f, i);
-    try admit(a, residual, work);
 }
 fn admit(a: std.mem.Allocator, module: ast.Module, work: ?*u64) Error!void {
-    if (work) |remaining| return source.admitWithWork(a, module, remaining);
-    var admitted = try source.lower(a, module);
-    admitted.deinit();
+    var unbounded: u64 = std.math.maxInt(u64);
+    return source.admitWithWork(a, module, work orelse &unbounded);
 }
 fn validateEnvelope(
     storage: std.mem.Allocator,

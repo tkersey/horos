@@ -167,11 +167,19 @@ pub fn specialize(a: std.mem.Allocator, original: ast.Module, requested: Request
         try @field(out.builder, name).appendSlice(storage, @field(m, name));
     }
     out.builder.region_count = m.region_count;
+    try derive(a, &out, requested);
+    out.key = try identity(a, original, requested);
+    try validate(a, original, requested, &out);
+    return out;
+}
+fn derive(a: std.mem.Allocator, out: *Output, requested: Request) Error!void {
+    const storage = out.builder.allocator();
+    const m = out.original;
     var scratch = std.heap.ArenaAllocator.init(a);
     defer scratch.deinit();
     var admission_work: u64 = std.math.maxInt(u64);
     try source.admitObservedWithWork(a, m, &admission_work, .{
-        .context = &out,
+        .context = out,
         .receive = retainEmittedConstants,
     });
     const checked = try @import("check.zig").analyze(scratch.allocator(), m);
@@ -184,7 +192,7 @@ pub fn specialize(a: std.mem.Allocator, original: ast.Module, requested: Request
         f.parameters,
     ) |k, param| try values.validate(storage, m, schema_facts, m.variables[@intCast(param)], k);
     var engine: Engine = .{
-        .out = &out,
+        .out = out,
         .captures = checked.functions,
         .left = requested.policy.work,
         .reads = .{ .module = m, .facts = schema_facts },
@@ -197,9 +205,6 @@ pub fn specialize(a: std.mem.Allocator, original: ast.Module, requested: Request
     out.entry = out.functions.items[root].after;
     var cursor: usize = 0;
     while (cursor < out.functions.items.len) : (cursor += 1) try engine.function(cursor);
-    out.key = try identity(a, original, requested);
-    try validate(a, original, requested, &out);
-    return out;
 }
 fn retainEmittedConstants(
     context: *anyopaque,
