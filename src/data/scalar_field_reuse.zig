@@ -142,7 +142,7 @@ const Context = struct {
     live: []const bool,
     predecessors: []const std.ArrayList(proof.Predecessor),
     budget: *Budget,
-    workspace: proof.Workspace,
+    workspace: *proof.Workspace,
     last_proved: ?proof.Witness = null,
 
     fn init(
@@ -150,6 +150,7 @@ const Context = struct {
         program: ir.Program,
         flow: *const Flow,
         budget: *Budget,
+        workspace: *proof.Workspace,
     ) Error!Context {
         const catalog = try admission.schemasWithWork(a, program.schemas, budget.work());
         const permissions = try traits.deriveWithWork(a, program.schemas, budget.work());
@@ -162,7 +163,7 @@ const Context = struct {
             .live = live,
             .predecessors = try proof.indexLivePredecessors(a, program, live, budget),
             .budget = budget,
-            .workspace = try proof.Workspace.init(a, program, budget),
+            .workspace = workspace,
         };
     }
 
@@ -249,7 +250,7 @@ pub const PreparedOriginal = opaque {
             return translated(err, prepared.cap.*, ctx.budget);
         defer after.deinit();
         if (comptime @TypeOf(observer) != @TypeOf(null))
-            observer.checked(ctx.flow, &after) catch |err| {
+            observer.checked(ctx.flow.observation(), after.observation()) catch |err| {
                 if (@as(anyerror, err) == error.RelationLimit) ctx.budget.exhausted = true;
                 return err;
             };
@@ -293,7 +294,10 @@ fn prepare(
     var flow = analyze(cap.allocator(), program, budget) catch |err|
         return translated(err, cap, budget);
     defer flow.deinit();
-    const ctx = Context.init(arena.allocator(), program, &flow, budget) catch |err|
+    var workspace = proof.Workspace.init(cap.allocator(), program, budget) catch |err|
+        return translated(err, cap, budget);
+    defer workspace.deinit();
+    const ctx = Context.init(arena.allocator(), program, &flow, budget, &workspace) catch |err|
         return translated(err, cap, budget);
     var prepared: PreparedState = .{ .cap = &cap, .context = ctx };
     return observer.prepared(@as(*PreparedOriginal, @ptrCast(&prepared)));

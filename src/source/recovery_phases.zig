@@ -6,6 +6,7 @@ const Binding = @import("activation_lower.zig").RecoveryBinding;
 const ir = data.activation;
 const Id = ir.Id;
 const Facts = data.activation_flow.Facts;
+const Observation = data.activation_flow.Observation;
 const Map = data.coalescing.Correspondence;
 const spend = data.admission.spend;
 const missing = data.relocation.missing;
@@ -197,9 +198,9 @@ pub fn validate(
         parameters,
         selected.formals(),
         original,
-        before,
+        before.observation(),
         candidate,
-        after,
+        after.observation(),
         correspondence,
         work,
     );
@@ -211,9 +212,9 @@ pub fn validateDistinct(
     parameters: []const Binding,
     formals: []const Formal,
     original: ir.Program,
-    before: *const Facts,
+    before: *const Observation,
     candidate: ir.Program,
-    after: *const Facts,
+    after: *const Observation,
     correspondence: ?Map,
     work: *u64,
 ) Error!void {
@@ -247,7 +248,7 @@ pub fn validateDistinct(
     for (original.blocks, 0..) |block, id| {
         const first = functions[@intCast(block.function)].first orelse continue;
         const next = try mapped(correspondence, .block, id);
-        if (next == missing and before.positions[id].len == 0) continue;
+        if (next == missing and before.positionCount(id) == 0) continue;
         if (next >= candidate.blocks.len) return error.InvalidCorrespondence;
         const target = candidate.blocks[@intCast(next)];
         if (target.function != slots[first].function or
@@ -259,7 +260,7 @@ pub fn validateDistinct(
             try spend(work, 1);
             const slot = slots[i];
             try positions(before, id, slot.original, after, @intCast(next), slot.target, work);
-            if (before.positions[id].len != 0)
+            if (before.positionCount(id) != 0)
                 try caller(before, block, slot.original, after, target, slot.target, work);
             current = slot.previous;
         }
@@ -267,32 +268,29 @@ pub fn validateDistinct(
 }
 
 fn positions(
-    before: *const Facts,
+    before: *const Observation,
     id: usize,
     slot: Id,
-    after: *const Facts,
+    after: *const Observation,
     next: usize,
     target: Id,
     work: *u64,
 ) Error!void {
-    const states = before.positions[id];
-    const candidates = after.positions[next];
-    if (states.len != candidates.len) return error.InvalidCorrespondence;
-    try spend(work, states.len);
-    for (states, candidates, before.live[id], after.live[next]) |state, candidate, live, now| {
-        const needed = before.pool.contains(live, slot);
-        const present = before.pool.contains(state.available, slot);
-        if (needed != after.pool.contains(now, target) or
-            present != after.pool.contains(candidate.available, target))
+    const count = before.positionCount(id);
+    if (count != after.positionCount(next)) return error.InvalidCorrespondence;
+    try spend(work, count);
+    for (0..count) |i| {
+        if (before.liveAt(id, i, slot) != after.liveAt(next, i, target) or
+            before.availableAt(id, i, slot) != after.availableAt(next, i, target))
             return error.RecoveryLiveness;
     }
 }
 
 fn caller(
-    before: *const Facts,
+    before: *const Observation,
     block: ir.Block,
     slot: Id,
-    after: *const Facts,
+    after: *const Observation,
     target: ir.Block,
     target_slot: Id,
     work: *u64,
@@ -304,17 +302,16 @@ fn caller(
         (try retained(after, candidate, target_slot, work))) return error.RecoveryLiveness;
 }
 
-fn retained(facts: *const Facts, edge: ir.Edge, slot: Id, work: *u64) Error!bool {
-    const positions_live = facts.live[@intCast(edge.block)];
-    if (positions_live.len == 0) return error.InvalidCorrespondence;
-    const live = positions_live[0];
-    var unchanged = facts.pool.contains(live, slot);
+fn retained(facts: *const Observation, edge: ir.Edge, slot: Id, work: *u64) Error!bool {
+    const block: usize = @intCast(edge.block);
+    if (facts.positionCount(block) == 0) return error.InvalidCorrespondence;
+    var unchanged = facts.liveAt(block, 0, slot);
     var transferred = false;
     try spend(work, edge.assignments.len);
     for (edge.assignments) |assignment| {
         if (assignment.destination == slot) unchanged = false;
         if (assignment.source == .slot and assignment.source.slot == slot and
-            facts.pool.contains(live, assignment.destination)) transferred = true;
+            facts.liveAt(block, 0, assignment.destination)) transferred = true;
     }
     return unchanged or transferred;
 }

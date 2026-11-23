@@ -218,6 +218,7 @@ const WriteIndex = struct {
         if (known.len != 0 or ops.len < 16) return known;
         if (!budget.charge(ops.len)) return error.ExpressionWorkLimit;
         const items = try self.allocator.alloc(Write, ops.len);
+        errdefer self.allocator.free(items);
         var ordered = true;
         for (ops, items, 0..) |op, *w, i| {
             if (i != 0 and items[i - 1].slot > op.destination) ordered = false;
@@ -401,16 +402,44 @@ pub const Workspace = struct {
     ) Error!Workspace {
         if (!budget.charge(program.blocks.len)) return error.ExpressionWorkLimit;
         const cache = try a.alloc(Proof.State, program.blocks.len);
+        errdefer a.free(cache);
         @memset(cache, .unseen);
-        const frame_count = @min(budget.limits.depth, program.blocks.len +| 2);
         const writes = try a.alloc([]const Write, program.blocks.len);
+        errdefer a.free(writes);
         @memset(writes, &.{});
+        const visited = try a.alloc(usize, program.blocks.len);
+        errdefer a.free(visited);
+        const frame_count = @min(budget.limits.depth, program.blocks.len +| 2);
         return .{
             .writes = .{ .allocator = a, .blocks = writes },
             .cache = cache,
-            .visited = try a.alloc(usize, program.blocks.len),
+            .visited = visited,
             .frames = try a.alloc(Proof.Frame, frame_count),
         };
+    }
+
+    pub fn deinit(self: *Workspace) void {
+        const a = self.writes.allocator;
+        a.free(self.frames);
+        a.free(self.visited);
+        for (self.writes.blocks) |items| a.free(items);
+        a.free(self.writes.blocks);
+        a.free(self.cache);
+        self.* = undefined;
+    }
+
+    fn framesFor(self: *Workspace, depth: usize) Error![]Proof.Frame {
+        const count = @min(depth, self.cache.len +| 2);
+        if (count <= self.frames.len) return self.frames[0..count];
+        const a = self.writes.allocator;
+        if (a.resize(self.frames, count)) {
+            self.frames.len = count;
+        } else {
+            const frames = try a.alloc(Proof.Frame, count);
+            a.free(self.frames);
+            self.frames = frames;
+        }
+        return self.frames;
     }
 
     pub fn writtenBefore(
@@ -459,7 +488,7 @@ pub const Workspace = struct {
     }
 
     pub fn proves(
-        self: Workspace,
+        self: *Workspace,
         program: ir.Program,
         w: Witness,
         predecessors: []const std.ArrayList(Predecessor),
@@ -477,7 +506,8 @@ pub const Workspace = struct {
         defer for (self.visited[0..proof.visit_count]) |id| {
             self.cache[id] = .unseen;
         };
-        return proof.resolve(w.target.block, w.target.instruction, self.frames);
+        const frames = try self.framesFor(budget.limits.depth);
+        return proof.resolve(w.target.block, w.target.instruction, frames);
     }
 };
 

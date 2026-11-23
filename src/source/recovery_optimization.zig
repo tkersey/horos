@@ -184,9 +184,9 @@ const Context = struct {
             self.original.parameters,
             self.options.formals,
             self.original.program,
-            &self.original.flow,
+            self.original.flow.observation(),
             t,
-            flow,
+            flow.observation(),
             evidence.correspondence,
             self.budget.work(),
         );
@@ -209,8 +209,8 @@ const PhaseCheck = struct {
 
     pub fn checked(
         self: PhaseCheck,
-        before: *const data.activation_flow.Facts,
-        after: *const data.activation_flow.Facts,
+        before: *const data.activation_flow.Observation,
+        after: *const data.activation_flow.Observation,
     ) !void {
         const ctx = self.ctx;
         try phases.validateDistinct(
@@ -445,9 +445,9 @@ fn structural(
         original.parameters,
         options.formals,
         original.program,
-        &original.flow,
+        original.flow.observation(),
         result.final.program,
-        &result.final.flow,
+        result.final.flow.observation(),
         result.map,
         work,
     );

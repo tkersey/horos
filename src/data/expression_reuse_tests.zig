@@ -1473,11 +1473,115 @@ test "prepared scalar operations honor the current depth and storage allowances"
     }
 }
 
+test "prepared scalar operations use additional proof depth within the same preparation" {
+    const Check = struct {
+        pub const Result = void;
+        budget: *scalar.Budget,
+        proposal: ir.Program,
+
+        pub fn prepared(self: @This(), original: *scalar.PreparedOriginal) !void {
+            self.budget.limits.depth = 3;
+            try original.validateObserved(self.proposal, &.{field_witness}, null);
+            var stats: scalar.Statistics = .{};
+            const ws = try original.discover(a, &stats);
+            defer a.free(ws);
+            try std.testing.expectEqualSlices(scalar.Witness, &.{field_witness}, ws);
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var budget = scalar.Budget.init(.{ .depth = 1 });
+    const proposal = try scalar.reconstructBorrowedProposal(
+        arena.allocator(),
+        scalar_diamond,
+        &.{field_witness},
+        &budget,
+    );
+    try scalar.withPreparedOriginal(a, scalar_diamond, &budget, Check{
+        .budget = &budget,
+        .proposal = proposal,
+    });
+}
+
+test "proof frames reuse their allocation after refused growth and on repeated proofs" {
+    const proof = @import("expression_reuse_proof.zig");
+    const AllocationBudget = @import("allocation_budget.zig");
+    const w: proof.Witness = .{
+        .source = .{ .block = 0, .instruction = 0 },
+        .target = .{ .block = 3, .instruction = 0 },
+    };
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var budget = scalar.Budget.init(.{ .depth = 1 });
+    const preds = try proof.indexPredecessors(arena.allocator(), scalar_diamond, &budget);
+    var cap: AllocationBudget = .{ .parent = a, .remaining = budget.bytes() };
+    var ws = try proof.Workspace.init(cap.allocator(), scalar_diamond, &budget);
+    defer ws.deinit();
+    const available = budget.bytes_remaining;
+    budget.limits.depth = 3;
+    budget.bytes_remaining = 0;
+    try std.testing.expectError(error.OutOfMemory, ws.proves(scalar_diamond, w, preds, &budget));
+    try std.testing.expect(cap.exhausted);
+    budget.bytes_remaining = available;
+    try std.testing.expect(try ws.proves(scalar_diamond, w, preds, &budget));
+    try std.testing.expect(budget.bytes_remaining < available);
+    budget.bytes_remaining = 0;
+    try std.testing.expect(try ws.proves(scalar_diamond, w, preds, &budget));
+    budget.limits.depth = 1;
+    try std.testing.expect(!try ws.proves(scalar_diamond, w, preds, &budget));
+    try std.testing.expect(budget.exhausted);
+}
+
+test "lazy write indexes release unpublished storage on a work limit and allow retry" {
+    const proof = @import("expression_reuse_proof.zig");
+    var moves: [16]ir.Instruction = @splat(.{
+        .opcode = .move,
+        .destination = 3,
+        .operands = &.{5},
+    });
+    for (&moves, 0..) |*op, i| op.destination += i % 2;
+    var program = scalar_diamond;
+    program.blocks = &.{.{
+        .function = 0,
+        .instructions = &moves,
+        .terminator = .{ .return_value = 3 },
+    }};
+    var budget = scalar.Budget.init(.{});
+    var allocations = std.testing.FailingAllocator.init(a, .{});
+    var ws = try proof.Workspace.init(allocations.allocator(), program, &budget);
+    defer ws.deinit();
+    const live = allocations.allocated_bytes - allocations.freed_bytes;
+    const last: proof.Location = .{ .block = 0, .instruction = moves.len - 1 };
+    budget.remaining = moves.len;
+    try std.testing.expectError(
+        error.ExpressionWorkLimit,
+        ws.writtenBefore(program, last, 3, &budget),
+    );
+    try std.testing.expectEqual(live, allocations.allocated_bytes - allocations.freed_bytes);
+    budget = scalar.Budget.init(.{});
+    try std.testing.expect(try ws.writtenBefore(program, last, 3, &budget));
+    const allocated = allocations.allocated_bytes;
+    try std.testing.expect(try ws.writtenBefore(program, last, 4, &budget));
+    try std.testing.expectEqual(allocated, allocations.allocated_bytes);
+}
+
 test "prepared scalar original releases discovery scratch and admits once across checks" {
     const Checked = struct {
         pub const Result = []const scalar.Witness;
         candidate: ir.Program,
         allocations: *std.testing.FailingAllocator,
+
+        const Observation = @import("activation_flow.zig").Observation;
+
+        pub fn checked(self: @This(), before: *const Observation, after: *const Observation) !void {
+            try std.testing.expect(@typeInfo(Observation) == .@"opaque");
+            for ([_]*const Observation{ before, after }) |observed| {
+                try std.testing.expectEqual(self.candidate.blocks.len, observed.blockCount());
+                try std.testing.expectEqual(@as(usize, 2), observed.positionCount(0));
+                try std.testing.expect(observed.availableAt(0, 0, 0));
+                try std.testing.expect(observed.liveAt(0, 0, 0));
+            }
+        }
 
         pub fn prepared(self: @This(), original: *scalar.PreparedOriginal) !Result {
             const al = self.allocations;
@@ -1486,7 +1590,7 @@ test "prepared scalar original releases discovery scratch and admits once across
             const ws = try original.discover(a, &stats);
             errdefer a.free(ws);
             try std.testing.expectEqual(base_live, al.allocated_bytes - al.freed_bytes);
-            try original.validateObserved(self.candidate, ws, null);
+            try original.validateObserved(self.candidate, ws, self);
             try std.testing.expectError(
                 error.InvalidExpressionReuse,
                 original.validateObserved(scalar_diamond, ws, null),
@@ -1846,6 +1950,7 @@ test "field proof preparation does not index unused block writes" {
     defer arena.deinit();
     var budget = scalar.Budget.init(.{ .work = program.blocks.len });
     const proof = @import("expression_reuse_proof.zig");
-    _ = try proof.Workspace.init(arena.allocator(), program, &budget);
+    var ws = try proof.Workspace.init(arena.allocator(), program, &budget);
+    defer ws.deinit();
     _ = try unavailableFieldWork(program, 0);
 }
