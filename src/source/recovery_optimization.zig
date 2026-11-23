@@ -143,7 +143,7 @@ const Context = struct {
 
     fn checkResult(self: Context, program: Program, evidence: Evidence) !void {
         try surviving(evidence.witnesses, evidence.correspondence, self.budget);
-        try imageGuard(self.baseline.program, program, self.options.limits, &self.budget.remaining);
+        try imageGuard(self.baseline.program, program, self.options.limits, self.budget.work());
     }
 
     fn composed(
@@ -154,7 +154,8 @@ const Context = struct {
         p01_remaining: u64,
     ) !void {
         try self.checkResult(t, evidence);
-        const allowance = @min(p01_remaining, self.budget.remaining);
+        const work = self.budget.work();
+        const allowance = @min(p01_remaining, work.*);
         var remaining = allowance;
         var flow = data.coalescing.correspondenceFlow(
             self.a,
@@ -163,10 +164,10 @@ const Context = struct {
             evidence.correspondence,
             &remaining,
         ) catch |err| {
-            self.budget.remaining -= allowance - remaining;
+            work.* -= allowance - remaining;
             return err;
         };
-        self.budget.remaining -= allowance - remaining;
+        work.* -= allowance - remaining;
         defer flow.deinit();
         try self.finalPhases(t, evidence, &flow);
     }
@@ -187,7 +188,7 @@ const Context = struct {
             t,
             flow,
             evidence.correspondence,
-            &self.budget.remaining,
+            self.budget.work(),
         );
         try phases.validateDistinctAliases(
             self.a,
@@ -197,7 +198,7 @@ const Context = struct {
             self.original.program,
             self.baseline.map,
             evidence.correspondence,
-            &self.budget.remaining,
+            self.budget.work(),
         );
     }
 };
@@ -222,7 +223,7 @@ const PhaseCheck = struct {
             self.candidate,
             after,
             null,
-            &ctx.budget.remaining,
+            ctx.budget.work(),
         );
     }
 };
@@ -303,23 +304,22 @@ fn selectBatch(
     };
     var p01 = ctx.options.limits.p01_work;
     var selected = finish(ctx, s, witnesses, &p01) catch |err| switch (err) {
-        error.RecoveryLiveness => recovered: {
+        error.RecoveryLiveness, error.ImageSizeLimit => recovered: {
+            const size = err == error.ImageSizeLimit;
+            const rejected = if (size) &stats.size_guard else &stats.recovery_liveness;
             _ = proposal.reset(.free_all);
-            break :recovered try filterComposed(
+            if (witnesses.len == 1) {
+                rejected.* += 1;
+                stats.budget -= 1;
+            } else if (try filterComposed(
                 ctx,
                 scratch.allocator(),
                 &witnesses,
                 stats,
+                rejected,
                 &p01,
-            ) orelse {
-                outcome.* = .recovery_liveness;
-                return null;
-            };
-        },
-        error.ImageSizeLimit => {
-            stats.size_guard = witnesses.len;
-            stats.budget = 0;
-            outcome.* = .size_guard;
+            )) |subset| break :recovered subset;
+            outcome.* = if (size) .size_guard else .recovery_liveness;
             return null;
         },
         else => return err,
@@ -351,7 +351,7 @@ fn publishSelected(
         evidence,
         .applied,
         applied,
-        &ctx.budget.remaining,
+        ctx.budget.work(),
     ) catch |err| return if (err == error.OutOfMemory) error.OutputAllocationFailed else err;
 }
 
@@ -461,7 +461,7 @@ fn structural(
 
 fn surviving(ws: []const reuse.Witness, map: Correspondence, budget: *reuse.Budget) !void {
     const blocks = map.maps[@backingInt(data.relocation.Kind.block)];
-    try data.admission.spend(&budget.remaining, ws.len);
+    try data.admission.spend(budget.work(), ws.len);
     for (ws) |w| {
         if (w.target.block >= blocks.len or w.source.block >= blocks.len or
             blocks[@intCast(w.target.block)] == data.relocation.missing or
@@ -485,11 +485,12 @@ fn finish(
     var scratch = std.heap.ArenaAllocator.init(ctx.a);
     errdefer scratch.deinit();
     var result = checked: {
-        const allowance = @min(p01.*, ctx.budget.remaining);
+        const work = ctx.budget.work();
+        const allowance = @min(p01.*, work.*);
         var remaining = allowance;
         defer {
             const spent = allowance - remaining;
-            ctx.budget.remaining -= spent;
+            work.* -= spent;
             p01.* -= spent;
         }
         break :checked try Correspondence.Reconstruction.checked(
@@ -507,7 +508,7 @@ fn finish(
         .witnesses = witnesses,
         .correspondence = result.map,
     };
-    try checkWire(ctx.a, evidence, ctx.options.limits, &ctx.budget.remaining);
+    try checkWire(ctx.a, evidence, ctx.options.limits, ctx.budget.work());
     try ctx.checkResult(result.final.program, evidence);
     try ctx.finalPhases(result.final.program, evidence, &result.final.flow);
     return .{
@@ -523,6 +524,7 @@ fn filterComposed(
     scratch: Allocator,
     witnesses: *[]const reuse.Witness,
     stats: *Statistics,
+    full_batch_rejections: *usize,
     p01: *u64,
 ) !?Baseline {
     const selected = try scratch.alloc(reuse.Witness, witnesses.len);
@@ -531,7 +533,7 @@ fn filterComposed(
     errdefer if (best) |*previous| previous.deinit();
     for (witnesses.*) |w| {
         if (count + 1 == witnesses.len) {
-            stats.recovery_liveness += 1;
+            full_batch_rejections.* += 1;
             stats.budget -= 1;
             break;
         }
@@ -669,7 +671,7 @@ pub fn parameters(
         options.limits.structural_evidence_bytes
     else
         options.limits.evidence_bytes;
-    const check_work = if (fallback) &source_work else &budget.remaining;
+    const check_work = if (fallback) &source_work else budget.work();
     _ = try evidenceSize(evidence, byte_limit, check_work);
     try correspondenceShape(evidence.correspondence, check_work);
     var original = try lowering.lowerRecoveryInputWithWork(preparation, module, &source_work);
@@ -702,7 +704,7 @@ pub fn parameters(
         return validationError(err, storage);
     ctx.composed(s, program, evidence, options.limits.p01_work) catch |err|
         return validationError(err, storage);
-    return relocate(a, original.parameters, evidence.correspondence, &budget.remaining);
+    return relocate(a, original.parameters, evidence.correspondence, budget.work());
 }
 
 fn validationError(err: anyerror, storage: data.AllocationBudget) anyerror {

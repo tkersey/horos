@@ -96,7 +96,7 @@ pub fn run(
     options: Options,
 ) Error!coalescing.Owned {
     var stats: Statistics = .{};
-    var budget: Budget = .{ .remaining = options.work_limit };
+    var budget = Budget.init(.{ .work = options.work_limit });
     defer if (statistics) |out| {
         stats.work = options.work_limit - budget.remaining;
         out.* = stats;
@@ -423,7 +423,7 @@ pub fn validate(
     candidate: ir.Program,
     witnesses: []const Witness,
 ) Error!void {
-    var budget: Budget = .{ .remaining = 1_000_000 };
+    var budget = Budget.init(.{ .work = 1_000_000 });
     return validateWithBudget(allocator, original, candidate, witnesses, &budget);
 }
 fn validateWithBudget(

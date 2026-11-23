@@ -1555,3 +1555,211 @@ test "capture classification preserves distinct field origins within one cyclic 
     try std.testing.expectEqual(0, ws.len);
     try std.testing.expectEqualDeep(scalar.Statistics{ .capture_boundary = 4 }, stats);
 }
+
+test "scalar work and allocation use the lesser of initial and remaining allowances" {
+    const limits: scalar.Limits = .{ .work = 11, .temporary_bytes = 17 };
+    var b: scalar.Budget = .{ .limits = limits, .remaining = 60, .bytes_remaining = 90 };
+    try std.testing.expectEqual(0, b.workUsed());
+    try std.testing.expectEqual(11, b.workRemaining());
+    try std.testing.expectEqual(17, b.bytes().*);
+    try std.testing.expect(b.charge(4));
+    try std.testing.expectEqual(7, b.work().*);
+    b.work().* -= 3;
+    try std.testing.expectEqual(7, b.workUsed());
+    try std.testing.expect(!b.charge(5));
+    try std.testing.expectEqual(4, b.workRemaining());
+    var aggregate: scalar.Budget = .{
+        .limits = .{ .work = 0 },
+        .remaining = 1_000_000,
+        .bytes_remaining = 100_000,
+    };
+    var stats: scalar.Statistics = .{};
+    try std.testing.expectError(
+        error.ScalarFieldLimit,
+        scalar.discover(a, scalar_diamond, &aggregate, &stats),
+    );
+    try std.testing.expectEqual(0, aggregate.remaining);
+}
+
+fn joinedFieldWork(comptime arms: usize, comptime reads: usize) ![2]u64 {
+    const variants: [arms]ir.Id = @splat(2);
+    var program = scalar_diamond;
+    program.schemas = &.{ .u64, .{ .sum = &variants }, .unit, .{ .product = &.{ 0, 0 } } };
+    var blocks: [arms + 2]ir.Block = undefined;
+    var cases: [arms]ir.Edge = undefined;
+    const join = blocks.len - 1;
+    for (&cases, 0..) |*edge, i| {
+        edge.* = .{ .block = i + 1 };
+        blocks[i + 1] = .{ .function = 0, .instructions = &.{}, .terminator = .{
+            .jump = .{ .block = join },
+        } };
+    }
+    blocks[0] = .{
+        .function = 0,
+        .instructions = scalar_diamond.blocks[0].instructions,
+        .terminator = .{ .switch_variant = .{ .value = 2, .cases = &cases } },
+    };
+    const targets: [reads]ir.Instruction = @splat(scalar_diamond.blocks[3].instructions[0]);
+    blocks[join] = .{
+        .function = 0,
+        .instructions = &targets,
+        .terminator = .{ .return_value = 4 },
+    };
+    program.blocks = &blocks;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const tmp = arena.allocator();
+    var budget = scalar.Budget.init(.{});
+    var stats: scalar.Statistics = .{};
+    const ws = try scalar.discover(tmp, program, &budget, &stats);
+    try std.testing.expectEqual(reads, ws.len);
+    const discover_work = budget.workUsed();
+    const proposal = try scalar.reconstructBorrowedProposal(tmp, program, ws, &budget);
+    const precheck = budget.workUsed();
+    try scalar.validate(a, program, proposal, ws, &budget);
+    const validate_work = budget.workUsed() - precheck;
+    for (ws, 0..) |w, i| {
+        try std.testing.expectEqual(0, w.source.block);
+        try std.testing.expectEqual(join, w.target.block);
+        try std.testing.expectEqual(i, w.target.instruction);
+    }
+    return .{ discover_work, validate_work };
+}
+
+fn capturedIntervalWork(comptime groups: usize, comptime middle: usize, repeated: bool) !u64 {
+    const fields: [groups * 2]ir.Id = @splat(0);
+    var program = scalar_diamond;
+    program.schemas = &.{ .u64, .boolean, .unit, .{ .product = &fields } };
+    var ops: [groups * 2]ir.Instruction = @splat(scalar_diamond.blocks[0].instructions[0]);
+    for (&ops, 0..) |*op, i| op.immediate = if (repeated) i % groups else i;
+    var blocks: [middle + 2]ir.Block = undefined;
+    for (&blocks, 0..) |*bl, i| {
+        const last = i == middle + 1;
+        bl.* = .{
+            .function = 0,
+            .instructions = if (i == 0) ops[0..groups] else if (last) ops[groups..] else &.{},
+            .terminator = if (i == 0)
+                .{ .yield_value = .{ .block = i + 1 } }
+            else if (last)
+                .{ .return_value = 3 }
+            else
+                .{ .jump = .{ .block = i + 1 } },
+        };
+    }
+    program.blocks = &blocks;
+    var budget = scalar.Budget.init(.{});
+    var stats: scalar.Statistics = .{};
+    const ws = try scalar.discover(a, program, &budget, &stats);
+    defer a.free(ws);
+    try std.testing.expectEqual(0, ws.len);
+    const expected: usize = if (repeated) groups else 0;
+    try std.testing.expectEqualDeep(scalar.Statistics{
+        .capture_boundary = expected,
+        .unavailable_version = expected,
+    }, stats);
+    return budget.workUsed();
+}
+
+test "unchanged reads at a join share the predecessor proof within each independent check" {
+    const small = try joinedFieldWork(16, 16);
+    const more_arms = try joinedFieldWork(32, 16);
+    const more_reads = try joinedFieldWork(16, 32);
+    const large = try joinedFieldWork(32, 32);
+    for (large, small, more_arms, more_reads) |both, base, arms, reads| {
+        try std.testing.expect(both + base <= arms + reads + 32);
+    }
+}
+
+test "capture groups with equal block roles share the intervening path" {
+    inline for (.{ 16, 32 }) |groups| {
+        const short = try capturedIntervalWork(groups, 16, true);
+        const short_control = try capturedIntervalWork(groups, 16, false);
+        const long = try capturedIntervalWork(groups, 32, true);
+        const long_control = try capturedIntervalWork(groups, 32, false);
+        try std.testing.expect(long - long_control <= short - short_control + 128);
+    }
+}
+
+fn killedAncestorWork(comptime count: usize, repeated: bool) !u64 {
+    var program = scalar_diamond;
+    const fields: [count]ir.Id = @splat(0);
+    program.schemas = &.{ .u64, .boolean, .unit, .{ .product = &fields } };
+    const read = scalar_diamond.blocks[0].instructions[0];
+    const kill: ir.Instruction = .{ .opcode = .move, .destination = 3, .operands = &.{5} };
+    var ops: [count][2]ir.Instruction = @splat(.{ read, kill });
+    var blocks: [count]ir.Block = undefined;
+    for (&blocks, &ops, 0..) |*block, *pair, i| {
+        pair[0].immediate = if (repeated) 0 else i;
+        block.* = .{
+            .function = 0,
+            .instructions = pair,
+            .terminator = if (i + 1 == count)
+                .{ .return_value = 3 }
+            else
+                .{ .jump = .{ .block = i + 1 } },
+        };
+    }
+    program.blocks = &blocks;
+    return unavailableFieldWork(program, if (repeated) count else 0);
+}
+
+fn unavailableFieldWork(program: ir.Program, rejected: usize) !u64 {
+    var budget = scalar.Budget.init(.{});
+    var stats: scalar.Statistics = .{};
+    const ws = try scalar.discover(a, program, &budget, &stats);
+    defer a.free(ws);
+    try std.testing.expectEqual(0, ws.len);
+    try std.testing.expectEqualDeep(scalar.Statistics{ .unavailable_version = rejected }, stats);
+    return budget.workUsed();
+}
+
+fn changedOperandWork(comptime count: usize, repeated: bool) !u64 {
+    var program = scalar_diamond;
+    const field = scalar_diamond.blocks[0].instructions[0];
+    var writes: [count]ir.Instruction = @splat(field);
+    for (&writes, 0..) |*w, i| w.destination = 6 + i;
+    var reads: [count + 1]ir.Instruction = @splat(scalar_diamond.blocks[3].instructions[0]);
+    reads[0] = .{ .opcode = .move, .destination = 0, .operands = &.{1} };
+    for (reads[1..]) |*read| read.immediate = @intFromBool(!repeated);
+    const slots = scalar_diamond.functions[0].layout.slots[0..6].* ++ @as([count]ir.Id, @splat(0));
+    var function = scalar_diamond.functions[0];
+    function.layout.slots = &slots;
+    program.functions = (&function)[0..1];
+    program.blocks = &.{
+        .{ .function = 0, .instructions = &writes, .terminator = .{ .jump = .{ .block = 1 } } },
+        .{ .function = 0, .instructions = &reads, .terminator = .{ .return_value = 4 } },
+    };
+    return unavailableFieldWork(program, if (repeated) 2 * count else 0);
+}
+
+test "killed field producers and changed aggregate versions avoid empty searches" {
+    inline for (.{ 32, 64 }) |count| {
+        const killed = try killedAncestorWork(count, true);
+        const distinct = try killedAncestorWork(count, false);
+        try std.testing.expect(killed <= distinct + 4 * count);
+        const changed = try changedOperandWork(count, true);
+        const separated = try changedOperandWork(count, false);
+        try std.testing.expect(changed <= separated + 50 * count);
+    }
+}
+
+test "field proof preparation does not index unused block writes" {
+    var arithmetic: [128]ir.Instruction = @splat(.{
+        .opcode = .move,
+        .operands = &.{5},
+        .destination = 3,
+    });
+    for (&arithmetic, 0..) |*op, i| op.destination = 3 + i % 2;
+    var program = scalar_diamond;
+    program.blocks = &.{.{
+        .function = 0,
+        .instructions = &arithmetic,
+        .terminator = .{ .return_value = 3 },
+    }};
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var budget = scalar.Budget.init(.{ .work = program.blocks.len });
+    const proof = @import("expression_reuse_proof.zig");
+    _ = try proof.Workspace.init(arena.allocator(), program, &budget);
+    _ = try unavailableFieldWork(program, 0);
+}

@@ -503,6 +503,15 @@ test "independent recovery validation enforces the actual encoded growth of a sp
         error.ImageSizeLimit,
         checkEvidence(module, final.program, evidence, policy),
     );
+    policy.formals = &.{.{ .function = second, .ordinal = 1 }};
+    policy.limits.p01_work = try candidateP01Work(original.program, &.{w});
+    var retained = try source.lowerRecoveryOptimized(a, module, policy);
+    defer retained.deinit();
+    try std.testing.expectEqual(.size_guard, retained.outcome);
+    try std.testing.expectEqual(1, retained.statistics.size_guard);
+    try std.testing.expectEqual(1, retained.statistics.recovery_liveness);
+    try std.testing.expectEqual(0, retained.statistics.budget);
+    try expectStructuralFallback(module, policy, &ordinary, &retained);
 }
 
 test "recovery field reuse preserves required phase liveness" {
@@ -588,30 +597,37 @@ test "composed alias rejection retains an independent projection" {
     var original = try @import("activation_lower.zig").lowerRecoveryInput(a, module);
     defer original.deinit();
     var policy = options();
-    policy.limits.image_growth_bytes = 65536;
     policy.formals = &.{.{ .function = first, .ordinal = 1 }};
     const w = try projectionWitness(original.program, third);
     const twin = try projectionWitness(original.program, second);
     const required = try candidateP01Work(original.program, &.{ twin, w }) +
         try candidateP01Work(original.program, &.{twin}) +
         try candidateP01Work(original.program, &.{w});
-    policy.limits.p01_work = required;
-    var selected = try source.lowerRecoveryOptimized(a, module, policy);
-    defer selected.deinit();
-    try std.testing.expectEqual(.applied, selected.outcome);
-    try std.testing.expectEqual(2, selected.statistics.recovery_liveness);
-    try std.testing.expectEqual(1, selected.evidence.witnesses.len);
-    try std.testing.expectEqualDeep(w, selected.evidence.witnesses[0]);
-    const map = selected.evidence.correspondence.maps[@backingInt(data.relocation.Kind.function)];
-    try std.testing.expectEqual(map[first], map[second]);
-    try checkEvidence(module, selected.program, selected.evidence, policy);
-    policy.limits.p01_work = required - 1;
-    var limited = try source.lowerRecoveryOptimized(a, module, policy);
-    defer limited.deinit();
-    try std.testing.expectEqual(.budget, limited.outcome);
-    try std.testing.expectEqual(2, limited.statistics.recovery_liveness);
-    try std.testing.expectEqual(1, limited.statistics.budget);
-    try checkEvidence(module, limited.program, limited.evidence, policy);
+    for ([_]usize{ 0, 65536 }) |growth| {
+        policy.limits.image_growth_bytes = growth;
+        const size_rejections: usize = @intFromBool(growth == 0);
+        policy.limits.p01_work = required;
+        var selected = try source.lowerRecoveryOptimized(a, module, policy);
+        defer selected.deinit();
+        try std.testing.expectEqual(.applied, selected.outcome);
+        try std.testing.expectEqual(2 - size_rejections, selected.statistics.recovery_liveness);
+        try std.testing.expectEqual(size_rejections, selected.statistics.size_guard);
+        try std.testing.expectEqual(0, selected.statistics.budget);
+        try std.testing.expectEqual(1, selected.evidence.witnesses.len);
+        try std.testing.expectEqualDeep(w, selected.evidence.witnesses[0]);
+        const maps = selected.evidence.correspondence.maps;
+        const map = maps[@backingInt(data.relocation.Kind.function)];
+        try std.testing.expectEqual(map[first], map[second]);
+        try checkEvidence(module, selected.program, selected.evidence, policy);
+        policy.limits.p01_work = required - 1;
+        var limited = try source.lowerRecoveryOptimized(a, module, policy);
+        defer limited.deinit();
+        try std.testing.expectEqual(.budget, limited.outcome);
+        try std.testing.expectEqual(2 - size_rejections, limited.statistics.recovery_liveness);
+        try std.testing.expectEqual(size_rejections, limited.statistics.size_guard);
+        try std.testing.expectEqual(1, limited.statistics.budget);
+        try checkEvidence(module, limited.program, limited.evidence, policy);
+    }
     policy.limits.p01_work = options().limits.p01_work;
     policy.formals = &.{.{ .function = first, .ordinal = 0 }};
     var both = try source.lowerRecoveryOptimized(a, module, policy);

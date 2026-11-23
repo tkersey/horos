@@ -143,6 +143,7 @@ const Context = struct {
     predecessors: []const std.ArrayList(proof.Predecessor),
     budget: *Budget,
     workspace: proof.Workspace,
+    last_proved: ?proof.Witness = null,
 
     fn init(
         a: Allocator,
@@ -150,8 +151,8 @@ const Context = struct {
         flow: *const Flow,
         budget: *Budget,
     ) Error!Context {
-        const catalog = try admission.schemasWithWork(a, program.schemas, &budget.remaining);
-        const permissions = try traits.deriveWithWork(a, program.schemas, &budget.remaining);
+        const catalog = try admission.schemasWithWork(a, program.schemas, budget.work());
+        const permissions = try traits.deriveWithWork(a, program.schemas, budget.work());
         const live = try liveBlocks(a, program, flow, budget);
         return .{
             .program = program,
@@ -161,7 +162,7 @@ const Context = struct {
             .live = live,
             .predecessors = try proof.indexLivePredecessors(a, program, live, budget),
             .budget = budget,
-            .workspace = try proof.Workspace.init(a, program, live, budget),
+            .workspace = try proof.Workspace.init(a, program, budget),
         };
     }
 
@@ -179,7 +180,7 @@ const Context = struct {
             self.permissions.copy[input] and self.permissions.drop[input];
     }
 
-    fn matches(self: Context, w: proof.Witness) Error!bool {
+    fn matches(self: *Context, w: proof.Witness) Error!bool {
         const earlier = instruction(self.program, w.source);
         const later = instruction(self.program, w.target);
         const block = self.program.blocks[w.target.block];
@@ -191,9 +192,23 @@ const Context = struct {
             positions[w.target.instruction].available,
             earlier.destination,
         )) return false;
-        const proved = self.workspace.proves(self.program, w, self.predecessors, self.budget);
+        if (self.last_proved) |previous| {
+            if (previous.source.block == w.source.block and
+                previous.source.instruction == w.source.instruction and
+                previous.target.block == w.target.block)
+            {
+                return !try self.writtenBefore(w.target, earlier.destination) and
+                    !try self.writtenBefore(w.target, earlier.operands[0]);
+            }
+        }
+        const proved = try self.workspace.proves(self.program, w, self.predecessors, self.budget);
         if (self.budget.exhausted) return error.ScalarFieldLimit;
+        if (proved) self.last_proved = w;
         return proved;
+    }
+
+    fn writtenBefore(self: Context, target: Site, slot: ir.Id) Error!bool {
+        return self.workspace.writtenBefore(self.program, target, slot, self.budget);
     }
 };
 
@@ -216,7 +231,7 @@ pub const PreparedOriginal = opaque {
             return translated(err, prepared.cap.*, ctx.budget);
         var output: AllocationBudget = .{
             .parent = result,
-            .remaining = &ctx.budget.bytes_remaining,
+            .remaining = ctx.budget.bytes(),
         };
         return output.allocator().dupe(Witness, selected) catch |err|
             return translated(err, output, ctx.budget);
@@ -252,7 +267,7 @@ pub fn withPreparedOriginal(
     budget: *Budget,
     observer: anytype,
 ) !@TypeOf(observer).Result {
-    var cap: AllocationBudget = .{ .parent = work, .remaining = &budget.bytes_remaining };
+    var cap: AllocationBudget = .{ .parent = work, .remaining = budget.bytes() };
     var flow = analyze(cap.allocator(), original, budget) catch |err|
         return translated(err, cap, budget);
     defer flow.deinit();
@@ -294,7 +309,7 @@ fn liveBlocks(
     budget: *Budget,
 ) Error![]const bool {
     try spend(budget, program.blocks.len);
-    const live = try relocation.reachableBlocks(a, program, &budget.remaining);
+    const live = try relocation.reachableBlocks(a, program, budget.work());
     for (flow.positions, live) |positions, *out| out.* = out.* and positions.len != 0;
     return live;
 }
@@ -540,7 +555,9 @@ fn indexAncestors(
         var first_source: ?usize = null;
         for (items[low..high]) |item| {
             const candidate = &sites[item.site];
-            if (repeated and ctx.workspace.survivesExit(ctx.program, candidate.site, ctx.budget)) {
+            if (repeated and
+                try ctx.workspace.survivesExit(ctx.program, candidate.site, ctx.budget))
+            {
                 if (last) |previous| {
                     sites[previous].next_source = item.site;
                 } else first_source = item.site;
@@ -552,13 +569,13 @@ fn indexAncestors(
             if (repeated) candidate.state = .repeated;
         }
         sites[first.site].first_source = first_source;
-        parent = first.site;
+        if (first_source != null) parent = first.site;
         low = high;
     }
 }
 
 fn matchingBlock(
-    ctx: Context,
+    ctx: *Context,
     sites: []Candidate,
     first: ?usize,
     target: Site,
@@ -576,12 +593,14 @@ fn matchingBlock(
 
 fn findSource(
     a: Allocator,
-    ctx: Context,
+    ctx: *Context,
     sites: []Candidate,
     target: Candidate,
     alternatives: *std.ArrayList(usize),
 ) Error!?usize {
     const least = target.least orelse return null;
+    if (try ctx.writtenBefore(target.site, instruction(ctx.program, target.site).operands[0]))
+        return null;
     if (try matchingBlock(ctx, sites, sites[least].first_source, target.site)) |source|
         return source;
     alternatives.clearRetainingCapacity();
@@ -605,18 +624,19 @@ fn findSource(
 
 fn selectFunction(
     a: Allocator,
-    ctx: Context,
+    original: Context,
     sites: []Candidate,
     selected: *std.ArrayList(Witness),
     stats: *Statistics,
     has_capture: bool,
 ) Error!void {
+    var ctx = original;
     var alternatives: std.ArrayList(usize) = .empty;
     defer alternatives.deinit(a);
     try spend(ctx.budget, sites.len);
     for (sites) |*target| {
         if (target.state == .producer) continue;
-        const i = try findSource(a, ctx, sites, target.*, &alternatives) orelse {
+        const i = try findSource(a, &ctx, sites, target.*, &alternatives) orelse {
             if (target.state == .repeated)
                 target.state = if (has_capture) .pending_capture else .unavailable;
             continue;
@@ -769,6 +789,30 @@ const CapturePaths = struct {
     }
 };
 
+fn copyCaptureClassifications(
+    sites: []Candidate,
+    previous: []const Ordered,
+    members: []const Ordered,
+    budget: *Budget,
+) Error!bool {
+    if (previous.len != members.len) return false;
+    try spend(budget, members.len);
+    for (previous, members) |left, right| {
+        const before = sites[left.site];
+        const after = sites[right.site];
+        if (before.site.block != after.site.block or
+            (before.state == .replaced) != (after.state == .replaced) or
+            (before.state == .capture or before.state == .unavailable) !=
+                (after.state == .pending_capture)) return false;
+    }
+    try spend(budget, members.len);
+    for (previous, members) |left, right| {
+        if (sites[right.site].state == .pending_capture)
+            sites[right.site].state = sites[left.site].state;
+    }
+    return true;
+}
+
 fn classifyCaptures(
     a: Allocator,
     ctx: Context,
@@ -778,6 +822,7 @@ fn classifyCaptures(
     tree: []const TreeBlock,
 ) Error!void {
     try spend(ctx.budget, ordered.len);
+    var previous: []const Ordered = &.{};
     var first: usize = 0;
     while (first < ordered.len) {
         const end = Ordered.expressionEnd(ordered, first);
@@ -786,7 +831,9 @@ fn classifyCaptures(
         for (members) |item| {
             if (sites[item.site].state == .pending_capture) break;
         } else continue;
-        try paths.classify(a, ctx, sites, members, tree);
+        if (!try copyCaptureClassifications(sites, previous, members, ctx.budget))
+            try paths.classify(a, ctx, sites, members, tree);
+        previous = members;
     }
 }
 
@@ -804,7 +851,7 @@ pub fn reconstructBorrowedProposal(
     witnesses: []const Witness,
     budget: *Budget,
 ) Error!ir.Program {
-    var cap: AllocationBudget = .{ .parent = arena, .remaining = &budget.bytes_remaining };
+    var cap: AllocationBudget = .{ .parent = arena, .remaining = budget.bytes() };
     return rewritten(cap.allocator(), original, witnesses, budget) catch |err|
         return translated(err, cap, budget);
 }
@@ -889,17 +936,18 @@ pub fn validateObserved(
 
 fn check(
     a: Allocator,
-    ctx: Context,
+    prepared: Context,
     candidate: ir.Program,
     witnesses: []const Witness,
 ) Error!Flow {
+    var ctx = prepared;
     const original = ctx.program;
     const budget = ctx.budget;
     var scratch = std.heap.ArenaAllocator.init(a);
     defer scratch.deinit();
     const tmp = scratch.allocator();
     const targets = try index(tmp, original, witnesses, budget);
-    var measure: wire.Writer = .{ .remaining = &budget.remaining };
+    var measure: wire.Writer = .{ .remaining = budget.work() };
     try record.write(ir.Program, original, &measure);
     try sameDeclarations(original, candidate);
     for (original.blocks, candidate.blocks, 0..) |before, after, bid| {
@@ -943,5 +991,5 @@ fn sameDeclarations(original: ir.Program, candidate: ir.Program) Error!void {
 }
 
 fn analyze(a: Allocator, program: ir.Program, budget: *Budget) Error!Flow {
-    return ownership.analyzeObservedWithWork(a, program, null, null, &budget.remaining);
+    return ownership.analyzeObservedWithWork(a, program, null, null, budget.work());
 }
