@@ -265,7 +265,10 @@ const TryPrepared = struct {
     stats: *Statistics,
     outcome: *Outcome,
 
-    pub fn prepared(self: TryPrepared, source_input: *reuse.PreparedOriginal) anyerror!AttemptResult {
+    pub fn prepared(
+        self: TryPrepared,
+        source_input: *reuse.PreparedOriginal,
+    ) anyerror!AttemptResult {
         var ctx = self.ctx;
         ctx.prepared_original = source_input;
         return selectBatch(self.parent, ctx, source_input, self.stats, self.outcome);
