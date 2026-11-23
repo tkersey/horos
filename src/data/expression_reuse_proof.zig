@@ -310,7 +310,8 @@ const Proof = struct {
         result = .pending;
         return result;
     }
-    fn resolve(self: *Proof, block_id: usize, before: usize, frames: []Frame) Error!bool {
+    fn resolve(self: *Proof, block_id: usize, before: usize, storage: []Frame) Error!bool {
+        const frames = storage[0..@min(storage.len, self.budget.limits.depth)];
         if (frames.len == 0) return self.depthLimit();
         frames[0] = .{
             .block_id = block_id,

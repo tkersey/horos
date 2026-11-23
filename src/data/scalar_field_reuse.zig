@@ -225,7 +225,7 @@ pub const PreparedOriginal = opaque {
         const prepared = self.state();
         const ctx = prepared.context;
         stats.* = .{};
-        var scratch = std.heap.ArenaAllocator.init(prepared.cap.allocator());
+        var scratch = std.heap.ArenaAllocator.init(prepared.allocator());
         defer scratch.deinit();
         const selected = find(scratch.allocator(), ctx, stats) catch |err|
             return translated(err, prepared.cap.*, ctx.budget);
@@ -245,7 +245,7 @@ pub const PreparedOriginal = opaque {
     ) !void {
         const prepared = self.state();
         const ctx = prepared.context;
-        var after = check(prepared.cap.allocator(), ctx, candidate, witnesses) catch |err|
+        var after = check(prepared.allocator(), ctx, candidate, witnesses) catch |err|
             return translated(err, prepared.cap.*, ctx.budget);
         defer after.deinit();
         if (comptime @TypeOf(observer) != @TypeOf(null))
@@ -259,6 +259,11 @@ pub const PreparedOriginal = opaque {
 const PreparedState = struct {
     cap: *AllocationBudget,
     context: Context,
+
+    fn allocator(self: *PreparedState) Allocator {
+        self.cap.remaining = self.context.budget.bytes();
+        return self.cap.allocator();
+    }
 };
 
 pub fn withPreparedOriginal(

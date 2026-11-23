@@ -56,6 +56,7 @@ pub fn sortIdsWithWork(ids: []p.Id, work: ?*u64) Error!void {
 }
 
 const RegionMap = std.AutoHashMapUnmanaged(p.Id, p.Id);
+const RegionOrder = enum { ordinary, unobserved };
 
 fn findRegion(map: RegionMap, key: p.Id, work: *u64, cost_per_probe: u64) Error!?p.Id {
     const keys = map.keyIterator();
@@ -78,6 +79,7 @@ const RegionNames = struct {
     allocator: std.mem.Allocator,
     declared: p.Id,
     work: ?*u64,
+    order: RegionOrder,
     ids: RegionMap = .empty,
 
     fn grow(self: *RegionNames, work: *u64) Error!void {
@@ -98,8 +100,16 @@ const RegionNames = struct {
         if (old >= self.declared) return error.InvalidReference;
         if (self.work) |left| {
             if (self.ids.available == 0) {
-                if (try findRegion(self.ids, old, left, 1)) |existing| return existing;
-                try self.grow(left);
+                switch (self.order) {
+                    .ordinary => self.grow(left) catch |err| {
+                        if (err != error.OutOfMemory) return err;
+                        return try findRegion(self.ids, old, left, 1) orelse err;
+                    },
+                    .unobserved => {
+                        if (try findRegion(self.ids, old, left, 1)) |existing| return existing;
+                        try self.grow(left);
+                    },
+                }
             }
             if (try findRegion(self.ids, old, left, 2)) |existing| return existing;
             const next: p.Id = self.ids.count();
@@ -112,13 +122,14 @@ const RegionNames = struct {
     }
 };
 
-test "full sparse region tables grow only after a charged lookup misses" {
+test "unobserved full sparse region tables grow only after a charged lookup misses" {
     var backing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
     var work: u64 = std.math.maxInt(u64);
     var names: RegionNames = .{
         .allocator = backing.allocator(),
         .declared = std.math.maxInt(p.Id),
         .work = &work,
+        .order = .unobserved,
     };
     defer names.ids.deinit(names.allocator);
     _ = try names.id(0);
@@ -141,6 +152,44 @@ test "full sparse region tables grow only after a charged lookup misses" {
     work = std.math.maxInt(u64);
     try std.testing.expectEqual(0, try names.id(0));
     try std.testing.expectError(error.OutOfMemory, names.id(fresh));
+}
+
+test "ordinary sparse region hits follow allocator refusal and recovery at each lookup" {
+    const testing = std.testing;
+    const unlimited = std.math.maxInt(u64);
+    for ([_]bool{ false, true }) |metered| {
+        var backing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 1 });
+        var work: u64 = unlimited;
+        var names: RegionNames = .{
+            .allocator = backing.allocator(),
+            .declared = std.math.maxInt(p.Id),
+            .work = if (metered) &work else null,
+            .order = .ordinary,
+        };
+        defer names.ids.deinit(names.allocator);
+        _ = try names.id(0);
+        var fresh: p.Id = 1;
+        while (names.ids.available != 0) : (fresh += 1) {
+            try testing.expectEqual(fresh, try names.id(fresh));
+        }
+        const capacity = names.ids.capacity();
+        try testing.expectEqual(0, try names.id(0));
+        try testing.expect(backing.has_induced_failure);
+        try testing.expectEqual(capacity, names.ids.capacity());
+        try testing.expectError(error.OutOfMemory, names.id(fresh));
+        if (metered) {
+            const growth = @as(u64, capacity) * 4 + 8;
+            for ([_]u64{ growth - 1, growth }) |limit| {
+                work = limit;
+                try testing.expectError(error.RelationLimit, names.id(0));
+            }
+            work = unlimited;
+        }
+        backing.fail_index = std.math.maxInt(usize);
+        try testing.expectEqual(0, try names.id(0));
+        try testing.expect(names.ids.capacity() > capacity);
+        try testing.expectEqual(fresh, try names.id(fresh));
+    }
 }
 
 pub fn sizes(program: ir.Program) Error![kind_count]usize {
@@ -456,7 +505,7 @@ pub fn reachableBlocks(
 ) Error![]bool {
     var arena = std.heap.ArenaAllocator.init(scratch);
     defer arena.deinit();
-    var selection = try Selection.init(arena.allocator(), input, work);
+    var selection = try Selection.init(arena.allocator(), input, work, .unobserved);
     try selection.scan(input);
     const live = selection.seen[@backingInt(Kind.block)];
     try spend(work, live.len);
@@ -477,9 +526,9 @@ pub fn ownReachableWithRegionOrder(
     scratch: std.mem.Allocator,
     input: ir.Program,
     work: ?*u64,
-    region_order: enum { ordinary, unobserved },
+    region_order: RegionOrder,
 ) Error!Projection {
-    var selection = try Selection.init(scratch, input, work);
+    var selection = try Selection.init(scratch, input, work, region_order);
     try selection.scan(input);
     var orders: [kind_count][]p.Id = undefined;
     var maps: Maps = undefined;
@@ -507,9 +556,6 @@ pub fn ownReachableWithRegionOrder(
         .work = work,
     };
     const result = try copySelected(mapper, input, orders, selection.regions.ids.count());
-    const regions = &selection.regions;
-    if (region_order == .ordinary and regions.ids.count() != 0 and regions.ids.available == 0)
-        if (work) |left| try regions.grow(left);
     return .{
         .program = result,
         .function_origins = orders[@backingInt(Kind.function)],
@@ -608,7 +654,12 @@ const Selection = struct {
     seen: [kind_count][]bool,
     regions: RegionNames,
 
-    fn init(allocator: std.mem.Allocator, input: ir.Program, work: ?*u64) Error!Selection {
+    fn init(
+        allocator: std.mem.Allocator,
+        input: ir.Program,
+        work: ?*u64,
+        region_order: RegionOrder,
+    ) Error!Selection {
         var result: Selection = .{
             .allocator = allocator,
             .work = work,
@@ -617,6 +668,7 @@ const Selection = struct {
                 .allocator = allocator,
                 .declared = input.scopes.region_count,
                 .work = work,
+                .order = region_order,
             },
         };
         // Region names are sparse nominal IDs, not a dense allocation bound.

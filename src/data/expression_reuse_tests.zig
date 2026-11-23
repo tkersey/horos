@@ -1426,6 +1426,53 @@ test "scalar proof limits apply to directly constructed budgets" {
     try std.testing.expect(budget.exhausted);
 }
 
+test "prepared scalar operations honor the current depth and storage allowances" {
+    const Check = struct {
+        pub const Result = void;
+        const Operation = enum { validate_depth, validate_storage, discover_storage };
+        budget: *scalar.Budget,
+        operation: Operation,
+        candidate: ir.Program,
+        allocations: *std.testing.FailingAllocator,
+
+        pub fn prepared(self: @This(), original: *scalar.PreparedOriginal) !void {
+            switch (self.operation) {
+                .validate_depth => self.budget.limits.depth = 1,
+                .validate_storage, .discover_storage => self.budget.limits.temporary_bytes = 0,
+            }
+            const allocated = self.allocations.allocated_bytes;
+            if (self.operation == .discover_storage) {
+                var stats: scalar.Statistics = .{};
+                try std.testing.expectError(error.ScalarFieldLimit, original.discover(a, &stats));
+            } else try std.testing.expectError(
+                error.ScalarFieldLimit,
+                original.validateObserved(self.candidate, &.{field_witness}, null),
+            );
+            if (self.operation != .validate_depth)
+                try std.testing.expectEqual(allocated, self.allocations.allocated_bytes);
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var proposal_budget = scalar.Budget.init(.{});
+    const candidate = try scalar.reconstructBorrowedProposal(
+        arena.allocator(),
+        scalar_diamond,
+        &.{field_witness},
+        &proposal_budget,
+    );
+    for ([_]Check.Operation{ .validate_depth, .validate_storage, .discover_storage }) |operation| {
+        var budget = scalar.Budget.init(.{});
+        var allocations = std.testing.FailingAllocator.init(a, .{});
+        try scalar.withPreparedOriginal(allocations.allocator(), scalar_diamond, &budget, Check{
+            .budget = &budget,
+            .operation = operation,
+            .candidate = candidate,
+            .allocations = &allocations,
+        });
+    }
+}
+
 test "prepared scalar original releases discovery scratch and admits once across checks" {
     const Checked = struct {
         pub const Result = []const scalar.Witness;
