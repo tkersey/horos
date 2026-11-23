@@ -1479,6 +1479,45 @@ test "prepared scalar original releases discovery scratch and admits once across
     try std.testing.expect(budget.workUsed() < raw.workUsed());
 }
 
+test "prepared scalar original retains nested records after the input owner releases them" {
+    const Inspect = struct {
+        pub const Result = void;
+        storage: *std.heap.ArenaAllocator,
+        candidate: ir.Program,
+
+        pub fn prepared(self: @This(), input: *scalar.PreparedOriginal) !void {
+            _ = self.storage.reset(.free_all);
+            var stats: scalar.Statistics = .{};
+            const ws = try input.discover(a, &stats);
+            defer a.free(ws);
+            try std.testing.expectEqualSlices(scalar.Witness, &.{field_witness}, ws);
+            try input.validateObserved(self.candidate, ws, null);
+        }
+    };
+    var storage = std.heap.ArenaAllocator.init(a);
+    defer storage.deinit();
+    const tmp = storage.allocator();
+    var program = scalar_diamond;
+    const blocks = try tmp.dupe(ir.Block, program.blocks);
+    program.blocks = blocks;
+    const ops = try tmp.dupe(ir.Instruction, blocks[0].instructions);
+    blocks[0].instructions = ops;
+    ops[0].operands = try tmp.dupe(ir.Id, ops[0].operands);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var budget = scalar.Budget.init(.{});
+    const candidate = try scalar.reconstructBorrowedProposal(
+        arena.allocator(),
+        scalar_diamond,
+        &.{field_witness},
+        &budget,
+    );
+    try scalar.withPreparedOriginal(a, program, &budget, Inspect{
+        .storage = &storage,
+        .candidate = candidate,
+    });
+}
+
 test "indexed scalar proofs use the last operand and destination writes in each prefix" {
     const field = scalar_diamond.blocks[0].instructions[0];
     var sources: [20]ir.Instruction = @splat(field);

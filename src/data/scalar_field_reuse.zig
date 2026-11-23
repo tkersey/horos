@@ -267,16 +267,44 @@ pub fn withPreparedOriginal(
     budget: *Budget,
     observer: anytype,
 ) !@TypeOf(observer).Result {
+    return prepare(.owned, work, original, budget, observer);
+}
+
+fn prepare(
+    comptime storage: enum { owned, borrowed },
+    work: Allocator,
+    original: ir.Program,
+    budget: *Budget,
+    observer: anytype,
+) !@TypeOf(observer).Result {
     var cap: AllocationBudget = .{ .parent = work, .remaining = budget.bytes() };
-    var flow = analyze(cap.allocator(), original, budget) catch |err|
-        return translated(err, cap, budget);
-    defer flow.deinit();
     var arena = std.heap.ArenaAllocator.init(cap.allocator());
     defer arena.deinit();
-    const ctx = Context.init(arena.allocator(), original, &flow, budget) catch |err|
+    const program = switch (storage) {
+        .owned => snapshot(arena.allocator(), original, budget) catch |err|
+            return translated(err, cap, budget),
+        .borrowed => original,
+    };
+    var flow = analyze(cap.allocator(), program, budget) catch |err|
+        return translated(err, cap, budget);
+    defer flow.deinit();
+    const ctx = Context.init(arena.allocator(), program, &flow, budget) catch |err|
         return translated(err, cap, budget);
     var prepared: PreparedState = .{ .cap = &cap, .context = ctx };
     return observer.prepared(@as(*PreparedOriginal, @ptrCast(&prepared)));
+}
+
+fn snapshot(a: Allocator, program: ir.Program, budget: *Budget) Error!ir.Program {
+    var measure: wire.Writer = .{ .remaining = budget.work() };
+    try record.write(ir.Program, program, &measure);
+    const bytes = try a.alloc(u8, measure.position);
+    var writer: wire.Writer = .{ .output = bytes, .remaining = budget.work() };
+    try record.write(ir.Program, program, &writer);
+    try spend(budget, bytes.len);
+    var reader: wire.Reader = .{ .input = bytes };
+    const owned = try record.read(ir.Program, &reader, a);
+    try reader.finish();
+    return owned;
 }
 
 const FindOriginal = struct {
@@ -296,7 +324,7 @@ pub fn discover(
     stats: *Statistics,
 ) Error![]const Witness {
     stats.* = .{};
-    return withPreparedOriginal(arena, original, budget, FindOriginal{
+    return prepare(.borrowed, arena, original, budget, FindOriginal{
         .result = arena,
         .stats = stats,
     });
@@ -927,7 +955,7 @@ pub fn validateObserved(
             try input.validateObserved(self.candidate, self.witnesses, callback);
         }
     };
-    return withPreparedOriginal(allocator, original, budget, CheckOriginal{
+    return prepare(.borrowed, allocator, original, budget, CheckOriginal{
         .candidate = candidate,
         .witnesses = witnesses,
         .observer = if (@TypeOf(observer) == @TypeOf(null)) {} else observer,
