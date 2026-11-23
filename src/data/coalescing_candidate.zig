@@ -103,7 +103,13 @@ pub fn materialize(
     );
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
-    const projected = try r.ownReachableWithWork(arena.allocator(), scratch, rewritten, remaining);
+    const projected = try r.ownReachableWithRegionOrder(
+        arena.allocator(),
+        scratch,
+        rewritten,
+        remaining,
+        .unobserved,
+    );
     correspondence.final = try compose(scratch, projected, correspondence.final, remaining);
     try checkTransformation(
         allocator,

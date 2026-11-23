@@ -229,7 +229,7 @@ fn checkMap(
     var scratch = std.heap.ArenaAllocator.init(a);
     defer scratch.deinit();
     const storage = scratch.allocator();
-    const live = try r.ownReachableWithWork(storage, storage, original, work);
+    const live = try r.ownReachableWithRegionOrder(storage, storage, original, work, .unobserved);
     const projection = live.maps orelse return error.InvalidCorrespondence;
     const counts = try r.sizes(live.program);
     const targets = try r.sizes(candidate);

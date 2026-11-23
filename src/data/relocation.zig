@@ -469,6 +469,16 @@ pub fn ownReachableWithWork(
     input: ir.Program,
     work: ?*u64,
 ) Error!Projection {
+    return ownReachableWithRegionOrder(output, scratch, input, work, .ordinary);
+}
+
+pub fn ownReachableWithRegionOrder(
+    output: std.mem.Allocator,
+    scratch: std.mem.Allocator,
+    input: ir.Program,
+    work: ?*u64,
+    region_order: enum { ordinary, unobserved },
+) Error!Projection {
     var selection = try Selection.init(scratch, input, work);
     try selection.scan(input);
     var orders: [kind_count][]p.Id = undefined;
@@ -497,6 +507,9 @@ pub fn ownReachableWithWork(
         .work = work,
     };
     const result = try copySelected(mapper, input, orders, selection.regions.ids.count());
+    const regions = &selection.regions;
+    if (region_order == .ordinary and regions.ids.count() != 0 and regions.ids.available == 0)
+        if (work) |left| try regions.grow(left);
     return .{
         .program = result,
         .function_origins = orders[@backingInt(Kind.function)],

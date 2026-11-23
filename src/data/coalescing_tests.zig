@@ -241,6 +241,28 @@ fn limitedObserver(context: *anyopaque, _: *const pass.OriginsTrace) pass.Error!
     return error.WorkLimit;
 }
 
+test "bounded coalescing preserves ordinary raw sparse region order at capacity" {
+    for ([_][]const u64{ &.{}, &.{3} }) |callee_regions| {
+        var program = fixture;
+        var functions = fixture.functions[0..3].*;
+        functions[2].regions = &.{ 0, 1, 2, 3, 4, 7 };
+        functions[0].regions = callee_regions;
+        program.functions = &functions;
+        program.scopes.region_count = 8;
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        var expected: MapCapture = .{ .a = arena.allocator() };
+        var actual = expected;
+        var ordinary = try pass.run(testing.allocator, program, expected.options());
+        defer ordinary.deinit();
+        var work: u64 = std.math.maxInt(u64);
+        var metered = try pass.runWithWork(testing.allocator, program, actual.options(), &work);
+        defer metered.deinit();
+        try testing.expectEqual(6, expected.map.?.regions.len);
+        try testing.expectEqualDeep(expected.map.?, actual.map.?);
+    }
+}
+
 test "observer errors retain their own budget identity on both coalescing routes" {
     var calls: usize = 0;
     var stats: pass.Statistics = .{};

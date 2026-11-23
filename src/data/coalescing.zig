@@ -175,13 +175,15 @@ fn runInternal(
     defer scratch.deinit();
     var baseline_arena = std.heap.ArenaAllocator.init(allocator);
     errdefer baseline_arena.deinit();
-    const baseline = try r.ownReachableWithWork(
+    const needs_trace = options.diagnostic != null or options.correspondence != null;
+    const baseline = try r.ownReachableWithRegionOrder(
         baseline_arena.allocator(),
         scratch.allocator(),
         original,
         remaining,
+        if (needs_trace) .ordinary else .unobserved,
     );
-    var trace: ?origins.Trace = if (options.diagnostic != null or options.correspondence != null)
+    var trace: ?origins.Trace = if (needs_trace)
         try observerTrace(allocator, original, baseline, remaining)
     else
         null;
