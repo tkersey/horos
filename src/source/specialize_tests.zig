@@ -1466,9 +1466,17 @@ test "standalone specialization needs only its output and ordinary admission sto
     );
     try std.testing.expect(producer.peak <= producer.live + admission);
     var checker: Peak = .{ .parent = a };
-    try pe.validate(checker.allocator(), fixture.module, fixture.request, &output);
+    var work: u64 = std.math.maxInt(u64);
+    try pe.validateWithWork(checker.allocator(), fixture.module, fixture.request, &output, &work);
     try std.testing.expect(checker.peak <= admission);
     try std.testing.expectEqual(@as(usize, 0), checker.live);
+    var compiled: Peak = .{ .parent = a };
+    var residual = try source.lower(compiled.allocator(), output.module());
+    residual.deinit();
+    var full: Peak = .{ .parent = a };
+    try pe.validate(full.allocator(), fixture.module, fixture.request, &output);
+    try std.testing.expect(full.peak >= compiled.peak);
+    try std.testing.expectEqual(@as(usize, 0), full.live);
 }
 test "source specialization selects known condition and checks forged literal" {
     const a = std.testing.allocator;

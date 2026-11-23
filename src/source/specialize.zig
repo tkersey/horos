@@ -169,7 +169,7 @@ pub fn specialize(a: std.mem.Allocator, original: ast.Module, requested: Request
     out.builder.region_count = m.region_count;
     try derive(a, &out, requested);
     out.key = try identity(a, original, requested);
-    try validate(a, original, requested, &out);
+    try @import("specialize_validate.zig").validateByAdmission(a, original, requested, &out);
     return out;
 }
 fn derive(a: std.mem.Allocator, out: *Output, requested: Request) Error!void {

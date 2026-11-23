@@ -66,6 +66,17 @@ pub fn validate(
         return if (err == error.RelationLimit) error.SpecializationLimit else err;
 }
 
+pub fn validateByAdmission(
+    a: std.mem.Allocator,
+    original: ast.Module,
+    request: pe.Request,
+    out: *const pe.Output,
+) Error!void {
+    var unbounded: u64 = std.math.maxInt(u64);
+    return validateBody(a, original, request, out, &unbounded) catch |err|
+        return if (err == error.RelationLimit) error.SpecializationLimit else err;
+}
+
 pub fn validateWithWork(
     a: std.mem.Allocator,
     original: ast.Module,
@@ -137,8 +148,9 @@ fn checkDerivation(
     for (out.functions.items, 0..) |f, i| try checker.function(f, i);
 }
 fn admit(a: std.mem.Allocator, module: ast.Module, work: ?*u64) Error!void {
-    var unbounded: u64 = std.math.maxInt(u64);
-    return source.admitWithWork(a, module, work orelse &unbounded);
+    if (work) |remaining| return source.admitWithWork(a, module, remaining);
+    var admitted = try source.lower(a, module);
+    admitted.deinit();
 }
 fn validateEnvelope(
     storage: std.mem.Allocator,
