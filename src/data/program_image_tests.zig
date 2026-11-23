@@ -106,6 +106,38 @@ test "immutable admitted images share facts without accepting mutable lookalikes
     );
 }
 
+test "bounded canonical identity and flow come from the same admitted records" {
+    const owner = try image.Admitted.decode(testing.allocator, &golden);
+    defer owner.deinit();
+    var independent = try owner.analysis(testing.allocator);
+    defer independent.deinit();
+    const maximum: u64 = 1_000_000;
+    var remaining = maximum;
+    var checked = try image.identityWithFlow(testing.allocator, example, &remaining);
+    defer checked.deinit();
+    try testing.expectEqual(owner.identity(), checked.identity);
+    try testing.expectEqual(try image.identity(testing.allocator, example), checked.identity);
+    for (independent.facts.live, checked.facts.live) |expected, actual| {
+        for (expected, actual) |lhs, rhs| {
+            var before = independent.facts.pool.iterator(lhs);
+            var after = checked.facts.pool.iterator(rhs);
+            while (before.next()) |slot| try testing.expectEqual(slot, after.next().?);
+            try testing.expectEqual(null, after.next());
+        }
+    }
+    const used = maximum - remaining;
+    var exact = used;
+    var fit = try image.identityWithFlow(testing.allocator, example, &exact);
+    defer fit.deinit();
+    try testing.expectEqual(0, exact);
+    var short = used - 1;
+    try testing.expectError(error.RelationLimit, image.identityWithFlow(
+        testing.allocator,
+        example,
+        &short,
+    ));
+}
+
 fn admittedFailure(allocator: std.mem.Allocator) !void {
     const owner = try image.Admitted.decode(allocator, &golden);
     defer owner.deinit();

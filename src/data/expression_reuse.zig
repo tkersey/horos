@@ -173,7 +173,7 @@ const Search = struct {
     fn indexRegions(self: *Search) Error!void {
         // A capture boundary kills every reuse fact. Build only the transparent
         // control-flow components in which a producer can possibly justify a use.
-        self.regions = try proof.transparentRegions(self.a, self.original, null, self.budget);
+        self.regions = try proof.transparentRegions(self.a, self.original, self.budget);
         self.region_defs = try self.a.alloc(std.ArrayList(Definition), self.original.blocks.len);
         self.predecessors = try indexPredecessors(self.a, self.original, self.budget);
         for (self.region_defs) |*items| items.* = .empty;

@@ -50,13 +50,35 @@ pub fn encode(allocator: std.mem.Allocator, program: ir.Program, output: []u8) E
 
 /// Domain-separated identity over the admitted compact structural encoding.
 pub fn identity(allocator: std.mem.Allocator, program: ir.Program) Error![32]u8 {
-    var checked = try admission.analyze(allocator, program);
+    var checked = try identityWithFlow(allocator, program, null);
     defer checked.deinit();
+    return checked.identity;
+}
+
+pub const VerifiedIdentity = struct {
+    identity: [32]u8,
+    facts: flow.Facts,
+
+    pub fn deinit(self: *VerifiedIdentity) void {
+        self.facts.deinit();
+        self.* = undefined;
+    }
+};
+
+pub fn identityWithFlow(
+    allocator: std.mem.Allocator,
+    program: ir.Program,
+    work: ?*u64,
+) Error!VerifiedIdentity {
+    var facts = try admission.analyzeObservedWithWork(allocator, program, null, null, work);
+    errdefer facts.deinit();
+    const length = try encodedLengthWithWork(program, work);
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    var writer: wire.Writer = .{ .hasher = &hash, .remaining = work };
+    try writer.charge(identity_domain.len);
     hash.update(identity_domain);
-    var writer: wire.Writer = .{ .hasher = &hash };
-    try write(program, try encodedLength(program), &writer);
-    return hash.finalResult();
+    try write(program, length, &writer);
+    return .{ .identity = hash.finalResult(), .facts = facts };
 }
 
 pub const Decoded = struct {

@@ -128,16 +128,22 @@ const Context = struct {
     module: source.Module,
     options: Options,
     budget: *reuse.Budget,
+    prepared_original: ?*reuse.PreparedOriginal = null,
 
     fn checked(self: Context, arena: Allocator, witnesses: []const reuse.Witness) !Program {
         try surviving(witnesses, self.baseline.map, self.budget);
         const r = self.original.program;
         const s = try reuse.reconstructBorrowedProposal(arena, r, witnesses, self.budget);
-        try reuse.validateObserved(self.a, r, s, witnesses, self.budget, PhaseCheck{
-            .ctx = self,
-            .candidate = s,
-        });
+        const observer: PhaseCheck = .{ .ctx = self, .candidate = s };
+        if (self.prepared_original) |prepared| {
+            try prepared.validateObserved(s, witnesses, observer);
+        } else try reuse.validateObserved(self.a, r, s, witnesses, self.budget, observer);
         return s;
+    }
+
+    fn checkResult(self: Context, program: Program, evidence: Evidence) !void {
+        try surviving(evidence.witnesses, evidence.correspondence, self.budget);
+        try imageGuard(self.baseline.program, program, self.options.limits, &self.budget.remaining);
     }
 
     fn composed(
@@ -147,8 +153,7 @@ const Context = struct {
         evidence: Evidence,
         p01_remaining: u64,
     ) !void {
-        try surviving(evidence.witnesses, evidence.correspondence, self.budget);
-        try imageGuard(self.baseline.program, t, self.options.limits, &self.budget.remaining);
+        try self.checkResult(t, evidence);
         const allowance = @min(p01_remaining, self.budget.remaining);
         var remaining = allowance;
         var flow = data.coalescing.correspondenceFlow(
@@ -163,6 +168,15 @@ const Context = struct {
         };
         self.budget.remaining -= allowance - remaining;
         defer flow.deinit();
+        try self.finalPhases(t, evidence, &flow);
+    }
+
+    fn finalPhases(
+        self: Context,
+        t: Program,
+        evidence: Evidence,
+        flow: *const data.activation_flow.Facts,
+    ) !void {
         try phases.validateDistinct(
             self.a,
             self.module,
@@ -171,7 +185,7 @@ const Context = struct {
             self.original.program,
             &self.original.flow,
             t,
-            &flow,
+            flow,
             evidence.correspondence,
             &self.budget.remaining,
         );
@@ -226,24 +240,48 @@ fn attempt(
     outcome.* = .budget;
     const limits = options.limits;
     if (limits.rule.work == 0 or limits.rule.depth == 0 or limits.rule.witnesses == 0 or
-        limits.evidence_bytes == 0) return null;
-    var scratch = std.heap.ArenaAllocator.init(work);
-    defer scratch.deinit();
+        limits.evidence_bytes == 0 or limits.p01_work == 0) return null;
     var budget = limits.rule.budget();
-    const ctx: Context = .{
-        .a = work,
-        .original = original,
-        .baseline = baseline,
-        .options = options,
-        .module = module,
-        .budget = &budget,
-    };
-    const discovered = reuse.discover(
-        scratch.allocator(),
-        original.program,
-        &budget,
-        &stats.discovery,
-    ) catch |err| {
+    return reuse.withPreparedOriginal(work, original.program, &budget, TryPrepared{
+        .parent = parent,
+        .ctx = .{
+            .a = work,
+            .original = original,
+            .baseline = baseline,
+            .options = options,
+            .module = module,
+            .budget = &budget,
+        },
+        .stats = stats,
+        .outcome = outcome,
+    });
+}
+
+const AttemptResult = ?Result;
+const TryPrepared = struct {
+    pub const Result = AttemptResult;
+    parent: Allocator,
+    ctx: Context,
+    stats: *Statistics,
+    outcome: *Outcome,
+
+    pub fn prepared(self: TryPrepared, source_input: *reuse.PreparedOriginal) anyerror!AttemptResult {
+        var ctx = self.ctx;
+        ctx.prepared_original = source_input;
+        return selectBatch(self.parent, ctx, source_input, self.stats, self.outcome);
+    }
+};
+
+fn selectBatch(
+    parent: Allocator,
+    ctx: Context,
+    prepared: *reuse.PreparedOriginal,
+    stats: *Statistics,
+    outcome: *Outcome,
+) !?Result {
+    var scratch = std.heap.ArenaAllocator.init(ctx.a);
+    defer scratch.deinit();
+    const discovered = prepared.discover(scratch.allocator(), &stats.discovery) catch |err| {
         stats.budget = stats.discovery.proven;
         return err;
     };
@@ -252,31 +290,66 @@ fn attempt(
         return null;
     }
     stats.budget = discovered.len;
-    if (limits.p01_work == 0) return null;
     var witnesses = discovered;
-    var proposal = std.heap.ArenaAllocator.init(work);
+    var proposal = std.heap.ArenaAllocator.init(ctx.a);
     defer proposal.deinit();
     const s = try checkedBatch(ctx, &proposal, scratch.allocator(), &witnesses, stats) orelse {
         outcome.* = .recovery_liveness;
         stats.budget = 0;
         return null;
     };
-    const selected = finish(parent, ctx, s, witnesses, stats) catch |err| {
-        switch (err) {
-            error.RecoveryLiveness => {
-                stats.recovery_liveness += witnesses.len;
+    var p01 = ctx.options.limits.p01_work;
+    var selected = finish(ctx, s, witnesses, &p01) catch |err| switch (err) {
+        error.RecoveryLiveness => recovered: {
+            _ = proposal.reset(.free_all);
+            break :recovered try filterComposed(
+                ctx,
+                scratch.allocator(),
+                &witnesses,
+                stats,
+                &p01,
+            ) orelse {
                 outcome.* = .recovery_liveness;
-            },
-            error.ImageSizeLimit => {
-                stats.size_guard = witnesses.len;
-                outcome.* = .size_guard;
-            },
-            else => return err,
-        }
-        stats.budget = 0;
-        return null;
+                return null;
+            };
+        },
+        error.ImageSizeLimit => {
+            stats.size_guard = witnesses.len;
+            stats.budget = 0;
+            outcome.* = .size_guard;
+            return null;
+        },
+        else => return err,
     };
-    return selected;
+    defer selected.deinit();
+    return try publishSelected(parent, ctx, &selected, witnesses, stats.*);
+}
+
+fn publishSelected(
+    parent: Allocator,
+    ctx: Context,
+    selected: *Baseline,
+    witnesses: []const reuse.Witness,
+    stats: Statistics,
+) !Result {
+    const evidence: Evidence = .{
+        .rule = ctx.options.rule,
+        .witnesses = witnesses,
+        .correspondence = selected.map,
+    };
+    var applied = stats;
+    applied.budget = 0;
+    return publish(
+        parent,
+        &selected.arena,
+        &selected.map_arena,
+        selected.program,
+        ctx.original.parameters,
+        evidence,
+        .applied,
+        applied,
+        &ctx.budget.remaining,
+    ) catch |err| return if (err == error.OutOfMemory) error.OutputAllocationFailed else err;
 }
 
 fn checkedBatch(
@@ -401,43 +474,89 @@ fn imageGuard(baseline: Program, actual: Program, limits: Limits, work: *u64) !v
 }
 
 fn finish(
-    a: Allocator,
     ctx: Context,
     s: Program,
     witnesses: []const reuse.Witness,
-    stats: *Statistics,
-) !Result {
+    p01: *u64,
+) !Baseline {
     var scratch = std.heap.ArenaAllocator.init(ctx.a);
-    defer scratch.deinit();
-    const allowance = @min(ctx.options.limits.p01_work, ctx.budget.remaining);
-    var remaining = allowance;
-    var result = Correspondence.Reconstruction.run(ctx.a, &scratch, s, &remaining) catch |err| {
-        ctx.budget.remaining -= allowance - remaining;
-        return err;
+    errdefer scratch.deinit();
+    var result = checked: {
+        const allowance = @min(p01.*, ctx.budget.remaining);
+        var remaining = allowance;
+        defer {
+            const spent = allowance - remaining;
+            ctx.budget.remaining -= spent;
+            p01.* -= spent;
+        }
+        break :checked try Correspondence.Reconstruction.checked(
+            ctx.a,
+            &scratch,
+            s,
+            null,
+            &remaining,
+        );
     };
-    ctx.budget.remaining -= allowance - remaining;
-    defer result.final.arena.deinit();
-    result.final.flow.deinit();
+    errdefer result.final.arena.deinit();
+    defer result.final.flow.deinit();
     const evidence: Evidence = .{
         .rule = ctx.options.rule,
         .witnesses = witnesses,
         .correspondence = result.map,
     };
     try checkWire(ctx.a, evidence, ctx.options.limits, &ctx.budget.remaining);
-    try ctx.composed(s, result.final.program, evidence, remaining);
-    var applied = stats.*;
-    applied.budget = 0;
-    return publish(
-        a,
-        &result.final.arena,
-        &scratch,
-        result.final.program,
-        ctx.original.parameters,
-        evidence,
-        .applied,
-        applied,
-        &ctx.budget.remaining,
-    ) catch |err| return if (err == error.OutOfMemory) error.OutputAllocationFailed else err;
+    try ctx.checkResult(result.final.program, evidence);
+    try ctx.finalPhases(result.final.program, evidence, &result.final.flow);
+    return .{
+        .arena = result.final.arena,
+        .map_arena = scratch,
+        .program = result.final.program,
+        .map = result.map,
+    };
+}
+
+fn filterComposed(
+    ctx: Context,
+    scratch: Allocator,
+    witnesses: *[]const reuse.Witness,
+    stats: *Statistics,
+    p01: *u64,
+) !?Baseline {
+    const selected = try scratch.alloc(reuse.Witness, witnesses.len);
+    var count: usize = 0;
+    var best: ?Baseline = null;
+    errdefer if (best) |*previous| previous.deinit();
+    for (witnesses.*) |w| {
+        if (count + 1 == witnesses.len) {
+            stats.recovery_liveness += 1;
+            stats.budget -= 1;
+            break;
+        }
+        selected[count] = w;
+        const extension = selected[0 .. count + 1];
+        var trial = std.heap.ArenaAllocator.init(ctx.a);
+        defer trial.deinit();
+        const s = ctx.checked(trial.allocator(), extension) catch |err| {
+            if (err != error.RecoveryLiveness) return err;
+            stats.recovery_liveness += 1;
+            stats.budget -= 1;
+            continue;
+        };
+        const accepted = finish(ctx, s, extension, p01) catch |err| {
+            switch (err) {
+                error.RecoveryLiveness => stats.recovery_liveness += 1,
+                error.ImageSizeLimit => stats.size_guard += 1,
+                else => return err,
+            }
+            stats.budget -= 1;
+            continue;
+        };
+        if (best) |*previous| previous.deinit();
+        best = accepted;
+        count += 1;
+    }
+    witnesses.* = selected[0..count];
+    return best;
 }
 
 fn publish(

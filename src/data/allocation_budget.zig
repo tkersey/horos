@@ -15,18 +15,21 @@ pub fn allocator(self: *AllocationBudget) std.mem.Allocator {
     } };
 }
 
-fn permits(self: *AllocationBudget, bytes: usize) bool {
+fn reserve(self: *AllocationBudget, bytes: usize) bool {
     if (bytes == 0) return true;
     self.exhausted = bytes > self.remaining.*;
-    return !self.exhausted;
+    if (self.exhausted) return false;
+    self.remaining.* -= bytes;
+    return true;
 }
 
 fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
     const self: *AllocationBudget = @ptrCast(@alignCast(ctx));
-    if (!self.permits(len)) return null;
-    const result = self.parent.rawAlloc(len, alignment, ra) orelse return null;
-    self.remaining.* -= len;
-    return result;
+    if (!self.reserve(len)) return null;
+    return self.parent.rawAlloc(len, alignment, ra) orelse {
+        self.remaining.* += len;
+        return null;
+    };
 }
 
 fn resize(
@@ -38,9 +41,11 @@ fn resize(
 ) bool {
     const self: *AllocationBudget = @ptrCast(@alignCast(ctx));
     const growth = len -| memory.len;
-    if (!self.permits(growth)) return false;
-    if (!self.parent.rawResize(memory, alignment, len, ra)) return false;
-    self.remaining.* -= growth;
+    if (!self.reserve(growth)) return false;
+    if (!self.parent.rawResize(memory, alignment, len, ra)) {
+        self.remaining.* += growth;
+        return false;
+    }
     self.release(memory.len -| len);
     return true;
 }
@@ -54,9 +59,11 @@ fn remap(
 ) ?[*]u8 {
     const self: *AllocationBudget = @ptrCast(@alignCast(ctx));
     const growth = len -| memory.len;
-    if (!self.permits(growth)) return null;
-    const result = self.parent.rawRemap(memory, alignment, len, ra) orelse return null;
-    self.remaining.* -= growth;
+    if (!self.reserve(growth)) return null;
+    const result = self.parent.rawRemap(memory, alignment, len, ra) orelse {
+        self.remaining.* += growth;
+        return null;
+    };
     self.release(memory.len -| len);
     return result;
 }
@@ -92,4 +99,56 @@ test "allocation refusal tracks the current growth request through recovery and 
     try std.testing.expect(cap.exhausted);
     try std.testing.expectError(error.OutOfMemory, a.alloc(u8, 5));
     try std.testing.expect(!cap.exhausted);
+}
+
+test "nested allocation budgets reserve and refund growth in delegation order" {
+    for ([_]@FieldType(AllocationBudget, "accounting"){ .live, .cumulative }) |accounting| {
+        var memory: [16]u8 = undefined;
+        var backing = std.heap.FixedBufferAllocator.init(&memory);
+        var remaining: usize = 12;
+        var parent: AllocationBudget = .{
+            .parent = backing.allocator(),
+            .remaining = &remaining,
+            .accounting = accounting,
+        };
+        var child: AllocationBudget = .{
+            .parent = parent.allocator(),
+            .remaining = &remaining,
+            .accounting = accounting,
+        };
+        const a = child.allocator();
+        try std.testing.expectError(error.OutOfMemory, a.alloc(u8, 7));
+        try std.testing.expect(parent.exhausted and !child.exhausted);
+        try std.testing.expectEqual(12, remaining);
+        var bytes = try a.alloc(u8, 3);
+        try std.testing.expectEqual(6, remaining);
+        try std.testing.expect(!parent.exhausted and !child.exhausted);
+        try std.testing.expect(!a.resize(bytes, 7));
+        try std.testing.expectEqual(6, remaining);
+        try std.testing.expect(a.remap(bytes, 7) == null);
+        try std.testing.expectEqual(6, remaining);
+        try std.testing.expect(a.resize(bytes, 4));
+        bytes.len = 4;
+        bytes = a.remap(bytes, 6).?;
+        try std.testing.expectEqual(0, remaining);
+        try std.testing.expect(a.resize(bytes, 2));
+        bytes.len = 2;
+        a.free(bytes);
+        try std.testing.expectEqual(@as(usize, if (accounting == .live) 12 else 0), remaining);
+    }
+}
+
+test "nested limits preserve independent allowances on refused and successful requests" {
+    var available: usize = 3;
+    var parent: AllocationBudget = .{ .parent = std.testing.allocator, .remaining = &available };
+    var remaining: usize = 7;
+    var child: AllocationBudget = .{ .parent = parent.allocator(), .remaining = &remaining };
+    const a = child.allocator();
+    try std.testing.expectError(error.OutOfMemory, a.alloc(u8, 4));
+    try std.testing.expectEqual(3, available);
+    try std.testing.expectEqual(7, remaining);
+    const bytes = try a.alloc(u8, 3);
+    defer a.free(bytes);
+    try std.testing.expectEqual(0, available);
+    try std.testing.expectEqual(4, remaining);
 }

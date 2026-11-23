@@ -20,7 +20,6 @@ pub const Limits = struct {
 };
 pub const Budget = struct {
     limits: Limits = .{},
-    strict: bool = false,
     bytes_remaining: usize = 0,
     remaining: u64,
     exhausted: bool = false,
@@ -30,7 +29,6 @@ pub const Budget = struct {
             .limits = limits,
             .remaining = limits.work,
             .bytes_remaining = limits.temporary_bytes,
-            .strict = true,
         };
     }
     pub fn workUsed(self: Budget) u64 {
@@ -81,15 +79,23 @@ pub fn indexPredecessors(
     program: ir.Program,
     budget: *Budget,
 ) Error![]std.ArrayList(Predecessor) {
-    return indexLivePredecessors(allocator, program, null, budget);
+    return buildPredecessors(allocator, program, null, budget);
 }
 pub fn indexLivePredecessors(
+    allocator: std.mem.Allocator,
+    program: ir.Program,
+    live: []const bool,
+    budget: *Budget,
+) Error![]std.ArrayList(Predecessor) {
+    return buildPredecessors(allocator, program, live, budget);
+}
+fn buildPredecessors(
     allocator: std.mem.Allocator,
     program: ir.Program,
     live: ?[]const bool,
     budget: *Budget,
 ) Error![]std.ArrayList(Predecessor) {
-    if (budget.strict and !budget.charge(program.blocks.len)) return error.ExpressionWorkLimit;
+    if (live != null and !budget.charge(program.blocks.len)) return error.ExpressionWorkLimit;
     const result = try allocator.alloc(std.ArrayList(Predecessor), program.blocks.len);
     for (result) |*items| items.* = .empty;
     for (program.blocks, 0..) |block, id| {
@@ -100,7 +106,7 @@ pub fn indexLivePredecessors(
             const target: usize = @intCast(transfer.edge.block);
             if (live) |blocks| if (!blocks[target]) continue;
             const list = &result[target];
-            if (budget.strict and list.items.len == list.capacity and
+            if (live != null and list.items.len == list.capacity and
                 !budget.charge(list.items.len)) return error.ExpressionWorkLimit;
             try list.append(
                 allocator,
@@ -113,32 +119,27 @@ pub fn indexLivePredecessors(
 pub fn transparentRegions(
     a: std.mem.Allocator,
     program: ir.Program,
-    live: ?[]const bool,
     budget: *Budget,
 ) Error![]usize {
-    if (budget.strict and !budget.charge(program.blocks.len)) return error.ExpressionWorkLimit;
     const parents = try a.alloc(usize, program.blocks.len);
     for (parents, 0..) |*parent, id| parent.* = id;
     for (program.blocks, 0..) |block, id| {
-        if (live) |blocks| if (!blocks[id]) continue;
         var edge: usize = 0;
         while (successor(block.terminator, edge)) |transfer| : (edge += 1) {
             if (!budget.tick()) return error.ExpressionWorkLimit;
             if (transfer.capture_boundary) continue;
             const target: usize = @intCast(transfer.edge.block);
-            if (live) |blocks| if (!blocks[target]) continue;
-            const left = try representative(parents, id, budget);
-            const right = try representative(parents, target, budget);
+            const left = representative(parents, id);
+            const right = representative(parents, target);
             parents[@max(left, right)] = @min(left, right);
         }
     }
-    for (0..parents.len) |id| parents[id] = try representative(parents, id, budget);
+    for (0..parents.len) |id| parents[id] = representative(parents, id);
     return parents;
 }
-fn representative(parents: []usize, start: usize, budget: *Budget) Error!usize {
+fn representative(parents: []usize, start: usize) usize {
     var root = start;
     while (parents[root] != root) {
-        if (budget.strict and !budget.tick()) return error.ExpressionWorkLimit;
         root = parents[root];
     }
     var cursor = start;
@@ -165,7 +166,34 @@ pub fn successor(term: ir.Terminator, index: usize) ?Incoming {
         inline else => |v| if (index == 0) .{ .edge = v.next, .capture_boundary = true } else null,
     };
 }
+const Write = struct {
+    slot: p.Id,
+    at: usize,
+
+    fn before(_: void, lhs: Write, rhs: Write) bool {
+        return lhs.slot < rhs.slot or (lhs.slot == rhs.slot and lhs.at < rhs.at);
+    }
+};
+
+fn latest(writes: []const Write, slot: p.Id, before: usize, budget: *Budget) ?usize {
+    if (!budget.tick() or before == 0 or
+        slot < writes[0].slot or slot > writes[writes.len - 1].slot)
+        return null;
+    if (writes[0].slot == writes[writes.len - 1].slot) return before - 1;
+    var low: usize = 0;
+    var high = writes.len;
+    while (low != high) {
+        if (!budget.tick()) return null;
+        const mid = low + (high - low) / 2;
+        if (Write.before({}, writes[mid], .{ .slot = slot, .at = before })) {
+            low = mid + 1;
+        } else high = mid;
+    }
+    return if (low != 0 and writes[low - 1].slot == slot) writes[low - 1].at else null;
+}
+
 const Proof = struct {
+    writes: ?[]const []const Write = null,
     program: ir.Program,
     definition: Definition,
     cache: []State,
@@ -183,7 +211,7 @@ const Proof = struct {
     const Resolution = enum { pending, yes, no };
     fn depthLimit(self: *Proof) bool {
         _ = self.budget.tick();
-        if (self.budget.strict) self.budget.exhausted = true;
+        if (self.writes != null) self.budget.exhausted = true;
         return false;
     }
     fn enter(self: *Proof, frame: Frame, before: usize) Resolution {
@@ -205,17 +233,32 @@ const Proof = struct {
             self.cache[frame.block_id] = if (result == .yes) .yes else .no;
         };
         const block = self.program.blocks[frame.block_id];
-        var cursor = before;
-        while (cursor != 0) {
-            if (!self.budget.tick()) return .no;
-            cursor -= 1;
-            if (self.definition.location.block == frame.block_id and
-                self.definition.location.instruction == cursor)
-            {
-                result = .yes;
+        const writes = if (self.writes) |index| index[frame.block_id] else &.{};
+        if (writes.len != 0) {
+            const op = self.definition.instruction;
+            const dest = latest(writes, op.destination, before, self.budget);
+            const operand = latest(writes, op.operands[0], before, self.budget);
+            if (self.budget.exhausted) return .no;
+            if (dest) |at| {
+                if (frame.block_id == self.definition.location.block and
+                    at == self.definition.location.instruction and
+                    (operand == null or operand.? < at)) result = .yes;
                 return result;
             }
-            if (relevant(self.definition, block.instructions[cursor].destination)) return .no;
+            if (operand != null) return .no;
+        } else {
+            var cursor = before;
+            while (cursor != 0) {
+                if (!self.budget.tick()) return .no;
+                cursor -= 1;
+                if (self.definition.location.block == frame.block_id and
+                    self.definition.location.instruction == cursor)
+                {
+                    result = .yes;
+                    return result;
+                }
+                if (relevant(self.definition, block.instructions[cursor].destination)) return .no;
+            }
         }
         if (self.program.functions[@intCast(block.function)].entry == frame.block_id) return .no;
         result = .pending;
@@ -252,7 +295,7 @@ const Proof = struct {
             if (predecessor.function != self.program.blocks[frame.block_id].function) continue;
             frame.count += 1;
             if (indexed.transfer.capture_boundary) return false;
-            if (self.budget.strict and
+            if (self.writes != null and
                 (!self.budget.charge(indexed.transfer.edge.assignments.len) or
                     !self.budget.charge(indexed.transfer.overwritten.len))) return false;
             if (!edgePreserves(
@@ -299,20 +342,71 @@ fn definitionAt(program: ir.Program, witness: Witness) ?Definition {
 }
 
 pub const Workspace = struct {
+    writes: []const []const Write,
     cache: []Proof.State,
     visited: []usize,
     frames: []Proof.Frame,
 
-    pub fn init(a: std.mem.Allocator, program: ir.Program, budget: *Budget) Error!Workspace {
+    pub fn init(
+        a: std.mem.Allocator,
+        program: ir.Program,
+        live: []const bool,
+        budget: *Budget,
+    ) Error!Workspace {
         if (!budget.charge(program.blocks.len)) return error.ExpressionWorkLimit;
         const cache = try a.alloc(Proof.State, program.blocks.len);
         @memset(cache, .unseen);
         const frame_count = @min(budget.limits.depth, program.blocks.len +| 2);
+        const writes = try a.alloc([]const Write, program.blocks.len);
+        for (program.blocks, writes, live) |block, *out, reachable| {
+            out.* = &.{};
+            const n = block.instructions.len;
+            if (!reachable or n < 16) continue;
+            if (!budget.charge(n)) return error.ExpressionWorkLimit;
+            const items = try a.alloc(Write, n);
+            var ordered = true;
+            for (block.instructions, items, 0..) |op, *w, i| {
+                if (i != 0 and items[i - 1].slot > op.destination) ordered = false;
+                w.* = .{ .slot = op.destination, .at = i };
+            }
+            if (!ordered) {
+                const levels: usize = @bitSizeOf(usize) - @clz(n);
+                const cost = std.math.mul(usize, n, 2 * levels) catch
+                    return error.ExpressionWorkLimit;
+                if (!budget.charge(cost)) return error.ExpressionWorkLimit;
+                std.sort.heap(Write, items, {}, Write.before);
+            }
+            out.* = items;
+        }
         return .{
+            .writes = writes,
             .cache = cache,
             .visited = try a.alloc(usize, program.blocks.len),
             .frames = try a.alloc(Proof.Frame, frame_count),
         };
+    }
+
+    pub fn survivesExit(
+        self: Workspace,
+        program: ir.Program,
+        source: Location,
+        budget: *Budget,
+    ) bool {
+        const ops = program.blocks[source.block].instructions;
+        const op = ops[source.instruction];
+        const writes = self.writes[source.block];
+        if (writes.len != 0) {
+            const dest = latest(writes, op.destination, ops.len, budget);
+            const operand = latest(writes, op.operands[0], ops.len, budget);
+            return dest == source.instruction and
+                (operand == null or operand.? < source.instruction);
+        }
+        for (ops[source.instruction + 1 ..]) |later| {
+            if (!budget.tick()) return false;
+            if (later.destination == op.destination or later.destination == op.operands[0])
+                return false;
+        }
+        return true;
     }
 
     pub fn proves(
@@ -327,6 +421,7 @@ pub const Workspace = struct {
             .definition = definitionAt(program, w) orelse return false,
             .budget = budget,
             .predecessors = predecessors,
+            .writes = self.writes,
             .cache = self.cache,
             .visited = self.visited,
         };

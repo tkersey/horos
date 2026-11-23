@@ -161,7 +161,7 @@ const Context = struct {
             .live = live,
             .predecessors = try proof.indexLivePredecessors(a, program, live, budget),
             .budget = budget,
-            .workspace = try proof.Workspace.init(a, program, budget),
+            .workspace = try proof.Workspace.init(a, program, live, budget),
         };
     }
 
@@ -197,17 +197,94 @@ const Context = struct {
     }
 };
 
+pub const PreparedOriginal = opaque {
+    fn state(self: *PreparedOriginal) *PreparedState {
+        return @ptrCast(@alignCast(self));
+    }
+
+    pub fn discover(
+        self: *PreparedOriginal,
+        result: Allocator,
+        stats: *Statistics,
+    ) Error![]const Witness {
+        const prepared = self.state();
+        const ctx = prepared.context;
+        stats.* = .{};
+        var scratch = std.heap.ArenaAllocator.init(prepared.cap.allocator());
+        defer scratch.deinit();
+        const selected = find(scratch.allocator(), ctx, stats) catch |err|
+            return translated(err, prepared.cap.*, ctx.budget);
+        var output: AllocationBudget = .{
+            .parent = result,
+            .remaining = &ctx.budget.bytes_remaining,
+        };
+        return output.allocator().dupe(Witness, selected) catch |err|
+            return translated(err, output, ctx.budget);
+    }
+
+    pub fn validateObserved(
+        self: *PreparedOriginal,
+        candidate: ir.Program,
+        witnesses: []const Witness,
+        observer: anytype,
+    ) !void {
+        const prepared = self.state();
+        const ctx = prepared.context;
+        var after = check(prepared.cap.allocator(), ctx, candidate, witnesses) catch |err|
+            return translated(err, prepared.cap.*, ctx.budget);
+        defer after.deinit();
+        if (comptime @TypeOf(observer) != @TypeOf(null))
+            observer.checked(ctx.flow, &after) catch |err| {
+                if (@as(anyerror, err) == error.RelationLimit) ctx.budget.exhausted = true;
+                return err;
+            };
+    }
+};
+
+const PreparedState = struct {
+    cap: *AllocationBudget,
+    context: Context,
+};
+
+pub fn withPreparedOriginal(
+    work: Allocator,
+    original: ir.Program,
+    budget: *Budget,
+    observer: anytype,
+) !@TypeOf(observer).Result {
+    var cap: AllocationBudget = .{ .parent = work, .remaining = &budget.bytes_remaining };
+    var flow = analyze(cap.allocator(), original, budget) catch |err|
+        return translated(err, cap, budget);
+    defer flow.deinit();
+    var arena = std.heap.ArenaAllocator.init(cap.allocator());
+    defer arena.deinit();
+    const ctx = Context.init(arena.allocator(), original, &flow, budget) catch |err|
+        return translated(err, cap, budget);
+    var prepared: PreparedState = .{ .cap = &cap, .context = ctx };
+    return observer.prepared(@as(*PreparedOriginal, @ptrCast(&prepared)));
+}
+
+const FindOriginal = struct {
+    pub const Result = []const Witness;
+    result: Allocator,
+    stats: *Statistics,
+
+    pub fn prepared(self: FindOriginal, original: *PreparedOriginal) Error!Result {
+        return original.discover(self.result, self.stats);
+    }
+};
+
 pub fn discover(
     arena: Allocator,
     original: ir.Program,
     budget: *Budget,
     stats: *Statistics,
 ) Error![]const Witness {
-    var cap: AllocationBudget = .{ .parent = arena, .remaining = &budget.bytes_remaining };
-    var observed: Statistics = .{};
-    defer stats.* = observed;
-    return find(cap.allocator(), original, budget, &observed) catch |err|
-        return translated(err, cap, budget);
+    stats.* = .{};
+    return withPreparedOriginal(arena, original, budget, FindOriginal{
+        .result = arena,
+        .stats = stats,
+    });
 }
 
 fn liveBlocks(
@@ -224,7 +301,8 @@ fn liveBlocks(
 
 const Candidate = struct {
     site: Site,
-    block: Range = .{},
+    first_source: ?usize = null,
+    next_source: ?usize = null,
     parent: ?usize = null,
     least: ?usize = null,
     state: State = .unmatched,
@@ -243,6 +321,9 @@ const Candidate = struct {
 const TreeBlock = struct {
     order: usize = 0,
     end: usize = 0,
+    low: usize = 0,
+    component: usize = 0,
+    previous_open: ?usize = null,
     segment: usize = 0,
     parent: ?usize = null,
     next_edge: usize = 0,
@@ -255,12 +336,14 @@ fn spanningTree(a: Allocator, ctx: Context) Error![]TreeBlock {
     const tree = try a.alloc(TreeBlock, ctx.live.len);
     @memset(tree, .{});
     var order: usize = 0;
+    var components: usize = 0;
     try spend(ctx.budget, ctx.program.functions.len);
     for (ctx.program.functions) |function| {
         const entry: usize = @intCast(function.entry);
         if (!ctx.live[entry]) continue;
         order += 1;
-        tree[entry] = .{ .order = order, .segment = entry };
+        tree[entry] = .{ .order = order, .low = order, .segment = entry };
+        var open: ?usize = entry;
         var current: ?usize = entry;
         while (current) |id| {
             try spend(ctx.budget, 1);
@@ -268,6 +351,16 @@ fn spanningTree(a: Allocator, ctx: Context) Error![]TreeBlock {
             const term = ctx.program.blocks[id].terminator;
             const edge = proof.successor(term, block.next_edge) orelse {
                 block.end = order;
+                if (block.low == block.order) {
+                    components += 1;
+                    while (open) |member| {
+                        try spend(ctx.budget, 1);
+                        open = tree[member].previous_open;
+                        tree[member].component = components;
+                        if (member == id) break;
+                    }
+                }
+                if (block.parent) |parent| tree[parent].low = @min(tree[parent].low, block.low);
                 current = block.parent;
                 continue;
             };
@@ -275,13 +368,19 @@ fn spanningTree(a: Allocator, ctx: Context) Error![]TreeBlock {
             const target: usize = @intCast(edge.edge.block);
             if (!ctx.live[target]) continue;
             if (edge.capture_boundary) tree[entry].has_capture = true;
-            if (tree[target].order != 0) continue;
+            if (tree[target].order != 0) {
+                if (tree[target].component == 0) block.low = @min(block.low, tree[target].order);
+                continue;
+            }
             order += 1;
             tree[target] = .{
                 .order = order,
+                .low = order,
+                .previous_open = open,
                 .segment = if (edge.capture_boundary) target else block.segment,
                 .parent = id,
             };
+            open = target;
             current = target;
         }
     }
@@ -307,18 +406,9 @@ fn markFieldPaths(a: Allocator, ctx: Context, tree: []TreeBlock) Error!void {
     }
 }
 
-fn find(
-    a: Allocator,
-    program: ir.Program,
-    budget: *Budget,
-    stats: *Statistics,
-) Error![]Witness {
-    var scratch = std.heap.ArenaAllocator.init(a);
-    defer scratch.deinit();
-    const tmp = scratch.allocator();
-    var flow = try analyze(a, program, budget);
-    defer flow.deinit();
-    const ctx = try Context.init(tmp, program, &flow, budget);
+fn find(tmp: Allocator, ctx: Context, stats: *Statistics) Error![]Witness {
+    const budget = ctx.budget;
+    const program = ctx.program;
     const tree = try spanningTree(tmp, ctx);
     try spend(budget, program.functions.len);
     const sites = try tmp.alloc(std.ArrayList(Candidate), program.functions.len);
@@ -346,12 +436,12 @@ fn find(
         defer countRejections(function.items, stats);
         const ordered = try indexExpressions(tmp, ctx, function.items, tree);
         const has_capture = tree[@intCast(declaration.entry)].has_capture;
-        try selectFunction(tmp, ctx, function.items, ordered, &selected, stats, has_capture);
+        try selectFunction(tmp, ctx, function.items, &selected, stats, has_capture);
         if (has_capture)
             try classifyCaptures(tmp, ctx, function.items, ordered, &paths, tree);
     }
     try spend(budget, selected.items.len);
-    return a.dupe(Witness, selected.items);
+    return selected.items;
 }
 
 fn append(
@@ -418,7 +508,7 @@ fn indexExpressions(
     var start: usize = 0;
     while (start < items.len) {
         const end = Ordered.expressionEnd(items, start);
-        try indexAncestors(sites, items, start, end, tree, ctx.budget);
+        try indexAncestors(sites, items, start, end, tree, ctx);
         start = end;
     }
     return items;
@@ -430,7 +520,7 @@ fn indexAncestors(
     start: usize,
     end: usize,
     tree: []const TreeBlock,
-    budget: *Budget,
+    ctx: Context,
 ) Error!void {
     const repeated = sites[items[start].site].site.block != sites[items[end - 1].site].site.block;
     var low = start;
@@ -439,20 +529,29 @@ fn indexAncestors(
         const first = items[low];
         if (low > start and items[low - 1].region != first.region) parent = null;
         while (parent) |p| {
-            try spend(budget, 1);
+            try spend(ctx.budget, 1);
             if (tree[sites[p].site.block].end >= first.order) break;
             parent = sites[p].parent;
         }
         var high = low + 1;
         while (high < end and items[high].order == first.order) high += 1;
         const least = if (parent) |p| @min(p, sites[p].least orelse p) else null;
+        var last: ?usize = null;
+        var first_source: ?usize = null;
         for (items[low..high]) |item| {
             const candidate = &sites[item.site];
-            candidate.block = .{ .start = low, .end = high };
+            if (repeated and ctx.workspace.survivesExit(ctx.program, candidate.site, ctx.budget)) {
+                if (last) |previous| {
+                    sites[previous].next_source = item.site;
+                } else first_source = item.site;
+                last = item.site;
+            }
+            if (ctx.budget.exhausted) return error.ScalarFieldLimit;
             candidate.parent = parent;
             candidate.least = least;
             if (repeated) candidate.state = .repeated;
         }
+        sites[first.site].first_source = first_source;
         parent = first.site;
         low = high;
     }
@@ -461,15 +560,16 @@ fn indexAncestors(
 fn matchingBlock(
     ctx: Context,
     sites: []Candidate,
-    groups: []const Ordered,
-    block: Range,
+    first: ?usize,
     target: Site,
 ) Error!?usize {
-    for (groups[block.start..block.end]) |item| {
+    var next = first;
+    while (next) |i| {
         try spend(ctx.budget, 1);
-        const source = sites[item.site];
+        const source = sites[i];
+        next = source.next_source;
         if (source.state == .replaced) continue;
-        if (try ctx.matches(.{ .source = source.site, .target = target })) return item.site;
+        if (try ctx.matches(.{ .source = source.site, .target = target })) return i;
     }
     return null;
 }
@@ -478,12 +578,11 @@ fn findSource(
     a: Allocator,
     ctx: Context,
     sites: []Candidate,
-    groups: []const Ordered,
     target: Candidate,
     alternatives: *std.ArrayList(usize),
 ) Error!?usize {
     const least = target.least orelse return null;
-    if (try matchingBlock(ctx, sites, groups, sites[least].block, target.site)) |source|
+    if (try matchingBlock(ctx, sites, sites[least].first_source, target.site)) |source|
         return source;
     alternatives.clearRetainingCapacity();
     var ancestor = target.parent;
@@ -498,7 +597,7 @@ fn findSource(
     try spend(ctx.budget, sorting);
     std.sort.heap(usize, items, {}, std.sort.asc(usize));
     for (items) |p| {
-        if (try matchingBlock(ctx, sites, groups, sites[p].block, target.site)) |source|
+        if (try matchingBlock(ctx, sites, sites[p].first_source, target.site)) |source|
             return source;
     }
     return null;
@@ -508,7 +607,6 @@ fn selectFunction(
     a: Allocator,
     ctx: Context,
     sites: []Candidate,
-    groups: []const Ordered,
     selected: *std.ArrayList(Witness),
     stats: *Statistics,
     has_capture: bool,
@@ -518,7 +616,7 @@ fn selectFunction(
     try spend(ctx.budget, sites.len);
     for (sites) |*target| {
         if (target.state == .producer) continue;
-        const i = try findSource(a, ctx, sites, groups, target.*, &alternatives) orelse {
+        const i = try findSource(a, ctx, sites, target.*, &alternatives) orelse {
             if (target.state == .repeated)
                 target.state = if (has_capture) .pending_capture else .unavailable;
             continue;
@@ -552,9 +650,15 @@ const Origins = enum(usize) {
 };
 
 const CapturePaths = struct {
-    const Block = struct { before: Origins = .none, after: Origins = .none, queued: bool = false };
+    const Block = struct {
+        before: Origins = .none,
+        after: Origins = .none,
+        queued: bool = false,
+        reaches_target: bool = false,
+    };
     blocks: []Block = &.{},
     queue: std.ArrayList(usize) = .empty,
+    reached: std.ArrayList(usize) = .empty,
 
     fn merge(
         self: *CapturePaths,
@@ -576,6 +680,38 @@ const CapturePaths = struct {
         }
     }
 
+    fn markTarget(self: *CapturePaths, a: Allocator, budget: *Budget, block: usize) Error!void {
+        if (self.blocks[block].reaches_target) return;
+        self.blocks[block].reaches_target = true;
+        try append(usize, a, budget, &self.reached, block);
+    }
+
+    fn markGroupPaths(
+        self: *CapturePaths,
+        a: Allocator,
+        ctx: Context,
+        sites: []const Candidate,
+        members: []const Ordered,
+        tree: []const TreeBlock,
+    ) Error!void {
+        var earliest_source: usize = 0;
+        for (members) |item| {
+            const site = sites[item.site];
+            if (site.state != .replaced)
+                earliest_source = @max(earliest_source, tree[site.site.block].component);
+            if (site.state == .pending_capture) try self.markTarget(a, ctx.budget, site.site.block);
+        }
+        var reached: usize = 0;
+        while (reached < self.reached.items.len) : (reached += 1) {
+            const incoming = ctx.predecessors[self.reached.items[reached]].items;
+            try spend(ctx.budget, incoming.len + 1);
+            for (incoming) |edge| {
+                if (tree[edge.block].component <= earliest_source)
+                    try self.markTarget(a, ctx.budget, edge.block);
+            }
+        }
+    }
+
     fn classify(
         self: *CapturePaths,
         a: Allocator,
@@ -592,8 +728,11 @@ const CapturePaths = struct {
         defer {
             for (self.queue.items) |id| self.blocks[id] = .{};
             self.queue.clearRetainingCapacity();
+            for (self.reached.items) |id| self.blocks[id].reaches_target = false;
+            self.reached.clearRetainingCapacity();
         }
         try spend(ctx.budget, members.len);
+        if (members.len != sites.len) try self.markGroupPaths(a, ctx, sites, members, tree);
         for (members) |item| {
             const site = sites[item.site];
             if (site.state != .replaced) {
@@ -612,7 +751,9 @@ const CapturePaths = struct {
             while (proof.successor(terminator, edge)) |transfer| : (edge += 1) {
                 try spend(ctx.budget, 1);
                 const target: usize = @intCast(transfer.edge.block);
-                if (!tree[target].reaches_field) continue;
+                if (members.len == sites.len) {
+                    if (!tree[target].reaches_field) continue;
+                } else if (!self.blocks[target].reaches_target) continue;
                 const crossed = transfer.capture_boundary;
                 const after = if (crossed) state.after.join(state.before) else state.after;
                 try self.merge(a, ctx.budget, target, if (crossed) .none else state.before, after);
@@ -728,25 +869,32 @@ pub fn validateObserved(
     budget: *Budget,
     observer: anytype,
 ) !void {
-    var cap: AllocationBudget = .{ .parent = allocator, .remaining = &budget.bytes_remaining };
-    var facts = check(cap.allocator(), original, candidate, witnesses, budget) catch |err|
-        return translated(err, cap, budget);
-    defer facts.original.deinit();
-    defer facts.candidate.deinit();
-    if (comptime @TypeOf(observer) != @TypeOf(null))
-        observer.checked(&facts.original, &facts.candidate) catch |err| {
-            if (@as(anyerror, err) == error.RelationLimit) budget.exhausted = true;
-            return err;
-        };
+    const CheckOriginal = struct {
+        pub const Result = void;
+        candidate: ir.Program,
+        witnesses: []const Witness,
+        observer: if (@TypeOf(observer) == @TypeOf(null)) void else @TypeOf(observer),
+
+        pub fn prepared(self: @This(), input: *PreparedOriginal) !void {
+            const callback = if (@TypeOf(observer) == @TypeOf(null)) null else self.observer;
+            try input.validateObserved(self.candidate, self.witnesses, callback);
+        }
+    };
+    return withPreparedOriginal(allocator, original, budget, CheckOriginal{
+        .candidate = candidate,
+        .witnesses = witnesses,
+        .observer = if (@TypeOf(observer) == @TypeOf(null)) {} else observer,
+    });
 }
 
 fn check(
     a: Allocator,
-    original: ir.Program,
+    ctx: Context,
     candidate: ir.Program,
     witnesses: []const Witness,
-    budget: *Budget,
-) Error!struct { original: Flow, candidate: Flow } {
+) Error!Flow {
+    const original = ctx.program;
+    const budget = ctx.budget;
     var scratch = std.heap.ArenaAllocator.init(a);
     defer scratch.deinit();
     const tmp = scratch.allocator();
@@ -754,9 +902,6 @@ fn check(
     var measure: wire.Writer = .{ .remaining = &budget.remaining };
     try record.write(ir.Program, original, &measure);
     try sameDeclarations(original, candidate);
-    var baseline = try analyze(a, original, budget);
-    errdefer baseline.deinit();
-    const ctx = try Context.init(tmp, original, &baseline, budget);
     for (original.blocks, candidate.blocks, 0..) |before, after, bid| {
         if (before.instructions.len != after.instructions.len) return error.InvalidExpressionReuse;
         var lhs = before;
@@ -785,7 +930,7 @@ fn check(
             if (!equal(ir.Instruction, expected, replacement)) return error.InvalidExpressionReuse;
         }
     }
-    return .{ .original = baseline, .candidate = try analyze(a, candidate, budget) };
+    return analyze(a, candidate, budget);
 }
 
 fn sameDeclarations(original: ir.Program, candidate: ir.Program) Error!void {

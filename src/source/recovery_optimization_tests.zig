@@ -380,26 +380,38 @@ test "candidate P01 selection and independent checking share a single work allow
     const s = try rule.reconstructBorrowedProposal(b.allocator(), input.program, &.{w}, &budget);
     const full = policy.limits.p01_work;
     var work = full;
-    var capture: CanonicalMap = .{ .arena = b.allocator(), .work = &work };
-    var selected = try data.coalescing.runWithWork(a, s, .{
-        .compact_refinement = true,
-        .correspondence = .{ .context = &capture, .receive = CanonicalMap.receive },
-    }, &work);
-    defer selected.deinit();
-    const selection_work = full - work;
-    var flow = try data.coalescing.correspondenceFlow(a, s, selected.program, capture.map.?, &work);
+    var map_arena = std.heap.ArenaAllocator.init(a);
+    defer map_arena.deinit();
+    const reconstruction = data.coalescing.Correspondence.Reconstruction;
+    var selected = try reconstruction.checked(a, &map_arena, s, null, &work);
+    defer selected.final.deinit();
+    const producer_work = full - work;
+    work = full;
+    var flow = try data.coalescing.correspondenceFlow(
+        a,
+        s,
+        selected.final.program,
+        selected.map,
+        &work,
+    );
     defer flow.deinit();
-    const total = full - work;
-    try std.testing.expect(selection_work > 0 and selection_work < total);
-    policy.limits.p01_work = total;
+    const verifier_work = full - work;
+    try std.testing.expect(verifier_work > 0 and producer_work >= verifier_work);
+    policy.limits.p01_work = producer_work;
     var exact = try source.lowerRecoveryOptimized(a, module, policy);
     defer exact.deinit();
     try std.testing.expectEqual(.applied, exact.outcome);
-    try std.testing.expectEqualDeep(selected.program, exact.program);
-    try std.testing.expectEqualDeep(capture.map.?, exact.evidence.correspondence);
-    policy.limits.p01_work = total - selection_work;
+    try std.testing.expectEqualDeep(selected.final.program, exact.program);
+    try std.testing.expectEqualDeep(selected.map, exact.evidence.correspondence);
     try checkEvidence(module, exact.program, exact.evidence, policy);
-    policy.limits.p01_work = total - 1;
+    policy.limits.p01_work = verifier_work;
+    try checkEvidence(module, exact.program, exact.evidence, policy);
+    policy.limits.p01_work -= 1;
+    try std.testing.expectError(
+        error.RelationLimit,
+        checkEvidence(module, exact.program, exact.evidence, policy),
+    );
+    policy.limits.p01_work = producer_work - 1;
     var retained = try source.lowerRecoveryOptimized(a, module, policy);
     defer retained.deinit();
     try std.testing.expectEqual(.budget, retained.outcome);
@@ -537,6 +549,76 @@ test "mixed recovery batches retain the checked proposal for either protected di
         try std.testing.expectEqualDeep(expected, selected.evidence.witnesses[0]);
         try checkEvidence(module, selected.program, selected.evidence, policy);
     }
+}
+
+fn candidateP01Work(
+    program: ir.Program,
+    witnesses: []const data.scalar_field_reuse.Witness,
+) !u64 {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const rule = data.scalar_field_reuse;
+    var budget = rule.Budget.init(.{});
+    const proposal = try rule.reconstructBorrowedProposal(
+        arena.allocator(),
+        program,
+        witnesses,
+        &budget,
+    );
+    var remaining = options().limits.p01_work;
+    var verified = try data.coalescing.Correspondence.Reconstruction.checked(
+        a,
+        &arena,
+        proposal,
+        null,
+        &remaining,
+    );
+    defer verified.final.deinit();
+    return options().limits.p01_work - remaining;
+}
+
+test "composed alias rejection retains an independent projection" {
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const first = (try fieldDiamond(&b, 0)).entry;
+    const second = (try fieldDiamond(&b, 0)).entry;
+    const third = (try fieldDiamond(&b, 1)).entry;
+    const pair = try twoReachableDiamonds(&b, first, second);
+    const module = try twoReachableDiamonds(&b, pair.entry, third);
+    var original = try @import("activation_lower.zig").lowerRecoveryInput(a, module);
+    defer original.deinit();
+    var policy = options();
+    policy.limits.image_growth_bytes = 65536;
+    policy.formals = &.{.{ .function = first, .ordinal = 1 }};
+    const w = try projectionWitness(original.program, third);
+    const twin = try projectionWitness(original.program, second);
+    const required = try candidateP01Work(original.program, &.{ twin, w }) +
+        try candidateP01Work(original.program, &.{twin}) +
+        try candidateP01Work(original.program, &.{w});
+    policy.limits.p01_work = required;
+    var selected = try source.lowerRecoveryOptimized(a, module, policy);
+    defer selected.deinit();
+    try std.testing.expectEqual(.applied, selected.outcome);
+    try std.testing.expectEqual(2, selected.statistics.recovery_liveness);
+    try std.testing.expectEqual(1, selected.evidence.witnesses.len);
+    try std.testing.expectEqualDeep(w, selected.evidence.witnesses[0]);
+    const map = selected.evidence.correspondence.maps[@backingInt(data.relocation.Kind.function)];
+    try std.testing.expectEqual(map[first], map[second]);
+    try checkEvidence(module, selected.program, selected.evidence, policy);
+    policy.limits.p01_work = required - 1;
+    var limited = try source.lowerRecoveryOptimized(a, module, policy);
+    defer limited.deinit();
+    try std.testing.expectEqual(.budget, limited.outcome);
+    try std.testing.expectEqual(2, limited.statistics.recovery_liveness);
+    try std.testing.expectEqual(1, limited.statistics.budget);
+    try checkEvidence(module, limited.program, limited.evidence, policy);
+    policy.limits.p01_work = options().limits.p01_work;
+    policy.formals = &.{.{ .function = first, .ordinal = 0 }};
+    var both = try source.lowerRecoveryOptimized(a, module, policy);
+    defer both.deinit();
+    try std.testing.expectEqual(.applied, both.outcome);
+    try std.testing.expectEqual(3, both.evidence.witnesses.len);
+    try checkEvidence(module, both.program, both.evidence, policy);
 }
 
 test "a proven singleton liveness rejection survives a budget too small for a second check" {

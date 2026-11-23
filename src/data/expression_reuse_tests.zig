@@ -1265,9 +1265,14 @@ test "recovery chooses the lexicographically first provable ancestor" {
     }
 }
 
-fn fieldTailWork(comptime groups: usize, comptime length: usize, repeated: bool) !u64 {
+fn fieldTailWork(
+    comptime groups: usize,
+    comptime length: usize,
+    repeated: bool,
+    final_field: bool,
+) !u64 {
     var program = scalar_diamond;
-    const fields: [groups * 2]ir.Id = @splat(0);
+    const fields: [groups * 2 + 1]ir.Id = @splat(0);
     program.schemas = &.{ .u64, .boolean, .unit, .{ .product = &fields } };
     var ops: [groups * 2]ir.Instruction = @splat(scalar_diamond.blocks[0].instructions[0]);
     for (&ops, 0..) |*op, i| op.immediate = if (repeated) i % groups else i;
@@ -1284,6 +1289,9 @@ fn fieldTailWork(comptime groups: usize, comptime length: usize, repeated: bool)
                 .{ .return_value = 3 },
         };
     }
+    var last = scalar_diamond.blocks[0].instructions[0];
+    last.immediate = groups * 2;
+    if (final_field) blocks[blocks.len - 1].instructions = (&last)[0..1];
     program.blocks = &blocks;
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
@@ -1300,9 +1308,250 @@ fn fieldTailWork(comptime groups: usize, comptime length: usize, repeated: bool)
 }
 
 test "recovery capture groups stop before field free tails" {
-    const baseline = try fieldTailWork(64, 0, false);
-    const repeated = try fieldTailWork(64, 0, true);
-    const total = try fieldTailWork(64, 128, false);
-    const total_repeated = try fieldTailWork(64, 128, true);
+    const baseline = try fieldTailWork(64, 0, false, false);
+    const repeated = try fieldTailWork(64, 0, true, false);
+    const total = try fieldTailWork(64, 128, false, false);
+    const total_repeated = try fieldTailWork(64, 128, true, false);
     try std.testing.expect(total_repeated - total <= repeated - baseline + 2 * 128);
+}
+
+fn fieldPrefixWork(comptime count: usize, comptime overwritten: bool) ![2]u64 {
+    const field = scalar_diamond.blocks[0].instructions[0];
+    const sources: [if (overwritten) count else 1]ir.Instruction = @splat(field);
+    var targets: [count]ir.Instruction = @splat(field);
+    for (&targets) |*op| op.destination = 4;
+    var program = scalar_diamond;
+    program.blocks = &.{
+        .{ .function = 0, .instructions = &sources, .terminator = .{ .jump = .{ .block = 1 } } },
+        .{ .function = 0, .instructions = &targets, .terminator = .{ .return_value = 4 } },
+    };
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var budget = scalar.Budget.init(.{});
+    var stats: scalar.Statistics = .{};
+    const ws = try scalar.discover(arena.allocator(), program, &budget, &stats);
+    try std.testing.expectEqual(count, ws.len);
+    for (ws, 0..) |w, i| {
+        try std.testing.expectEqual(sources.len - 1, w.source.instruction);
+        try std.testing.expectEqual(i, w.target.instruction);
+    }
+    const cost = budget.workUsed();
+    const candidate = try scalar.reconstructBorrowedProposal(
+        arena.allocator(),
+        program,
+        ws,
+        &budget,
+    );
+    const before = budget.workUsed();
+    try scalar.validate(a, program, candidate, ws, &budget);
+    return .{ cost, budget.workUsed() - before };
+}
+
+test "recovery field prefixes index overwritten producers and repeated target reads" {
+    inline for (.{ false, true }) |overwritten| {
+        const small = try fieldPrefixWork(64, overwritten);
+        const large = try fieldPrefixWork(128, overwritten);
+        for (small, large) |before, after| try std.testing.expect(after * 4 <= before * 9);
+    }
+}
+
+test "recovery capture groups stop before an unrelated populated tail" {
+    const short = try fieldTailWork(64, 1, true, true);
+    const long = try fieldTailWork(64, 128, true, true);
+    const short_control = try fieldTailWork(64, 1, false, true);
+    const long_control = try fieldTailWork(64, 128, false, true);
+    try std.testing.expect(long - long_control <= short - short_control + 2 * 128);
+}
+
+fn successiveFieldPairWork(comptime pairs: usize, repeated: bool) !u64 {
+    const count = pairs * 2;
+    const fields: [count]ir.Id = @splat(0);
+    var program = scalar_diamond;
+    program.schemas = &.{ .u64, .boolean, .unit, .{ .product = &fields } };
+    var ops: [count]ir.Instruction = @splat(scalar_diamond.blocks[0].instructions[0]);
+    var blocks: [count]ir.Block = undefined;
+    for (&ops, &blocks, 0..) |*op, *block, i| {
+        op.immediate = if (repeated) i / 2 else i;
+        block.* = .{
+            .function = 0,
+            .instructions = op[0..1],
+            .terminator = if (i + 1 < count)
+                .{ .yield_value = .{ .block = i + 1 } }
+            else
+                .{ .return_value = op.destination },
+        };
+    }
+    program.blocks = &blocks;
+    var stats: scalar.Statistics = .{};
+    var budget = scalar.Budget.init(.{});
+    const ws = try scalar.discover(a, program, &budget, &stats);
+    defer a.free(ws);
+    try std.testing.expectEqual(0, ws.len);
+    const rejected: usize = if (repeated) pairs else 0;
+    try std.testing.expectEqualDeep(scalar.Statistics{
+        .capture_boundary = rejected,
+        .unavailable_version = rejected,
+    }, stats);
+    return budget.workUsed();
+}
+
+test "recovery successive capture pairs stop before earlier and later groups" {
+    inline for (.{ 64, 128 }) |count| {
+        const all = try successiveFieldPairWork(count, true);
+        const control = try successiveFieldPairWork(count, false);
+        try std.testing.expect(all - control <= 16 * count);
+    }
+}
+
+test "scalar proof limits apply to directly constructed budgets" {
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const limits: scalar.Limits = .{ .depth = 1 };
+    var budget: scalar.Budget = .{
+        .limits = limits,
+        .remaining = limits.work,
+        .bytes_remaining = limits.temporary_bytes,
+    };
+    const ws = &.{field_witness};
+    const candidate = try scalar.reconstructBorrowedProposal(
+        arena.allocator(),
+        scalar_diamond,
+        ws,
+        &budget,
+    );
+    try std.testing.expectError(
+        error.ScalarFieldLimit,
+        scalar.validate(a, scalar_diamond, candidate, ws, &budget),
+    );
+    try std.testing.expect(budget.exhausted);
+}
+
+test "prepared scalar original releases discovery scratch and admits once across checks" {
+    const Checked = struct {
+        pub const Result = []const scalar.Witness;
+        candidate: ir.Program,
+        allocations: *std.testing.FailingAllocator,
+
+        pub fn prepared(self: @This(), original: *scalar.PreparedOriginal) !Result {
+            const al = self.allocations;
+            const base_live = al.allocated_bytes - al.freed_bytes;
+            var stats: scalar.Statistics = .{};
+            const ws = try original.discover(a, &stats);
+            errdefer a.free(ws);
+            try std.testing.expectEqual(base_live, al.allocated_bytes - al.freed_bytes);
+            try original.validateObserved(self.candidate, ws, null);
+            try std.testing.expectError(
+                error.InvalidExpressionReuse,
+                original.validateObserved(scalar_diamond, ws, null),
+            );
+            try original.validateObserved(self.candidate, ws, null);
+            return ws;
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var budget = scalar.Budget.init(.{});
+    const candidate = try scalar.reconstructBorrowedProposal(
+        arena.allocator(),
+        scalar_diamond,
+        &.{field_witness},
+        &budget,
+    );
+    budget = scalar.Budget.init(.{});
+    var alloc = std.testing.FailingAllocator.init(a, .{});
+    const ws = try scalar.withPreparedOriginal(alloc.allocator(), scalar_diamond, &budget, Checked{
+        .candidate = candidate,
+        .allocations = &alloc,
+    });
+    defer a.free(ws);
+    try std.testing.expectEqualSlices(scalar.Witness, &.{field_witness}, ws);
+    try std.testing.expectEqual(alloc.allocated_bytes, alloc.freed_bytes);
+    var raw = scalar.Budget.init(.{});
+    var stats: scalar.Statistics = .{};
+    const independent = try scalar.discover(a, scalar_diamond, &raw, &stats);
+    defer a.free(independent);
+    try scalar.validate(a, scalar_diamond, candidate, independent, &raw);
+    try std.testing.expectError(
+        error.InvalidExpressionReuse,
+        scalar.validate(a, scalar_diamond, scalar_diamond, independent, &raw),
+    );
+    try scalar.validate(a, scalar_diamond, candidate, independent, &raw);
+    try std.testing.expect(budget.workUsed() < raw.workUsed());
+}
+
+test "indexed scalar proofs use the last operand and destination writes in each prefix" {
+    const field = scalar_diamond.blocks[0].instructions[0];
+    var sources: [20]ir.Instruction = @splat(field);
+    sources[11] = .{ .opcode = .move, .destination = 0, .operands = &.{1} };
+    sources[12].destination = 5;
+    var targets: [20]ir.Instruction = @splat(field);
+    for (&targets) |*op| op.destination = 4;
+    targets[9] = .{ .opcode = .move, .destination = 5, .operands = &.{3} };
+    targets[16] = sources[11];
+    var program = scalar_diamond;
+    program.blocks = &.{
+        .{ .function = 0, .instructions = &sources, .terminator = .{ .jump = .{ .block = 1 } } },
+        .{ .function = 0, .instructions = &targets, .terminator = .{ .return_value = 4 } },
+    };
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var stats: scalar.Statistics = .{};
+    var budget = scalar.Budget.init(.{});
+    const ws = try scalar.discover(a, program, &budget, &stats);
+    defer a.free(ws);
+    try std.testing.expectEqual(15, ws.len);
+    for (ws, 0..) |w, i| {
+        try std.testing.expectEqual(if (i < 9) @as(u64, 12) else 19, w.source.instruction);
+        try std.testing.expectEqual(if (i < 9) i else i + 1, w.target.instruction);
+    }
+    const proposal = try scalar.reconstructBorrowedProposal(
+        arena.allocator(),
+        program,
+        ws,
+        &budget,
+    );
+    try scalar.validate(a, program, proposal, ws, &budget);
+    var late = ws[ws.len - 1];
+    late.target.instruction = 19;
+    const stale = try scalar.reconstructBorrowedProposal(
+        arena.allocator(),
+        program,
+        &.{late},
+        &budget,
+    );
+    try std.testing.expectError(
+        error.InvalidExpressionReuse,
+        scalar.validate(a, program, stale, &.{late}, &budget),
+    );
+}
+
+test "capture classification preserves distinct field origins within one cyclic component" {
+    var program = scalar_diamond;
+    program.schemas = &.{ .u64, .boolean, .unit, .{ .product = &.{ 0, 0 } } };
+    const field = scalar_diamond.blocks[0].instructions[0];
+    var pair: [2]ir.Instruction = @splat(field);
+    pair[1].immediate = 1;
+    program.blocks = &.{
+        .{
+            .function = 0,
+            .instructions = &pair,
+            .terminator = .{ .yield_value = .{ .block = 1 } },
+        },
+        .{
+            .function = 0,
+            .instructions = &pair,
+            .terminator = .{ .branch = .{
+                .condition = 2,
+                .when_true = .{ .block = 0 },
+                .when_false = .{ .block = 2 },
+            } },
+        },
+        .{ .function = 0, .instructions = &.{}, .terminator = .{ .return_value = 3 } },
+    };
+    var stats: scalar.Statistics = .{};
+    var budget = scalar.Budget.init(.{});
+    const ws = try scalar.discover(a, program, &budget, &stats);
+    defer a.free(ws);
+    try std.testing.expectEqual(0, ws.len);
+    try std.testing.expectEqualDeep(scalar.Statistics{ .capture_boundary = 4 }, stats);
 }

@@ -99,7 +99,8 @@ const RegionNames = struct {
         if (self.work) |left| {
             if (self.ids.available == 0) self.grow(left) catch |err| {
                 if (err != error.OutOfMemory) return err;
-                return try findRegion(self.ids, old, left, 1) orelse err;
+                const existing = findRegion(self.ids, old, left, 1) catch return err;
+                return existing orelse err;
             };
             if (try findRegion(self.ids, old, left, 2)) |existing| return existing;
             const next: p.Id = self.ids.count();
@@ -111,6 +112,28 @@ const RegionNames = struct {
         return entry.value_ptr.*;
     }
 };
+
+test "sparse growth preserves allocator refusal when existing key lookup cannot finish" {
+    var backing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+    var work: u64 = std.math.maxInt(u64);
+    var names: RegionNames = .{
+        .allocator = backing.allocator(),
+        .declared = std.math.maxInt(p.Id),
+        .work = &work,
+    };
+    defer names.ids.deinit(names.allocator);
+    _ = try names.id(0);
+    var fresh: p.Id = 1;
+    while (names.ids.available != 0) : (fresh += 1) {
+        try std.testing.expectEqual(fresh, try names.id(fresh));
+    }
+    work = @as(u64, names.ids.capacity()) * 4 + 8;
+    try std.testing.expectError(error.OutOfMemory, names.id(fresh));
+    try std.testing.expectEqual(0, work);
+    work = std.math.maxInt(u64);
+    try std.testing.expectEqual(0, try names.id(0));
+    try std.testing.expectError(error.OutOfMemory, names.id(fresh));
+}
 
 pub fn sizes(program: ir.Program) Error![kind_count]usize {
     const regions = std.math.cast(usize, program.scopes.region_count) orelse return error.Capacity;

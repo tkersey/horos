@@ -346,7 +346,16 @@ fn RecordOps(comptime T: type, comptime ancestors: []const type) type {
                 for (a, b) |left, right| if (left != right) return false;
                 return true;
             }
-            if (@sizeOf(Child) == 0) return true;
+            if (@sizeOf(Child) == 0) {
+                if (comptime @TypeOf(work) == @TypeOf(null)) return true;
+                if (a.len == 0) return true;
+                var remaining = work.*;
+                if (!try RecordOps(Child, ancestry).equal(a[0], b[0], &remaining)) return false;
+                const width = work.* - remaining;
+                const total = std.math.mul(u64, a.len, width) catch return error.RelationLimit;
+                try @import("admission.zig").spend(work, total);
+                return true;
+            }
             for (a, b) |left, right| {
                 if (!try RecordOps(Child, ancestry).equal(left, right, work)) return false;
             }
