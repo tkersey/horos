@@ -207,7 +207,6 @@ src/data/state_image_tests.zig
 src/data/tail_clauses.zig
 src/data/tail_duplication.zig
 src/data/tail_duplication_tests.zig
-src/data/test_root.zig
 src/data/tests.zig
 src/data/thunk_forwarding.zig
 src/data/thunk_forwarding_tests.zig
