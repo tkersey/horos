@@ -1528,6 +1528,61 @@ test "specialization charges admission, derivation and self-validation to the ca
         );
     }
 }
+fn foldedSums(b: *source.Builder, count: usize) !pe.Request {
+    const word = try b.scalar(u64);
+    const failure = try b.failureLiteral(try b.constant(void, {}));
+    const entry = try b.declare(&.{}, word, &.{}, &.{});
+    const variables = try b.allocator().alloc(p.Id, count);
+    const sums = try b.allocator().alloc(p.Id, count);
+    var previous = try b.constant(u64, 1);
+    for (variables, sums, 0..) |*variable, *sum, index| {
+        sum.* = try b.value(.{ .schema = word, .expression = .{ .primitive = .{
+            .opcode = .integer_add,
+            .operands = &.{ previous, try b.constant(u64, 2 * index + 3) },
+            .failures = &.{.{ .kind = .arithmetic_overflow, .value = failure }},
+        } } });
+        variable.* = try b.variable(word);
+        previous = try b.reference(variable.*);
+    }
+    var body = try b.pure(previous);
+    var index = count;
+    while (index > 0) {
+        index -= 1;
+        body = try b.bind(variables[index], try b.pure(sums[index]), body);
+    }
+    try b.define(entry, body);
+    return .{ .context = context, .function = entry, .arguments = &.{} };
+}
+test "specialization charges residual literal interning to the caller" {
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const request = try foldedSums(&b, 96);
+    const module = b.module(request.function, try b.scalar(void));
+    var remaining: u64 = std.math.maxInt(u64);
+    var output = try pe.specializeWithWork(a, module, request, &remaining);
+    defer output.deinit();
+    const spent = std.math.maxInt(u64) - remaining;
+    const residual = output.module();
+    var interned: u64 = 0;
+    for (output.value_proofs.items) |proof| if (proof.folded) {
+        interned += residual.values[@intCast(proof.after)].expression.literal;
+    };
+    try std.testing.expect(interned > 96 * 96);
+    var validation: u64 = std.math.maxInt(u64);
+    try pe.validateWithWork(a, module, request, &output, &validation);
+    var admission: u64 = std.math.maxInt(u64);
+    try source.admitWithWork(a, module, &admission);
+    const checked = std.math.maxInt(u64) - validation;
+    const admitted = std.math.maxInt(u64) - admission;
+    try std.testing.expect(spent >= checked + admitted + interned);
+    var unbounded = try pe.specialize(a, module, request);
+    defer unbounded.deinit();
+    try std.testing.expectEqualSlices(u8, &unbounded.key, &output.key);
+    try std.testing.expect(
+        @import("horos_data").record.equal(source.Module, unbounded.module(), residual),
+    );
+}
 test "source specialization selects known condition and checks forged literal" {
     const a = std.testing.allocator;
     var b = source.Builder.init(a);

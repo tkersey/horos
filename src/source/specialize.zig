@@ -275,6 +275,9 @@ const Engine = struct {
         defer evaluation.finish();
         return self.reads.field(self.a(), knowledge, index, &evaluation.left);
     }
+    fn literal(self: *Engine, known: p.Literal) Error!p.Id {
+        return self.out.builder.literalWithWork(known, self.work);
+    }
     const SupportedTask = struct { id: p.Id, depth: usize };
     fn supported(self: *Engine, id: p.Id, depth: usize) Error!bool {
         var pending: std.ArrayList(SupportedTask) = .empty;
@@ -437,7 +440,7 @@ const Engine = struct {
             frame.total = frame.total and frame.knowledge == .known;
         }
         const folded = frame.total and frame.knowledge == .known;
-        const residual = if (folded) try self.out.builder.literal(
+        const residual = if (folded) try self.literal(
             frame.knowledge.known,
         ) else try self.out.builder.value(frame.expression);
         const proof = self.out.value_proofs.items.len;
@@ -713,7 +716,7 @@ const Engine = struct {
                 frame.residual = .{ .bind = .{
                     .variable = frame.variable,
                     .value = try self.out.builder.pure(
-                        try self.out.builder.literal(frame.payload.known),
+                        try self.literal(frame.payload.known),
                     ),
                     .next = result.id,
                 } };
