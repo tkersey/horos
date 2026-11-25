@@ -200,7 +200,7 @@ fn validateInternal(
     )) return error.InvalidState;
     try context.valueScopes();
     try validateOwnership(&context);
-    try context.control.validateState(temporary, state.nodes, activations);
+    if (context.control) |control| try control.validateState(temporary, state.nodes, activations);
     try context.effect_check.?.futureCaptures(&context, Context.visitFutureCapture);
 }
 
@@ -297,17 +297,22 @@ fn initContext(
     flow: ?*@import("activation_flow.zig").View,
     admitted: ?*const @import("program_image.zig").Admitted,
 ) Error!Context {
+    const facts = if (admitted) |owner|
+        owner.schemaFacts()
+    else
+        try a.schemas(temporary, program.schemas);
     const context: Context = .{
         .allocator = temporary,
         .program = program,
-        .control = try provenance.derive(temporary, program, &.{}, false),
+        .control = if (program.handlers.len == 0 and
+            std.mem.allEqual(bool, facts.exportable, true))
+            null
+        else
+            try provenance.derive(temporary, program, &.{}, false),
         .state = state,
         .activations = activations,
         .flow = flow,
-        .facts = if (admitted) |owner| owner.schemaFacts() else try a.schemas(
-            temporary,
-            program.schemas,
-        ),
+        .facts = facts,
         .uses = if (admitted) |owner| owner.traits() else try traits.derive(
             temporary,
             program.schemas,
@@ -383,7 +388,7 @@ const Context = struct {
     const BorrowFlow = borrows.StableFlow;
     allocator: std.mem.Allocator,
     program: Program,
-    control: *const provenance.Analysis,
+    control: ?*const provenance.Analysis,
     state: StateView,
     activations: []const ?ps.Activation,
     flow: ?*@import("activation_flow.zig").View,
@@ -2157,7 +2162,7 @@ const Context = struct {
             self.allocator,
             self.program,
             self.facts.exportable,
-            self.control,
+            self.control.?,
         );
         const children = try self.allocator.alloc(?g.NodeRef, self.state.nodes.len);
         @memset(children, null);

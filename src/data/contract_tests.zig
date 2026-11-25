@@ -57,6 +57,7 @@ test {
     _ = @import("coalescing_origins_tests.zig");
     _ = @import("coalescing_mutation_tests.zig");
     _ = @import("state_image_tests.zig");
+    _ = @import("state_admission_tests.zig");
     _ = @import("invocation_tests.zig");
 }
 

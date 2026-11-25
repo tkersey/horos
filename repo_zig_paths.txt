@@ -203,6 +203,7 @@ src/data/slot_access.zig
 src/data/slot_packing.zig
 src/data/slot_packing_tests.zig
 src/data/state_admission.zig
+src/data/state_admission_tests.zig
 src/data/state_effects.zig
 src/data/state_image.zig
 src/data/state_image_tests.zig
