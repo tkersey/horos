@@ -40,7 +40,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: [installation, contracts]
+        lane: [installation, contracts-native, contracts-observations]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -49,7 +49,7 @@ jobs:
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
-        if: matrix.lane == 'contracts'
+        if: matrix.lane == 'contracts-observations'
         with:
           node-version: '26.9.0'
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
@@ -58,17 +58,17 @@ jobs:
           use-cache: false
       - name: Restore complete compiler cache
         id: cache
-        if: matrix.lane == 'contracts'
+        if: matrix.lane != 'installation'
         continue-on-error: true
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25
         with:
           path: .zig-cache-upload
-          key: horos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ hashFiles('build.zig.zon') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: horos-${{ matrix.lane }}-v1-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ hashFiles('build.zig.zon') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            horos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ hashFiles('build.zig.zon') }}-
-            horos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.1-
+            horos-${{ matrix.lane }}-v1-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ hashFiles('build.zig.zon') }}-
+            horos-${{ matrix.lane }}-v1-${{ runner.os }}-${{ runner.arch }}-0.17.1-
       - name: Select working cache
-        if: matrix.lane == 'contracts'
+        if: matrix.lane != 'installation'
         run: |
           if [ -d .zig-cache-upload ]; then
             test ! -e .zig-cache
@@ -77,14 +77,18 @@ jobs:
           mkdir -p .zig-cache/tmp
       - name: Run selected native build root
         run: |
-          if [ "${{ matrix.lane }}" = installation ]; then
-            zig build check-package -Doptimize=safe --summary all
-          else
-            zig build check -Doptimize=safe --summary all --verbose
-          fi
+          case "${{ matrix.lane }}" in
+            installation)
+              zig build check-package -Doptimize=safe --summary all ;;
+            contracts-native)
+              zig build check-native -Doptimize=safe --summary all --verbose ;;
+            contracts-observations)
+              zig build check-semantics check-program-image-wasm check-state-image-wasm \
+                check-invocation-wasm -Doptimize=safe --summary all --verbose ;;
+          esac
       - name: Admit complete bounded compiler cache
         id: cache_size
-        if: ${{ !cancelled() && matrix.lane == 'contracts' }}
+        if: ${{ !cancelled() && matrix.lane != 'installation' }}
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
@@ -114,7 +118,7 @@ jobs:
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25
         with:
           path: .zig-cache-upload
-          key: horos-native-v1-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ hashFiles('build.zig.zon') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: horos-${{ matrix.lane }}-v1-${{ runner.os }}-${{ runner.arch }}-0.17.1-${{ hashFiles('build.zig.zon') }}-${{ github.run_id }}-${{ github.run_attempt }}
   native:
     name: native
     needs: [source, qualify]
@@ -122,7 +126,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: Require source and both qualification lanes
+      - name: Require source and every qualification lane
         env:
           SOURCE: ${{ needs.source.result }}
           QUALIFICATION: ${{ needs.qualify.result }}
