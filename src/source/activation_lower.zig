@@ -139,6 +139,14 @@ fn lowerInternal(
 /// Reconstruct the canonical input to recovery-preserving coalescing. The
 /// frontend remains trusted; no submitted intermediate program is accepted.
 pub fn lowerRecoveryInput(allocator: std.mem.Allocator, input: ast.Module) Error!Construction {
+    return lowerRecoveryInputWithWork(allocator, input, null);
+}
+
+pub fn lowerRecoveryInputWithWork(
+    allocator: std.mem.Allocator,
+    input: ast.Module,
+    work: ?*u64,
+) Error!Construction {
     return (try lowerBody(
         allocator,
         input,
@@ -147,7 +155,7 @@ pub fn lowerRecoveryInput(allocator: std.mem.Allocator, input: ast.Module) Error
         &.{},
         .{ .recovery = true },
         true,
-        null,
+        work,
         null,
     )).?;
 }
@@ -288,7 +296,11 @@ fn lowerBody(
         const admitted = selected.admission;
         try admitted.receive(admitted.context, program, facts);
     }
-    if (work != null) return null;
+    if (work != null and !recovery_input) return null;
+    if (work) |remaining| {
+        var direct_records: data.wire.Writer = .{ .remaining = remaining };
+        try data.record.write(ir.Program, program, &direct_records);
+    }
     const ordered = try optimizeDirect(&compiler, program, options);
     if (!component and !recovery_input) return try coalesce(allocator, ordered, &compiler, options);
     return try ownConstruction(allocator, ordered, &compiler, imports, component, borrows, options);

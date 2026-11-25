@@ -51,6 +51,7 @@ pub const dead_computation = @import("dead_computation.zig");
 pub const dead_arguments = @import("dead_arguments.zig");
 pub const aggregate_reduction = @import("aggregate_reduction.zig");
 pub const expression_reuse = @import("expression_reuse.zig");
+pub const scalar_field_reuse = @import("scalar_field_reuse.zig");
 pub const cell_reduction = @import("cell_reduction.zig");
 pub const capture_reduction = @import("capture_reduction.zig");
 pub const capture_summary = @import("capture_summary.zig");
@@ -80,3 +81,5 @@ test {
 }
 
 pub const record = @import("record.zig");
+
+pub const AllocationBudget = @import("allocation_budget.zig");

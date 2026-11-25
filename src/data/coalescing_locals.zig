@@ -18,6 +18,8 @@ pub const Names = struct {
 
     /// All allocations belong to the caller's scratch arena, including on failure.
     pub fn init(a: std.mem.Allocator, function: ir.Function, work: *graph.Work) Error!Names {
+        try work.chargeBounded(function.layout.slots.len);
+        try work.chargeBounded(function.custody.len);
         const slots = try a.alloc(p.Id, function.layout.slots.len);
         const custody = try a.alloc(p.Id, function.custody.len);
         @memset(slots, r.missing);
@@ -36,7 +38,7 @@ pub const Names = struct {
         const result = &self.slots[@intCast(old)];
         if (result.* == r.missing) {
             result.* = self.slot_order.items.len;
-            try self.slot_order.append(self.allocator, old);
+            try self.work.append(self.allocator, &self.slot_order, old);
         }
         return result.*;
     }
@@ -47,14 +49,14 @@ pub const Names = struct {
         var cursor = old;
         while (self.custody[@intCast(cursor)] == r.missing) {
             try self.work.charge(1);
-            try chain.append(self.allocator, cursor);
+            try self.work.append(self.allocator, &chain, cursor);
             const parent = self.function.custody[@intCast(cursor)].parent orelse break;
             if (parent >= cursor) return error.InvalidReference;
             cursor = parent;
         }
         while (chain.pop()) |id| {
             self.custody[@intCast(id)] = self.scope_order.items.len;
-            try self.scope_order.append(self.allocator, id);
+            try self.work.append(self.allocator, &self.scope_order, id);
         }
         return self.custody[@intCast(old)];
     }
@@ -63,12 +65,13 @@ pub const Names = struct {
         for (self.function.layout.slots, self.slots, 0..) |schema, name, old| {
             try self.work.charge(1);
             if (schema >= schemas.len) return error.InvalidReference;
-            if (name == r.missing) try remaining.append(
+            if (name == r.missing) try self.work.append(
                 self.allocator,
+                &remaining,
                 .{ .schema = schemas[@intCast(schema)], .old = old },
             );
         }
-        std.mem.sort(Slot, remaining.items, {}, Slot.less);
+        try sorted(Slot, remaining.items, {}, Slot.less, self.work, null);
         for (remaining.items) |item| _ = try self.slot(item.old);
         try self.completeScopes();
     }
@@ -82,7 +85,8 @@ pub const Names = struct {
         while (cursor < self.scope_order.items.len) : (cursor += 1) {
             const parent = self.scope_order.items[cursor];
             const children = tree.children[@intCast(parent)].items;
-            std.mem.sort(p.Id, children, @as([]const p.Id, tree.ranks), ScopeTree.lessChild);
+            const ranks: []const p.Id = tree.ranks;
+            try sorted(p.Id, children, ranks, ScopeTree.lessChild, self.work, null);
             for (children) |child| {
                 try self.work.charge(1);
                 if (self.custody[@intCast(child)] == r.missing) _ = try self.scope(child);
@@ -92,6 +96,55 @@ pub const Names = struct {
     }
 };
 
+fn sorted(
+    comptime T: type,
+    items: []T,
+    context: anytype,
+    comptime less: fn (@TypeOf(context), T, T) bool,
+    work: *graph.Work,
+    comptime metered_less: anytype,
+) Error!void {
+    if (work.remaining == null and !work.compact_refinement)
+        return std.mem.sort(T, items, context, less);
+    if (items.len < 2) return;
+    const Heap = struct {
+        values: []T,
+        context: @TypeOf(context),
+        work: *graph.Work,
+
+        fn before(self: @This(), i: usize, j: usize) Error!bool {
+            try self.work.chargeBounded(1);
+            if (comptime @TypeOf(metered_less) != @TypeOf(null))
+                return metered_less(self.work, self.values[i], self.values[j]);
+            return less(self.context, self.values[i], self.values[j]);
+        }
+
+        fn sift(self: @This(), start: usize, end: usize) Error!void {
+            var root = start;
+            while (root < end / 2) {
+                var child = 2 * root + 1;
+                if (child + 1 < end and try self.before(child, child + 1)) child += 1;
+                if (!try self.before(root, child)) break;
+                std.mem.swap(T, &self.values[root], &self.values[child]);
+                root = child;
+            }
+        }
+    };
+    const heap: Heap = .{ .values = items, .context = context, .work = work };
+    var start = items.len / 2;
+    while (start > 0) {
+        start -= 1;
+        try heap.sift(start, items.len);
+    }
+    var end = items.len;
+    while (end > 1) {
+        try work.chargeBounded(1);
+        end -= 1;
+        std.mem.swap(T, &items[0], &items[end]);
+        try heap.sift(0, end);
+    }
+}
+
 const Slot = struct {
     schema: p.Id,
     old: p.Id,
@@ -100,6 +153,36 @@ const Slot = struct {
     }
 };
 const Shape = struct { old: p.Id, height: usize, children: []const p.Id = &.{} };
+
+test "bounded custody sorting compares child ranks only through their common prefix" {
+    const wide: [256]p.Id = @splat(1);
+    var shapes: [32]Shape = undefined;
+    for (&shapes, 0..) |*shape, index| shape.* = .{
+        .old = shapes.len - index,
+        .height = 1,
+        .children = if (index == 0) &wide else wide[0..1],
+    };
+    var expected = shapes;
+    std.mem.sort(Shape, &expected, {}, ScopeTree.lessShape);
+    var shared: u64 = 1024;
+    var work: graph.Work = .{ .remaining = &shared };
+    try sorted(Shape, &shapes, {}, ScopeTree.lessShape, &work, ScopeTree.lessShapeMetered);
+    try std.testing.expectEqualDeep(expected, shapes);
+    try std.testing.expect(shared < 1024);
+    const differing: [256]p.Id = @splat(2);
+    shared = 1;
+    try std.testing.expectEqual(.lt, try ScopeTree.orderRanks(&work, &wide, &differing));
+    try std.testing.expectEqual(0, shared);
+    try std.testing.expectError(error.WorkLimit, ScopeTree.orderRanks(&work, &wide, &wide));
+    try std.testing.expect(work.exhausted and !work.local_exhausted);
+    var local: graph.Work = .{ .limit = 1, .compact_refinement = true };
+    try std.testing.expectError(
+        error.WorkLimit,
+        sorted(Shape, &shapes, {}, ScopeTree.lessShape, &local, ScopeTree.lessShapeMetered),
+    );
+    try std.testing.expect(local.local_exhausted);
+}
+
 const ScopeTree = struct {
     allocator: std.mem.Allocator,
     work: *graph.Work,
@@ -112,6 +195,7 @@ const ScopeTree = struct {
         scopes: []const ir.CustodyScope,
         work: *graph.Work,
     ) Error!ScopeTree {
+        try work.chargeBounded(scopes.len);
         const children = try a.alloc(std.ArrayList(p.Id), scopes.len);
         @memset(children, .empty);
         const shapes = try a.alloc(Shape, scopes.len);
@@ -125,11 +209,11 @@ const ScopeTree = struct {
                 if (parent >= cursor) return error.InvalidReference;
                 const index: usize = @intCast(parent);
                 heights[index] = @max(heights[index], heights[cursor] + 1);
-                try children[index].append(a, cursor);
+                try work.append(a, &children[index], cursor);
             } else if (cursor != 0) return error.InvalidProgram;
             shapes[cursor] = .{ .old = cursor, .height = heights[cursor] };
         }
-        std.mem.sort(Shape, shapes, {}, lessHeight);
+        try sorted(Shape, shapes, {}, lessHeight, work, null);
         return .{
             .allocator = a,
             .work = work,
@@ -148,19 +232,21 @@ const ScopeTree = struct {
             {
                 const shape = &self.shapes[end];
                 const children = self.children[@intCast(shape.old)].items;
+                try self.work.chargeBounded(1);
                 const ranks = try self.allocator.alloc(p.Id, children.len);
                 for (children, ranks) |child, *target| {
                     try self.work.charge(1);
                     target.* = self.ranks[@intCast(child)];
                 }
-                std.mem.sort(p.Id, ranks, {}, std.sort.asc(p.Id));
+                try sorted(p.Id, ranks, {}, std.sort.asc(p.Id), self.work, null);
                 shape.children = ranks;
             }
-            std.mem.sort(Shape, self.shapes[first..end], {}, lessShape);
+            try sorted(Shape, self.shapes[first..end], {}, lessShape, self.work, lessShapeMetered);
             for (self.shapes[first..end], first..) |shape, index| {
                 try self.work.charge(1);
                 const different = index == first or
-                    !std.mem.eql(p.Id, self.shapes[index - 1].children, shape.children);
+                    self.shapes[index - 1].children.len != shape.children.len or
+                    try self.childOrder(self.shapes[index - 1].children, shape.children) != .eq;
                 if (different) next_rank += 1;
                 self.ranks[@intCast(shape.old)] = next_rank;
             }
@@ -173,6 +259,23 @@ const ScopeTree = struct {
     fn lessShape(_: void, a: Shape, b: Shape) bool {
         const order = std.mem.order(p.Id, a.children, b.children);
         return if (order == .eq) a.old < b.old else order == .lt;
+    }
+    fn lessShapeMetered(work: *graph.Work, a: Shape, b: Shape) Error!bool {
+        const order = try orderRanks(work, a.children, b.children);
+        return if (order == .eq) a.old < b.old else order == .lt;
+    }
+    fn childOrder(self: ScopeTree, a: []const p.Id, b: []const p.Id) Error!std.math.Order {
+        if (self.work.remaining == null and !self.work.compact_refinement)
+            return std.mem.order(p.Id, a, b);
+        return orderRanks(self.work, a, b);
+    }
+    fn orderRanks(work: *graph.Work, a: []const p.Id, b: []const p.Id) Error!std.math.Order {
+        for (0..@min(a.len, b.len)) |i| {
+            try work.chargeBounded(1);
+            const order = std.math.order(a[i], b[i]);
+            if (order != .eq) return order;
+        }
+        return std.math.order(a.len, b.len);
     }
     fn lessChild(ranks: []const p.Id, a: p.Id, b: p.Id) bool {
         const left = ranks[@intCast(a)];
@@ -188,6 +291,24 @@ pub const Blocks = struct {
     function: p.Id,
     names: std.AutoHashMapUnmanaged(p.Id, p.Id) = .empty,
     order: std.ArrayList(p.Id) = .empty,
+    direct: ?[]p.Id = null,
+
+    pub fn index(a: std.mem.Allocator, count: usize, work: *graph.Work) Error!?[]p.Id {
+        if (work.remaining == null and !work.compact_refinement) return null;
+        try work.chargeBounded(count);
+        const result = try a.alloc(p.Id, count);
+        @memset(result, r.missing);
+        return result;
+    }
+
+    pub fn name(self: Blocks, id: p.Id) ?p.Id {
+        if (self.direct) |slots| {
+            if (id >= slots.len or slots[@intCast(id)] == r.missing) return null;
+            if (self.program.blocks[@intCast(id)].function != self.function) return null;
+            return slots[@intCast(id)];
+        }
+        return self.names.get(id);
+    }
 
     pub fn collect(self: *Blocks) Error!void {
         if (self.function >= self.program.functions.len) return error.InvalidReference;
@@ -203,6 +324,14 @@ pub const Blocks = struct {
         if (old >= self.program.blocks.len or
             self.program.blocks[@intCast(old)].function != self.function)
             return error.InvalidReference;
+        if (self.direct) |slots| {
+            const slot = &slots[@intCast(old)];
+            if (slot.* == r.missing) {
+                slot.* = self.order.items.len;
+                try self.work.append(self.allocator, &self.order, old);
+            }
+            return slot.*;
+        }
         const entry = try self.names.getOrPut(self.allocator, old);
         if (!entry.found_existing) {
             entry.value_ptr.* = self.order.items.len;

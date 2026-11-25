@@ -78,7 +78,7 @@ test "source recovery evidence owns arrays of relocation slices" {
     try std.testing.expectEqualSlices(u64, &.{ 7, 11 }, copied[1]);
 }
 
-fn coalescedBindingModule(b: *source.Builder) !struct {
+pub fn coalescedBindingModule(b: *source.Builder, consumer: ?source.Id) !struct {
     module: source.Module,
     first: source.Id,
     second: source.Id,
@@ -86,19 +86,24 @@ fn coalescedBindingModule(b: *source.Builder) !struct {
     const unit = try b.scalar(void);
     const word = try b.scalar(u64);
     const pair = try b.schema(.{ .product = &.{ word, word } });
-    const entry = try b.declare(&.{ word, word }, pair, &.{}, &.{});
+    const arguments: []const u64 = if (consumer != null)
+        &.{ word, word, try b.scalar(bool) }
+    else
+        &.{ word, word };
+    const entry = try b.declare(arguments, if (consumer == null) pair else word, &.{}, &.{});
     const first = try b.declare(&.{word}, word, &.{}, &.{});
     const second = try b.declare(&.{word}, word, &.{}, &.{});
     try b.define(first, try b.pure(try b.reference(b.parameter(first, 0))));
     try b.define(second, try b.pure(try b.reference(b.parameter(second, 0))));
     const left = try b.variable(word);
     const right = try b.variable(word);
-    const result = try b.pure(try b.primitive(
-        pair,
-        .product,
-        &.{ try b.reference(left), try b.reference(right) },
-        0,
-    ));
+    const lhs = try b.reference(left);
+    const rhs = try b.reference(right);
+    const aggregate = try b.primitive(pair, .product, &.{ lhs, rhs }, 0);
+    const result = if (consumer) |f| try b.term(.{ .call = .{
+        .function = f,
+        .arguments = &.{ try b.reference(b.parameter(entry, 2)), aggregate, lhs, rhs },
+    } }) else try b.pure(aggregate);
     try b.define(
         entry,
         try b.bind(
@@ -161,7 +166,7 @@ fn rejectForgedBindingParameters(module: source.Module, compiled: source.Compile
 test "source recovery retains binding aliases through checked function coalescing" {
     var b = source.Builder.init(a);
     defer b.deinit();
-    const fixture = try coalescedBindingModule(&b);
+    const fixture = try coalescedBindingModule(&b, null);
     const module = fixture.module;
     const first = fixture.first;
     const second = fixture.second;

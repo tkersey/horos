@@ -48,8 +48,17 @@ test "coalescing diagnostics preserve original aliases across projection and suc
     var facts = try @import("activation_ownership.zig").analyze(testing.allocator, original);
     facts.deinit();
     const baseline = try r.ownReachable(a, a, original);
-    var trace = try origins.Trace.init(testing.allocator, original, baseline);
+    var construction_work: u64 = 100_000;
+    var trace = try origins.Trace.initWithWork(
+        testing.allocator,
+        original,
+        baseline,
+        &construction_work,
+    );
     defer trace.deinit();
+    try testing.expect(construction_work < 100_000);
+    construction_work = 0;
+    _ = try pass.Correspondence.copy(a, &trace);
     var work: graph.Work = .{};
     const analysis = try discovery.analyze(a, baseline.program, &work);
     var first = try candidate.build(testing.allocator, a, baseline.program, analysis, .full, &work);
@@ -62,6 +71,7 @@ test "coalescing diagnostics preserve original aliases across projection and suc
     try testing.expect(diagnostic.origins.ambiguous);
     try testing.expectEqual(@as(?p.Id, 0), diagnostic.original_slot);
     try trace.advance(first.correspondence);
+    try testing.expectEqual(@as(u64, 0), construction_work);
     try testing.expectEqualSlices(p.Id, &.{ 1, 0 }, trace.locals[2].slots);
     try testing.expectEqualSlices(p.Id, &.{ 0, 2, 1, 3 }, trace.locals[2].custody);
     const next_analysis = try discovery.analyze(a, first.program, &work);
@@ -374,4 +384,67 @@ test "coalescing origin composition retains sparse nominal regions without dense
     stale.final[@backingInt(r.Kind.region)] = &.{};
     try testing.expectError(error.InvalidCorrespondence, trace.advance(stale));
     try testing.expectEqual(@as(?p.Id, 0), trace.resolve(.region, large));
+}
+
+test "optional coalescing attribution preserves the primary allocation error at exact work" {
+    const maximum = std.math.maxInt(u64);
+    var measured: u64 = maximum;
+    var first = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    try testing.expectError(error.OutOfMemory, pass.runWithWork(
+        first.allocator(),
+        typed_constructors,
+        .{},
+        &measured,
+    ));
+    var exact = maximum - measured;
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    var diagnostic: pass.Diagnostic = .{};
+    try testing.expectError(error.OutOfMemory, pass.runWithWork(
+        failing.allocator(),
+        typed_constructors,
+        .{ .diagnostic = &diagnostic },
+        &exact,
+    ));
+    try testing.expectEqual(error.OutOfMemory, diagnostic.code.?);
+    try testing.expectEqual(@as(u64, 0), exact);
+
+    diagnostic = .{ .target = .{ .function = 0, .capture = 0, .slot = 1 } };
+    origins.explainOriginalWithWork(typed_constructors, &diagnostic, &exact);
+    try testing.expectEqualSlices(p.Id, &.{0}, diagnostic.origins.items());
+    try testing.expectEqual(@as(?p.Id, 1), diagnostic.original_slot);
+    try testing.expect(!diagnostic.origins.truncated);
+
+    diagnostic = .{ .target = .{ .capture = 0 } };
+    origins.explainOriginalWithWork(typed_constructors, &diagnostic, &exact);
+    try testing.expect(diagnostic.origins.truncated);
+    exact = typed_constructors.constructors.len;
+    origins.explainOriginalWithWork(typed_constructors, &diagnostic, &exact);
+    try testing.expectEqualSlices(p.Id, &.{ 0, 1 }, diagnostic.origins.items());
+    try testing.expect(!diagnostic.origins.truncated);
+    try testing.expectEqual(@as(u64, 0), exact);
+}
+
+test "coalescing diagnostic charges only selected origin, slot and block scans" {
+    var scratch = std.heap.ArenaAllocator.init(testing.allocator);
+    defer scratch.deinit();
+    const a = scratch.allocator();
+    const baseline = try r.ownReachable(a, a, fixture);
+    var trace = try origins.Trace.init(testing.allocator, fixture, baseline);
+    defer trace.deinit();
+    var remaining: u64 = fixture.functions.len + 2;
+    trace.remaining = &remaining;
+    var diagnostic: pass.Diagnostic = .{ .target = .{ .function = 0, .block = 0, .slot = 0 } };
+    try trace.explainWithWork(null, &diagnostic);
+    try testing.expectEqualSlices(p.Id, &.{0}, diagnostic.origins.items());
+    try testing.expectEqual(@as(?p.Id, 0), diagnostic.original_slot);
+    try testing.expectEqual(@as(?p.Id, 0), diagnostic.original_block);
+    try testing.expectEqual(@as(u64, 0), remaining);
+
+    diagnostic = .{};
+    try trace.explainWithWork(null, &diagnostic);
+    try testing.expect(!diagnostic.origins.truncated);
+    diagnostic.target.function = 0;
+    trace.explain(null, &diagnostic);
+    try testing.expect(diagnostic.origins.truncated);
+    try testing.expectEqual(@as(usize, 0), diagnostic.origins.count);
 }

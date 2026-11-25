@@ -40,6 +40,12 @@ fn check(nodes: []const Node) !void {
     var work: graph.Work = .{};
     const classes = try graph.discover(testing.allocator, nodes, &.{}, &work);
     defer testing.allocator.free(classes);
+    var remaining: u64 = 1_000_000;
+    var bounded: graph.Work = .{ .remaining = &remaining, .compact_refinement = true };
+    const compact = try graph.discover(testing.allocator, nodes, &.{}, &bounded);
+    defer testing.allocator.free(compact);
+    try testing.expectEqualSlices(usize, classes, compact);
+    try testing.expectEqual(bounded.units, 1_000_000 - remaining);
     const expected = try oracle(testing.allocator, nodes);
     defer testing.allocator.free(expected);
     for (classes, 0..) |x, i| {
@@ -142,6 +148,16 @@ test "coalescing profile singleton restriction propagates to parents and recursi
     );
     defer testing.allocator.free(restricted);
     try testing.expectEqualSlices(usize, &.{ 0, 1, 2, 3 }, restricted);
+    var remaining: u64 = 4096;
+    var bounded: graph.Work = .{ .remaining = &remaining, .compact_refinement = true };
+    const compact = try graph.discover(
+        testing.allocator,
+        &nodes,
+        &.{ false, false, true, true },
+        &bounded,
+    );
+    defer testing.allocator.free(compact);
+    try testing.expectEqualSlices(usize, restricted, compact);
     const recursive = [_]Node{
         .{ .kind = .function, .label = "even", .edges = &.{.{ .role = 0, .target = 1 }} },
         .{ .kind = .function, .label = "odd", .edges = &.{.{ .role = 0, .target = 0 }} },
@@ -179,6 +195,11 @@ test "coalescing work accounting rejects overflow without wrapping or publishing
     work = .{ .limit = 3, .units = 2 };
     try testing.expectError(error.WorkLimit, work.charge(2));
     try testing.expectEqual(@as(u64, 2), work.units);
+    var remaining: u64 = 2;
+    work = .{ .remaining = &remaining };
+    try std.testing.expectError(error.WorkLimit, work.charge(3));
+    try testing.expect(work.exhausted);
+    try testing.expectEqual(@as(u64, 2), remaining);
 }
 
 test "coalescing discovery rejects invalid references restrictions and exhausted work" {

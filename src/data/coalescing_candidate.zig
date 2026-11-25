@@ -60,7 +60,15 @@ pub fn buildObserved(
 ) Error!Candidate {
     if (diagnostic) |d| d.* = .{ .stage = .mapping };
     const correspondence = try discovery.correspondence(scratch, original, analysis, profile, work);
-    return materialize(allocator, scratch, original, correspondence, trace, diagnostic);
+    return materialize(
+        allocator,
+        scratch,
+        original,
+        correspondence,
+        trace,
+        diagnostic,
+        work.remaining,
+    );
 }
 
 pub fn materialize(
@@ -70,32 +78,39 @@ pub fn materialize(
     proposed: witness.Witness,
     trace: ?*const origins.Trace,
     diagnostic: ?*origins.Diagnostic,
+    remaining: ?*u64,
 ) Error!Candidate {
     var correspondence = proposed;
     var temporary = std.heap.ArenaAllocator.init(allocator);
     defer temporary.deinit();
-    const rewritten = try r.ownQuotient(
+    const rewritten = try r.ownQuotientWithWork(
         temporary.allocator(),
         scratch,
         original,
         correspondence.representatives,
         correspondence.final,
+        remaining,
     );
     // This check precedes cleanup: projection cannot conceal a faulty rewrite.
-    try checkTransformation(allocator, original, rewritten, correspondence, trace, diagnostic);
+    try checkTransformation(
+        allocator,
+        original,
+        rewritten,
+        correspondence,
+        trace,
+        diagnostic,
+        remaining,
+    );
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
-    const projected = try r.ownReachable(arena.allocator(), scratch, rewritten);
-    var composed: r.Maps = undefined;
-    for (correspondence.final, &composed, 0..) |map, *result, kind| {
-        const values = try scratch.alloc(p.Id, map.len);
-        for (
-            map,
-            values,
-        ) |old, *target| target.* = try projected.mapped(@fromBackingInt(@intCast(kind)), old);
-        result.* = values;
-    }
-    correspondence.final = composed;
+    const projected = try r.ownReachableWithRegionOrder(
+        arena.allocator(),
+        scratch,
+        rewritten,
+        remaining,
+        .unobserved,
+    );
+    correspondence.final = try compose(scratch, projected, correspondence.final, remaining);
     try checkTransformation(
         allocator,
         original,
@@ -103,25 +118,71 @@ pub fn materialize(
         correspondence,
         trace,
         diagnostic,
+        remaining,
     );
     if (diagnostic) |d| d.* = .{ .stage = .candidate };
-    var flow = admission.analyzeDiagnosed(
+    var flow = try candidateFlow(
         allocator,
         projected.program,
-        if (diagnostic) |d| &d.target else null,
-    ) catch |err| {
-        if (diagnostic) |d| if (trace) |t| t.explain(correspondence, d);
-        return err;
-    };
+        correspondence,
+        trace,
+        diagnostic,
+        remaining,
+    );
     errdefer flow.deinit();
     if (diagnostic) |d| d.* = .{ .stage = .cost };
     return .{
         .arena = arena,
         .program = projected.program,
         .flow = flow,
-        .bytes = try image.encodedLength(projected.program),
+        .bytes = try image.encodedLengthWithWork(projected.program, remaining),
         .entries = try count(projected.program),
         .correspondence = correspondence,
+    };
+}
+
+fn compose(
+    scratch: std.mem.Allocator,
+    projected: r.Projection,
+    before: r.Maps,
+    remaining: ?*u64,
+) Error!r.Maps {
+    var composed: r.Maps = undefined;
+    for (before, &composed, 0..) |map, *result, kind| {
+        try @import("admission.zig").spend(remaining, map.len);
+        const values = try scratch.alloc(p.Id, map.len);
+        for (
+            map,
+            values,
+        ) |old, *target| target.* = try projected.mappedWithWork(
+            @fromBackingInt(@intCast(kind)),
+            old,
+            remaining,
+        );
+        result.* = values;
+    }
+    return composed;
+}
+
+fn candidateFlow(
+    allocator: std.mem.Allocator,
+    program: ir.Program,
+    correspondence: witness.Witness,
+    trace: ?*const origins.Trace,
+    diagnostic: ?*origins.Diagnostic,
+    remaining: ?*u64,
+) Error!@import("activation_flow.zig").Facts {
+    return admission.analyzeObservedWithWork(
+        allocator,
+        program,
+        if (diagnostic) |d| &d.target else null,
+        null,
+        remaining,
+    ) catch |err| {
+        if (err != error.RelationLimit) if (diagnostic) |d| {
+            if (trace) |t| t.explain(correspondence, d);
+        };
+        return err;
     };
 }
 
@@ -132,16 +193,20 @@ fn checkTransformation(
     map: witness.Witness,
     trace: ?*const origins.Trace,
     diagnostic: ?*origins.Diagnostic,
+    remaining: ?*u64,
 ) Error!void {
     if (diagnostic) |d| d.* = .{ .stage = .transformation };
-    validation.validateDiagnosed(
+    validation.validateDiagnosedWithWork(
         allocator,
         original,
         result,
         map,
         if (diagnostic) |d| &d.target else null,
+        remaining,
     ) catch |err| {
-        if (diagnostic) |d| if (trace) |t| t.explain(null, d);
+        if (err != error.RelationLimit) if (diagnostic) |d| {
+            if (trace) |t| t.explain(null, d);
+        };
         return err;
     };
     if (diagnostic) |d| d.* = .{ .stage = .mapping };

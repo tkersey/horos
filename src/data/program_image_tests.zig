@@ -29,6 +29,21 @@ const golden = "ABL_BPI3".* ++ [_]u8{
     0, 0, 0, 0, 0, // handlers, captures, regions, resources, constructors
 };
 
+test "bounded image sizing charges compact logical IDs before choosing their spelling" {
+    const slots: [1024]p.Id = @splat(0);
+    var program = example;
+    var function = example.functions[0];
+    function.layout.slots = &slots;
+    program.functions = &.{function};
+    const size = try image.encodedLength(program);
+    try testing.expect(size < slots.len);
+    var work: u64 = size;
+    try testing.expectError(error.RelationLimit, image.encodedLengthWithWork(program, &work));
+    work = size + slots.len;
+    try testing.expectEqual(size, try image.encodedLengthWithWork(program, &work));
+    try testing.expectEqual(0, work);
+}
+
 test "immutable admitted images share facts without accepting mutable lookalikes" {
     var bytes = golden;
     const admitted = try image.Admitted.decode(testing.allocator, &bytes);
@@ -89,6 +104,38 @@ test "immutable admitted images share facts without accepting mutable lookalikes
         error.InvalidState,
         @import("state_admission.zig").validateAdmitted(testing.allocator, admitted, invalid),
     );
+}
+
+test "bounded canonical identity and flow come from the same admitted records" {
+    const owner = try image.Admitted.decode(testing.allocator, &golden);
+    defer owner.deinit();
+    var independent = try owner.analysis(testing.allocator);
+    defer independent.deinit();
+    const maximum: u64 = 1_000_000;
+    var remaining = maximum;
+    var checked = try image.identityWithFlow(testing.allocator, example, &remaining);
+    defer checked.deinit();
+    try testing.expectEqual(owner.identity(), checked.identity);
+    try testing.expectEqual(try image.identity(testing.allocator, example), checked.identity);
+    for (independent.facts.live, checked.facts.live) |expected, actual| {
+        for (expected, actual) |lhs, rhs| {
+            var before = independent.facts.pool.iterator(lhs);
+            var after = checked.facts.pool.iterator(rhs);
+            while (before.next()) |slot| try testing.expectEqual(slot, after.next().?);
+            try testing.expectEqual(null, after.next());
+        }
+    }
+    const used = maximum - remaining;
+    var exact = used;
+    var fit = try image.identityWithFlow(testing.allocator, example, &exact);
+    defer fit.deinit();
+    try testing.expectEqual(0, exact);
+    var short = used - 1;
+    try testing.expectError(error.RelationLimit, image.identityWithFlow(
+        testing.allocator,
+        example,
+        &short,
+    ));
 }
 
 fn admittedFailure(allocator: std.mem.Allocator) !void {

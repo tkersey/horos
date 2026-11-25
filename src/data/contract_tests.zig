@@ -1,5 +1,5 @@
-//! Separate pure-data test entry point; never imported by the production module.
 test {
+    _ = @import("allocation_budget.zig");
     _ = @import("interactions_tests.zig");
     _ = @import("validator_coverage_tests.zig");
     _ = @import("native_decode_tests.zig");
@@ -47,7 +47,6 @@ test {
     _ = @import("coalescing_tests.zig");
     _ = @import("application_specialization_tests.zig");
     _ = @import("aggregate_reduction_tests.zig");
-    _ = @import("expression_reuse_tests.zig");
     _ = @import("cell_reduction_tests.zig");
     _ = @import("capture_reduction_tests.zig");
     _ = @import("capture_summary_tests.zig");

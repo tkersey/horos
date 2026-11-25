@@ -83,3 +83,109 @@ test "closed projection follows resource authority and owns remapped output afte
 test "closed projection releases partial owners at every allocation failure" {
     try @import("allocation_testing.zig").check(testing.allocator, projectionCase, .{});
 }
+
+test "bounded closure follows authorities independently of literal byte length" {
+    var input = fixture;
+    var literals = fixture.constants[0..3].*;
+    var schemas = fixture.schemas[0..4].*;
+    schemas[0] = .bytes;
+    input.schemas = &schemas;
+    for (&literals) |*literal| literal.bytes = &.{0};
+    input.constants = &literals;
+    var remaining: u64 = 10000;
+    const expected = try d.relocation.reachableBlocks(testing.allocator, input, &remaining);
+    defer testing.allocator.free(expected);
+    try testing.expectEqualSlices(bool, &.{ false, true, true }, expected);
+    const cost = 10000 - remaining;
+    const payload = 1024 * 1024;
+    const bytes = try testing.allocator.alloc(u8, d.wire.naturalLength(payload) + payload);
+    defer testing.allocator.free(bytes);
+    @memset(bytes, 0);
+    var writer: d.wire.Writer = .{ .output = bytes };
+    try writer.natural(payload);
+    literals[2].bytes = bytes;
+    var admitted = try d.activation_ownership.analyze(testing.allocator, input);
+    admitted.deinit();
+    var exact = cost;
+    const actual = try d.relocation.reachableBlocks(testing.allocator, input, &exact);
+    defer testing.allocator.free(actual);
+    try testing.expectEqualSlices(bool, expected, actual);
+    try testing.expectEqual(0, exact);
+    var short = cost - 1;
+    try testing.expectError(
+        error.RelationLimit,
+        d.relocation.reachableBlocks(testing.allocator, input, &short),
+    );
+    var output = std.heap.ArenaAllocator.init(testing.allocator);
+    defer output.deinit();
+    var materialize: u64 = bytes.len - 1;
+    try testing.expectError(error.RelationLimit, d.relocation.ownReachableWithWork(
+        output.allocator(),
+        output.allocator(),
+        input,
+        &materialize,
+    ));
+}
+
+const SparseCosts = struct { projection: u64, lookup: u64 };
+
+fn sparseProjectionCosts(comptime width: usize) !SparseCosts {
+    const maximum = std.math.maxInt(u64);
+    var even: [width]u64 = undefined;
+    var odd: [width]u64 = undefined;
+    for (&even, &odd, 0..) |*left, *right, i| {
+        left.* = maximum - 4 * width + 4 * i;
+        right.* = left.* + 1;
+    }
+    var functions = fixture.functions[0..3].*;
+    functions[2].regions = &even;
+    functions[1].regions = &odd;
+    var input = fixture;
+    input.functions = &functions;
+    input.scopes.region_count = maximum;
+    var admitted = try d.activation_ownership.analyze(testing.allocator, input);
+    admitted.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ordinary = try d.relocation.ownReachable(a, a, input);
+    var work: u64 = maximum;
+    const bounded = try d.relocation.ownReachableWithWork(a, a, input, &work);
+    const projection = maximum - work;
+    if (width == 32) {
+        var exact = projection;
+        _ = try d.relocation.ownReachableWithWork(a, a, input, &exact);
+        try testing.expectEqual(0, exact);
+        var short = projection - 1;
+        try testing.expectError(error.RelationLimit, d.relocation.ownReachableWithWork(
+            a,
+            a,
+            input,
+            &short,
+        ));
+    }
+    try testing.expectEqualDeep(ordinary.program, bounded.program);
+    try testing.expectEqual(2 * width, bounded.program.scopes.region_count);
+    var expected = ordinary.regions.iterator();
+    var actual = bounded.regions.iterator();
+    while (expected.next()) |entry| {
+        const received = actual.next().?;
+        try testing.expectEqual(entry.key_ptr.*, received.key_ptr.*);
+        try testing.expectEqual(entry.value_ptr.*, received.value_ptr.*);
+    }
+    try testing.expect(actual.next() == null);
+    const before = work;
+    for (even, odd, 0..) |left, right, i| {
+        try testing.expectEqual(i, try bounded.mappedWithWork(.region, left, &work));
+        try testing.expectEqual(width + i, try bounded.mappedWithWork(.region, right, &work));
+    }
+    try testing.expectError(error.InvalidReference, bounded.mappedWithWork(.region, 0, &work));
+    return .{ .projection = projection, .lookup = before - work };
+}
+
+test "bounded sparse region projection preserves numbering and legacy order at scale" {
+    const small = try sparseProjectionCosts(32);
+    const wide = try sparseProjectionCosts(1024);
+    try testing.expect(wide.projection < 64 * small.projection);
+    try testing.expect(wide.lookup < 64 * small.lookup);
+}

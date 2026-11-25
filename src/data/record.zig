@@ -285,29 +285,33 @@ fn RecordOps(comptime T: type, comptime ancestors: []const type) type {
             };
         }
 
-        fn equal(a: T, b: T) bool {
+        fn equal(a: T, b: T, work: anytype) EqualError(@TypeOf(work))!bool {
+            if (comptime @TypeOf(work) != @TypeOf(null)) {
+                const width = switch (@typeInfo(T)) {
+                    .bool, .optional => 1,
+                    .int => wire.naturalLength(a),
+                    .@"enum" => wire.naturalLength(@backingInt(a)),
+                    .@"union" => wire.naturalLength(@backingInt(std.meta.activeTag(a))),
+                    .pointer => wire.naturalLength(a.len),
+                    .array, .@"struct", .void => 0,
+                    else => @compileError("not a logical portable record: " ++ @typeName(T)),
+                };
+                try @import("admission.zig").spend(work, width);
+            }
             return switch (@typeInfo(T)) {
-                .pointer => |info| blk: {
-                    if (a.len != b.len) break :blk false;
-                    for (a, b) |left, right|
-                        if (!RecordOps(
-                            info.child,
-                            ancestry,
-                        ).equal(
-                            left,
-                            right,
-                        ))
-                            break :blk false;
-                    break :blk true;
-                },
+                .pointer => |info| if (a.len == b.len)
+                    equalElements(info.child, a, b, work)
+                else
+                    false,
+                .array => |info| equalElements(info.child, &a, &b, work),
                 .@"struct" => |info| blk: {
-                    inline for (
-                        info.field_names,
-                        info.field_types,
-                    ) |field_name, FieldType| if (!RecordOps(FieldType, ancestry).equal(
-                        @field(a, field_name),
-                        @field(b, field_name),
-                    )) break :blk false;
+                    inline for (info.field_names, info.field_types) |name, Field| {
+                        if (!try RecordOps(Field, ancestry).equal(
+                            @field(a, name),
+                            @field(b, name),
+                            work,
+                        )) break :blk false;
+                    }
                     break :blk true;
                 },
                 .@"union" => switch (a) {
@@ -315,38 +319,47 @@ fn RecordOps(comptime T: type, comptime ancestors: []const type) type {
                         tag => |other| RecordOps(@TypeOf(payload), ancestry).equal(
                             payload,
                             other,
+                            work,
                         ),
                         else => false,
                     },
                 },
-                .array => |info| blk: {
-                    for (a, b) |left, right|
-                        if (!RecordOps(
-                            info.child,
-                            ancestry,
-                        ).equal(
-                            left,
-                            right,
-                        ))
-                            break :blk false;
-                    break :blk true;
+                .optional => |info| blk: {
+                    const left = a orelse break :blk b == null;
+                    const right = b orelse break :blk false;
+                    break :blk RecordOps(info.child, ancestry).equal(left, right, work);
                 },
-                .optional => |info| if (a) |left|
-                    (if (b) |right|
-                        RecordOps(
-                            info.child,
-                            ancestry,
-                        ).equal(
-                            left,
-                            right,
-                        )
-                    else
-                        false)
-                else
-                    b == null,
                 .void => true,
                 else => a == b,
             };
+        }
+
+        fn equalElements(
+            comptime Child: type,
+            a: anytype,
+            b: anytype,
+            work: anytype,
+        ) EqualError(@TypeOf(work))!bool {
+            if (Child == u8) {
+                if (comptime @TypeOf(work) != @TypeOf(null))
+                    try @import("admission.zig").spend(work, a.len);
+                for (a, b) |left, right| if (left != right) return false;
+                return true;
+            }
+            if (@sizeOf(Child) == 0) {
+                if (comptime @TypeOf(work) == @TypeOf(null)) return true;
+                if (a.len == 0) return true;
+                var remaining = work.*;
+                if (!try RecordOps(Child, ancestry).equal(a[0], b[0], &remaining)) return false;
+                const width = work.* - remaining;
+                const total = std.math.mul(u64, a.len, width) catch return error.RelationLimit;
+                try @import("admission.zig").spend(work, total);
+                return true;
+            }
+            for (a, b) |left, right| {
+                if (!try RecordOps(Child, ancestry).equal(left, right, work)) return false;
+            }
+            return true;
         }
     };
 }
@@ -394,7 +407,11 @@ test "union decoding uses declared wire tags instead of field indexes" {
 
 test "numeric sequence sizing agrees with emitted and hashed current record bytes" {
     const Argument = @import("activation.zig").Source;
-    const Row = struct { ids: []const u64, arguments: []const Argument };
+    const Row = struct {
+        ids: []const u64,
+        arguments: []const Argument,
+        bytes: []const u8 = &.{ 127, 128, 255 },
+    };
     for ([_]u64{ 0, 127, 128, 16383, 16384, std.math.maxInt(u64) }) |number| {
         const value: Row = .{
             .ids = &.{ number, 0, 128 },
@@ -406,6 +423,9 @@ test "numeric sequence sizing agrees with emitted and hashed current record byte
         var emitted: wire.Writer = .{ .output = &buffer };
         try write(Row, value, &emitted);
         try std.testing.expectEqual(emitted.position, measured.position);
+        var remaining: u64 = emitted.position;
+        try std.testing.expect(try equalWithWork(Row, value, value, &remaining));
+        try std.testing.expectEqual(0, remaining);
         var hash = std.crypto.hash.sha2.Sha256.init(.{});
         var hashed: wire.Writer = .{ .hasher = &hash };
         try write(Row, value, &hashed);
@@ -437,7 +457,15 @@ test "current record hashes preserve long full-width vectors" {
 
 /// Compare declared record contents, including borrowed slice elements.
 pub fn equal(comptime T: type, a: T, b: T) bool {
-    return RecordOps(T, &.{}).equal(a, b);
+    return RecordOps(T, &.{}).equal(a, b, null) catch |err| switch (err) {};
+}
+
+fn EqualError(comptime Work: type) type {
+    return if (Work == @TypeOf(null)) error{} else error{RelationLimit};
+}
+
+pub fn equalWithWork(comptime T: type, a: T, b: T, work: *u64) error{RelationLimit}!bool {
+    return RecordOps(T, &.{}).equal(a, b, work);
 }
 
 pub fn writeAlloc(

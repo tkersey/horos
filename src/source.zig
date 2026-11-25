@@ -15,6 +15,8 @@ pub const Id = p.Id;
 pub const Module = ast.Module;
 pub const Compiled = @import("source/activation_lower.zig").Construction;
 pub const RecoveryBinding = @import("source/activation_lower.zig").RecoveryBinding;
+pub const recovery_optimization = @import("source/recovery_optimization.zig");
+pub const lowerRecoveryOptimized = recovery_optimization.lower;
 pub const recovery = @import("source/recovery.zig");
 pub const relation = @import("source/relation.zig");
 pub const consumer = @import("source/consumer.zig");
@@ -161,11 +163,15 @@ pub const Builder = struct {
         });
     }
     pub fn literal(self: *Builder, wanted: p.Literal) Error!p.Id {
+        return self.literalWithWork(wanted, null);
+    }
+    pub fn literalWithWork(self: *Builder, wanted: p.Literal, work: ?*u64) Error!p.Id {
         var id: p.Id = self.constants.items.len;
-        for (self.constants.items, 0..) |present, index| if (equal(p.Literal, present, wanted)) {
+        for (self.constants.items, 0..) |present, index| {
+            if (!try literalEqual(present, wanted, work)) continue;
             id = index;
             break;
-        };
+        }
         if (id == self.constants.items.len) try self.constants.append(
             self.allocator(),
             try own(p.Literal, self.allocator(), wanted),
@@ -486,6 +492,10 @@ fn OwnValue(comptime T: type) type {
             }
         }
     };
+}
+fn literalEqual(present: p.Literal, wanted: p.Literal, work: ?*u64) Error!bool {
+    const remaining = work orelse return equal(p.Literal, present, wanted);
+    return data.record.equalWithWork(p.Literal, present, wanted, remaining);
 }
 inline fn equal(comptime T: type, left: T, right: T) bool {
     return switch (@typeInfo(T)) {

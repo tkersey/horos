@@ -964,7 +964,7 @@ fn runInternal(
             stats.baseline_bytes,
             growth(options, stats.baseline_bytes),
         ) catch return error.Capacity,
-        .quiet = .{ .work_limit = options.coalescing.work_limit },
+        .quiet = options.coalescing.withoutObservations(),
     };
     defer invocation.deinit();
     if (try invocation.run()) |result| return result;

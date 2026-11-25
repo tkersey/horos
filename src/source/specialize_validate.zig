@@ -83,6 +83,16 @@ fn validateBody(
     out: *const pe.Output,
     work: ?*u64,
 ) Error!void {
+    try checkDerivation(a, original, request, out, work);
+    try admit(a, out.module(), work);
+}
+fn checkDerivation(
+    a: std.mem.Allocator,
+    original: ast.Module,
+    request: pe.Request,
+    out: *const pe.Output,
+    work: ?*u64,
+) Error!void {
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const storage = arena.allocator();
@@ -125,7 +135,10 @@ fn validateBody(
     };
     defer checker.reads.deinit(storage);
     for (out.functions.items, 0..) |f, i| try checker.function(f, i);
-    try admit(a, residual, work);
+}
+fn recordEqual(comptime T: type, lhs: T, rhs: T, work: ?*u64) Error!bool {
+    if (work) |remaining| return data.record.equalWithWork(T, lhs, rhs, remaining);
+    return data.record.equal(T, lhs, rhs);
 }
 fn admit(a: std.mem.Allocator, module: ast.Module, work: ?*u64) Error!void {
     if (work) |remaining| return source.admitWithWork(a, module, remaining);
@@ -143,22 +156,23 @@ fn validateEnvelope(
     const identity = try pe.identityWithWork(storage, original, request, work);
     try require(std.mem.eql(u8, &out.key, &identity));
     try require(try pe.requestEqualWithWork(storage, request, out.request, work));
-    try require(data.record.equal(ast.Module, original, out.original));
+    try require(try recordEqual(ast.Module, original, out.original, work));
     try require(
         original.failure == residual.failure and original.region_count == residual.region_count,
     );
     inline for (.{ "schemas", "effects", "handlers", "resources" }) |field| try require(
-        data.record.equal(
+        try recordEqual(
             @TypeOf(@field(original, field)),
             @field(original, field),
             @field(residual, field),
+            work,
         ),
     );
     inline for (.{ "constants", "variables", "values", "terms", "functions" }) |field| {
         const before = @field(original, field);
         const after = @field(residual, field);
         try require(after.len >= before.len);
-        try require(data.record.equal(@TypeOf(before), before, after[0..before.len]));
+        try require(try recordEqual(@TypeOf(before), before, after[0..before.len], work));
     }
     try require(
         out.functions.items.len > 0 and
@@ -190,22 +204,7 @@ fn validateCanonicalArguments(
     }
     return arguments;
 }
-const EvaluationWork = struct {
-    local: *u64,
-    global: ?*u64,
-    available: u64,
-    left: u64,
-
-    fn init(local: *u64, global: ?*u64) EvaluationWork {
-        const available = if (global) |remaining| @min(local.*, remaining.*) else local.*;
-        return .{ .local = local, .global = global, .available = available, .left = available };
-    }
-    fn finish(self: *EvaluationWork) void {
-        const spent = self.available - self.left;
-        self.local.* -= spent;
-        if (self.global) |remaining| remaining.* -= spent;
-    }
-};
+const EvaluationWork = k.EvaluationWork;
 fn normalize(
     a: std.mem.Allocator,
     value: pe.Knowledge,
@@ -294,6 +293,8 @@ const Checker = struct {
         const r = self.after.functions[@intCast(f.after)];
         try require(f.arguments.len == b.parameters.len and
             b.body != null and r.body != null and f.body != null);
+        try data.admission.spend(self.work, b.effects.len);
+        try data.admission.spend(self.work, b.regions.len);
         try require(b.result == r.result and std.mem.eql(p.Id, b.effects, r.effects) and
             std.mem.eql(p.Id, b.regions, r.regions));
         var env: Env = &.{};
@@ -409,7 +410,7 @@ const Checker = struct {
                 self.after.constants[@intCast(r.expression.literal)],
                 self.work,
             ));
-        } else try require(data.record.equal(ast.Value, frame.expected, r));
+        } else try require(try recordEqual(ast.Value, frame.expected, r, self.work));
         const fact: V = .{
             .knowledge = frame.knowledge,
             .total = frame.total,
@@ -526,10 +527,11 @@ const Checker = struct {
         return result.?.fact.knowledge;
     }
     fn finish(self: *Checker, frame: *const TermFrame) Error!Action {
-        try require(data.record.equal(
+        try require(try recordEqual(
             ast.Term,
             frame.expected,
             self.after.terms[@intCast(frame.visit.after)],
+            self.work,
         ));
         return .{ .done = frame.knowledge };
     }

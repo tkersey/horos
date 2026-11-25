@@ -10,6 +10,22 @@ fn spend(left: *u64, count: u64) Error!void {
     if (left.* < count) return error.SpecializationLimit;
     left.* -= count;
 }
+pub const EvaluationWork = struct {
+    local: *u64,
+    global: ?*u64,
+    available: u64,
+    left: u64,
+
+    pub fn init(local: *u64, global: ?*u64) EvaluationWork {
+        const available = if (global) |remaining| @min(local.*, remaining.*) else local.*;
+        return .{ .local = local, .global = global, .available = available, .left = available };
+    }
+    pub fn finish(self: *EvaluationWork) void {
+        const spent = self.available - self.left;
+        self.local.* -= spent;
+        if (self.global) |remaining| remaining.* -= spent;
+    }
+};
 fn readValue(
     a: std.mem.Allocator,
     schemas: []const p.Schema,

@@ -856,6 +856,21 @@ fn literalProofWork(output: *const pe.Output) !u64 {
     return 1_000_000_000 - remaining;
 }
 
+fn valueRecordWork(output: *const pe.Output) !u64 {
+    const residual = output.module();
+    var remaining: u64 = std.math.maxInt(u64);
+    for (output.value_proofs.items) |proof| {
+        const value = residual.values[@intCast(proof.after)];
+        try std.testing.expect(try @import("horos_data").record.equalWithWork(
+            source.ast.Value,
+            value,
+            value,
+            &remaining,
+        ));
+    }
+    return std.math.maxInt(u64) - remaining;
+}
+
 fn rejectLiteralProofWork(output: *const pe.Output, budget: u64) !void {
     var remaining = budget;
     try std.testing.expectError(
@@ -877,7 +892,7 @@ test "distinct folded literal proofs charge every content comparison" {
     try duplicateLiteralProof(&output, 8);
     const folded = try literalProofWork(&output);
     for (output.value_proofs.items) |*proof| proof.folded = false;
-    const unfolded = try literalProofWork(&output);
+    const unfolded = try literalProofWork(&output) - try valueRecordWork(&output);
     try std.testing.expect(folded - unfolded >= 8 * bytes.len);
     for (output.value_proofs.items) |*proof| proof.folded = true;
     try rejectLiteralProofWork(&output, unfolded + 8 * bytes.len - 1);
@@ -1330,10 +1345,9 @@ test "non-exportable aggregate constructors remain residual" {
     }
 }
 
-test "source specialization reserves recursive keys and retains dynamic arithmetic" {
-    const a = std.testing.allocator;
-    var b = source.Builder.init(a);
-    defer b.deinit();
+const RecursiveFactor = struct { module: source.Module, request: pe.Request };
+
+fn recursiveFactor(b: *source.Builder, bytes: *[8]u8) !RecursiveFactor {
     const unit = try b.scalar(void);
     const u64_type = try b.scalar(u64);
     const bool_type = try b.scalar(bool);
@@ -1362,13 +1376,24 @@ test "source specialization reserves recursive keys and retains dynamic arithmet
             .when_false = recurse,
         } }),
     );
-    var bytes: [8]u8 = undefined;
-    const request: pe.Request = .{
-        .context = context,
-        .function = f,
-        .arguments = &.{ .dynamic, known(7, &bytes, u64_type) },
+    const arguments = try b.allocator().dupe(pe.Knowledge, &.{
+        .dynamic,
+        known(7, bytes, u64_type),
+    });
+    return .{
+        .module = b.module(f, unit),
+        .request = .{ .context = context, .function = f, .arguments = arguments },
     };
-    var result = try pe.specialize(a, b.module(f, unit), request);
+}
+
+test "source specialization reserves recursive keys and retains dynamic arithmetic" {
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    var bytes: [8]u8 = undefined;
+    const fixture = try recursiveFactor(&b, &bytes);
+    const request = fixture.request;
+    var result = try pe.specialize(a, fixture.module, request);
     defer result.deinit();
     try std.testing.expectEqual(@as(usize, 1), result.functions.items.len);
     try std.testing.expectEqual(
@@ -1382,14 +1407,180 @@ test "source specialization reserves recursive keys and retains dynamic arithmet
     proof.before = 0;
     try std.testing.expectError(
         error.InvalidSpecialization,
-        pe.validate(a, b.module(f, unit), request, &result),
+        pe.validate(a, fixture.module, request, &result),
     );
     proof.before = saved;
     var changed = request;
     changed.context.guest[0] ^= 1;
     try std.testing.expectError(
         error.InvalidSpecialization,
-        pe.validate(a, b.module(f, unit), changed, &result),
+        pe.validate(a, fixture.module, changed, &result),
+    );
+}
+
+const Peak = struct {
+    parent: std.mem.Allocator,
+    live: usize = 0,
+    peak: usize = 0,
+
+    fn allocator(self: *Peak) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        } };
+    }
+
+    fn grow(self: *Peak, before: usize, after: usize) void {
+        self.live = self.live - before + after;
+        self.peak = @max(self.peak, self.live);
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *Peak = @ptrCast(@alignCast(ctx));
+        const memory = self.parent.rawAlloc(len, alignment, ra) orelse return null;
+        self.grow(0, len);
+        return memory;
+    }
+
+    fn resize(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) bool {
+        return false;
+    }
+
+    fn remap(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) ?[*]u8 {
+        return null;
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const self: *Peak = @ptrCast(@alignCast(ctx));
+        self.parent.rawFree(memory, alignment, ra);
+        self.grow(memory.len, 0);
+    }
+};
+
+fn admissionPeak(module: source.Module) !usize {
+    var meter: Peak = .{ .parent = std.testing.allocator };
+    var work: u64 = std.math.maxInt(u64);
+    try source.admitWithWork(meter.allocator(), module, &work);
+    return meter.peak;
+}
+
+test "standalone specialization needs only its output and ordinary admission storage" {
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    var bytes: [8]u8 = undefined;
+    const fixture = try recursiveFactor(&b, &bytes);
+    var producer: Peak = .{ .parent = a };
+    var output = try pe.specialize(producer.allocator(), fixture.module, fixture.request);
+    defer output.deinit();
+    const admission = @max(
+        try admissionPeak(fixture.module),
+        try admissionPeak(output.module()),
+    );
+    try std.testing.expect(producer.peak <= producer.live + admission);
+    var checker: Peak = .{ .parent = a };
+    var work: u64 = std.math.maxInt(u64);
+    try pe.validateWithWork(checker.allocator(), fixture.module, fixture.request, &output, &work);
+    try std.testing.expect(checker.peak <= admission);
+    try std.testing.expectEqual(@as(usize, 0), checker.live);
+    var compiled: Peak = .{ .parent = a };
+    var residual = try source.lower(compiled.allocator(), output.module());
+    residual.deinit();
+    var full: Peak = .{ .parent = a };
+    try pe.validate(full.allocator(), fixture.module, fixture.request, &output);
+    try std.testing.expect(full.peak >= compiled.peak);
+    try std.testing.expectEqual(@as(usize, 0), full.live);
+}
+test "specialization charges admission, derivation and self-validation to the caller" {
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    var bytes: [8]u8 = undefined;
+    const fixture = try recursiveFactor(&b, &bytes);
+    var remaining: u64 = std.math.maxInt(u64);
+    var output = try pe.specializeWithWork(a, fixture.module, fixture.request, &remaining);
+    defer output.deinit();
+    const spent = std.math.maxInt(u64) - remaining;
+    var unbounded = try pe.specialize(a, fixture.module, fixture.request);
+    defer unbounded.deinit();
+    try std.testing.expectEqualSlices(u8, &unbounded.key, &output.key);
+    var validation: u64 = std.math.maxInt(u64);
+    try pe.validateWithWork(a, fixture.module, fixture.request, &output, &validation);
+    var admission: u64 = std.math.maxInt(u64);
+    try source.admitWithWork(a, fixture.module, &admission);
+    const checked = std.math.maxInt(u64) - validation;
+    const admitted = std.math.maxInt(u64) - admission;
+    try std.testing.expect(spent >= checked + admitted);
+    var exact = spent;
+    var repeated = try pe.specializeWithWork(a, fixture.module, fixture.request, &exact);
+    repeated.deinit();
+    try std.testing.expectEqual(@as(u64, 0), exact);
+    for ([_]u64{ 0, admitted - 1, admitted, spent - checked, spent - 1 }) |budget| {
+        var short = budget;
+        if (pe.specializeWithWork(a, fixture.module, fixture.request, &short)) |unexpected| {
+            var leaked = unexpected;
+            leaked.deinit();
+            return error.TestUnexpectedResult;
+        } else |err| try std.testing.expect(
+            err == error.RelationLimit or err == error.SpecializationLimit,
+        );
+    }
+}
+fn foldedSums(b: *source.Builder, count: usize) !pe.Request {
+    const word = try b.scalar(u64);
+    const failure = try b.failureLiteral(try b.constant(void, {}));
+    const entry = try b.declare(&.{}, word, &.{}, &.{});
+    const variables = try b.allocator().alloc(p.Id, count);
+    const sums = try b.allocator().alloc(p.Id, count);
+    var previous = try b.constant(u64, 1);
+    for (variables, sums, 0..) |*variable, *sum, index| {
+        sum.* = try b.value(.{ .schema = word, .expression = .{ .primitive = .{
+            .opcode = .integer_add,
+            .operands = &.{ previous, try b.constant(u64, 2 * index + 3) },
+            .failures = &.{.{ .kind = .arithmetic_overflow, .value = failure }},
+        } } });
+        variable.* = try b.variable(word);
+        previous = try b.reference(variable.*);
+    }
+    var body = try b.pure(previous);
+    var index = count;
+    while (index > 0) {
+        index -= 1;
+        body = try b.bind(variables[index], try b.pure(sums[index]), body);
+    }
+    try b.define(entry, body);
+    return .{ .context = context, .function = entry, .arguments = &.{} };
+}
+test "specialization charges residual literal interning to the caller" {
+    const a = std.testing.allocator;
+    var b = source.Builder.init(a);
+    defer b.deinit();
+    const request = try foldedSums(&b, 96);
+    const module = b.module(request.function, try b.scalar(void));
+    var remaining: u64 = std.math.maxInt(u64);
+    var output = try pe.specializeWithWork(a, module, request, &remaining);
+    defer output.deinit();
+    const spent = std.math.maxInt(u64) - remaining;
+    const residual = output.module();
+    var interned: u64 = 0;
+    for (output.value_proofs.items) |proof| if (proof.folded) {
+        interned += residual.values[@intCast(proof.after)].expression.literal;
+    };
+    try std.testing.expect(interned > 96 * 96);
+    var validation: u64 = std.math.maxInt(u64);
+    try pe.validateWithWork(a, module, request, &output, &validation);
+    var admission: u64 = std.math.maxInt(u64);
+    try source.admitWithWork(a, module, &admission);
+    const checked = std.math.maxInt(u64) - validation;
+    const admitted = std.math.maxInt(u64) - admission;
+    try std.testing.expect(spent >= checked + admitted + interned);
+    var unbounded = try pe.specialize(a, module, request);
+    defer unbounded.deinit();
+    try std.testing.expectEqualSlices(u8, &unbounded.key, &output.key);
+    try std.testing.expect(
+        @import("horos_data").record.equal(source.Module, unbounded.module(), residual),
     );
 }
 test "source specialization selects known condition and checks forged literal" {
@@ -2042,7 +2233,6 @@ test "specialization local allowance excludes admission while relation allowance
 }
 
 test "specialization literal validation retains independent semantic allowances" {
-    const checker = @import("specialize_validate.zig");
     const a = std.testing.allocator;
     var b = source.Builder.init(a);
     defer b.deinit();
@@ -2068,10 +2258,10 @@ test "specialization literal validation retains independent semantic allowances"
     var remaining: u64 = 64;
     try std.testing.expectError(
         error.RelationLimit,
-        checker.validateWithWork(a, before, output.request, &output, &remaining),
+        pe.validateWithWork(a, before, output.request, &output, &remaining),
     );
     remaining = 1_000_000;
-    try checker.validateWithWork(a, before, output.request, &output, &remaining);
+    try pe.validateWithWork(a, before, output.request, &output, &remaining);
     try std.testing.expect(1_000_000 - remaining > bytes.len);
     output.request.policy.work = 1;
     output.key = try pe.identity(a, before, output.request);

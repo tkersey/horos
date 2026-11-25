@@ -22,25 +22,51 @@ pub const Work = struct {
     /// Charged key bytes, node/edge visits, and exact comparison byte bounds.
     limit: u64 = std.math.maxInt(u64),
     units: u64 = 0,
+    compact_refinement: bool = false,
     comparisons: u64 = 0,
     rounds: u64 = 0,
     exhausted: bool = false,
+    local_exhausted: bool = false,
+    remaining: ?*u64 = null,
 
-    pub fn charge(self: *Work, amount: usize) Error!void {
-        const next = std.math.add(u64, self.units, amount) catch {
+    pub fn chargeBounded(self: *Work, amount: usize) error{WorkLimit}!void {
+        if (self.compact_refinement) return self.charge(amount);
+        return self.chargeShared(amount);
+    }
+
+    pub fn append(
+        self: *Work,
+        allocator: std.mem.Allocator,
+        list: anytype,
+        item: @TypeOf(list.items[0]),
+    ) (std.mem.Allocator.Error || error{WorkLimit})!void {
+        if (list.items.len == list.capacity) try self.chargeBounded(list.items.len);
+        try list.append(allocator, item);
+    }
+
+    pub fn charge(self: *Work, amount: usize) error{WorkLimit}!void {
+        if (amount > self.limit or self.units > self.limit - amount) {
             self.exhausted = true;
+            self.local_exhausted = true;
             return error.WorkLimit;
-        };
-        if (next > self.limit) {
+        }
+        try self.chargeShared(amount);
+        self.units += amount;
+    }
+
+    fn chargeShared(self: *Work, amount: usize) error{WorkLimit}!void {
+        const remaining = self.remaining orelse return;
+        if (amount > remaining.*) {
             self.exhausted = true;
             return error.WorkLimit;
         }
-        self.units = next;
+        remaining.* -= amount;
     }
 };
 
-const Key = struct { bytes: []const u8, original: usize };
-fn less(work: *Work, left: Key, right: Key) Error!bool {
+pub const Key = struct { bytes: []const u8, original: usize };
+const SortError = std.mem.Allocator.Error || error{WorkLimit};
+fn less(work: *Work, left: Key, right: Key) error{WorkLimit}!bool {
     try work.charge(1);
     try work.charge(@min(left.bytes.len, right.bytes.len));
     work.comparisons = std.math.add(u64, work.comparisons, 1) catch
@@ -50,7 +76,7 @@ fn less(work: *Work, left: Key, right: Key) Error!bool {
 }
 
 // Iterative merge sort permits immediate work-limit failure inside comparisons.
-fn sort(a: std.mem.Allocator, keys: []Key, work: *Work) Error!void {
+fn sort(a: std.mem.Allocator, keys: []Key, work: *Work) SortError!void {
     const temporary = try a.alloc(Key, keys.len);
     var width: usize = 1;
     while (width < keys.len) {
@@ -74,6 +100,7 @@ fn sort(a: std.mem.Allocator, keys: []Key, work: *Work) Error!void {
             }
             start = end;
         }
+        try work.chargeBounded(keys.len);
         @memcpy(keys, temporary);
         width = if (width > keys.len / 2) keys.len else width * 2;
     }
@@ -100,6 +127,7 @@ pub fn discover(
     }
     const classes = try allocator.alloc(usize, nodes.len);
     errdefer allocator.free(classes);
+    try work.chargeBounded(nodes.len);
     @memset(classes, 0);
     const next = try allocator.alloc(usize, nodes.len);
     defer allocator.free(next);
@@ -110,7 +138,9 @@ pub fn discover(
     while (initial or remaining != 0) {
         try refine(allocator, nodes, singletons, classes, next, initial, work);
         work.rounds = std.math.add(u64, work.rounds, 1) catch return error.WorkLimit;
+        try work.chargeBounded(classes.len);
         if (!initial and std.mem.eql(usize, classes, next)) return classes;
+        try work.chargeBounded(classes.len);
         @memcpy(classes, next);
         if (nodes.len == 0) return classes;
         if (!initial) {
@@ -137,13 +167,24 @@ fn refine(
     for (nodes, keys, 0..) |node, *key, id| {
         const pinned = node.pinned or (singletons.len != 0 and singletons[id]);
         var size: wire.Writer = .{};
-        try writeKey(&size, nodes, node, id, pinned, classes, initial);
+        try work.chargeBounded(node.edges.len);
+        const compact = !initial and work.compact_refinement;
+        try writeKey(&size, nodes, node, id, pinned, classes, initial, compact);
         try work.charge(size.position);
         const bytes = try a.alloc(u8, size.position);
         var writer: wire.Writer = .{ .output = bytes };
-        try writeKey(&writer, nodes, node, id, pinned, classes, initial);
+        try writeKey(&writer, nodes, node, id, pinned, classes, initial, compact);
         key.* = .{ .bytes = bytes, .original = id };
     }
+    try assignRepresentatives(a, keys, next, work);
+}
+
+pub fn assignRepresentatives(
+    a: std.mem.Allocator,
+    keys: []Key,
+    next: anytype,
+    work: *Work,
+) SortError!void {
     try sort(a, keys, work);
     var representative: usize = 0;
     for (keys, 0..) |key, i| {
@@ -162,8 +203,13 @@ fn writeKey(
     pinned: bool,
     classes: []const usize,
     initial: bool,
+    compact: bool,
 ) wire.Error!void {
     try writer.natural(if (initial) 0 else classes[id]);
+    if (compact) {
+        for (node.edges) |edge| try writer.natural(classes[edge.target]);
+        return;
+    }
     try writer.natural(@backingInt(node.kind));
     try writer.natural(node.label.len);
     try writer.put(node.label);

@@ -351,6 +351,42 @@ test "recursive record equality retains volatile finite byte slice semantics" {
 
 const OptionalRow = struct { next: ?[]const @This() };
 
+test "bounded equality charges portable widths of native zero size rows" {
+    const Element = struct { zero: u0 = 0, more: [3]u0 = @splat(0), empty: [5]void = @splat({}) };
+    const rows: [7]Element = @splat(.{});
+    const values: []const Element = &rows;
+    try std.testing.expectEqual(0, @sizeOf(Element));
+    var writer: wire.Writer = .{};
+    try record.write(@TypeOf(values), values, &writer);
+    try std.testing.expectEqual(1 + 4 * rows.len, writer.position);
+    var work: u64 = writer.position;
+    try std.testing.expect(try record.equalWithWork(@TypeOf(values), values, values, &work));
+    try std.testing.expectEqual(0, work);
+    work = writer.position - 1;
+    try std.testing.expectError(error.RelationLimit, record.equalWithWork(
+        @TypeOf(values),
+        values,
+        values,
+        &work,
+    ));
+    const empty: [128][128]void = @splat(@splat({}));
+    work = 0;
+    try std.testing.expect(try record.equalWithWork(@TypeOf(empty), empty, empty, &work));
+}
+
+test "finite record comparison accepts allowzero byte slices" {
+    const Row = struct { label: []allowzero const u8 };
+    var bytes = [_]u8{ 7, 11 };
+    const original: Row = .{ .label = &bytes };
+    const expected: Row = .{ .label = &.{ 7, 11 } };
+    var work: u64 = 3;
+    try std.testing.expect(try record.equalWithWork(Row, original, expected, &work));
+    try std.testing.expectEqual(0, work);
+    bytes[1] = 12;
+    try std.testing.expect(!record.equal(Row, original, expected));
+    try std.testing.expect(!try record.equalAlloc(Row, std.testing.allocator, original, expected));
+}
+
 fn expectDecoded(comptime T: type, bytes: []const u8, expected: T) !void {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

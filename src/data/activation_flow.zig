@@ -38,11 +38,39 @@ pub const Facts = struct {
         return .{ .pool = self.pool, .positions = self.positions, .live = self.live };
     }
 
+    pub fn observation(self: *const Facts) *const Observation {
+        return @ptrCast(self);
+    }
+
     pub fn deinit(self: *Facts) void {
         self.pool.deinit();
         self.arena.deinit();
         self.parent_allocator.destroy(self.arena);
         self.* = undefined;
+    }
+};
+
+pub const Observation = opaque {
+    fn facts(self: *const Observation) *const Facts {
+        return @ptrCast(@alignCast(self));
+    }
+
+    pub fn blockCount(self: *const Observation) usize {
+        return self.facts().positions.len;
+    }
+
+    pub fn positionCount(self: *const Observation, block: usize) usize {
+        return self.facts().positions[block].len;
+    }
+
+    pub fn liveAt(self: *const Observation, block: usize, position: usize, slot: ir.Id) bool {
+        const flow = self.facts();
+        return flow.pool.contains(flow.live[block][position], slot);
+    }
+
+    pub fn availableAt(self: *const Observation, block: usize, position: usize, slot: ir.Id) bool {
+        const flow = self.facts();
+        return flow.pool.contains(flow.positions[block][position].available, slot);
     }
 };
 

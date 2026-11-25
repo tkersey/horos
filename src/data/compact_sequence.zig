@@ -92,6 +92,7 @@ pub fn write(comptime T: type, values: []const T, writer: *wire.Writer) Error!vo
         for (values) |value| try record.write(T, value, writer);
         return;
     }
+    try writer.charge(values.len);
     var segmented: wire.Writer = .{};
     try segments(T, values, &segmented);
     var literal: wire.Writer = .{};
