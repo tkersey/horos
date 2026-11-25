@@ -346,6 +346,24 @@ fn benchmarks(b: *std.Build, optimize: std.lang.Optimize) void {
         run_control_bench.captureStdOut(.{}),
         "admission-derive.jsonl",
     ).step);
+    valueDecodeBenchmark(b, optimize);
+}
+
+fn valueDecodeBenchmark(b: *std.Build, optimize: std.lang.Optimize) void {
+    const bench = b.addExecutable(.{
+        .name = "value-decode-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/data/value_decode_bench.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+        }),
+    });
+    const run = b.addRunArtifact(bench);
+    run.has_side_effects = true;
+    b.step(
+        "bench-value-decode",
+        "Measure repeated element and record value decoding (JSON)",
+    ).dependOn(&b.addInstallFile(run.captureStdOut(.{}), "value-decode.json").step);
 }
 
 fn staticAuthoring(

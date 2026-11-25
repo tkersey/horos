@@ -32,6 +32,7 @@ test {
     _ = @import("capture_unpack_tests.zig");
     _ = @import("root.zig");
     _ = @import("tests.zig");
+    _ = @import("admission_differential_tests.zig");
     _ = @import("compact_sequence_tests.zig");
     _ = @import("activation_structure_tests.zig");
     _ = @import("analysis_sets_tests.zig");

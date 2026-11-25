@@ -250,36 +250,90 @@ fn readValueMetered(
     if (!facts.exportable[@intCast(schema)]) return error.InvalidValue;
     if (reader.position > reader.input.len) return error.Truncated;
     const start = reader.position;
-    var pending: std.ArrayList(ValueTask) = .empty;
-    defer pending.deinit(allocator);
+    var pending: ValueTasks = .{ .allocator = allocator };
+    defer pending.deinit();
     try valueWork(remaining, 1);
-    try pending.append(allocator, .{ .schema = schema, .count = 1 });
-    while (pending.pop()) |task| {
-        try valueWork(remaining, 1);
-        const index: usize = @intCast(task.schema);
-        const minimum = facts.minimum[index];
-        if (task.count == 0 or minimum == 0) continue;
-        if (task.count > (reader.input.len - reader.position) / minimum) return error.InvalidValue;
-        if (task.count > 1) {
-            try valueWork(remaining, 1);
-            try pending.append(allocator, .{ .schema = task.schema, .count = task.count - 1 });
-        }
-        try readValueTask(allocator, catalog[index], minimum, reader, &pending, remaining);
-    }
+    try pending.push(.{ .schema = schema, .count = 1 });
+    while (pending.pop()) |task|
+        try readValueRun(catalog, facts, task, reader, &pending, remaining);
     return reader.input[start..reader.position];
 }
 
 const ValueTask = struct { schema: p.Id, count: u64 };
 
-fn readValueTask(
+const ValueTasks = struct {
     allocator: std.mem.Allocator,
-    shape: p.Schema,
-    minimum: u64,
+    local: [local_tasks_max]ValueTask = undefined,
+    local_count: usize = 0,
+    spilled: std.ArrayList(ValueTask) = .empty,
+
+    const local_tasks_max = 64;
+
+    fn deinit(self: *ValueTasks) void {
+        self.spilled.deinit(self.allocator);
+    }
+
+    inline fn push(self: *ValueTasks, task: ValueTask) Error!void {
+        if (self.spilled.items.len == 0 and self.local_count < local_tasks_max) {
+            self.local[self.local_count] = task;
+            self.local_count += 1;
+        } else try self.spilled.append(self.allocator, task);
+    }
+
+    fn pop(self: *ValueTasks) ?ValueTask {
+        if (self.spilled.pop()) |task| return task;
+        if (self.local_count == 0) return null;
+        self.local_count -= 1;
+        return self.local[self.local_count];
+    }
+};
+
+fn readValueRun(
+    catalog: []const p.Schema,
+    facts: SchemaFacts,
+    first: ValueTask,
     reader: *wire.Reader,
-    pending: *std.ArrayList(ValueTask),
+    pending: *ValueTasks,
     remaining: ?*u64,
 ) Error!void {
-    switch (shape) {
+    var next: ?ValueTask = first;
+    while (next) |task| {
+        const index: usize = @intCast(task.schema);
+        const minimum = facts.minimum[index];
+        const shape = &catalog[index];
+        try valueWork(remaining, 1);
+        if (task.count == 0 or minimum == 0) return;
+        if (exceedsInput(reader, task.count, minimum)) return error.InvalidValue;
+        if (remaining == null and integer(shape.*)) {
+            reader.position += @intCast(task.count * minimum);
+            return;
+        }
+        if (task.count > 1) try valueWork(remaining, 1);
+        if (try readValueLeaf(shape, minimum, reader, remaining)) {
+            next = if (task.count == 1)
+                null
+            else
+                .{ .schema = task.schema, .count = task.count - 1 };
+        } else {
+            if (task.count > 1)
+                try pending.push(.{ .schema = task.schema, .count = task.count - 1 });
+            next = try readValueComposite(shape, reader, pending, remaining);
+        }
+    }
+}
+
+fn exceedsInput(reader: *const wire.Reader, count: u64, minimum: u64) bool {
+    const required = std.math.mul(u64, count, minimum) catch return true;
+    return required > reader.input.len - reader.position;
+}
+
+fn readValueLeaf(
+    shape: *const p.Schema,
+    minimum: u64,
+    reader: *wire.Reader,
+    remaining: ?*u64,
+) Error!bool {
+    switch (shape.*) {
         .unit => {},
         .boolean => {
             if (try reader.byte() > 1) return error.InvalidValue;
@@ -291,7 +345,7 @@ fn readValueTask(
             const bytes = try reader.take(4);
             const tag = std.mem.readInt(u32, bytes[0..4], .little);
             try valueWork(remaining, tags.len);
-            if (std.mem.indexOfScalar(u32, tags, tag) == null) return error.InvalidValue;
+            if (!enumerationContains(tags, tag)) return error.InvalidValue;
         },
         .bytes => {
             _ = try reader.bytes();
@@ -305,8 +359,14 @@ fn readValueTask(
         .bounded_text => |maximum| {
             if ((try readValueText(reader, remaining)).len > maximum) return error.InvalidValue;
         },
-        else => try queueValueChildren(allocator, shape, reader, pending, remaining),
+        else => return false,
     }
+    return true;
+}
+
+fn enumerationContains(tags: []const u32, tag: u32) bool {
+    if (tag < tags.len and tags[tag] == tag) return true;
+    return std.mem.indexOfScalar(u32, tags, tag) != null;
 }
 
 fn readValueText(reader: *wire.Reader, remaining: ?*u64) Error![]const u8 {
@@ -317,40 +377,35 @@ fn readValueText(reader: *wire.Reader, remaining: ?*u64) Error![]const u8 {
     return reader.text();
 }
 
-fn queueValueChildren(
-    allocator: std.mem.Allocator,
-    shape: p.Schema,
+fn readValueComposite(
+    shape: *const p.Schema,
     reader: *wire.Reader,
-    pending: *std.ArrayList(ValueTask),
+    pending: *ValueTasks,
     remaining: ?*u64,
-) Error!void {
-    try valueWork(remaining, if (shape == .product) shape.product.len else 1);
-    switch (shape) {
+) Error!?ValueTask {
+    try valueWork(remaining, if (shape.* == .product) shape.product.len else 1);
+    switch (shape.*) {
         .product => |fields| {
+            if (fields.len == 0) return null;
             var i = fields.len;
-            while (i != 0) {
+            while (i != 1) {
                 i -= 1;
-                try pending.append(allocator, .{ .schema = fields[i], .count = 1 });
+                try pending.push(.{ .schema = fields[i], .count = 1 });
             }
+            return .{ .schema = fields[0], .count = 1 };
         },
         .sum => |fields| {
             const tag = try reader.count();
             if (tag >= fields.len) return error.InvalidValue;
-            try pending.append(allocator, .{ .schema = fields[tag], .count = 1 });
+            return .{ .schema = fields[tag], .count = 1 };
         },
-        .seq => |element| try pending.append(
-            allocator,
-            .{ .schema = element, .count = try reader.natural() },
-        ),
+        .seq => |element| return .{ .schema = element, .count = try reader.natural() },
         .vector => |vector| {
             const count = try reader.natural();
             if (count > vector.maximum) return error.InvalidValue;
-            try pending.append(allocator, .{ .schema = vector.element, .count = count });
+            return .{ .schema = vector.element, .count = count };
         },
-        .array => |array| try pending.append(
-            allocator,
-            .{ .schema = array.element, .count = array.length },
-        ),
+        .array => |array| return .{ .schema = array.element, .count = array.length },
         else => return error.InvalidValue,
     }
 }

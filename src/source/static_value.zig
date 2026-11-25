@@ -723,7 +723,7 @@ test "static read cache does not publish failed decoding growth or allocation" {
     );
     try std.testing.expect(!failing.has_induced_failure);
     try std.testing.expectEqual(@as(usize, 0), cache.entries.count());
-    failing.fail_index = failing.alloc_index + 1;
+    failing.fail_index = failing.alloc_index;
     left = 100;
     try std.testing.expectError(
         error.OutOfMemory,
