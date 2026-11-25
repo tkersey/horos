@@ -215,19 +215,31 @@ const acc = try horos.library.stage.residual(body, try body.parameter("acc"));
 ```
 
 The hints live beside the module, never inside it, so source relations, slices
-and specialization cannot misplace them. `Context.compile*` and `source.emit`
-pass them to the compiler; `Context.hints()` returns them for an explicit
-`source.lowerObserved(..., .{ .hints = ... })`. Each place that materializes a
-hinted value names its function and slot; slot ordering and checked structural
-coalescing transport those bindings like recovery origins. A binding hinted both
-ways is residual. A hint is dropped when its value is never materialized or its
-function is removed. `Compiled.hints` holds the canonical table, and
-`Compiled.encode`/`encodedLength` include it.
+and specialization do not rewrite them. A recorded table is a `source.Hints`
+bound to the source identity of the module it was recorded against
+(`source.relation.identity`), and compilation rejects any other module with
+`InvalidSource`; a sliced, specialized or otherwise different module cannot
+silently inherit hints whose value IDs name another module's values.
+`Context.compile*` and `source.emit` bind and pass the recorded hints;
+`Context.hints()` returns the binding made by the last `Context.module()` for
+an explicit `source.lowerObserved(..., .{ .hints = ... })`, and
+`source.Hints.bind(module, table)` binds a table written for one module.
+
+Each place that materializes a hinted value names its function and slot; slot
+ordering and checked structural coalescing transport those bindings like
+recovery origins. A binding hinted both ways is residual. When coalescing merges
+a hinted function with an unhinted structural twin, the merged binding is
+residual, so a context hint never covers the twin's call sites. A hint is
+dropped when its value is never materialized or its function is removed.
+`Compiled.hints` holds the canonical table, `Compiled.image()` pairs it with
+the records, and `Compiled.encode(allocator)` returns exactly that image's
+bytes. `max_image_bytes` bounds the emitted image, hint table included.
 
 Hints need a correspondence to final bindings. Structural compilation, with or
 without recovery, provides it. The semantic contract rejects hinted modules with
-`InvalidCorrespondence`, and component compilation rejects them with
-`InvalidSource` because BMO1 has no hint table.
+`InvalidCorrespondence`. Component compilation, including
+`authoring.interop.componentModule`, rejects them with `InvalidSource` because
+BMO1 has no hint table.
 
 ## Operations and interpretations
 

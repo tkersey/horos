@@ -94,8 +94,8 @@ test "two live scalar captures become one XOR summary" {
     std.debug.print(
         "XOR capture summary: {d} -> {d} bytes; captured u64 payload 16 -> 8 bytes\n",
         .{
-            try @import("program_image.zig").encodedLength(reused),
-            try @import("program_image.zig").encodedLength(result.program),
+            try @import("program_image.zig").encodedLength(.unhinted(reused)),
+            try @import("program_image.zig").encodedLength(result.image()),
         },
     );
 }

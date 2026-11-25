@@ -210,7 +210,7 @@ pub fn construct(
     original: ir.Program,
     options: Options,
 ) Error!?Candidate {
-    if (options.profile) |record| try profiles.validate(allocator, original, record);
+    if (options.profile) |record| try profiles.validate(allocator, .unhinted(original), record);
     var facts = try own.analyze(allocator, original);
     defer facts.deinit();
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -227,7 +227,7 @@ pub fn construct(
             original.blocks.len,
             original.blocks.len,
         ) catch return error.LoopWorkLimit);
-        break :blk try profiles.orderedBlocks(a, original, record);
+        break :blk try profiles.orderedBlocks(a, .unhinted(original), record);
     } else null;
     const function_order = try orderedFunctions(a, original, order);
     for (0..original.functions.len) |ordinal| {
@@ -572,10 +572,10 @@ pub fn run(
     defer baseline.deinit();
     const limit = std.math.add(
         usize,
-        try image.encodedLength(baseline.program),
+        try image.encodedLength(baseline.image()),
         options.max_added_bytes,
     ) catch std.math.maxInt(usize);
-    if (try image.encodedLength(result.program) > limit) {
+    if (try image.encodedLength(result.image()) > limit) {
         std.mem.swap(p01.Owned, &result, &baseline);
         stats.code_budget_rejected = true;
         return result;

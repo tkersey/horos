@@ -204,15 +204,15 @@ test "recursive join allocation and group limits preserve baseline ownership" {
     defer baseline.deinit();
     try std.testing.expect(stats.work_limit);
     try std.testing.expectEqual(
-        try @import("program_image.zig").identity(a, baseline.program),
-        try @import("program_image.zig").identity(a, result.program),
+        try @import("program_image.zig").identity(a, baseline.image()),
+        try @import("program_image.zig").identity(a, result.image()),
     );
 }
 test "shared pipeline adopts recursive join conversion" {
     var stats: @import("closed_compilation.zig").Statistics = .{};
     var result = try @import("closed_compilation.zig").run(
         a,
-        mutual,
+        .unhinted(mutual),
         .{ .contract = .semantic, .statistics = &stats },
     );
     defer result.deinit();

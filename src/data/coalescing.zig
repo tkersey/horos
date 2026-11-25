@@ -32,7 +32,7 @@ pub const Counts = struct {
     entries: usize = 0,
 
     pub fn of(program: ir.Program) Error!Counts {
-        return measure(program, try image.encodedLength(program), null);
+        return measure(program, try image.encodedLength(.unhinted(program)), null);
     }
 
     fn measure(program: ir.Program, bytes: usize, remaining: ?*u64) Error!Counts {
@@ -111,6 +111,11 @@ pub const Owned = struct {
     arena: std.heap.ArenaAllocator,
     program: ir.Program,
     flow: @import("activation_flow.zig").Facts,
+    hints: []const @import("binding_time.zig").Hint = &.{},
+
+    pub fn image(self: *const Owned) @import("program_image.zig").Image {
+        return .{ .program = self.program, .hints = self.hints };
+    }
 
     pub fn deinit(self: *Owned) void {
         self.flow.deinit();
@@ -192,7 +197,7 @@ fn runInternal(
     var flow = try baselineFlow(allocator, baseline.program, options, &trace, remaining);
     errdefer flow.deinit();
     if (options.diagnostic) |d| d.* = .{ .stage = .cost };
-    const bytes = try image.encodedLengthWithWork(baseline.program, remaining);
+    const bytes = try image.encodedLengthWithWork(.unhinted(baseline.program), remaining);
     const counts = try Counts.measure(baseline.program, bytes, remaining);
     var stats: Statistics = .{
         .baseline = counts,

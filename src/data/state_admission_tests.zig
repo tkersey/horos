@@ -27,9 +27,9 @@ const ordinary: ir.Program = .{
 };
 
 fn admit(program: ir.Program) !*image.Admitted {
-    const bytes = try a.alloc(u8, try image.encodedLength(program));
+    const bytes = try a.alloc(u8, try image.encodedLength(.unhinted(program)));
     defer a.free(bytes);
-    _ = try image.encode(a, program, bytes);
+    _ = try image.encode(a, .unhinted(program), bytes);
     return image.Admitted.decode(a, bytes);
 }
 
@@ -66,7 +66,7 @@ fn roundTrip(owner: *const image.Admitted, state: ps.State) !void {
     const expected = try state_image.emit(a, state);
     defer a.free(expected);
     try admission.validateAdmitted(a, owner, state);
-    try admission.validateStable(a, owner.program(), state);
+    try admission.validateStable(a, owner.image(), state);
     var restored = try state_image.decodeGraph(a, expected);
     defer restored.deinit();
     try admission.validateAdmitted(a, owner, restored.state);
@@ -133,7 +133,7 @@ test "public-only state admission rejects fabricated handler attachments and own
 
 fn expectRejected(expected: anyerror, owner: *const image.Admitted, state: ps.State) !void {
     try std.testing.expectError(expected, admission.validateAdmitted(a, owner, state));
-    try std.testing.expectError(expected, admission.validateStable(a, owner.program(), state));
+    try std.testing.expectError(expected, admission.validateStable(a, owner.image(), state));
 }
 
 test "state admission retains scoped-schema and handler analysis paths" {
@@ -243,7 +243,7 @@ test "handler provenance still rejects a forged closure that private schemas alo
         const owner = try admit(program);
         defer owner.deinit();
         try admission.validateAdmitted(a, owner, closureState(owner, 0));
-        try admission.validateStable(a, program, closureState(owner, 0));
+        try admission.validateStable(a, .unhinted(program), closureState(owner, 0));
         if (handlers.len == 0) {
             try admission.validateAdmitted(a, owner, closureState(owner, 1));
         } else try expectRejected(error.InvalidOwnership, owner, closureState(owner, 1));

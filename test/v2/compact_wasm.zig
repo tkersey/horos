@@ -17,7 +17,8 @@ export fn program_encode(length: usize) usize {
     var decoded = data.program_image.decode(allocator, input[0..length]) catch return 0;
     defer decoded.deinit();
     program_identity = decoded.identity;
-    const encoded = data.program_image.encode(allocator, decoded.program, &output) catch return 0;
+    const erased: data.program_image.Image = .unhinted(decoded.program);
+    const encoded = data.program_image.encode(allocator, erased, &output) catch return 0;
     return encoded.len;
 }
 
@@ -29,12 +30,7 @@ export fn hinted_program_encode(length: usize) usize {
     defer decoded.deinit();
     if (decoded.hints.len == 0) return 0;
     program_identity = decoded.identity;
-    const encoded = data.program_image.encodeWithHints(
-        allocator,
-        decoded.program,
-        decoded.hints,
-        &output,
-    ) catch return 0;
+    const encoded = data.program_image.encode(allocator, decoded.image(), &output) catch return 0;
     return encoded.len;
 }
 

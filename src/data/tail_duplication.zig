@@ -111,7 +111,7 @@ pub fn construct(
     original: ir.Program,
     options: Options,
 ) Error!?Candidate {
-    if (options.profile) |record| try profiles.validate(allocator, original, record);
+    if (options.profile) |record| try profiles.validate(allocator, .unhinted(original), record);
     var admitted = try ownership.analyze(allocator, original);
     defer admitted.deinit();
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -134,7 +134,7 @@ pub fn construct(
         ) catch return error.TailDuplicationLimit;
         if (charge > budget.left) return error.TailDuplicationLimit;
         budget.left -= charge;
-        break :blk try profiles.orderedBlocks(a, original, record);
+        break :blk try profiles.orderedBlocks(a, .unhinted(original), record);
     } else null;
     for (0..original.blocks.len) |ordinal| {
         const bid = if (order) |ids| ids[ordinal] else ordinal;
@@ -163,8 +163,8 @@ pub fn construct(
     }
     var program = original;
     program.blocks = blocks;
-    const before = try image.encodedLength(original);
-    const after = try image.encodedLength(program);
+    const before = try image.encodedLength(.unhinted(original));
+    const after = try image.encodedLength(.unhinted(program));
     if (after > before and
         after - before > options.max_added_bytes)
         return error.TailDuplicationLimit;

@@ -8,7 +8,7 @@ test "an exact immutable profile prioritizes a proved hot constructor within one
     var counts = @as([repeated.blocks.len]u64, @splat(0));
     counts[4] = 100;
     const record: profile.Record = .{
-        .image_identity = try @import("program_image.zig").identity(a, repeated),
+        .image_identity = try @import("program_image.zig").identity(a, .unhinted(repeated)),
         .block_counts = &counts,
         .total = 100,
     };
@@ -55,7 +55,7 @@ test "a hot polymorphic call does not acquire a constructor proof from its profi
     var counts = @as([blocks.len]u64, @splat(0));
     counts[repeated.blocks.len] = 1000000;
     const record: profile.Record = .{
-        .image_identity = try @import("program_image.zig").identity(a, original),
+        .image_identity = try @import("program_image.zig").identity(a, .unhinted(original)),
         .block_counts = &counts,
         .total = 1000000,
     };
@@ -83,11 +83,11 @@ test "a hot polymorphic call does not acquire a constructor proof from its profi
 test "profile identity toolchain locations and overflowing counters reject" {
     var counts = @as([repeated.blocks.len]u64, @splat(0));
     var record: profile.Record = .{
-        .image_identity = try @import("program_image.zig").identity(a, repeated),
+        .image_identity = try @import("program_image.zig").identity(a, .unhinted(repeated)),
         .block_counts = &counts,
         .total = 0,
     };
-    try profile.validate(a, repeated, record);
+    try profile.validate(a, .unhinted(repeated), record);
     record.image_identity[0] ^= 1;
     try std.testing.expectError(
         error.InvalidOptimizationProfile,
@@ -101,25 +101,25 @@ test "profile identity toolchain locations and overflowing counters reject" {
     record.toolchain_identity = "another compiler";
     try std.testing.expectError(
         error.InvalidOptimizationProfile,
-        profile.validate(a, repeated, record),
+        profile.validate(a, .unhinted(repeated), record),
     );
     record.toolchain_identity = profile.toolchain;
     record.block_counts = counts[0 .. counts.len - 1];
     try std.testing.expectError(
         error.InvalidOptimizationProfile,
-        profile.validate(a, repeated, record),
+        profile.validate(a, .unhinted(repeated), record),
     );
     record.block_counts = &counts;
     counts[0] = std.math.maxInt(u64);
     counts[1] = 1;
     try std.testing.expectError(
         error.InvalidOptimizationProfile,
-        profile.validate(a, repeated, record),
+        profile.validate(a, .unhinted(repeated), record),
     );
 }
 
 test "local profile collection snapshots and canonical bytes preserve checked counts" {
-    var collector = try profile.Collector.init(a, repeated);
+    var collector = try profile.Collector.init(a, .unhinted(repeated));
     defer collector.deinit();
     try collector.observe(4);
     var snapshot = try collector.snapshot(a);
@@ -130,7 +130,7 @@ test "local profile collection snapshots and canonical bytes preserve checked co
     const bytes = try a.alloc(u8, try profile.encodedLength(snapshot.record));
     defer a.free(bytes);
     _ = try profile.encode(snapshot.record, bytes);
-    var decoded = try profile.decode(a, repeated, bytes);
+    var decoded = try profile.decode(a, .unhinted(repeated), bytes);
     defer decoded.deinit();
     try std.testing.expectEqualSlices(
         u64,
@@ -138,7 +138,7 @@ test "local profile collection snapshots and canonical bytes preserve checked co
         decoded.record.block_counts,
     );
     for (0..bytes.len) |length| {
-        const result = profile.decode(a, repeated, bytes[0..length]);
+        const result = profile.decode(a, .unhinted(repeated), bytes[0..length]);
         if (result) |value| {
             var owner = value;
             owner.deinit();
@@ -367,8 +367,8 @@ test "call-pattern allocation and code-growth exhaustion retain P01 baseline" {
         defer result.deinit();
         try std.testing.expect(stats.work_limit);
         try std.testing.expectEqual(
-            try @import("program_image.zig").identity(a, baseline.program),
-            try @import("program_image.zig").identity(a, result.program),
+            try @import("program_image.zig").identity(a, baseline.image()),
+            try @import("program_image.zig").identity(a, result.image()),
         );
     }
 }
@@ -458,7 +458,7 @@ test "shared pipeline selects checked repeated-callable specialization" {
     var stats: @import("closed_compilation.zig").Statistics = .{};
     var result = try @import("closed_compilation.zig").run(
         a,
-        repeated,
+        .unhinted(repeated),
         .{ .contract = .semantic, .statistics = &stats },
     );
     defer result.deinit();
@@ -561,7 +561,7 @@ test "configuration changes cannot relabel an old specialization epoch" {
     );
     const variants = try a.dupe(patterns.Variant, candidate.variants);
     defer a.free(variants);
-    const epoch = try @import("program_image.zig").identity(a, original);
+    const epoch = try @import("program_image.zig").identity(a, .unhinted(original));
     for (variants) |*variant| variant.key.epoch = epoch;
     try std.testing.expectError(
         error.InvalidCallPattern,

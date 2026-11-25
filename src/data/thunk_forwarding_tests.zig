@@ -137,8 +137,8 @@ test "forwarding handles allocation failure and rolls deterministic work limits 
     defer limited.deinit();
     try std.testing.expect(stats.work_limit);
     try std.testing.expectEqual(
-        try @import("program_image.zig").identity(a, baseline.program),
-        try @import("program_image.zig").identity(a, limited.program),
+        try @import("program_image.zig").identity(a, baseline.image()),
+        try @import("program_image.zig").identity(a, limited.image()),
     );
     var invalid = wrapped;
     invalid.roots.entry = 99;

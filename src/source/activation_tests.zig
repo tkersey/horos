@@ -436,17 +436,13 @@ test "generalized-effect staged examples round-trip directly through BPI3 admiss
         try data.activation_structure.validate(testing.allocator, compiled.program);
 
         try testing.expect(compiled.program.blocks.len != 0);
-        const bytes = try testing.allocator.alloc(
-            u8,
-            try data.program_image.encodedLength(compiled.program),
-        );
+        const bytes = try compiled.encode(testing.allocator);
         defer testing.allocator.free(bytes);
-        _ = try compiled.encode(testing.allocator, bytes);
         var decoded = try data.program_image.decode(testing.allocator, bytes);
         defer decoded.deinit();
         try testing.expectEqualDeep(compiled.program, decoded.program);
         try testing.expectEqual(
-            try data.program_image.identity(testing.allocator, compiled.program),
+            try data.program_image.identity(testing.allocator, compiled.image()),
             decoded.identity,
         );
     }
@@ -461,15 +457,15 @@ test "complete BPI3 installation images stay within the fixed BPC1 anchors" {
             try source.examples.installations(&builder, count),
         );
         defer compiled.deinit();
-        const length = try data.program_image.encodedLength(compiled.program);
+        const length = try data.program_image.encodedLength(compiled.image());
         if (length > baseline) std.debug.print(
             "BPI3 installations {d}: {d} > {d}\n",
             .{ count, length, baseline },
         );
         try testing.expect(length <= baseline);
-        const bytes = try testing.allocator.alloc(u8, length);
+        const bytes = try compiled.encode(testing.allocator);
         defer testing.allocator.free(bytes);
-        _ = try compiled.encode(testing.allocator, bytes);
+        try testing.expectEqual(length, bytes.len);
         var decoded = try data.program_image.decode(testing.allocator, bytes);
         defer decoded.deinit();
         try testing.expectEqualDeep(compiled.program, decoded.program);
@@ -512,8 +508,8 @@ test "stable construction observations preserve bytes and report source failures
         );
         try testing.expectEqual(@as(?anyerror, null), diagnostic.code);
         try testing.expectEqual(
-            try data.program_image.identity(testing.allocator, plain.program),
-            try data.program_image.identity(testing.allocator, observed.program),
+            try data.program_image.identity(testing.allocator, plain.image()),
+            try data.program_image.identity(testing.allocator, observed.image()),
         );
         builder.functions.items[@intCast(module.entry)].body = null;
         trace.count = 0;
@@ -763,8 +759,8 @@ test "optional capture explanations preserve images and retain mapped presentati
             );
             defer observed.deinit();
             try testing.expectEqual(
-                try data.program_image.identity(testing.allocator, plain.program),
-                try data.program_image.identity(testing.allocator, observed.program),
+                try data.program_image.identity(testing.allocator, plain.image()),
+                try data.program_image.identity(testing.allocator, observed.image()),
             );
             if (observer.unavailable) std.debug.print("explanation unavailable for {s}\n", .{name});
             try testing.expect(!observer.unavailable);
@@ -878,8 +874,8 @@ test "service interaction observation checks actual construction and labeled rep
         try testing.expectEqual(@as(usize, 1), observer.calls);
         try testing.expect(!observer.failed);
         try testing.expectEqual(
-            try data.program_image.identity(testing.allocator, plain.program),
-            try data.program_image.identity(testing.allocator, observed.program),
+            try data.program_image.identity(testing.allocator, plain.image()),
+            try data.program_image.identity(testing.allocator, observed.image()),
         );
     }
 }
@@ -938,7 +934,7 @@ test "changed service code cannot retain prior interaction or wait conclusions" 
         var observer: Observer = .{};
         var compiled = try data.closed_compilation.run(
             testing.allocator,
-            candidate,
+            .unhinted(candidate),
             .{ .observer = .{
                 .context = &observer,
                 .enter = Observer.enter,

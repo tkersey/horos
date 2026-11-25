@@ -14,6 +14,7 @@ pub const ast = @import("source/ast.zig");
 pub const Id = p.Id;
 pub const Module = ast.Module;
 pub const Hint = ast.Hint;
+pub const Hints = ast.Hints;
 pub const Compiled = @import("source/activation_lower.zig").Construction;
 pub const RecoveryBinding = @import("source/activation_lower.zig").RecoveryBinding;
 pub const recovery_optimization = @import("source/recovery_optimization.zig");
@@ -44,7 +45,9 @@ pub fn emit(allocator: std.mem.Allocator, comptime Application: type) !Compiled 
     var builder = Builder.init(allocator);
     defer builder.deinit();
     const module = try Application.emit(&builder);
-    return lowerObserved(allocator, module, .{ .hints = builder.hints.items });
+    return lowerObserved(allocator, module, .{
+        .hints = try builder.recordedHints(module.entry, module.failure),
+    });
 }
 
 pub const Builder = struct {
@@ -211,6 +214,9 @@ pub const Builder = struct {
         const id = self.values.items.len;
         try self.values.append(self.allocator(), try own(ast.Value, self.allocator(), expression));
         return id;
+    }
+    pub fn recordedHints(self: *const Builder, entry: p.Id, failure: p.Id) Error!?Hints {
+        return Hints.bind(self.module(entry, failure), self.hints.items);
     }
     pub fn hint(self: *Builder, value_id: p.Id, kind: data.binding_time.Kind) Error!void {
         if (value_id >= self.values.items.len) return error.InvalidSource;

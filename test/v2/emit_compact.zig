@@ -33,13 +33,14 @@ pub fn main(init: std.process.Init) !void {
         .value = value,
         .kind = if (value % 2 == 0) .context else .residual,
     };
-    var compiled = try horos.program.compileObserved(init.gpa, module, .{ .hints = hints });
+    var compiled = try horos.program.compileObserved(init.gpa, module, .{
+        .hints = try horos.source.Hints.bind(module, hints),
+    });
     defer compiled.deinit();
     if (constant and compiled.program.constants.len != 1) return error.DuplicatedConstant;
     if (hinted and compiled.hints.len == 0) return error.MissingHints;
-    const bytes = try init.gpa.alloc(u8, try compiled.encodedLength());
+    const bytes = try compiled.encode(init.gpa);
     defer init.gpa.free(bytes);
-    _ = try compiled.encode(init.gpa, bytes);
     var buffer: [4096]u8 = undefined;
     var output = std.Io.File.stdout().writer(init.io, &buffer);
     try output.interface.writeAll(bytes);

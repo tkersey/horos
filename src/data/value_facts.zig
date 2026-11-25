@@ -87,7 +87,7 @@ pub const Facts = struct {
         if (!std.mem.eql(
             u8,
             &self.epoch,
-            &try image.identity(allocator, program),
+            &try image.identity(allocator, .unhinted(program)),
         )) return error.StaleFacts;
     }
 };
@@ -117,7 +117,7 @@ pub fn analyzeObservedWithLimit(
     var checked = try ownership.analyzeObserved(allocator, program, null, observer);
     defer checked.deinit();
     var budget: Work = .{ .remaining = work_limit };
-    const epoch = try image.identity(allocator, program);
+    const epoch = try image.identity(allocator, .unhinted(program));
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
     const a = arena.allocator();

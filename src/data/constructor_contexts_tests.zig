@@ -166,8 +166,8 @@ test "constructor context allocation cleanup and exact zero-work rollback" {
     defer baseline.deinit();
     try std.testing.expect(stats.work_limit);
     try std.testing.expectEqual(
-        try @import("program_image.zig").identity(a, baseline.program),
-        try @import("program_image.zig").identity(a, limited.program),
+        try @import("program_image.zig").identity(a, baseline.image()),
+        try @import("program_image.zig").identity(a, limited.image()),
     );
     var invalid = mapped;
     invalid.roots.entry = 99;

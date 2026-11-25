@@ -640,7 +640,7 @@ pub fn construct(
     const program = try materialize(&graph, original, root, &stats);
     stats.candidates = 1;
     const proof: Proof = .{
-        .epoch = try image.identity(allocator, original),
+        .epoch = try image.identity(allocator, .unhinted(original)),
         .nodes = graph.nodes.items,
         .steps = graph.steps.items,
     };
@@ -908,7 +908,7 @@ pub fn validate(
     if (!std.mem.eql(
         u8,
         &proof.epoch,
-        &try image.identity(allocator, original),
+        &try image.identity(allocator, .unhinted(original)),
     )) return error.InvalidEqualityProof;
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -990,7 +990,7 @@ pub fn run(
         options.coalescing.withoutObservations(),
     );
     defer baseline.deinit();
-    if (try image.encodedLength(selected.program) > try image.encodedLength(baseline.program))
+    if (try image.encodedLength(selected.image()) > try image.encodedLength(baseline.image()))
         return p01.run(allocator, original, options.coalescing);
     stats.selected = true;
     keep = true;

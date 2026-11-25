@@ -588,7 +588,7 @@ pub fn construct(
 ) Error!?Candidate {
     // A supplied stale profile is rejected even when the later search budget
     // would otherwise return its ordinary no-op fallback.
-    if (options.profile) |record| try profiles.validate(allocator, original, record);
+    if (options.profile) |record| try profiles.validate(allocator, .unhinted(original), record);
     // The default covers shared P02 analysis as in branch/application
     // specialization. An explicit pass limit still caps every phase.
     var budget: Budget = .{ .remaining = options.work_limit };
@@ -670,7 +670,7 @@ const Construction = struct {
             ) catch return error.CallPatternLimit;
             if (charge > budget.remaining) return error.CallPatternLimit;
             budget.remaining -= charge;
-            break :blk try profiles.orderedBlocks(a, original, record);
+            break :blk try profiles.orderedBlocks(a, .unhinted(original), record);
         } else null;
         for (0..original.blocks.len) |ordinal| {
             const bid = if (order) |ordered| ordered[ordinal] else ordinal;
@@ -867,8 +867,8 @@ const Construction = struct {
         var program = original;
         program.functions = functions;
         program.blocks = blocks;
-        const before_bytes = try image.encodedLength(original);
-        const after_bytes = try image.encodedLength(program);
+        const before_bytes = try image.encodedLength(.unhinted(original));
+        const after_bytes = try image.encodedLength(.unhinted(program));
         if (after_bytes > before_bytes and
             after_bytes - before_bytes > options.max_added_bytes)
             return error.CallPatternLimit;
@@ -1191,7 +1191,7 @@ pub fn validate(
     var scratch = std.heap.ArenaAllocator.init(allocator);
     defer scratch.deinit();
     const permissions = try traits.derive(scratch.allocator(), original.schemas);
-    const epoch = try image.identity(allocator, original);
+    const epoch = try image.identity(allocator, .unhinted(original));
     var budget: Budget = .{ .remaining = work_limit };
     var proof: origin.Prover = .{
         .allocator = allocator,

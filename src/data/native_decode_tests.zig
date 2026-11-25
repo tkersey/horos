@@ -35,9 +35,9 @@ test "native BPI3 BMO1 and invocation decoders admit allocator-backed large valu
 
 fn checkLargeProgram(program: data.activation.Program, value: []const u8) !void {
     {
-        const image = try a.alloc(u8, try data.program_image.encodedLength(program));
+        const image = try a.alloc(u8, try data.program_image.encodedLength(.unhinted(program)));
         defer a.free(image);
-        _ = try data.program_image.encode(a, program, image);
+        _ = try data.program_image.encode(a, .unhinted(program), image);
         try std.testing.expect(image.len > 64 << 20);
         var decoded = try data.program_image.decode(a, image);
         defer decoded.deinit();

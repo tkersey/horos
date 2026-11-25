@@ -493,8 +493,8 @@ test "independent recovery validation enforces the actual encoded growth of a sp
     };
     var ordinary = try source.lowerObserved(a, module, .{ .recovery = true });
     defer ordinary.deinit();
-    const before = try data.program_image.encodedLength(ordinary.program);
-    const after = try data.program_image.encodedLength(final.program);
+    const before = try data.program_image.encodedLength(ordinary.image());
+    const after = try data.program_image.encodedLength(final.image());
     try std.testing.expect(after > before);
     policy.limits.image_growth_bytes = after - before;
     try checkEvidence(module, final.program, evidence, policy);

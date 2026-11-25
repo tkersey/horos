@@ -144,8 +144,8 @@ test "loop motion releases every allocation failure and rolls back exact work ex
     defer baseline.deinit();
     try std.testing.expect(stats.work_limit);
     try std.testing.expectEqual(
-        try @import("program_image.zig").identity(a, baseline.program),
-        try @import("program_image.zig").identity(a, limited.program),
+        try @import("program_image.zig").identity(a, baseline.image()),
+        try @import("program_image.zig").identity(a, limited.image()),
     );
     var invalid = counted;
     invalid.roots.entry = 99;
@@ -414,8 +414,8 @@ test "an aliased mutable loop read cannot acquire scalar invariance" {
     var baseline = try @import("coalescing.zig").run(a, mutable, .{});
     defer baseline.deinit();
     try std.testing.expectEqual(
-        try @import("program_image.zig").identity(a, baseline.program),
-        try @import("program_image.zig").identity(a, result.program),
+        try @import("program_image.zig").identity(a, baseline.image()),
+        try @import("program_image.zig").identity(a, result.image()),
     );
 }
 

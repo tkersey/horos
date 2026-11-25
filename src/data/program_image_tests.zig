@@ -35,12 +35,15 @@ test "bounded image sizing charges compact logical IDs before choosing their spe
     var function = example.functions[0];
     function.layout.slots = &slots;
     program.functions = &.{function};
-    const size = try image.encodedLength(program);
+    const size = try image.encodedLength(.unhinted(program));
     try testing.expect(size < slots.len);
     var work: u64 = size;
-    try testing.expectError(error.RelationLimit, image.encodedLengthWithWork(program, &work));
+    try testing.expectError(
+        error.RelationLimit,
+        image.encodedLengthWithWork(.unhinted(program), &work),
+    );
     work = size + slots.len;
-    try testing.expectEqual(size, try image.encodedLengthWithWork(program, &work));
+    try testing.expectEqual(size, try image.encodedLengthWithWork(.unhinted(program), &work));
     try testing.expectEqual(0, work);
 }
 
@@ -84,7 +87,11 @@ test "immutable admitted images share facts without accepting mutable lookalikes
     lookalike.roots.entry = 999;
     try testing.expectError(
         error.InvalidReference,
-        @import("state_admission.zig").validateStable(testing.allocator, lookalike, state),
+        @import("state_admission.zig").validateStable(
+            testing.allocator,
+            .unhinted(lookalike),
+            state,
+        ),
     );
     try @import("state_admission.zig").validateAdmitted(testing.allocator, admitted, state);
     // Public-only values have no borrow scopes, but still require the exact
@@ -113,10 +120,13 @@ test "bounded canonical identity and flow come from the same admitted records" {
     defer independent.deinit();
     const maximum: u64 = 1_000_000;
     var remaining = maximum;
-    var checked = try image.identityWithFlow(testing.allocator, example, &remaining);
+    var checked = try image.identityWithFlow(testing.allocator, .unhinted(example), &remaining);
     defer checked.deinit();
     try testing.expectEqual(owner.identity(), checked.identity);
-    try testing.expectEqual(try image.identity(testing.allocator, example), checked.identity);
+    try testing.expectEqual(
+        try image.identity(testing.allocator, .unhinted(example)),
+        checked.identity,
+    );
     for (independent.facts.live, checked.facts.live) |expected, actual| {
         for (expected, actual) |lhs, rhs| {
             var before = independent.facts.pool.iterator(lhs);
@@ -127,13 +137,13 @@ test "bounded canonical identity and flow come from the same admitted records" {
     }
     const used = maximum - remaining;
     var exact = used;
-    var fit = try image.identityWithFlow(testing.allocator, example, &exact);
+    var fit = try image.identityWithFlow(testing.allocator, .unhinted(example), &exact);
     defer fit.deinit();
     try testing.expectEqual(0, exact);
     var short = used - 1;
     try testing.expectError(error.RelationLimit, image.identityWithFlow(
         testing.allocator,
-        example,
+        .unhinted(example),
         &short,
     ));
 }
@@ -175,7 +185,7 @@ fn retainedContractFacts(allocator: std.mem.Allocator) !void {
         },
     };
     var bytes: [256]u8 = undefined;
-    const encoded = try image.encode(testing.allocator, program, &bytes);
+    const encoded = try image.encode(testing.allocator, .unhinted(program), &bytes);
     const owner = try image.Admitted.decode(allocator, encoded);
     defer owner.deinit();
     @memset(&bytes, 0xff);
@@ -201,7 +211,7 @@ test "BPI3 scalar and unit golden encodings" {
     try testing.expectEqualSlices(
         u8,
         &golden,
-        try image.encode(testing.allocator, example, &bytes),
+        try image.encode(testing.allocator, .unhinted(example), &bytes),
     );
     var decoded = try image.decode(testing.allocator, &golden);
     defer decoded.deinit();
@@ -219,7 +229,7 @@ test "BPI3 scalar and unit golden encodings" {
     try testing.expectEqualSlices(
         u8,
         &unit_golden,
-        try image.encode(testing.allocator, unit, &bytes),
+        try image.encode(testing.allocator, .unhinted(unit), &bytes),
     );
     var decoded_unit = try image.decode(testing.allocator, &unit_golden);
     defer decoded_unit.deinit();
@@ -263,12 +273,15 @@ test "BPI3 rejects redundant defaults and compressed expansion bombs" {
 
 test "BPI3 owns decoded records and binds identity to its canonical bytes" {
     var bytes: [256]u8 = undefined;
-    const encoded = try image.encode(testing.allocator, example, &bytes);
+    const encoded = try image.encode(testing.allocator, .unhinted(example), &bytes);
     var decoded = try image.decode(testing.allocator, encoded);
     defer decoded.deinit();
     @memset(&bytes, 0xff);
     try testing.expectEqualDeep(example, decoded.program);
-    try testing.expectEqual(try image.identity(testing.allocator, example), decoded.identity);
+    try testing.expectEqual(
+        try image.identity(testing.allocator, .unhinted(example)),
+        decoded.identity,
+    );
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
     hash.update(image.identity_domain);
     hash.update(decoded.bytes);
@@ -280,16 +293,22 @@ test "BPI3 rejects output overlap and capacity without mutation" {
     const constants = [_]p.Literal{.{ .schema = 0, .bytes = bytes[0..8] }};
     var program = example;
     program.constants = &constants;
-    try testing.expectError(error.InvalidBuffers, image.encode(testing.allocator, program, &bytes));
+    try testing.expectError(
+        error.InvalidBuffers,
+        image.encode(testing.allocator, .unhinted(program), &bytes),
+    );
     try testing.expectEqualSlices(u8, &(@as([256]u8, @splat(0))), &bytes);
     @memset(&bytes, 0xa5);
-    try testing.expectError(error.Capacity, image.encode(testing.allocator, example, bytes[0..1]));
+    try testing.expectError(
+        error.Capacity,
+        image.encode(testing.allocator, .unhinted(example), bytes[0..1]),
+    );
     try testing.expectEqualSlices(u8, &(@as([256]u8, @splat(0xa5))), &bytes);
     program = example;
     program.roots.entry = 999;
     try testing.expectError(
         error.InvalidReference,
-        image.encode(testing.allocator, program, &bytes),
+        image.encode(testing.allocator, .unhinted(program), &bytes),
     );
     try testing.expectEqualSlices(u8, &(@as([256]u8, @splat(0xa5))), &bytes);
 }
@@ -306,10 +325,10 @@ test "BPI3 single-bit mutations either reject or remain admitted canonical owner
                 try testing.expectEqualSlices(
                     u8,
                     &mutated,
-                    try image.encode(testing.allocator, decoded.program, &output),
+                    try image.encode(testing.allocator, decoded.image(), &output),
                 );
                 try testing.expectEqual(
-                    try image.identity(testing.allocator, decoded.program),
+                    try image.identity(testing.allocator, decoded.image()),
                     decoded.identity,
                 );
             } else |_| {}
@@ -319,7 +338,7 @@ test "BPI3 single-bit mutations either reject or remain admitted canonical owner
 
 fn allocationFailure(allocator: std.mem.Allocator) !void {
     var bytes = @as([256]u8, @splat(0xa5));
-    const encoded = image.encode(allocator, example, &bytes) catch |err| {
+    const encoded = image.encode(allocator, .unhinted(example), &bytes) catch |err| {
         for (bytes) |byte| try testing.expectEqual(@as(u8, 0xa5), byte);
         return err;
     };
@@ -334,7 +353,7 @@ test "BPI3 allocation failures release owners and leave uncommitted output intac
 
 test "BPI3 framing rejects truncation, old families, flags and trailing input" {
     var bytes: [256]u8 = undefined;
-    const encoded = try image.encode(testing.allocator, example, &bytes);
+    const encoded = try image.encode(testing.allocator, .unhinted(example), &bytes);
     for (0..encoded.len) |length| {
         if (image.decode(testing.allocator, encoded[0..length])) |value| {
             var owner = value;
@@ -384,7 +403,7 @@ test "admission checks the owned header even when allocation changes caller inpu
         }
     };
     var bytes: [256]u8 = undefined;
-    const encoded = try image.encode(std.testing.allocator, example, &bytes);
+    const encoded = try image.encode(std.testing.allocator, .unhinted(example), &bytes);
     var context: Mutating = .{ .child = std.testing.allocator, .input = &bytes };
     const allocator: std.mem.Allocator = .{ .ptr = &context, .vtable = &.{
         .alloc = Mutating.allocate,
@@ -418,9 +437,9 @@ test "large decoded arrays and owned image bytes survive caller mutation and all
     blocks[0].instructions = instructions;
     var program = example;
     program.blocks = &blocks;
-    const bytes = try testing.allocator.alloc(u8, try image.encodedLength(program));
+    const bytes = try testing.allocator.alloc(u8, try image.encodedLength(.unhinted(program)));
     defer testing.allocator.free(bytes);
-    _ = try image.encode(testing.allocator, program, bytes);
+    _ = try image.encode(testing.allocator, .unhinted(program), bytes);
     try testing.expect(bytes.len >= 4096);
     try @import("allocation_testing.zig").check(testing.allocator, bulkDecodeFailure, .{bytes});
     var decoded = try image.decode(testing.allocator, bytes);
@@ -432,9 +451,9 @@ test "large decoded arrays and owned image bytes survive caller mutation and all
         example.constants[0].bytes,
         decoded.program.constants[0].bytes,
     );
-    const output = try testing.allocator.alloc(u8, try image.encodedLength(decoded.program));
+    const output = try testing.allocator.alloc(u8, try image.encodedLength(decoded.image()));
     defer testing.allocator.free(output);
-    _ = try image.encode(testing.allocator, decoded.program, output);
+    _ = try image.encode(testing.allocator, decoded.image(), output);
     var roundtrip = try image.decode(testing.allocator, output);
     defer roundtrip.deinit();
     try testing.expectEqualDeep(decoded.program, roundtrip.program);
@@ -452,9 +471,9 @@ test "large outer block catalogs own exact storage and release partial decode fa
     };
     var program = example;
     program.blocks = &blocks;
-    const encoded = try testing.allocator.alloc(u8, try image.encodedLength(program));
+    const encoded = try testing.allocator.alloc(u8, try image.encodedLength(.unhinted(program)));
     defer testing.allocator.free(encoded);
-    _ = try image.encode(testing.allocator, program, encoded);
+    _ = try image.encode(testing.allocator, .unhinted(program), encoded);
     var decoded = try image.decode(testing.allocator, encoded);
     defer decoded.deinit();
     try testing.expectEqual(blocks.len, decoded.block_catalog.len);

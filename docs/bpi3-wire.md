@@ -255,14 +255,32 @@ the same `Program` records as its unhinted twin, so execution and metering are
 identical. Program identity covers the whole image, so it binds the hints: a
 hinted image and its unhinted twin have different identities, and hints cannot
 be added to or removed from an image without changing its identity.
-`Decoded.hints` and `Admitted.hints()` expose the admitted table; the
-`WithHints` forms of `encode`, `encodedLength` and `identity` produce it.
+
+There is one program identity. `Image` pairs the executable records with their
+hint table, and `encodedLength`, `encode`, `encodeAlloc`, `identity` and
+`identityWithFlow` accept only an `Image`; a bare `Program` cannot be sized,
+encoded or identified. `Image.unhinted(program)` states that a program has no
+hints. `Decoded.image()`, `Admitted.image()`, `Compiled.image()` and
+`Linked.image()` return the image they own, so each identity function agrees
+with `Decoded.identity` and `Admitted.identity()`. State admission
+(`state_admission.validateStable`) and optimization profiles take the image
+too, so a PST3 state or a profile of a hinted program is checked against the
+same identity that admission computed.
+
+Closed compilation takes an `Image`. Structural P01 transports its hints
+through the checked correspondence; a final binding keeps a kind only when every
+binding merged into it carried that kind, and any merged binding without a hint
+joins it to residual. Its `max_image_bytes` and reported byte counts measure the
+emitted image, including the hint table. The semantic contract rejects a hinted
+input with `InvalidCorrespondence`.
 
 ## Owners, limits and failure safety
 
-`encodedLength` sizes borrowed records without granting admission. `encode`
+`encodedLength` sizes a borrowed image without granting admission. `encode`
 performs full stable admission, sizing, capacity and recursive borrowed-storage
-overlap checks before writing any output. `identity` also performs admission.
+overlap checks before writing any output; `encodeAlloc` allocates exactly the
+encoded length and is the only sizing route of `Compiled.encode` and
+`Linked.encode`. `identity` also performs admission.
 
 `decode` copies input, checks framing, reads records, performs full stable
 admission and checks canonical bytes by re-emission. Its returned owner contains

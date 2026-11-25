@@ -76,8 +76,8 @@ test "reused closure loses a dead capture while preserving explicit arguments" {
     std.debug.print(
         "dead capture in reused closure: {d} -> {d} bytes\n",
         .{
-            try @import("program_image.zig").encodedLength(reused),
-            try @import("program_image.zig").encodedLength(result.program),
+            try @import("program_image.zig").encodedLength(.unhinted(reused)),
+            try @import("program_image.zig").encodedLength(result.image()),
         },
     );
 }

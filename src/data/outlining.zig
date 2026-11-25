@@ -464,7 +464,7 @@ pub fn run(
     var result = try p01.run(allocator, candidate.program, options.coalescing);
     var keep_result = false;
     defer if (!keep_result) result.deinit();
-    if (try image.encodedLength(result.program) >= try image.encodedLength(baseline.program)) {
+    if (try image.encodedLength(result.image()) >= try image.encodedLength(baseline.image())) {
         stats.size_guard = true;
         keep_baseline = true;
         return baseline;

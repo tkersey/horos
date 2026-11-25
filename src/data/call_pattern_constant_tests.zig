@@ -169,15 +169,15 @@ test "constant worker allocation failures release owners and variant limit rolls
     defer baseline.deinit();
     try std.testing.expect(stats.work_limit);
     try std.testing.expectEqual(
-        try @import("program_image.zig").identity(a, baseline.program),
-        try @import("program_image.zig").identity(a, limited.program),
+        try @import("program_image.zig").identity(a, baseline.image()),
+        try @import("program_image.zig").identity(a, limited.image()),
     );
 }
 test "shared pipeline selects constant argument specialization" {
     var stats: @import("closed_compilation.zig").Statistics = .{};
     var result = try @import("closed_compilation.zig").run(
         a,
-        choice,
+        .unhinted(choice),
         .{ .contract = .semantic, .statistics = &stats },
     );
     defer result.deinit();
@@ -204,7 +204,7 @@ test "selected constants without an origin proof retain a valid generic call" {
     try std.testing.expectEqual(@as(usize, 1), stats.generic_fallback_calls);
     var compiled = try @import("closed_compilation.zig").run(
         a,
-        original,
+        .unhinted(original),
         .{ .contract = .semantic },
     );
     defer compiled.deinit();

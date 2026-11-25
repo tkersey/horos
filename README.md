@@ -28,8 +28,9 @@ An application implements `emit(builder)` using the checked staged builder.
 `horos.program.compile(allocator, module)` compiles an already constructed
 source module. Both use the same stable-slot compiler. The returned owner must
 be deinitialized; it owns the emitted records and derived flow facts independently
-of the source builder. `compiled.encode(allocator, destination)` emits BPI3 into
-caller-owned storage. Arbitrary native Zig function bodies are not translated.
+of the source builder. `compiled.encode(allocator)` returns the BPI3 image in
+exactly sized caller-owned storage. Arbitrary native Zig function bodies are not
+translated.
 
 `program.compileObserved` additionally accepts caller-owned diagnostics and a
 phase observer. Diagnostics identify source variables or target calls and scopes

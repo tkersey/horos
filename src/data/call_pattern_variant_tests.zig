@@ -192,7 +192,7 @@ test "shared semantic pipeline removes selected constructor and decomposition" {
     var stats: @import("closed_compilation.zig").Statistics = .{};
     var result = try @import("closed_compilation.zig").run(
         a,
-        original,
+        .unhinted(original),
         .{ .contract = .semantic, .statistics = &stats },
     );
     defer result.deinit();
@@ -347,7 +347,7 @@ test "known variant switch transports returned payload to specialized jump" {
         try std.testing.expectEqual(@as(u64, 0), edge.assignments[0].source.slot);
         var compiled = try @import("closed_compilation.zig").run(
             a,
-            original,
+            .unhinted(original),
             .{ .contract = .semantic },
         );
         defer compiled.deinit();

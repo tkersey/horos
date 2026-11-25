@@ -6,9 +6,9 @@ const image = @import("program_image.zig");
 const fixture = @import("coalescing_witness_tests.zig").original;
 
 fn bytes(program: @import("activation.zig").Program) ![]u8 {
-    const result = try testing.allocator.alloc(u8, try image.encodedLength(program));
+    const result = try testing.allocator.alloc(u8, try image.encodedLength(.unhinted(program)));
     errdefer testing.allocator.free(result);
-    _ = try image.encode(testing.allocator, program, result);
+    _ = try image.encode(testing.allocator, .unhinted(program), result);
     return result;
 }
 

@@ -78,8 +78,8 @@ test "private cell reads and writes become explicit scalar values" {
     std.debug.print(
         "private cell scalar replacement: {d} -> {d} bytes\n",
         .{
-            try @import("program_image.zig").encodedLength(private_cell),
-            try @import("program_image.zig").encodedLength(result.program),
+            try @import("program_image.zig").encodedLength(.unhinted(private_cell)),
+            try @import("program_image.zig").encodedLength(result.image()),
         },
     );
 }

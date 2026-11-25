@@ -57,12 +57,8 @@ const Measurement = struct {
         const elapsed = start.durationTo(std.Io.Clock.awake.now(self.io)).nanoseconds;
         const retained = meter.live;
         const peak = meter.peak;
-        const bytes = try self.allocator.alloc(
-            u8,
-            try horos.data.program_image.encodedLength(compiled.program),
-        );
+        const bytes = try compiled.encode(self.allocator);
         defer self.allocator.free(bytes);
-        _ = try compiled.encode(self.allocator, bytes);
         var hash: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(bytes, &hash, .{});
         if (self.identity) |expected| {

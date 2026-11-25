@@ -64,16 +64,15 @@ pub const Construction = struct {
     recovery_evidence: ?RecoveryEvidence = null,
     hints: []const data.binding_time.Hint = &.{},
 
-    pub fn encodedLength(self: *const Construction) data.program_image.Error!usize {
-        return data.program_image.encodedLengthWithHints(self.program, self.hints);
+    pub fn image(self: *const Construction) data.program_image.Image {
+        return .{ .program = self.program, .hints = self.hints };
     }
 
     pub fn encode(
         self: *const Construction,
         allocator: std.mem.Allocator,
-        output: []u8,
-    ) data.program_image.Error![]const u8 {
-        return data.program_image.encodeWithHints(allocator, self.program, self.hints, output);
+    ) data.program_image.Error![]u8 {
+        return data.program_image.encodeAlloc(allocator, self.image());
     }
 
     pub fn deinit(self: *Construction) void {
@@ -124,7 +123,11 @@ fn lowerInternal(
     options: source.CompileOptions,
 ) Error!Construction {
     options.resetObservations();
-    if (component and (options.recovery or options.hints.len != 0)) return error.InvalidSource;
+    if (options.hints) |hints| if (hints.table.len != 0) {
+        if (component or !try hints.recordedAgainst(input)) return error.InvalidSource;
+        if (options.contract != .structural) return error.InvalidCorrespondence;
+    };
+    if (component and options.recovery) return error.InvalidSource;
     return (lowerBody(
         allocator,
         input,
@@ -276,7 +279,7 @@ fn lowerBody(
         .cacheable = try @import("value_cache.zig").deriveWithWork(a, input, traits, work),
         .uses = traits,
         .recovery_enabled = options.recovery,
-        .hinted = try hintedValues(a, input, options.hints),
+        .hinted = try hintedValues(a, input, hintTable(options)),
     };
     const program = try lowerProgram(&compiler, options);
     if (options.diagnostic) |diagnostic| diagnostic.function = null;
@@ -310,6 +313,10 @@ fn lowerBody(
     const ordered = try optimizeDirect(&compiler, program, options);
     if (!component and !recovery_input) return try coalesce(allocator, ordered, &compiler, options);
     return try ownConstruction(allocator, ordered, &compiler, imports, component, borrows, options);
+}
+
+fn hintTable(options: source.CompileOptions) []const ast.Hint {
+    return if (options.hints) |hints| hints.table else &.{};
 }
 
 fn hintedValues(
@@ -369,10 +376,6 @@ const CompilationObserver = struct {
             if (try binding.relocated(self.compiler.correspondence.?)) |final|
                 try self.compiler.final_bindings.append(self.compiler.allocator, final);
         }
-        for (self.compiler.hint_sites.items) |site| {
-            if (try relocatedHint(site, self.compiler.correspondence.?)) |final|
-                try self.compiler.final_hints.append(self.compiler.allocator, final);
-        }
         if (self.options.coalescing.correspondence) |observer| try observer.receive(
             observer.context,
             trace,
@@ -405,7 +408,7 @@ fn coalesce(
     };
     var detail: data.coalescing.Diagnostic = .{};
     var selected = options.coalescing;
-    if (options.recovery or options.hints.len != 0) selected.correspondence = .{
+    if (options.recovery) selected.correspondence = .{
         .context = &observation,
         .receive = CompilationObserver.correspondence,
     };
@@ -421,9 +424,13 @@ fn coalesce(
             out.* = detail;
         };
     }
+    const hinted: data.program_image.Image = .{
+        .program = program,
+        .hints = data.binding_time.normalize(compiler.hint_sites.items),
+    };
     var result = data.closed_compilation.run(
         allocator,
-        program,
+        hinted,
         compilationOptions(options, &observation, &statistics, selected),
     ) catch |err| {
         diagnoseCoalescing(compiler, options, statistics, detail);
@@ -479,20 +486,6 @@ fn checkTarget(
         };
 }
 
-fn relocatedHint(
-    site: data.binding_time.Hint,
-    map: data.coalescing.Correspondence,
-) error{InvalidCorrespondence}!?data.binding_time.Hint {
-    const functions = map.maps[@backingInt(data.relocation.Kind.function)];
-    if (site.function >= functions.len or site.function >= map.locals.len)
-        return error.InvalidCorrespondence;
-    const function = functions[@intCast(site.function)];
-    if (function == data.relocation.missing) return null;
-    const slots = map.locals[@intCast(site.function)].slots;
-    if (site.slot >= slots.len) return error.InvalidCorrespondence;
-    return .{ .function = function, .slot = slots[@intCast(site.slot)], .kind = site.kind };
-}
-
 const ConstructorKey = struct { function: p.Id, schema: p.Id };
 const Compiler = struct {
     work: ?*u64 = null,
@@ -508,7 +501,6 @@ const Compiler = struct {
     correspondence: ?data.coalescing.Correspondence = null,
     hinted: []const ?data.binding_time.Kind,
     hint_sites: std.ArrayList(data.binding_time.Hint) = .empty,
-    final_hints: std.ArrayList(data.binding_time.Hint) = .empty,
     cacheable: []const bool,
     uses: data.traits.Facts,
     constants: std.ArrayList(p.Literal) = .empty,
@@ -1378,7 +1370,7 @@ fn optimizeDirect(
     return try @import("slot_order.zig").optimizeObserved(
         a,
         selected,
-        if (options.recovery or options.hints.len != 0) .{
+        if (options.recovery or compiler.hinted.len != 0) .{
             .context = compiler,
             .receive = Compiler.reorderBindings,
         } else null,
@@ -1531,10 +1523,6 @@ fn finishCoalescing(
             if (try binding.relocated(proof.correspondence)) |final|
                 try parameters.append(result.arena.allocator(), final);
     }
-    const hints = data.binding_time.normalize(
-        try result.arena.allocator().dupe(data.binding_time.Hint, compiler.final_hints.items),
-    );
-    data.binding_time.validate(result.program, hints) catch return error.InvalidSource;
     const constructed: Construction = .{
         .arena = result.arena,
         .program = result.program,
@@ -1542,7 +1530,7 @@ fn finishCoalescing(
         .recovery = recovery,
         .parameters = parameters.items,
         .recovery_evidence = evidence,
-        .hints = hints,
+        .hints = result.hints,
     };
     options.stage(.complete);
     if (options.diagnostic) |diagnostic| diagnostic.* = .{ .phase = .complete };

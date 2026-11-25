@@ -4,8 +4,11 @@ const p = @import("program.zig");
 const ir = @import("activation.zig");
 const wire = @import("wire.zig");
 const body_record = @import("program_record.zig");
+const relocation = @import("relocation.zig");
+const witness = @import("coalescing_witness.zig");
 
 pub const Error = body_record.Error || error{InvalidReference};
+pub const RelocationError = std.mem.Allocator.Error || error{InvalidCorrespondence};
 
 pub const Kind = enum(u8) {
     context = 0,
@@ -40,12 +43,16 @@ pub fn validate(program: ir.Program, hints: []const Hint) Error!void {
     }
 }
 
-pub fn normalize(hints: []Hint) []Hint {
+fn sort(hints: []Hint) void {
     std.mem.sort(Hint, hints, {}, struct {
         fn lessThan(_: void, left: Hint, right: Hint) bool {
             return left.precedes(right);
         }
     }.lessThan);
+}
+
+pub fn normalize(hints: []Hint) []Hint {
+    sort(hints);
     var length: usize = 0;
     for (hints) |hint| {
         if (length != 0 and hints[length - 1].sameBinding(hint)) {
@@ -56,6 +63,74 @@ pub fn normalize(hints: []Hint) []Hint {
         length += 1;
     }
     return hints[0..length];
+}
+
+pub fn relocate(
+    arena: std.mem.Allocator,
+    scratch: std.mem.Allocator,
+    hints: []const Hint,
+    target: ir.Program,
+    functions: []const p.Id,
+    locals: []const witness.Local,
+) RelocationError![]const Hint {
+    const members = try scratch.alloc(usize, target.functions.len);
+    defer scratch.free(members);
+    @memset(members, 0);
+    for (functions) |function| {
+        if (function == relocation.missing) continue;
+        if (function >= members.len) return error.InvalidCorrespondence;
+        members[@intCast(function)] += 1;
+    }
+    const placed = try scratch.alloc(Hint, hints.len);
+    defer scratch.free(placed);
+    const relocated = try place(placed, hints, functions, locals);
+    const joined = try join(relocated, members);
+    validate(target, joined) catch return error.InvalidCorrespondence;
+    return arena.dupe(Hint, joined);
+}
+
+fn place(
+    placed: []Hint,
+    hints: []const Hint,
+    functions: []const p.Id,
+    locals: []const witness.Local,
+) error{InvalidCorrespondence}![]Hint {
+    var length: usize = 0;
+    for (hints) |hint| {
+        if (hint.function >= functions.len or hint.function >= locals.len)
+            return error.InvalidCorrespondence;
+        const function = functions[@intCast(hint.function)];
+        if (function == relocation.missing) continue;
+        const slots = locals[@intCast(hint.function)].slots;
+        if (hint.slot >= slots.len) return error.InvalidCorrespondence;
+        placed[length] = .{
+            .function = function,
+            .slot = slots[@intCast(hint.slot)],
+            .kind = hint.kind,
+        };
+        length += 1;
+    }
+    sort(placed[0..length]);
+    return placed[0..length];
+}
+
+fn join(placed: []Hint, members: []const usize) error{InvalidCorrespondence}![]Hint {
+    var length: usize = 0;
+    var start: usize = 0;
+    while (start < placed.len) {
+        const binding = placed[start];
+        var kind = binding.kind;
+        var end = start + 1;
+        while (end < placed.len and placed[end].sameBinding(binding)) : (end += 1)
+            kind = kind.join(placed[end].kind);
+        const merged = members[@intCast(binding.function)];
+        if (end - start > merged) return error.InvalidCorrespondence;
+        if (end - start < merged) kind = .residual;
+        placed[length] = .{ .function = binding.function, .slot = binding.slot, .kind = kind };
+        length += 1;
+        start = end;
+    }
+    return placed[0..length];
 }
 
 pub fn write(hints: []const Hint, writer: *wire.Writer) Error!void {

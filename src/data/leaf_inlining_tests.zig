@@ -188,8 +188,8 @@ test "leaf work and site limits roll back to P01 and allocation failure releases
         defer result.deinit();
         try std.testing.expect(stats.work_limit);
         try std.testing.expectEqual(
-            try @import("program_image.zig").identity(a, baseline.program),
-            try @import("program_image.zig").identity(a, result.program),
+            try @import("program_image.zig").identity(a, baseline.image()),
+            try @import("program_image.zig").identity(a, result.image()),
         );
     }
 }
@@ -211,7 +211,7 @@ test "shared pipeline cancels product exposed by leaf inlining" {
     var stats: @import("closed_compilation.zig").Statistics = .{};
     var result = try @import("closed_compilation.zig").run(
         a,
-        product,
+        .unhinted(product),
         .{ .contract = .semantic, .statistics = &stats },
     );
     defer result.deinit();

@@ -2,6 +2,10 @@ const std = @import("std");
 const image = @import("program_image.zig");
 const binding_time = @import("binding_time.zig");
 const ir = @import("activation.zig");
+const state_admission = @import("state_admission.zig");
+const compilation = @import("closed_compilation.zig");
+const witness = @import("coalescing_witness.zig");
+const relocation_missing = @import("relocation.zig").missing;
 const testing = std.testing;
 const Hint = binding_time.Hint;
 
@@ -33,6 +37,7 @@ const hinted_golden = "ABL_BPI3".* ++ [_]u8{
 };
 
 const residual_result = [_]Hint{.{ .function = 0, .slot = 0, .kind = .residual }};
+const hinted_example: image.Image = .{ .program = example, .hints = &residual_result };
 
 const pair: ir.Program = .{
     .roots = .{ .entry = 0, .result = 0, .failure = 1 },
@@ -55,14 +60,21 @@ const pair: ir.Program = .{
     }},
 };
 
+fn imageIdentity(bytes: []const u8) [32]u8 {
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    hash.update(image.identity_domain);
+    hash.update(bytes);
+    return hash.finalResult();
+}
+
 test "a program without hints keeps the exact pre-hint encoding and identity" {
     var output: [256]u8 = undefined;
-    const plain = try image.encodeWithHints(testing.allocator, example, &.{}, &output);
+    const plain = try image.encode(testing.allocator, .unhinted(example), &output);
     try testing.expectEqualSlices(u8, &golden, plain);
-    try testing.expectEqual(golden.len, try image.encodedLengthWithHints(example, &.{}));
+    try testing.expectEqual(golden.len, try image.encodedLength(.unhinted(example)));
     try testing.expectEqual(
-        try image.identity(testing.allocator, example),
-        try image.identityWithHints(testing.allocator, example, &.{}),
+        imageIdentity(&golden),
+        try image.identity(testing.allocator, .unhinted(example)),
     );
     var decoded = try image.decode(testing.allocator, &golden);
     defer decoded.deinit();
@@ -71,12 +83,7 @@ test "a program without hints keeps the exact pre-hint encoding and identity" {
 
 test "binding-time hints are recorded beside unchanged executable records" {
     var output: [256]u8 = undefined;
-    const encoded = try image.encodeWithHints(
-        testing.allocator,
-        example,
-        &residual_result,
-        &output,
-    );
+    const encoded = try image.encode(testing.allocator, hinted_example, &output);
     try testing.expectEqualSlices(u8, &hinted_golden, encoded);
     var bytes = hinted_golden;
     var decoded = try image.decode(testing.allocator, &bytes);
@@ -87,14 +94,18 @@ test "binding-time hints are recorded beside unchanged executable records" {
     try testing.expectEqualSlices(
         u8,
         &golden,
-        try image.encode(testing.allocator, decoded.program, &output),
+        try image.encode(testing.allocator, .unhinted(decoded.program), &output),
     );
-    const hinted = try image.identityWithHints(testing.allocator, example, &residual_result);
+    const hinted = try image.identity(testing.allocator, hinted_example);
+    try testing.expectEqual(imageIdentity(&hinted_golden), hinted);
     try testing.expectEqual(hinted, decoded.identity);
-    try testing.expect(!std.mem.eql(u8, &hinted, &try image.identity(testing.allocator, example)));
+    try testing.expectEqual(imageIdentity(&golden), try image.identity(
+        testing.allocator,
+        .unhinted(example),
+    ));
     const admitted = try image.Admitted.decode(testing.allocator, &hinted_golden);
     defer admitted.deinit();
-    try testing.expectEqualSlices(Hint, &residual_result, admitted.hints());
+    try testing.expectEqualSlices(Hint, &residual_result, admitted.image().hints);
     try testing.expectEqual(hinted, admitted.identity());
 }
 
@@ -131,7 +142,7 @@ test "forged hint tables reject unknown kinds and missing bindings" {
 
 test "forged hint tables reject repeated and unordered bindings" {
     var output: [256]u8 = undefined;
-    const plain = try image.encode(testing.allocator, pair, &output);
+    const plain = try image.encode(testing.allocator, .unhinted(pair), &output);
     var storage: [256]u8 = undefined;
     for ([_][]const u8{
         &.{ 2, 0, 0, 0, 0, 0, 1 },
@@ -148,7 +159,11 @@ test "forged hint tables reject repeated and unordered bindings" {
         .{ .function = 0, .slot = 0, .kind = .context },
         .{ .function = 0, .slot = 1, .kind = .residual },
     };
-    const encoded = try image.encodeWithHints(testing.allocator, pair, &ordered, &storage);
+    const encoded = try image.encode(
+        testing.allocator,
+        .{ .program = pair, .hints = &ordered },
+        &storage,
+    );
     var decoded = try image.decode(testing.allocator, encoded);
     defer decoded.deinit();
     try testing.expectEqualSlices(Hint, &ordered, decoded.hints);
@@ -172,14 +187,9 @@ test "encoding rejects invalid in-memory hint tables before writing output" {
         .{ error.InvalidReference, &missing },
         .{ error.InvalidReference, &absent },
     }) |case| {
-        try testing.expectError(
-            case[0],
-            image.encodeWithHints(testing.allocator, pair, case[1], &output),
-        );
-        try testing.expectError(
-            case[0],
-            image.identityWithHints(testing.allocator, pair, case[1]),
-        );
+        const forged: image.Image = .{ .program = pair, .hints = case[1] };
+        try testing.expectError(case[0], image.encode(testing.allocator, forged, &output));
+        try testing.expectError(case[0], image.identity(testing.allocator, forged));
     }
     try testing.expectEqualSlices(u8, &(@as([256]u8, @splat(0xa5))), &output);
 }
@@ -208,7 +218,7 @@ fn hintedAllocation(allocator: std.mem.Allocator) !void {
     try testing.expectEqualSlices(Hint, &residual_result, decoded.hints);
     const admitted = try image.Admitted.decode(allocator, &hinted_golden);
     defer admitted.deinit();
-    try testing.expectEqualSlices(Hint, &residual_result, admitted.hints());
+    try testing.expectEqualSlices(Hint, &residual_result, admitted.image().hints);
 }
 
 test "hinted image decoding releases every owner on allocation failure" {
@@ -235,4 +245,120 @@ test "the decoding budget charges the hint table" {
         .max_decoded_bytes = hinted.decoded_bytes,
     });
     exact.deinit();
+}
+
+fn hintedState(identity: [32]u8) @import("process_state.zig").State {
+    return .{
+        .program_identity = identity,
+        .status = .active,
+        .roots = .{ .current = .{ .id = 0 } },
+        .nodes = &.{.{ .record = .{ .control = .{ .block = 0 } }, .activation = .{
+            .position = 1,
+            .scope = 0,
+            .owners = &.{},
+            .bindings = &.{.{
+                .slot = 0,
+                .value = .{ .schema = 0, .body = .{ .scalar = .{ 42, 0, 0, 0, 0, 0, 0, 0 } } },
+            }},
+        } }},
+    };
+}
+
+test "a hinted program has one identity across every identity function" {
+    var decoded = try image.decode(testing.allocator, &hinted_golden);
+    defer decoded.deinit();
+    const admitted = try image.Admitted.decode(testing.allocator, &hinted_golden);
+    defer admitted.deinit();
+    try testing.expectEqual(decoded.identity, admitted.identity());
+    try testing.expectEqual(
+        decoded.identity,
+        try image.identity(testing.allocator, decoded.image()),
+    );
+    try testing.expectEqual(
+        decoded.identity,
+        try image.identity(testing.allocator, admitted.image()),
+    );
+    var verified = try image.identityWithFlow(testing.allocator, decoded.image(), null);
+    defer verified.deinit();
+    try testing.expectEqual(decoded.identity, verified.identity);
+}
+
+test "stable and admitted state validation agree for a hinted program" {
+    const admitted = try image.Admitted.decode(testing.allocator, &hinted_golden);
+    defer admitted.deinit();
+    const state = hintedState(admitted.identity());
+    try state_admission.validateAdmitted(testing.allocator, admitted, state);
+    try state_admission.validateStable(testing.allocator, admitted.image(), state);
+    const erased = hintedState(try image.identity(
+        testing.allocator,
+        .unhinted(admitted.program()),
+    ));
+    try testing.expectError(
+        error.InvalidState,
+        state_admission.validateAdmitted(testing.allocator, admitted, erased),
+    );
+    try testing.expectError(
+        error.InvalidState,
+        state_admission.validateStable(testing.allocator, admitted.image(), erased),
+    );
+}
+
+test "closed compilation bounds the emitted hinted image" {
+    const length = try image.encodedLength(hinted_example);
+    try testing.expectError(error.Capacity, compilation.run(
+        testing.allocator,
+        hinted_example,
+        .{ .max_image_bytes = length - 1 },
+    ));
+    var stats: compilation.Statistics = .{};
+    var result = try compilation.run(
+        testing.allocator,
+        hinted_example,
+        .{ .max_image_bytes = length, .statistics = &stats },
+    );
+    defer result.deinit();
+    try testing.expectEqualSlices(Hint, &residual_result, result.hints);
+    try testing.expectEqual(length, stats.original_bytes);
+    try testing.expectEqual(length, stats.final_bytes);
+    try testing.expectError(error.InvalidCorrespondence, compilation.run(
+        testing.allocator,
+        hinted_example,
+        .{ .contract = .semantic },
+    ));
+}
+
+fn expectRelocated(
+    expected: anyerror![]const Hint,
+    hints: []const Hint,
+    functions: []const u64,
+) !void {
+    const unary: witness.Local = .{ .slots = &.{0}, .custody = &.{} };
+    const locals = [_]witness.Local{ unary, unary };
+    const actual = binding_time.relocate(
+        testing.allocator,
+        testing.allocator,
+        hints,
+        example,
+        functions,
+        &locals,
+    );
+    const wanted = expected catch |err| return testing.expectError(err, actual);
+    const relocated = try actual;
+    defer testing.allocator.free(relocated);
+    try testing.expectEqualSlices(Hint, wanted, relocated);
+}
+
+test "relocation joins a binding merged with an unhinted twin to residual" {
+    const context = [_]Hint{.{ .function = 0, .slot = 0, .kind = .context }};
+    const twins = [_]Hint{
+        .{ .function = 0, .slot = 0, .kind = .context },
+        .{ .function = 1, .slot = 0, .kind = .context },
+    };
+    const residual = [_]Hint{.{ .function = 0, .slot = 0, .kind = .residual }};
+    try expectRelocated(&residual, &context, &.{ 0, 0 });
+    try expectRelocated(&context, &twins, &.{ 0, 0 });
+    try expectRelocated(&context, &context, &.{ 0, relocation_missing });
+    try expectRelocated(&.{}, &context, &.{ relocation_missing, 0 });
+    try expectRelocated(error.InvalidCorrespondence, &context, &.{ 1, 0 });
+    try expectRelocated(error.InvalidCorrespondence, &twins, &.{0});
 }

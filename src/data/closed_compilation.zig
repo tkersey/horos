@@ -43,6 +43,8 @@ const rectangles = @import("rectangular_loops.zig");
 const tiling = @import("rectangular_tiling.zig");
 const profiles = @import("optimization_profile.zig");
 const unpack = @import("capture_unpack.zig");
+const binding_time = @import("binding_time.zig");
+const relocation = @import("relocation.zig");
 pub const Contract = enum { structural, semantic };
 pub const Objective = enum { size, balanced, speed };
 pub const Stage = enum {
@@ -655,7 +657,7 @@ fn cost(allocator: std.mem.Allocator, owned: *const p01.Owned) Error!Cost {
     );
     const repeated_work = try motion.repeatedWorkEstimate(allocator, program);
     var result: Cost = .{
-        .bytes = try image.encodedLength(program),
+        .bytes = try image.encodedLength(owned.image()),
         .work = 0,
         .path_work = if (try rectangles.executionWork(
             allocator,
@@ -883,7 +885,7 @@ fn possible(allocator: std.mem.Allocator, owned: *const p01.Owned, stage: Stage)
     return false;
 }
 
-pub fn run(allocator: std.mem.Allocator, original: ir.Program, options: Options) Error!p01.Owned {
+pub fn run(allocator: std.mem.Allocator, original: image.Image, options: Options) Error!p01.Owned {
     const result = try runInternal(allocator, original, options);
     if (options.observer) |observer| if (observer.service) |service| {
         // Optional presentation is derived only after final binding/relocation.
@@ -914,13 +916,13 @@ pub fn run(allocator: std.mem.Allocator, original: ir.Program, options: Options)
 }
 fn runInternal(
     allocator: std.mem.Allocator,
-    original: ir.Program,
+    original: image.Image,
     options: Options,
 ) Error!p01.Owned {
     options.resetObservations();
     // Semantic passes need their own composed recovery correspondence. Until
     // they provide it, never publish a P01-only map for a rewritten program.
-    if (options.coalescing.correspondence != null and
+    if ((options.coalescing.correspondence != null or original.hints.len != 0) and
         options.contract != .structural)
         return error.InvalidCorrespondence;
     var stats: Statistics = .{};
@@ -930,14 +932,14 @@ fn runInternal(
     };
     errdefer stats.failed_stage = stage;
     notify(options, .p01);
-    var baseline = try p01.run(allocator, original, options.coalescing);
+    var baseline = try transported(allocator, original, options.coalescing);
     var keep_baseline = false;
     defer if (!keep_baseline) baseline.deinit();
     // Bind logical locations before any semantic rewrite or P01 relocation.
     // Structural compilation validates the profile but explicitly does not use it.
     if (options.profile) |policy| try profiles.validate(allocator, original, policy.record);
     stats.original_bytes = try image.encodedLength(original);
-    stats.baseline_bytes = try image.encodedLength(baseline.program);
+    stats.baseline_bytes = try image.encodedLength(baseline.image());
     stats.final_bytes = stats.baseline_bytes;
     if (options.contract == .structural) {
         if (options.max_image_bytes) |limit| if (stats.final_bytes > limit) return error.Capacity;
@@ -953,7 +955,7 @@ fn runInternal(
     }
     var invocation: SemanticInvocation = .{
         .allocator = allocator,
-        .original = original,
+        .original = original.program,
         .options = options,
         .stats = &stats,
         .stage = &stage,
@@ -971,6 +973,46 @@ fn runInternal(
     keep_baseline = true;
     return baseline;
 }
+const HintTransport = struct {
+    scratch: std.heap.ArenaAllocator,
+    downstream: @FieldType(p01.Options, "correspondence"),
+    correspondence: ?p01.Correspondence = null,
+
+    fn receive(context: *anyopaque, trace: *const p01.OriginsTrace) p01.Error!void {
+        const self: *HintTransport = @ptrCast(@alignCast(context));
+        self.correspondence = try p01.Correspondence.copy(self.scratch.allocator(), trace);
+        if (self.downstream) |observer| try observer.receive(observer.context, trace);
+    }
+};
+
+fn transported(
+    allocator: std.mem.Allocator,
+    original: image.Image,
+    coalescing: p01.Options,
+) Error!p01.Owned {
+    if (original.hints.len == 0) return p01.run(allocator, original.program, coalescing);
+    try binding_time.validate(original.program, original.hints);
+    var transport: HintTransport = .{
+        .scratch = .init(allocator),
+        .downstream = coalescing.correspondence,
+    };
+    defer transport.scratch.deinit();
+    var selected = coalescing;
+    selected.correspondence = .{ .context = &transport, .receive = HintTransport.receive };
+    var result = try p01.run(allocator, original.program, selected);
+    errdefer result.deinit();
+    const map = transport.correspondence orelse return error.InvalidCorrespondence;
+    result.hints = try binding_time.relocate(
+        result.arena.allocator(),
+        transport.scratch.allocator(),
+        original.hints,
+        result.program,
+        map.maps[@backingInt(relocation.Kind.function)],
+        map.locals,
+    );
+    return result;
+}
+
 const SemanticInvocation = struct {
     allocator: std.mem.Allocator,
     original: ir.Program,
@@ -1125,7 +1167,7 @@ const SemanticInvocation = struct {
         }
         var round: usize = 0;
         while (round < self.options.round_limit) : (round += 1) {
-            const before = try image.identity(self.allocator, self.subject().program);
+            const before = try image.identity(self.allocator, self.subject().image());
             for (schedule) |next_stage| {
                 self.stage.* = next_stage;
                 if (!try self.runStage()) return false;
@@ -1134,7 +1176,7 @@ const SemanticInvocation = struct {
             if (std.mem.eql(
                 u8,
                 &before,
-                &try image.identity(self.allocator, self.subject().program),
+                &try image.identity(self.allocator, self.subject().image()),
             )) return true;
         }
         try self.stop(null);
@@ -1229,7 +1271,7 @@ const SemanticInvocation = struct {
         notify(self.options, .p01);
         var result = try p01.run(self.allocator, selected.program, self.options.coalescing);
         errdefer result.deinit();
-        self.stats.final_bytes = try image.encodedLength(result.program);
+        self.stats.final_bytes = try image.encodedLength(result.image());
         self.stats.outcome = .applied;
         return result;
     }

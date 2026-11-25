@@ -155,7 +155,7 @@ test "BMO1 preserves independently admitted tail clauses through relocation" {
             linked.program.blocks[@intCast(function.entry)].function,
         );
     }
-    _ = try data.program_image.identity(testing.allocator, linked.program);
+    _ = try data.program_image.identity(testing.allocator, linked.image());
 }
 
 fn object(provider: bool, boolean: bool) ![]u8 {
@@ -217,7 +217,7 @@ test "BMO1 links effectful bodies without source owners and ignores instance enu
     var output: [8192]u8 = undefined;
     try testing.expectError(
         error.InvalidReference,
-        data.program_image.encode(testing.allocator, decoded.object.program, &output),
+        data.program_image.encode(testing.allocator, .unhinted(decoded.object.program), &output),
     );
     const instances = [_]data.linker.Instance{
         .{ .key = "library", .object = provider },
@@ -240,14 +240,14 @@ test "BMO1 links effectful bodies without source owners and ignores instance enu
     );
     defer second.deinit();
     try testing.expectEqual(
-        try data.program_image.identity(testing.allocator, first.program),
-        try data.program_image.identity(testing.allocator, second.program),
+        try data.program_image.identity(testing.allocator, first.image()),
+        try data.program_image.identity(testing.allocator, second.image()),
     );
     try testing.expectEqual(1, first.program.effects.len);
     try testing.expectEqual(2, first.program.functions.len);
     @memset(provider, 0xff);
     @memset(client, 0xff);
-    _ = try first.encode(testing.allocator, &output);
+    _ = try data.program_image.encode(testing.allocator, first.image(), &output);
 }
 
 test "public linker rejects missing duplicate wrong-kind and incompatible effect imports" {
@@ -374,8 +374,8 @@ test "three effectful components link without retaining source and also serve a 
     defer second.deinit();
     try testing.expect(!std.mem.eql(
         u8,
-        &try data.program_image.identity(testing.allocator, first.program),
-        &try data.program_image.identity(testing.allocator, second.program),
+        &try data.program_image.identity(testing.allocator, first.image()),
+        &try data.program_image.identity(testing.allocator, second.image()),
     ));
 }
 
@@ -488,9 +488,8 @@ fn failureLink(allocator: std.mem.Allocator, provider: []const u8, client: []con
         .{ .instance = "client", .symbol = "main" },
     );
     defer linked.deinit();
-    const bytes = try allocator.alloc(u8, try data.program_image.encodedLength(linked.program));
+    const bytes = try linked.encode(allocator);
     defer allocator.free(bytes);
-    _ = try linked.encode(allocator, bytes);
 }
 
 test "component linking releases every partial owner on allocation failure" {

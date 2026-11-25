@@ -1651,7 +1651,7 @@ pub const Context = opaque {
     pub fn module(self: *Context, entry: anytype, failure: anytype) Error!source.Module {
         return rawContext(self).module(erased(.function, entry), erased(.schema, failure));
     }
-    pub fn hints(self: *Context) []const source.Hint {
+    pub fn hints(self: *Context) ?source.Hints {
         return rawContext(self).hints();
     }
     pub fn compile(

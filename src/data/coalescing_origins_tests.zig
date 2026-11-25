@@ -136,8 +136,8 @@ test "coalescing diagnostics do not change the selected image" {
     defer ordinary.deinit();
     const image = @import("program_image.zig");
     try testing.expectEqual(
-        try image.identity(testing.allocator, ordinary.program),
-        try image.identity(testing.allocator, observed.program),
+        try image.identity(testing.allocator, ordinary.image()),
+        try image.identity(testing.allocator, observed.image()),
     );
 }
 

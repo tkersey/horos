@@ -41,12 +41,8 @@ pub fn main(init: std.process.Init) !void {
     } else {
         var compiled = try horos.program.compile(init.gpa, module);
         defer compiled.deinit();
-        const bytes = try init.gpa.alloc(
-            u8,
-            try horos.data.program_image.encodedLength(compiled.program),
-        );
+        const bytes = try compiled.encode(init.gpa);
         defer init.gpa.free(bytes);
-        _ = try compiled.encode(init.gpa, bytes);
         try output.interface.writeAll(bytes);
     }
     try output.interface.flush();

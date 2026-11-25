@@ -352,7 +352,7 @@ test "retained call-pattern representations preserve admitted inputs" {
     for ([_]ir.Program{ callable, variant }) |original| {
         var admitted = try own.analyze(a, original);
         admitted.deinit();
-        var baseline = try closed.run(a, original, .{});
+        var baseline = try closed.run(a, .unhinted(original), .{});
         defer baseline.deinit();
         if (try patterns.construct(a, original, .{})) |value| {
             var candidate = value;
@@ -370,7 +370,7 @@ test "retained call-pattern representations preserve admitted inputs" {
         }
         var direct = try patterns.run(a, original, null, .{});
         defer direct.deinit();
-        var compiled = try closed.run(a, original, .{ .contract = .semantic });
+        var compiled = try closed.run(a, .unhinted(original), .{ .contract = .semantic });
         defer compiled.deinit();
     }
 }
@@ -399,7 +399,7 @@ test "retained call-pattern compatible replacement schemas still specialize" {
             candidate.sites,
             1000000,
         );
-        var compiled = try closed.run(a, compatible, .{ .contract = .semantic });
+        var compiled = try closed.run(a, .unhinted(compatible), .{ .contract = .semantic });
         defer compiled.deinit();
     }
 }
@@ -449,8 +449,8 @@ test "retained call-pattern observation allocation failure and work limits remai
         defer result.deinit();
         try std.testing.expect(stats.work_limit);
         try std.testing.expectEqual(
-            try @import("program_image.zig").identity(a, baseline.program),
-            try @import("program_image.zig").identity(a, result.program),
+            try @import("program_image.zig").identity(a, baseline.image()),
+            try @import("program_image.zig").identity(a, result.image()),
         );
     }
 }

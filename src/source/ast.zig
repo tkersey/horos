@@ -1,9 +1,33 @@
 // Copyright (c) 2026 Boundary contributors. MIT license.
 //! Higher-order source syntax. Functions may close over lexical variables;
 //! terms compose with bind, independently of any target block or frame layout.
-const p = @import("horos_data").program;
+const std = @import("std");
+const data = @import("horos_data");
+const p = data.program;
 pub const Id = p.Id;
-pub const Hint = struct { value: Id, kind: @import("horos_data").binding_time.Kind };
+pub const Hint = struct { value: Id, kind: data.binding_time.Kind };
+pub const Hints = struct {
+    module: [32]u8,
+    table: []const Hint,
+
+    pub fn bind(module: Module, table: []const Hint) data.record.Error!?Hints {
+        if (table.len == 0) return null;
+        return .{ .module = try identity(module, null), .table = table };
+    }
+
+    pub fn recordedAgainst(self: Hints, module: Module) data.record.Error!bool {
+        const actual = try identity(module, null);
+        return std.mem.eql(u8, &self.module, &actual);
+    }
+};
+
+pub fn identity(module: Module, work: ?*u64) data.record.Error![32]u8 {
+    var digest = std.crypto.hash.sha2.Sha256.init(.{});
+    var writer: data.wire.Writer = .{ .hasher = &digest, .remaining = work };
+    try writer.put("horos.source-relation/1\x00");
+    try data.record.write(Module, module, &writer);
+    return digest.finalResult();
+}
 pub const Value = struct {
     schema: Id,
     expression: union(enum) {

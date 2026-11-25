@@ -159,7 +159,7 @@ test "shared pipeline consumes materialized facts to eliminate comparison branch
     var stats: @import("closed_compilation.zig").Statistics = .{};
     var result = try @import("closed_compilation.zig").run(
         a,
-        words,
+        .unhinted(words),
         .{ .contract = .semantic, .statistics = &stats },
     );
     defer result.deinit();

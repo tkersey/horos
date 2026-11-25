@@ -37,7 +37,7 @@ test "profile order spends the one-loop unswitch attempt on the hotter header" {
     @memset(counts, 0);
     counts[9] = 100;
     const profile: @import("optimization_profile.zig").Record = .{
-        .image_identity = try @import("program_image.zig").identity(a, original),
+        .image_identity = try @import("program_image.zig").identity(a, .unhinted(original)),
         .block_counts = counts,
         .total = 100,
     };
@@ -211,10 +211,13 @@ test "unswitching retains exact P01 on exhausted work or insufficient final code
     try std.testing.expect(stats.code_budget_rejected);
     const identity = @import("program_image.zig").identity;
     try std.testing.expectEqual(
-        try identity(a, baseline.program),
-        try identity(a, limited.program),
+        try identity(a, baseline.image()),
+        try identity(a, limited.image()),
     );
-    try std.testing.expectEqual(try identity(a, baseline.program), try identity(a, sized.program));
+    try std.testing.expectEqual(
+        try identity(a, baseline.image()),
+        try identity(a, sized.image()),
+    );
     var invalid = selectable;
     invalid.roots.entry = 99;
     try std.testing.expectError(

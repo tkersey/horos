@@ -208,8 +208,8 @@ test "late proof-budget exhaustion discards already selected replacements" {
     defer baseline.deinit();
     const image = @import("program_image.zig");
     try std.testing.expectEqual(
-        try image.identity(a, baseline.program),
-        try image.identity(a, result.program),
+        try image.identity(a, baseline.image()),
+        try image.identity(a, result.image()),
     );
 }
 

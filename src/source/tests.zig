@@ -172,9 +172,9 @@ fn requireAdmitted(program: data.activation.Program) !void {
 
 fn canonical(program: data.activation.Program) !void {
     const a = std.testing.allocator;
-    const bytes = try a.alloc(u8, try data.program_image.encodedLength(program));
+    const bytes = try a.alloc(u8, try data.program_image.encodedLength(.unhinted(program)));
     defer a.free(bytes);
-    _ = try data.program_image.encode(a, program, bytes);
+    _ = try data.program_image.encode(a, .unhinted(program), bytes);
     var decoded = try data.program_image.decode(a, bytes);
     defer decoded.deinit();
     try std.testing.expectEqualDeep(program, decoded.program);
@@ -918,12 +918,8 @@ test "an added pointer-free constant occupies one stored payload" {
         defer compiled.deinit();
         try std.testing.expectEqual(@as(usize, 1), compiled.program.constants.len);
         try std.testing.expectEqual(bytes.len, compiled.program.constants[0].bytes.len);
-        const output = try std.testing.allocator.alloc(
-            u8,
-            try data.program_image.encodedLength(compiled.program),
-        );
+        const output = try compiled.encode(std.testing.allocator);
         defer std.testing.allocator.free(output);
-        _ = try compiled.encode(std.testing.allocator, output);
         if (length == 0) empty_size = output.len else {
             try std.testing.expectEqual(
                 @as(usize, 1),
@@ -950,12 +946,8 @@ test "public staged emit compiles independently and frees every failed allocatio
             var compiled = try @import("../root.zig").program.lower(allocator, @This());
             defer compiled.deinit();
             try std.testing.expectEqual(@as(u8, 42), compiled.program.constants[0].bytes[0]);
-            const bytes = try allocator.alloc(
-                u8,
-                try data.program_image.encodedLength(compiled.program),
-            );
+            const bytes = try compiled.encode(allocator);
             defer allocator.free(bytes);
-            _ = try compiled.encode(allocator, bytes);
             try std.testing.expectEqualStrings("ABL_BPI3", bytes[0..8]);
         }
     };
@@ -975,12 +967,8 @@ test "lexical lambda conversion derives captures and owns emitted data independe
     try std.testing.expectEqual(@as(usize, 1), compiled.program.constructors.len);
     try std.testing.expectEqual(@as(usize, 1), compiled.program.scopes.captures[0].fields.len);
     try std.testing.expectEqual(@as(usize, 2), compiled.program.functions[1].inputs.len);
-    const output = try std.testing.allocator.alloc(
-        u8,
-        try data.program_image.encodedLength(compiled.program),
-    );
+    const output = try compiled.encode(std.testing.allocator);
     defer std.testing.allocator.free(output);
-    _ = try compiled.encode(std.testing.allocator, output);
     var decoded = try data.program_image.decode(std.testing.allocator, output);
     defer decoded.deinit();
 }
@@ -1558,8 +1546,8 @@ test "large sparse region names preserve alpha-equivalent canonical images" {
     var large_bytes: [512]u8 = undefined;
     try std.testing.expectEqualSlices(
         u8,
-        try small.encode(std.testing.allocator, &small_bytes),
-        try large.encode(std.testing.allocator, &large_bytes),
+        try data.program_image.encode(std.testing.allocator, small.image(), &small_bytes),
+        try data.program_image.encode(std.testing.allocator, large.image(), &large_bytes),
     );
     var diagnostic: data.coalescing.Diagnostic = .{};
     var optimized = try Example.compileObserved(
@@ -1571,8 +1559,12 @@ test "large sparse region names preserve alpha-equivalent canonical images" {
     var optimized_bytes: [512]u8 = undefined;
     try std.testing.expectEqualSlices(
         u8,
-        try large.encode(std.testing.allocator, &large_bytes),
-        try optimized.encode(std.testing.allocator, &optimized_bytes),
+        try data.program_image.encode(std.testing.allocator, large.image(), &large_bytes),
+        try data.program_image.encode(
+            std.testing.allocator,
+            optimized.image(),
+            &optimized_bytes,
+        ),
     );
     try std.testing.expectEqual(@as(?anyerror, null), diagnostic.code);
 }
@@ -1623,8 +1615,8 @@ test "capture diagnostics name the responsible source variable without changing 
         var c: [1024]u8 = undefined;
         try std.testing.expectEqualSlices(
             u8,
-            try original.encode(std.testing.allocator, &a),
-            try observed.encode(std.testing.allocator, &c),
+            try data.program_image.encode(std.testing.allocator, original.image(), &a),
+            try data.program_image.encode(std.testing.allocator, observed.image(), &c),
         );
         for (b.schemas.items) |*schema|
             if (schema.* == .internal and

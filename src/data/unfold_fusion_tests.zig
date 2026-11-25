@@ -105,7 +105,7 @@ test "early-stop unfold and its divergent delayed successor are admitted" {
     var stats: @import("closed_compilation.zig").Statistics = .{};
     var current = try @import("closed_compilation.zig").run(
         a,
-        unfold,
+        .unhinted(unfold),
         .{ .contract = .semantic, .statistics = &stats },
     );
     defer current.deinit();
@@ -163,8 +163,8 @@ test "unfold allocation failures and work exhaustion preserve original ownership
     defer limited.deinit();
     try std.testing.expect(stats.work_limit);
     try std.testing.expectEqual(
-        try @import("program_image.zig").identity(a, baseline.program),
-        try @import("program_image.zig").identity(a, limited.program),
+        try @import("program_image.zig").identity(a, baseline.image()),
+        try @import("program_image.zig").identity(a, limited.image()),
     );
     var invalid = unfold;
     invalid.roots.entry = 100;

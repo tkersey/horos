@@ -4,6 +4,7 @@ const std = @import("std");
 const p = @import("program.zig");
 const ir = @import("activation.zig");
 const component = @import("component.zig");
+const program_image = @import("program_image.zig");
 const relocate = @import("relocation.zig");
 const equal = @import("record.zig").equal;
 const Kind = relocate.Kind;
@@ -29,12 +30,11 @@ pub const Linked = struct {
         self.arena.deinit();
         self.* = undefined;
     }
-    pub fn encode(
-        self: *const Linked,
-        allocator: std.mem.Allocator,
-        output: []u8,
-    ) Error![]const u8 {
-        return @import("program_image.zig").encode(allocator, self.program, output);
+    pub fn image(self: *const Linked) program_image.Image {
+        return .unhinted(self.program);
+    }
+    pub fn encode(self: *const Linked, allocator: std.mem.Allocator) Error![]u8 {
+        return program_image.encodeAlloc(allocator, self.image());
     }
 };
 const Unit = struct {
@@ -213,7 +213,12 @@ fn finishLink(
     var checked = try @import("activation_ownership.zig").analyze(allocator, result);
     defer checked.deinit();
     try checkBorrows(a, units, result);
-    const optimized = try @import("closed_compilation.zig").run(allocator, result, options);
+    const optimized = try @import("closed_compilation.zig").run(
+        allocator,
+        .unhinted(result),
+        options,
+    );
+    std.debug.assert(optimized.hints.len == 0);
     return .{ .arena = optimized.arena, .program = optimized.program, .flow = optimized.flow };
 }
 
