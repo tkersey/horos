@@ -7,13 +7,21 @@ Source syntax/formatting, the tracked Zig source inventory and the
 gate requires both to pass. The source job checks out the actual proposed head
 with its history,
 tests the pinned native auditor and audits every tracked Zig file.
-The source preflight retains its five-minute timeout. The existing installation
-and contracts jobs remain independent and each has a ten-minute timeout:
+The source preflight retains its five-minute timeout. Three independent
+qualification jobs run in parallel, each with a ten-minute timeout: installation,
+and the `check` aggregate split into its native contracts and its independent
+observations. Together the two contracts lanes select exactly the steps `check`
+depends on:
 
 ```sh
 zig build check-package -Doptimize=safe --summary all
-zig build check -Doptimize=safe --summary all
+zig build check-native -Doptimize=safe --summary all
+zig build check-semantics check-program-image-wasm check-state-image-wasm \
+  check-invocation-wasm -Doptimize=safe --summary all
 ```
+
+A cold compiler cache made the single contracts job take more than ten minutes.
+Splitting it keeps every check while each lane fits its timeout.
 
 The package check requires a clean committed candidate. One native driver
 exports that commit, uses Zig to construct its package, then compiles the public
@@ -41,7 +49,8 @@ image-bound checkpoints; an approved realization switch preserves the same guest
 state and revision without requiring the same runtime artifact or pump count.
 Host authorization remains a separate condition of a live switch.
 
-Compiler cache retention uses ordinary CI filesystem operations. Only a complete
+Each contracts lane keeps its own compiler cache. Compiler cache retention uses
+ordinary CI filesystem operations. Only a complete
 regular-file/directory tree containing compiler objects and within four GiB is
 saved. Over-budget or unsupported caches are left in place and not uploaded;
 local data is never deleted to meet the upload bound. Package qualification owns
