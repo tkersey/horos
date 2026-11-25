@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Boundary contributors. MIT license.
-pub const package_version = "8.0.0";
+pub const package_version = "8.1.0";
 pub const authoring = @import("authoring.zig");
 pub const source = @import("source.zig");
 pub const library = struct {
