@@ -9,19 +9,23 @@ with its history,
 tests the pinned native auditor and audits every tracked Zig file.
 The source preflight retains its five-minute timeout. Three independent
 qualification jobs run in parallel, each with a ten-minute timeout: installation,
-and the `check` aggregate split into its native contracts and its independent
-observations. Together the two contracts lanes select exactly the steps `check`
-depends on:
+and the `check` aggregate split into two contracts lanes. `check-semantics`
+already runs the authoring test root and the source recovery tests, so the
+observations lane also selects `check-authoring`; the native lane selects the
+rest of `check-native`. Together the two contracts lanes select exactly the steps
+`check` depends on:
 
 ```sh
 zig build check-package -Doptimize=safe --summary all
-zig build check-native -Doptimize=safe --summary all
-zig build check-semantics check-program-image-wasm check-state-image-wasm \
-  check-invocation-wasm -Doptimize=safe --summary all
+zig build check-data check-components check-recovery-optimization \
+  -Doptimize=safe --summary all
+zig build check-authoring check-semantics check-program-image-wasm \
+  check-state-image-wasm check-invocation-wasm -Doptimize=safe --summary all
 ```
 
 A cold compiler cache made the single contracts job take more than ten minutes.
-Splitting it keeps every check while each lane fits its timeout.
+Splitting it keeps every check while each lane fits its timeout, and the
+449-test authoring root, the longest compilation, is compiled in one lane only.
 
 The package check requires a clean committed candidate. One native driver
 exports that commit, uses Zig to construct its package, then compiles the public
@@ -55,7 +59,7 @@ regular-file/directory tree containing compiler objects and within four GiB is
 saved. Over-budget or unsupported caches are left in place and not uploaded;
 local data is never deleted to meet the upload bound. Package qualification owns
 fresh caches; a cache hit never establishes source or execution qualification.
-Cache upload starts only in the workflow's first eight minutes and has a
+Cache upload starts only in the job's first eight minutes and has a
 one-minute step limit, reserving time for cleanup and the final gate.
 Linux x86-64 build-host programs use a reproducible baseline target, retaining
 native execution while avoiding runner-specific CPU and OS target cache inputs.
