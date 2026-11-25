@@ -60,6 +60,8 @@ src/data/analysis_sets.zig
 src/data/analysis_sets_tests.zig
 src/data/application_specialization.zig
 src/data/application_specialization_tests.zig
+src/data/binding_time.zig
+src/data/binding_time_tests.zig
 src/data/blob_admission.zig
 src/data/borrow_contract.zig
 src/data/borrow_flow.zig

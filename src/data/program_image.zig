@@ -8,49 +8,84 @@ const body_record = @import("program_record.zig");
 const admission = @import("activation_ownership.zig");
 const flow = @import("activation_flow.zig");
 const sets = @import("analysis_sets.zig");
-pub const Error = admission.Error || body_record.Error;
+const binding_time = @import("binding_time.zig");
+pub const Error = admission.Error || binding_time.Error;
 pub const magic = "ABL_BPI3";
 pub const identity_domain = "boundary.program/v3\x00";
 /// Native defaults follow the allocator; finite budgets are caller policy.
 pub const Limits = struct { max_decoded_bytes: usize = std.math.maxInt(usize) };
 
 pub fn encodedLength(program: ir.Program) Error!usize {
-    return encodedLengthWithWork(program, null);
+    return measure(program, &.{}, null);
 }
 
 pub fn encodedLengthWithWork(program: ir.Program, work: ?*u64) Error!usize {
+    return measure(program, &.{}, work);
+}
+
+pub fn encodedLengthWithHints(program: ir.Program, hints: []const binding_time.Hint) Error!usize {
+    return measure(program, hints, null);
+}
+
+fn measure(program: ir.Program, hints: []const binding_time.Hint, work: ?*u64) Error!usize {
     var writer: wire.Writer = .{ .position = wire.header_length, .remaining = work };
     try writer.charge(wire.header_length);
     var context: body_record.Context = .{};
     try body_record.write(ir.Program, program, &writer, &context);
+    if (hints.len != 0) try binding_time.write(hints, &writer);
     return writer.position;
 }
 
-fn write(program: ir.Program, length: usize, writer: *wire.Writer) Error!void {
+fn write(
+    program: ir.Program,
+    hints: []const binding_time.Hint,
+    length: usize,
+    writer: *wire.Writer,
+) Error!void {
     try writer.put(magic);
     try writer.fixed(u16, 3);
     try writer.fixed(u16, 0);
     try writer.fixed(u64, length - wire.header_length);
     var context: body_record.Context = .{};
     try body_record.write(ir.Program, program, writer, &context);
+    if (hints.len != 0) try binding_time.write(hints, writer);
 }
 
 /// Full admission, sizing and overlap checks precede the first output write.
 pub fn encode(allocator: std.mem.Allocator, program: ir.Program, output: []u8) Error![]const u8 {
+    return encodeWithHints(allocator, program, &.{}, output);
+}
+
+pub fn encodeWithHints(
+    allocator: std.mem.Allocator,
+    program: ir.Program,
+    hints: []const binding_time.Hint,
+    output: []u8,
+) Error![]const u8 {
     var checked = try admission.analyze(allocator, program);
     defer checked.deinit();
-    const length = try encodedLength(program);
+    try binding_time.validate(program, hints);
+    const length = try encodedLengthWithHints(program, hints);
     if (output.len < length) return error.Capacity;
-    if (record.overlaps(ir.Program, program, output[0..length])) return error.InvalidBuffers;
+    if (record.overlaps(ir.Program, program, output[0..length]) or
+        wire.overlap(std.mem.sliceAsBytes(hints), output[0..length])) return error.InvalidBuffers;
     var writer: wire.Writer = .{ .output = output[0..length] };
-    try write(program, length, &writer);
+    try write(program, hints, length, &writer);
     std.debug.assert(writer.position == length);
     return output[0..length];
 }
 
 /// Domain-separated identity over the admitted compact structural encoding.
 pub fn identity(allocator: std.mem.Allocator, program: ir.Program) Error![32]u8 {
-    var checked = try identityWithFlow(allocator, program, null);
+    return identityWithHints(allocator, program, &.{});
+}
+
+pub fn identityWithHints(
+    allocator: std.mem.Allocator,
+    program: ir.Program,
+    hints: []const binding_time.Hint,
+) Error![32]u8 {
+    var checked = try verifiedIdentity(allocator, program, hints, null);
     defer checked.deinit();
     return checked.identity;
 }
@@ -70,14 +105,24 @@ pub fn identityWithFlow(
     program: ir.Program,
     work: ?*u64,
 ) Error!VerifiedIdentity {
+    return verifiedIdentity(allocator, program, &.{}, work);
+}
+
+fn verifiedIdentity(
+    allocator: std.mem.Allocator,
+    program: ir.Program,
+    hints: []const binding_time.Hint,
+    work: ?*u64,
+) Error!VerifiedIdentity {
     var facts = try admission.analyzeObservedWithWork(allocator, program, null, null, work);
     errdefer facts.deinit();
-    const length = try encodedLengthWithWork(program, work);
+    try binding_time.validate(program, hints);
+    const length = try measure(program, hints, work);
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
     var writer: wire.Writer = .{ .hasher = &hash, .remaining = work };
     try writer.charge(identity_domain.len);
     hash.update(identity_domain);
-    try write(program, length, &writer);
+    try write(program, hints, length, &writer);
     return .{ .identity = hash.finalResult(), .facts = facts };
 }
 
@@ -85,6 +130,7 @@ pub const Decoded = struct {
     arena: std.heap.ArenaAllocator,
     block_catalog: []ir.Block,
     program: ir.Program,
+    hints: []const binding_time.Hint = &.{},
     bytes: []const u8,
     identity: [32]u8,
     decoded_bytes: usize,
@@ -141,21 +187,27 @@ fn decodeChecked(allocator: std.mem.Allocator, input: []const u8, limits: Limits
         &budget,
         &context,
     );
+    const hints: []const binding_time.Hint = if (reader.position == owned.len)
+        &.{}
+    else
+        try binding_time.read(&reader, arena.allocator(), &budget);
     try reader.finish();
     var checked = try admission.analyze(allocator, program);
     errdefer checked.deinit();
+    try binding_time.validate(program, hints);
     // Re-emission checks every omitted default and compressed spelling. The hash
     // receives those same bytes; neither path expands old live interfaces.
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
     hash.update(identity_domain);
     var canonical: wire.Writer = .{ .expected = owned, .hasher = &hash };
-    try write(program, owned.len, &canonical);
+    try write(program, hints, owned.len, &canonical);
     if (canonical.position != owned.len) return error.NonCanonical;
     return .{
         .decoded = .{
             .arena = arena,
             .block_catalog = block_catalog,
             .program = program,
+            .hints = hints,
             .bytes = owned,
             .identity = hash.finalResult(),
             .decoded_bytes = budget.used,
@@ -221,6 +273,9 @@ pub const Admitted = opaque {
     }
     pub fn identity(self: *const Admitted) [32]u8 {
         return self.storage().decoded.identity;
+    }
+    pub fn hints(self: *const Admitted) []const binding_time.Hint {
+        return self.storage().decoded.hints;
     }
     pub fn schemaFacts(self: *const Admitted) @import("admission.zig").SchemaFacts {
         return self.storage().schemas;
