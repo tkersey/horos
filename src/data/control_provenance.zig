@@ -213,6 +213,9 @@ pub const Analysis = opaque {
     pub fn program(self: *const Analysis) ir.Program {
         return self.data().image;
     }
+    pub fn precise(self: *const Analysis) bool {
+        return self.data().values != null;
+    }
     pub const Constructors = struct { ids: []const p.Id, conservative: bool };
     pub fn constructorsAt(self: *const Analysis, block: p.Id, slot: p.Id) Error!Constructors {
         try admission.spend(self.data().work, 1);
@@ -768,9 +771,12 @@ pub fn deriveObservedWithWork(
         }
         row.* = try targets.toOwnedSlice(allocator);
     }
-    if (!component and imports.len == 0 and image.handlers.len != 0)
-        try derivePrecise(stored, explanations);
+    if (analyzesValues(image, imports, component)) try derivePrecise(stored, explanations);
     return @ptrCast(stored);
+}
+
+pub fn analyzesValues(image: ir.Program, imports: []const p.Id, component: bool) bool {
+    return !component and imports.len == 0 and image.handlers.len != 0;
 }
 
 fn derivePrecise(stored: *Storage, explanations: bool) Error!void {

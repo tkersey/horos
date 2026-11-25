@@ -39,7 +39,6 @@ src/data/activation_structure_tests.zig
 src/data/activation_types.zig
 src/data/admission.zig
 src/data/admission_differential_tests.zig
-src/data/admission_oracle.zig
 src/data/affine_capture.zig
 src/data/affine_capture_tests.zig
 src/data/affine_edges.zig

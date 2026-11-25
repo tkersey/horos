@@ -305,13 +305,7 @@ fn initContext(
     const context: Context = .{
         .allocator = temporary,
         .program = program,
-        .control = if (std.mem.allEqual(bool, facts.exportable, true))
-            .{ .exportable = if (program.handlers.len == 0)
-                null
-            else
-                try provenance.derive(temporary, program, &.{}, false) }
-        else
-            .{ .scoped = try provenance.derive(temporary, program, &.{}, false) },
+        .control = try Control.derive(temporary, program, facts.exportable),
         .state = state,
         .activations = activations,
         .flow = flow,
@@ -390,6 +384,20 @@ const Control = union(enum) {
     exportable: ?*const provenance.Analysis,
     scoped: *const provenance.Analysis,
 
+    const imports: []const p.Id = &.{};
+    const component = false;
+
+    fn derive(
+        allocator: std.mem.Allocator,
+        program: Program,
+        exportable: []const bool,
+    ) Error!Control {
+        if (!std.mem.allEqual(bool, exportable, true))
+            return .{ .scoped = try provenance.derive(allocator, program, imports, component) };
+        if (!provenance.analyzesValues(program, imports, component)) return .{ .exportable = null };
+        return .{ .exportable = try provenance.derive(allocator, program, imports, component) };
+    }
+
     fn analysis(self: Control) ?*const provenance.Analysis {
         return switch (self) {
             .exportable => |control| control,
@@ -397,6 +405,55 @@ const Control = union(enum) {
         };
     }
 };
+
+test "exportable state control derives provenance exactly when it analyzes values" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const handled: Program = .{
+        .roots = .{ .entry = 0, .result = 0, .failure = 1 },
+        .schemas = &.{ .u64, .unit },
+        .constants = &.{.{ .schema = 0, .bytes = &.{ 42, 0, 0, 0, 0, 0, 0, 0 } }},
+        .effects = &.{},
+        .functions = &.{
+            .{ .entry = 0, .inputs = &.{}, .layout = .{ .slots = &.{0} }, .result = 0 },
+            .{ .entry = 1, .inputs = &.{0}, .layout = .{ .slots = &.{0} }, .result = 0 },
+        },
+        .blocks = &.{
+            .{
+                .function = 0,
+                .instructions = &.{.{ .opcode = .constant, .destination = 0 }},
+                .terminator = .{ .return_value = 0 },
+            },
+            .{ .function = 1, .instructions = &.{}, .terminator = .{ .return_value = 0 } },
+        },
+        .handlers = &.{.{
+            .mode = .deep,
+            .input = 0,
+            .answer = 0,
+            .return_function = 1,
+            .clauses = &.{},
+        }},
+    };
+    var unhandled = handled;
+    unhandled.handlers = &.{};
+    var observed: [2]bool = @splat(false);
+    for ([_]Program{ handled, unhandled }) |program| {
+        const facts = try a.schemas(allocator, program.schemas);
+        const control = try Control.derive(allocator, program, facts.exportable);
+        const derived = try provenance.derive(
+            allocator,
+            program,
+            Control.imports,
+            Control.component,
+        );
+        try std.testing.expect(control == .exportable);
+        try std.testing.expectEqual(derived.precise(), control.exportable != null);
+        if (control.exportable) |analysis| try std.testing.expect(analysis.precise());
+        observed[@intFromBool(derived.precise())] = true;
+    }
+    try std.testing.expect(observed[0] and observed[1]);
+}
 
 const Context = struct {
     const EffectCheck = state_effects.CheckFor(Program, StateView);
