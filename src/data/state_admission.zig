@@ -176,7 +176,7 @@ fn validateInternal(
         if (admitted) |owner| owner.effectFacts() else null,
     );
     context.effect_check.?.activations = activations;
-    context.effect_check.?.control = context.control;
+    context.effect_check.?.control = context.control.analysis();
     for (state.blobs) |blob| try a.value(
         temporary,
         program.schemas,
@@ -200,7 +200,8 @@ fn validateInternal(
     )) return error.InvalidState;
     try context.valueScopes();
     try validateOwnership(&context);
-    if (context.control) |control| try control.validateState(temporary, state.nodes, activations);
+    if (context.control.analysis()) |control|
+        try control.validateState(temporary, state.nodes, activations);
     try context.effect_check.?.futureCaptures(&context, Context.visitFutureCapture);
 }
 
@@ -304,11 +305,13 @@ fn initContext(
     const context: Context = .{
         .allocator = temporary,
         .program = program,
-        .control = if (program.handlers.len == 0 and
-            std.mem.allEqual(bool, facts.exportable, true))
-            null
+        .control = if (std.mem.allEqual(bool, facts.exportable, true))
+            .{ .exportable = if (program.handlers.len == 0)
+                null
+            else
+                try provenance.derive(temporary, program, &.{}, false) }
         else
-            try provenance.derive(temporary, program, &.{}, false),
+            .{ .scoped = try provenance.derive(temporary, program, &.{}, false) },
         .state = state,
         .activations = activations,
         .flow = flow,
@@ -383,12 +386,24 @@ fn validateRoots(state: StateView) Error!void {
 
 const Program = stable_ir.Program;
 const Block = std.meta.Elem(@FieldType(Program, "blocks"));
+const Control = union(enum) {
+    exportable: ?*const provenance.Analysis,
+    scoped: *const provenance.Analysis,
+
+    fn analysis(self: Control) ?*const provenance.Analysis {
+        return switch (self) {
+            .exportable => |control| control,
+            .scoped => |control| control,
+        };
+    }
+};
+
 const Context = struct {
     const EffectCheck = state_effects.CheckFor(Program, StateView);
     const BorrowFlow = borrows.StableFlow;
     allocator: std.mem.Allocator,
     program: Program,
-    control: ?*const provenance.Analysis,
+    control: Control,
     state: StateView,
     activations: []const ?ps.Activation,
     flow: ?*@import("activation_flow.zig").View,
@@ -2157,12 +2172,15 @@ const Context = struct {
         // Exportable-only schemas cannot carry scoped values. Their borrow
         // constraints have the empty fixed point, including across calls.
         // Surrounding admission still checks records, ownership and holder DAGs.
-        if (std.mem.allEqual(bool, self.facts.exportable, true)) return;
+        const control = switch (self.control) {
+            .exportable => return,
+            .scoped => |scoped| scoped,
+        };
         var flow = try BorrowFlow.initWithControl(
             self.allocator,
             self.program,
             self.facts.exportable,
-            self.control.?,
+            control,
         );
         const children = try self.allocator.alloc(?g.NodeRef, self.state.nodes.len);
         @memset(children, null);
