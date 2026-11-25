@@ -3,6 +3,7 @@
 //! terms compose with bind, independently of any target block or frame layout.
 const p = @import("horos_data").program;
 pub const Id = p.Id;
+pub const Hint = struct { value: Id, kind: @import("horos_data").binding_time.Kind };
 pub const Value = struct {
     schema: Id,
     expression: union(enum) {

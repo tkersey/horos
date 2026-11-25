@@ -21,6 +21,23 @@ export fn program_encode(length: usize) usize {
     return encoded.len;
 }
 
+export fn hinted_program_encode(length: usize) usize {
+    if (length > input.len) return 0;
+    var storage = std.heap.FixedBufferAllocator.init(&scratch);
+    const allocator = storage.allocator();
+    var decoded = data.program_image.decode(allocator, input[0..length]) catch return 0;
+    defer decoded.deinit();
+    if (decoded.hints.len == 0) return 0;
+    program_identity = decoded.identity;
+    const encoded = data.program_image.encodeWithHints(
+        allocator,
+        decoded.program,
+        decoded.hints,
+        &output,
+    ) catch return 0;
+    return encoded.len;
+}
+
 export fn admitted_probe(length: usize) u32 {
     if (length > input.len) return 0;
     var storage = std.heap.FixedBufferAllocator.init(&scratch);

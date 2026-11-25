@@ -60,6 +60,11 @@ scheduling. Typed bodies provide `protect` and `bracket`. Ownership, borrowing, 
 order and cleanup remain checked. Stable slots retain earlier bindings without
 copying them into every intermediate continuation interface.
 
+`library.stage` provides the binding-time hints `context` and `residual`. They
+are identities that leave executable records unchanged and are recorded in an
+optional BPI3 hint table for a later specializer; see
+[binding-time hints](docs/typed-authoring.md#binding-time-hints).
+
 Choice, Search, State, Reader, Writer and Raise families use an `authoring.Context` and typed handles.
 Choice/Writer/Raise expose `effect()` and `capability()`; State exposes `get()`, `put()`
 and their capability schemas. Interpretations return typed handler and answer

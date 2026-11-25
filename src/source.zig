@@ -13,6 +13,7 @@ const p = data.program;
 pub const ast = @import("source/ast.zig");
 pub const Id = p.Id;
 pub const Module = ast.Module;
+pub const Hint = ast.Hint;
 pub const Compiled = @import("source/activation_lower.zig").Construction;
 pub const RecoveryBinding = @import("source/activation_lower.zig").RecoveryBinding;
 pub const recovery_optimization = @import("source/recovery_optimization.zig");
@@ -42,7 +43,8 @@ pub const Error = data.closed_compilation.Error ||
 pub fn emit(allocator: std.mem.Allocator, comptime Application: type) !Compiled {
     var builder = Builder.init(allocator);
     defer builder.deinit();
-    return lower(allocator, try Application.emit(&builder));
+    const module = try Application.emit(&builder);
+    return lowerObserved(allocator, module, .{ .hints = builder.hints.items });
 }
 
 pub const Builder = struct {
@@ -58,6 +60,7 @@ pub const Builder = struct {
     functions: std.ArrayList(ast.Function) = .empty,
     region_count: p.Id = 0,
     specializations: std.StringHashMapUnmanaged(*const anyopaque) = .empty,
+    hints: std.ArrayList(Hint) = .empty,
 
     pub fn init(parent_allocator: std.mem.Allocator) Builder {
         return .{ .arena = std.heap.ArenaAllocator.init(parent_allocator) };
@@ -208,6 +211,10 @@ pub const Builder = struct {
         const id = self.values.items.len;
         try self.values.append(self.allocator(), try own(ast.Value, self.allocator(), expression));
         return id;
+    }
+    pub fn hint(self: *Builder, value_id: p.Id, kind: data.binding_time.Kind) Error!void {
+        if (value_id >= self.values.items.len) return error.InvalidSource;
+        try self.hints.append(self.allocator(), .{ .value = value_id, .kind = kind });
     }
     pub fn term(self: *Builder, expression: ast.Term) Error!p.Id {
         const id = self.terms.items.len;

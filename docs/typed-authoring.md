@@ -201,6 +201,34 @@ result. The evidence carries no alternative lowering input. Recovery lowering
 retains general handler clauses because direct tail conversion does not yet
 provide an origin transport; ordinary lowering keeps that optimization.
 
+## Binding-time hints
+
+`library.stage.context(body, value)` and `library.stage.residual(body, value)`
+return `value` itself, with its type. They record that the value should be
+known when a later specializer specializes the program (context) or must stay
+residual. Their meaning is the identity: the source module and the emitted
+executable records are exactly those of the same program without the calls.
+
+```zig
+const pc = try horos.library.stage.context(body, try body.parameter("pc"));
+const acc = try horos.library.stage.residual(body, try body.parameter("acc"));
+```
+
+The hints live beside the module, never inside it, so source relations, slices
+and specialization cannot misplace them. `Context.compile*` and `source.emit`
+pass them to the compiler; `Context.hints()` returns them for an explicit
+`source.lowerObserved(..., .{ .hints = ... })`. Each place that materializes a
+hinted value names its function and slot; slot ordering and checked structural
+coalescing transport those bindings like recovery origins. A binding hinted both
+ways is residual. A hint is dropped when its value is never materialized or its
+function is removed. `Compiled.hints` holds the canonical table, and
+`Compiled.encode`/`encodedLength` include it.
+
+Hints need a correspondence to final bindings. Structural compilation, with or
+without recovery, provides it. The semantic contract rejects hinted modules with
+`InvalidCorrespondence`, and component compilation rejects them with
+`InvalidSource` because BMO1 has no hint table.
+
 ## Operations and interpretations
 
 `external`, `local` and `scoped` retain payload, reply and named body contracts.

@@ -1651,6 +1651,9 @@ pub const Context = opaque {
     pub fn module(self: *Context, entry: anytype, failure: anytype) Error!source.Module {
         return rawContext(self).module(erased(.function, entry), erased(.schema, failure));
     }
+    pub fn hints(self: *Context) []const source.Hint {
+        return rawContext(self).hints();
+    }
     pub fn compile(
         self: *Context,
         allocator: std.mem.Allocator,
@@ -2697,6 +2700,14 @@ pub fn Body(comptime Parameters: type) type {
         }
         pub fn abandon(self: *Self) void {
             self.raw().abandon();
+        }
+        pub fn bindingTime(
+            self: *Self,
+            kind: data.binding_time.Kind,
+            value: anytype,
+        ) Error!@TypeOf(value) {
+            try self.raw().bindingTime(kind, erased(.value, value));
+            return value;
         }
     };
 }

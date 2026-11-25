@@ -2098,6 +2098,7 @@ pub const Context = opaque {
                 .semantic_round_limit = compilation.round_limit,
                 .semantic_statistics = compilation.statistics,
                 .compilation_observer = compilation.observer,
+                .hints = contextData(self).raw.hints.items,
                 .captures = if (contextData(self).lambda_schemas.count() != 0 or contextData(
                     self,
                 ).handlers.items.len != 0) .{
@@ -2303,6 +2304,9 @@ pub const Context = opaque {
         failure: *const Schema,
     ) Error!source.Module {
         return self.publish(entry, failure, true);
+    }
+    pub fn hints(self: *Context) []const source.Hint {
+        return contextData(self).raw.hints.items;
     }
     fn publish(
         self: *Context,
@@ -3644,6 +3648,17 @@ pub const Body = opaque {
             .bytes, .text, .bounded_bytes, .bounded_text => return value,
             else => return c.reject(error.InvalidCategory, "blob", "requires bytes or UTF-8 text"),
         }
+    }
+    pub fn bindingTime(
+        self: *Body,
+        kind: @import("horos_data").binding_time.Kind,
+        value: *const Value,
+    ) Error!void {
+        const v = try self.useValue(value);
+        const c = bodyData(self).context;
+        var returned_error: anyerror = undefined;
+        errdefer c.poison(returned_error);
+        try captureError(&returned_error, contextData(c).raw.hint(v.id, kind));
     }
     pub fn yieldNow(self: *Body) Error!*const Value {
         try self.ready();
