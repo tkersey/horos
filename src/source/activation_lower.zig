@@ -558,13 +558,15 @@ const Compiler = struct {
     }
 
     fn selectTails(self: *Compiler, program: ir.Program) Error!ir.Program {
-        const selection = try data.tail_clauses.optimize(self.allocator, program, self.uses);
+        const a = self.allocator;
+        var selection = try data.tail_clauses.optimize(a, program, self.uses);
         inline for (binding_lists) |field| {
             const bindings = &@field(self, field);
             for (0..bindings.items.len) |index| {
                 var binding = bindings.items[index];
-                binding.function = selection.tail(binding.function, binding.slot) orelse continue;
-                try bindings.append(self.allocator, binding);
+                binding.function = try selection.tail(a, binding.function, binding.slot) orelse
+                    continue;
+                try bindings.append(a, binding);
             }
         }
         return selection.program;
