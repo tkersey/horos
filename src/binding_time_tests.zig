@@ -513,3 +513,20 @@ test "a binding merged from hinted and unhinted twins keeps only a shared hint" 
         try testing.expectEqual(case[1], merged.hints[0].kind);
     }
 }
+
+fn Returned(comptime function: anytype) type {
+    return @typeInfo(@typeInfo(@TypeOf(function)).@"fn".return_type.?).error_union.payload;
+}
+
+test "only an owner that states its hints can name an image" {
+    try testing.expect(!@hasField(data.coalescing.Owned, "hints"));
+    try testing.expect(!@hasDecl(data.coalescing.Owned, "image"));
+    inline for (.{
+        Returned(data.closed_compilation.run),
+        Returned(source.lowerObserved),
+        data.program_image.Decoded,
+    }) |Owner| {
+        try testing.expect(@hasDecl(Owner, "image"));
+        try testing.expect(std.meta.fieldInfo(Owner, .hints).attrs.default_value_ptr == null);
+    }
+}

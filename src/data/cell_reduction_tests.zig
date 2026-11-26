@@ -79,7 +79,7 @@ test "private cell reads and writes become explicit scalar values" {
         "private cell scalar replacement: {d} -> {d} bytes\n",
         .{
             try @import("program_image.zig").encodedLength(.unhinted(private_cell)),
-            try @import("program_image.zig").encodedLength(result.image()),
+            try @import("program_image.zig").encodedLength(.unhinted(result.program)),
         },
     );
 }

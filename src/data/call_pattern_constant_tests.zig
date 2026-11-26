@@ -169,8 +169,8 @@ test "constant worker allocation failures release owners and variant limit rolls
     defer baseline.deinit();
     try std.testing.expect(stats.work_limit);
     try std.testing.expectEqual(
-        try @import("program_image.zig").identity(a, baseline.image()),
-        try @import("program_image.zig").identity(a, limited.image()),
+        try @import("program_image.zig").identity(a, .unhinted(baseline.program)),
+        try @import("program_image.zig").identity(a, .unhinted(limited.program)),
     );
 }
 test "shared pipeline selects constant argument specialization" {

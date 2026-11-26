@@ -93,7 +93,7 @@ test "private product capture becomes its sole observed scalar field" {
         "capture field projection: {d} -> {d} image bytes\n",
         .{
             try @import("program_image.zig").encodedLength(.unhinted(reused)),
-            try @import("program_image.zig").encodedLength(result.image()),
+            try @import("program_image.zig").encodedLength(.unhinted(result.program)),
         },
     );
 }

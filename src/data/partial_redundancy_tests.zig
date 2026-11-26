@@ -170,8 +170,8 @@ test "PRE allocation failures and work exhaustion preserve original ownership" {
     defer baseline.deinit();
     try std.testing.expect(stats.work_limit);
     try std.testing.expectEqual(
-        try @import("program_image.zig").identity(a, baseline.image()),
-        try @import("program_image.zig").identity(a, limited.image()),
+        try @import("program_image.zig").identity(a, .unhinted(baseline.program)),
+        try @import("program_image.zig").identity(a, .unhinted(limited.program)),
     );
 }
 

@@ -367,8 +367,8 @@ test "call-pattern allocation and code-growth exhaustion retain P01 baseline" {
         defer result.deinit();
         try std.testing.expect(stats.work_limit);
         try std.testing.expectEqual(
-            try @import("program_image.zig").identity(a, baseline.image()),
-            try @import("program_image.zig").identity(a, result.image()),
+            try @import("program_image.zig").identity(a, .unhinted(baseline.program)),
+            try @import("program_image.zig").identity(a, .unhinted(result.program)),
         );
     }
 }

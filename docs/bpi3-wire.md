@@ -267,12 +267,15 @@ with `Decoded.identity` and `Admitted.identity()`. State admission
 too, so a PST3 state or a profile of a hinted program is checked against the
 same identity that admission computed.
 
-Closed compilation takes an `Image`. Structural P01 transports its hints
+Closed compilation takes an `Image` and returns a `closed_compilation.Compiled`,
+whose hint table has no default. Structural P01 transports its hints
 through the checked correspondence; a final binding keeps a kind only when every
 binding merged into it carried that kind, and any merged binding without a hint
 joins it to residual. Its `max_image_bytes` and reported byte counts measure the
 emitted image, including the hint table. The semantic contract rejects a hinted
-input with `InvalidCorrespondence`.
+input with `InvalidCorrespondence`, so its result states an empty table. A P01 or
+semantic-stage `coalescing.Owned` holds records only and names no image; a caller
+holding one writes `Image.unhinted`.
 
 ## Owners, limits and failure safety
 

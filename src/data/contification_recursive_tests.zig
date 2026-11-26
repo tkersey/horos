@@ -204,8 +204,8 @@ test "recursive join allocation and group limits preserve baseline ownership" {
     defer baseline.deinit();
     try std.testing.expect(stats.work_limit);
     try std.testing.expectEqual(
-        try @import("program_image.zig").identity(a, baseline.image()),
-        try @import("program_image.zig").identity(a, result.image()),
+        try @import("program_image.zig").identity(a, .unhinted(baseline.program)),
+        try @import("program_image.zig").identity(a, .unhinted(result.program)),
     );
 }
 test "shared pipeline adopts recursive join conversion" {

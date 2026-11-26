@@ -990,7 +990,8 @@ pub fn run(
         options.coalescing.withoutObservations(),
     );
     defer baseline.deinit();
-    if (try image.encodedLength(selected.image()) > try image.encodedLength(baseline.image()))
+    if (try image.encodedLength(.unhinted(selected.program)) >
+        try image.encodedLength(.unhinted(baseline.program)))
         return p01.run(allocator, original, options.coalescing);
     stats.selected = true;
     keep = true;

@@ -111,11 +111,6 @@ pub const Owned = struct {
     arena: std.heap.ArenaAllocator,
     program: ir.Program,
     flow: @import("activation_flow.zig").Facts,
-    hints: []const @import("binding_time.zig").Hint = &.{},
-
-    pub fn image(self: *const Owned) @import("program_image.zig").Image {
-        return .{ .program = self.program, .hints = self.hints };
-    }
 
     pub fn deinit(self: *Owned) void {
         self.flow.deinit();

@@ -220,8 +220,8 @@ test "checked affine transformation owns output and rolls back deterministic lim
     defer baseline.deinit();
     try std.testing.expectEqual(.work_limit, stats.outcome);
     try std.testing.expectEqual(
-        try @import("program_image.zig").identity(a, baseline.image()),
-        try @import("program_image.zig").identity(a, limited.image()),
+        try @import("program_image.zig").identity(a, .unhinted(baseline.program)),
+        try @import("program_image.zig").identity(a, .unhinted(limited.program)),
     );
     try @import("allocation_testing.zig").check(a, checkedAllocationAttempt, .{});
 }
@@ -414,8 +414,8 @@ test "rank-zero state is emitted and full-rank observation is a legal no-op" {
     var baseline = try @import("coalescing.zig").run(a, program, .{});
     defer baseline.deinit();
     try std.testing.expectEqual(
-        try @import("program_image.zig").identity(a, baseline.image()),
-        try @import("program_image.zig").identity(a, retained.image()),
+        try @import("program_image.zig").identity(a, .unhinted(baseline.program)),
+        try @import("program_image.zig").identity(a, .unhinted(retained.program)),
     );
 }
 
@@ -613,12 +613,15 @@ test "checked affine output survives decoded input and source buffer release" {
         break :blk transformed;
     };
     defer result.deinit();
-    const encoded = try a.alloc(u8, try image.encodedLength(result.image()));
+    const encoded = try a.alloc(u8, try image.encodedLength(.unhinted(result.program)));
     defer a.free(encoded);
-    _ = try image.encode(a, result.image(), encoded);
+    _ = try image.encode(a, .unhinted(result.program), encoded);
     var decoded_result = try image.decode(a, encoded);
     defer decoded_result.deinit();
-    try std.testing.expectEqual(try image.identity(a, result.image()), decoded_result.identity);
+    try std.testing.expectEqual(
+        try image.identity(a, .unhinted(result.program)),
+        decoded_result.identity,
+    );
 }
 
 pub fn directFixture(storage: std.mem.Allocator) !ir.Program {
@@ -665,7 +668,7 @@ test "direct recursive parameter state uses the checked affine pipeline without 
     var baseline = try @import("coalescing.zig").run(a, program, .{});
     defer baseline.deinit();
     try std.testing.expectEqual(
-        try @import("program_image.zig").identity(a, baseline.image()),
+        try @import("program_image.zig").identity(a, .unhinted(baseline.program)),
         try @import("program_image.zig").identity(a, semantic.image()),
     );
 }
@@ -755,8 +758,8 @@ test "direct parameter synthesis owns every partial allocation and rolls back wo
     defer baseline.deinit();
     try std.testing.expectEqual(.work_limit, stats.outcome);
     try std.testing.expectEqual(
-        try @import("program_image.zig").identity(a, baseline.image()),
-        try @import("program_image.zig").identity(a, limited.image()),
+        try @import("program_image.zig").identity(a, .unhinted(baseline.program)),
+        try @import("program_image.zig").identity(a, .unhinted(limited.program)),
     );
 }
 
@@ -975,8 +978,8 @@ test "full product inspection of the rotating state preserves all three words" {
     defer baseline.deinit();
     try std.testing.expectEqual(.no_change, stats.outcome);
     try std.testing.expectEqual(
-        try @import("program_image.zig").identity(a, baseline.image()),
-        try @import("program_image.zig").identity(a, retained.image()),
+        try @import("program_image.zig").identity(a, .unhinted(baseline.program)),
+        try @import("program_image.zig").identity(a, .unhinted(retained.program)),
     );
 }
 
@@ -1058,8 +1061,8 @@ test "a valid opaque computation consumer keeps its original capture interface" 
     defer baseline.deinit();
     try std.testing.expectEqual(.no_change, stats.outcome);
     try std.testing.expectEqual(
-        try @import("program_image.zig").identity(a, baseline.image()),
-        try @import("program_image.zig").identity(a, retained.image()),
+        try @import("program_image.zig").identity(a, .unhinted(baseline.program)),
+        try @import("program_image.zig").identity(a, .unhinted(retained.program)),
     );
 }
 

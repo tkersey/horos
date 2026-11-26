@@ -37,7 +37,7 @@ test "product projections forward exact operands and eliminate materialization" 
         "product scalar replacement: {d} -> {d} bytes\n",
         .{
             try @import("program_image.zig").encodedLength(.unhinted(original)),
-            try @import("program_image.zig").encodedLength(eliminated.image()),
+            try @import("program_image.zig").encodedLength(.unhinted(eliminated.program)),
         },
     );
 }

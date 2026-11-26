@@ -468,8 +468,8 @@ test "dead-computation round credit preserves whole-attempt rollback and admissi
         try std.testing.expectEqual(limit, stats.round_attempts);
         try std.testing.expectEqual(@as(usize, 0), stats.instructions_removed);
         try std.testing.expectEqual(
-            try image.identity(a, baseline.image()),
-            try image.identity(a, limited.image()),
+            try image.identity(a, .unhinted(baseline.program)),
+            try image.identity(a, .unhinted(limited.program)),
         );
     }
     var stats: dead.Statistics = .{};

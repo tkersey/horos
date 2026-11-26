@@ -186,8 +186,8 @@ test "discarded authority neither pins live helpers nor hides an invalid unused 
         var repeated = try pass.run(testing.allocator, result.program, .{});
         defer repeated.deinit();
         try testing.expectEqual(
-            try image.identity(testing.allocator, result.image()),
-            try image.identity(testing.allocator, repeated.image()),
+            try image.identity(testing.allocator, .unhinted(result.program)),
+            try image.identity(testing.allocator, .unhinted(repeated.program)),
         );
     }
 }

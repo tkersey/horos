@@ -211,12 +211,12 @@ test "unswitching retains exact P01 on exhausted work or insufficient final code
     try std.testing.expect(stats.code_budget_rejected);
     const identity = @import("program_image.zig").identity;
     try std.testing.expectEqual(
-        try identity(a, baseline.image()),
-        try identity(a, limited.image()),
+        try identity(a, .unhinted(baseline.program)),
+        try identity(a, .unhinted(limited.program)),
     );
     try std.testing.expectEqual(
-        try identity(a, baseline.image()),
-        try identity(a, sized.image()),
+        try identity(a, .unhinted(baseline.program)),
+        try identity(a, .unhinted(sized.program)),
     );
     var invalid = selectable;
     invalid.roots.entry = 99;

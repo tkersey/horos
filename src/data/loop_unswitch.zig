@@ -572,10 +572,10 @@ pub fn run(
     defer baseline.deinit();
     const limit = std.math.add(
         usize,
-        try image.encodedLength(baseline.image()),
+        try image.encodedLength(.unhinted(baseline.program)),
         options.max_added_bytes,
     ) catch std.math.maxInt(usize);
-    if (try image.encodedLength(result.image()) > limit) {
+    if (try image.encodedLength(.unhinted(result.program)) > limit) {
         std.mem.swap(p01.Owned, &result, &baseline);
         stats.code_budget_rejected = true;
         return result;

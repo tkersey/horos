@@ -525,7 +525,7 @@ pub fn run(
     var keep_result = false;
     defer if (!keep_result) result.deinit();
     const old_bytes = try image.encodedLength(.unhinted(original));
-    const new_bytes = try image.encodedLength(result.image());
+    const new_bytes = try image.encodedLength(.unhinted(result.program));
     if (before == null or
         after == null or
         after.? >= before.? or

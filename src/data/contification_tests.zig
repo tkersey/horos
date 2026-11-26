@@ -108,7 +108,7 @@ test "two predecessors share one local body with parallel argument and swap edge
         "shared join bytes: {d} -> {d}\n",
         .{
             try @import("program_image.zig").encodedLength(.unhinted(shared)),
-            try @import("program_image.zig").encodedLength(result.image()),
+            try @import("program_image.zig").encodedLength(.unhinted(result.program)),
         },
     );
 }
@@ -187,8 +187,8 @@ test "join allocation and budget exhaustion preserve the P01 baseline" {
         defer result.deinit();
         try std.testing.expect(stats.work_limit);
         try std.testing.expectEqual(
-            try @import("program_image.zig").identity(a, baseline.image()),
-            try @import("program_image.zig").identity(a, result.image()),
+            try @import("program_image.zig").identity(a, .unhinted(baseline.program)),
+            try @import("program_image.zig").identity(a, .unhinted(result.program)),
         );
     }
 }

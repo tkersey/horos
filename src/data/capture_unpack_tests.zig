@@ -158,8 +158,8 @@ test "whole-product observation keeps the original captured representation" {
     var retained = try unpack.run(a, original, .{});
     defer retained.deinit();
     try std.testing.expectEqual(
-        try image.identity(a, baseline.image()),
-        try image.identity(a, retained.image()),
+        try image.identity(a, .unhinted(baseline.program)),
+        try image.identity(a, .unhinted(retained.program)),
     );
     _ = p;
 }
@@ -431,7 +431,7 @@ test "capture unpack preserves representations retained by effect continuations"
             const image = @import("program_image.zig");
             try std.testing.expectEqual(
                 try image.identity(a, baseline.image()),
-                try image.identity(a, unchanged.image()),
+                try image.identity(a, .unhinted(unchanged.program)),
             );
         }
         var compiled = try @import("closed_compilation.zig").run(

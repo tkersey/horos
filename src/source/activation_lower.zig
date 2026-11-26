@@ -62,7 +62,7 @@ pub const Construction = struct {
     /// parameter remains live at every instruction in its function.
     parameters: []const RecoveryBinding = &.{},
     recovery_evidence: ?RecoveryEvidence = null,
-    hints: []const data.binding_time.Hint = &.{},
+    hints: []const data.binding_time.Hint,
 
     pub fn image(self: *const Construction) data.program_image.Image {
         return .{ .program = self.program, .hints = self.hints };
@@ -1403,6 +1403,10 @@ fn ownConstruction(
         RecoveryBinding,
         compiler.parameter_bindings.items,
     );
+    const hints = try output.allocator().dupe(
+        data.binding_time.Hint,
+        data.binding_time.normalize(compiler.hint_sites.items),
+    );
     const flow = try checkTarget(
         allocator,
         compiler,
@@ -1422,6 +1426,7 @@ fn ownConstruction(
         .flow = flow,
         .recovery = recovery,
         .parameters = parameters,
+        .hints = hints,
     };
 }
 
@@ -1493,7 +1498,7 @@ fn finishCoalescing(
     program: ir.Program,
     compiler: *Compiler,
     options: source.CompileOptions,
-    result: *data.coalescing.Owned,
+    result: *data.closed_compilation.Compiled,
 ) Error!Construction {
     const recovery = try result.arena.allocator().dupe(
         RecoveryBinding,

@@ -1024,8 +1024,8 @@ test "a general resumption with an administrative join becomes a checked tail cl
     try std.testing.expect(stats.work_limit);
     const image_codec = @import("program_image.zig");
     try std.testing.expectEqual(
-        try image_codec.identity(a, limited.image()),
-        try image_codec.identity(a, late_limit.image()),
+        try image_codec.identity(a, .unhinted(limited.program)),
+        try image_codec.identity(a, .unhinted(late_limit.program)),
     );
     try checkChangedAnswer(a, scratch, original);
     try checkShallowClause(a, scratch, original);

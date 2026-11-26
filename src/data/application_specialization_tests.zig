@@ -76,7 +76,7 @@ test "captured application becomes an ordered direct call and final P01 runs" {
     }
     try std.testing.expectEqual(@as(usize, 1), calls);
     const before = try @import("program_image.zig").encodedLength(.unhinted(captured));
-    const after = try @import("program_image.zig").encodedLength(result.image());
+    const after = try @import("program_image.zig").encodedLength(.unhinted(result.program));
     try std.testing.expect(after < before);
     std.debug.print(
         "captured specialization: BPI3 {d} -> {d} bytes; apply/construction 1 -> 0\n",
@@ -418,7 +418,7 @@ test "checked feasible branch removes the alternate constructor and unlocks a di
         "branch/constructor specialization: BPI3 {d} -> {d} bytes\n",
         .{
             try @import("program_image.zig").encodedLength(.unhinted(program)),
-            try @import("program_image.zig").encodedLength(specialized.image()),
+            try @import("program_image.zig").encodedLength(.unhinted(specialized.program)),
         },
     );
 }
@@ -487,8 +487,8 @@ test "dead computation removes the closed constructor left by direct specializat
     std.debug.print(
         "dead computation after specialization: {d} -> {d} bytes\n",
         .{
-            try @import("program_image.zig").encodedLength(specialized.image()),
-            try @import("program_image.zig").encodedLength(result.image()),
+            try @import("program_image.zig").encodedLength(.unhinted(specialized.program)),
+            try @import("program_image.zig").encodedLength(.unhinted(result.program)),
         },
     );
 }
@@ -648,7 +648,7 @@ test "known caller argument prunes the worker branch and unlocks constructor spe
         "known caller argument: {d} -> {d} bytes\n",
         .{
             try @import("program_image.zig").encodedLength(.unhinted(original)),
-            try @import("program_image.zig").encodedLength(result.image()),
+            try @import("program_image.zig").encodedLength(.unhinted(result.program)),
         },
     );
 }
@@ -920,7 +920,7 @@ test "private dead callable argument removal unlocks constructor elimination" {
         "incoming callable plus dead argument/construction: {d} -> {d} bytes\n",
         .{
             try @import("program_image.zig").encodedLength(.unhinted(original)),
-            try @import("program_image.zig").encodedLength(result.image()),
+            try @import("program_image.zig").encodedLength(.unhinted(result.program)),
         },
     );
 }
