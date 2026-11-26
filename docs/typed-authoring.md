@@ -198,8 +198,9 @@ supplied source, independently checks the finite correspondence against the
 actual candidate program, and returns its verified formal bindings.
 `source.recovery.validate` additionally compares those bindings with a compiled
 result. The evidence carries no alternative lowering input. Recovery lowering
-retains general handler clauses because direct tail conversion does not yet
-provide an origin transport; ordinary lowering keeps that optimization.
+retains general handler clauses because direct tail conversion has no
+independently checked origin correspondence; ordinary lowering keeps that
+optimization.
 
 ## Binding-time hints
 
@@ -227,10 +228,13 @@ an explicit `source.lowerObserved(..., .{ .hints = ... })`, and
 
 Each place that materializes a hinted value names its function and slot; slot
 ordering and checked structural coalescing transport those bindings like
-recovery origins. A binding hinted both ways is residual. When coalescing merges
-a hinted function with an unhinted structural twin, the merged binding is
-residual, so a context hint never covers the twin's call sites. A hint is
-dropped when its value is never materialized or its function is removed.
+recovery origins. Tail-clause conversion copies every binding of a converted
+clause to its tail copy, which keeps each slot except the erased resumption, so
+a hint on a clause binding survives in the emitted tail clause. A binding
+hinted both ways is residual. When coalescing merges a hinted function with an
+unhinted structural twin, the merged binding is residual, so a context hint
+never covers the twin's call sites. A hint is dropped when its value is never
+materialized or its function is removed.
 `Compiled.hints` holds the canonical table, `Compiled.image()` pairs it with
 the records, and `Compiled.encode(allocator)` returns exactly that image's
 bytes. `max_image_bytes` bounds the emitted image, hint table included.

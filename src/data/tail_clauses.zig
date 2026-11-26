@@ -380,15 +380,36 @@ const Correspondence = struct {
     }
 };
 
+pub const Selection = struct {
+    program: ir.Program,
+    tails: []const ?p.Id,
+
+    pub fn tail(self: Selection, function: p.Id, slot: p.Id) ?p.Id {
+        const copy = self.tails[@intCast(function)] orelse return null;
+        const inputs = self.program.functions[@intCast(function)].inputs;
+        return if (slot == inputs[inputs.len - 1]) null else copy;
+    }
+};
+
 pub fn optimize(
     a: std.mem.Allocator,
     input: ir.Program,
     uses: traits.Facts,
-) std.mem.Allocator.Error!ir.Program {
-    return transform(a, input, uses, false, null) catch |err| switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
+) std.mem.Allocator.Error!Selection {
+    const program = transform(a, input, uses, false, null) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
         error.TailClauseWorkLimit => unreachable, // No budget on the existing source path.
     };
+    const tails = try a.alloc(?p.Id, input.functions.len);
+    @memset(tails, null);
+    for (input.handlers, program.handlers) |before, after| for (
+        before.clauses,
+        after.clauses,
+    ) |general, selected| {
+        if (selected.function != general.function)
+            tails[@intCast(general.function)] = selected.function;
+    };
+    return .{ .program = program, .tails = tails };
 }
 
 // Both callers share construction. The semantic caller must independently
@@ -1009,7 +1030,7 @@ test "a general resumption with an administrative join becomes a checked tail cl
     const structural = try optimize(scratch, original, uses);
     try std.testing.expectEqual(
         ir.Clause{ .effect = 0, .function = 3, .resumption = 4 },
-        structural.handlers[0].clauses[0],
+        structural.program.handlers[0].clauses[0],
     );
     const candidate = try transform(scratch, original, uses, true, null);
     try std.testing.expect(candidate.handlers[0].clauses[0].strategy == .tail);

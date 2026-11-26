@@ -541,18 +541,33 @@ const Compiler = struct {
             .schema = schema,
         };
     }
+    const binding_lists = .{ "recovery_bindings", "parameter_bindings", "hint_sites" };
+
     fn reorderBindings(
         context: *anyopaque,
         maps: []const ?[]const p.Id,
     ) std.mem.Allocator.Error!void {
         const self: *Compiler = @ptrCast(@alignCast(context));
-        inline for (.{ "recovery_bindings", "parameter_bindings", "hint_sites" }) |field|
+        inline for (binding_lists) |field|
             for (@field(
                 self,
                 field,
             ).items) |*binding| if (maps[@intCast(binding.function)]) |slots| {
                 binding.slot = slots[@intCast(binding.slot)];
             };
+    }
+
+    fn selectTails(self: *Compiler, program: ir.Program) Error!ir.Program {
+        const selection = try data.tail_clauses.optimize(self.allocator, program, self.uses);
+        inline for (binding_lists) |field| {
+            const bindings = &@field(self, field);
+            for (0..bindings.items.len) |index| {
+                var binding = bindings.items[index];
+                binding.function = selection.tail(binding.function, binding.slot) orelse continue;
+                try bindings.append(self.allocator, binding);
+            }
+        }
+        return selection.program;
     }
 
     fn noteHint(self: *Compiler, function: p.Id, value: p.Id, slot: p.Id) Error!void {
@@ -1359,14 +1374,10 @@ fn optimizeDirect(
     const a = compiler.allocator;
     options.stage(.direct_optimization);
     const threaded = try @import("thread_jumps.zig").optimize(a, program);
-    // Tail-clause conversion adds functions and erases a resumption input. It
-    // has no source-binding transport yet. Recovery keeps the general clauses;
-    // source specialization and checked structural coalescing remain enabled.
-    const selected = if (options.recovery) threaded else try data.tail_clauses.optimize(
-        a,
-        threaded,
-        compiler.uses,
-    );
+    // Tail-clause conversion adds functions and erases a resumption input.
+    // Recovery keeps the general clauses; source specialization and checked
+    // structural coalescing remain enabled.
+    const selected = if (options.recovery) threaded else try compiler.selectTails(threaded);
     return try @import("slot_order.zig").optimizeObserved(
         a,
         selected,

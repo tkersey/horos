@@ -514,6 +514,42 @@ test "a binding merged from hinted and unhinted twins keeps only a shared hint" 
     }
 }
 
+fn clauseParameter(module: source.Module, index: usize) !u64 {
+    const clause = module.handlers[0].clauses[0].function;
+    const variable = module.functions[@intCast(clause)].parameters[index];
+    for (module.values, 0..) |value, id| switch (value.expression) {
+        .variable => |name| if (name == variable) return id,
+        else => {},
+    };
+    return error.TestExpectedClauseParameter;
+}
+
+fn tailClause(program: data.activation.Program) !data.activation.Clause {
+    for (program.handlers) |handler| for (handler.clauses) |clause|
+        if (clause.strategy == .tail) return clause;
+    return error.TestExpectedTailClause;
+}
+
+test "a tail clause keeps the hints of every binding its copy retains" {
+    var raw = source.Builder.init(testing.allocator);
+    defer raw.deinit();
+    const module = try source.examples.branchingTail(&raw);
+    var compiled = try source.lowerObserved(testing.allocator, module, .{
+        .hints = try source.Hints.bind(module, &.{
+            .{ .value = try clauseParameter(module, 0), .kind = .context },
+            .{ .value = try clauseParameter(module, 1), .kind = .residual },
+        }),
+    });
+    defer compiled.deinit();
+    const clause = try tailClause(compiled.program);
+    const tail = compiled.program.functions[@intCast(clause.function)];
+    try testing.expectEqualSlices(Hint, &.{.{
+        .function = clause.function,
+        .slot = tail.inputs[0],
+        .kind = .context,
+    }}, compiled.hints);
+}
+
 fn Returned(comptime function: anytype) type {
     return @typeInfo(@typeInfo(@TypeOf(function)).@"fn".return_type.?).error_union.payload;
 }
