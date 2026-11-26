@@ -228,15 +228,20 @@ an explicit `source.lowerObserved(..., .{ .hints = ... })`, and
 
 Each place that materializes a hinted value names its function and slot; slot
 ordering and checked structural coalescing transport those bindings like
-recovery origins. Tail-clause conversion copies a binding of a converted clause
-to its tail copy only when the copy materializes that slot, as one of its inputs
-or a write in one of its blocks, so a hint on such a binding survives in the
-emitted tail clause, while the erased resumption and the resumed answer, which
-the copy returns without binding, carry none. A binding hinted both ways is
-residual. When coalescing merges a hinted function with an
-unhinted structural twin, the merged binding is residual, so a context hint
-never covers the twin's call sites. A hint is dropped when its value is never
-materialized or its function is removed.
+recovery origins. Tail-clause conversion selects only deep clauses whose every
+path ends in `resume_value(k, v)` and then returns the resumed answer, and emits
+a tail copy of each. The copy takes the clause's state and payload, keeps the
+blocks before each resumption, and ends each path by returning `v`, the
+resumption argument, which has the effect's result type. The resumed answer,
+which has the handler's answer type, never passes through the copy, and `k` is
+erased. A clause binding is duplicated onto the copy only when the copy
+materializes its slot, as an input or as a write in one of its blocks, so a hint
+can cover the state, the payload, values computed before the resumption and
+`v`, but never `k` or the resumed answer. A binding hinted both ways is
+residual. When coalescing merges a hinted function with an unhinted structural
+twin, the merged binding is residual, so a context hint never covers the twin's
+call sites. A hint is dropped when its value is never materialized or its
+function is removed.
 `Compiled.hints` holds the canonical table, `Compiled.image()` pairs it with
 the records, and `Compiled.encode(allocator)` returns exactly that image's
 bytes. `max_image_bytes` bounds the emitted image, hint table included.
