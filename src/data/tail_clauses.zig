@@ -380,14 +380,15 @@ const Correspondence = struct {
     }
 };
 
+const Tail = struct { function: p.Id, materialized: []const bool };
+
 pub const Selection = struct {
     program: ir.Program,
-    tails: []const ?p.Id,
+    tails: []const ?Tail,
 
     pub fn tail(self: Selection, function: p.Id, slot: p.Id) ?p.Id {
         const copy = self.tails[@intCast(function)] orelse return null;
-        const inputs = self.program.functions[@intCast(function)].inputs;
-        return if (slot == inputs[inputs.len - 1]) null else copy;
+        return if (copy.materialized[@intCast(slot)]) copy.function else null;
     }
 };
 
@@ -400,14 +401,28 @@ pub fn optimize(
         error.OutOfMemory => return error.OutOfMemory,
         error.TailClauseWorkLimit => unreachable, // No budget on the existing source path.
     };
-    const tails = try a.alloc(?p.Id, input.functions.len);
+    const first_copy = input.functions.len;
+    const materialized = try a.alloc([]bool, program.functions.len - first_copy);
+    for (materialized, program.functions[first_copy..]) |*slots, copy| {
+        slots.* = try a.alloc(bool, copy.layout.slots.len);
+        @memset(slots.*, false);
+        for (copy.inputs) |slot| slots.*[@intCast(slot)] = true;
+    }
+    for (program.blocks[input.blocks.len..]) |block| {
+        const slots = materialized[@intCast(block.function - first_copy)];
+        for (block.instructions) |operation| slots[@intCast(operation.destination)] = true;
+        @import("slot_access.zig").markWrites(block.terminator, slots);
+    }
+    const tails = try a.alloc(?Tail, first_copy);
     @memset(tails, null);
     for (input.handlers, program.handlers) |before, after| for (
         before.clauses,
         after.clauses,
     ) |general, selected| {
-        if (selected.function != general.function)
-            tails[@intCast(general.function)] = selected.function;
+        if (selected.function != general.function) tails[@intCast(general.function)] = .{
+            .function = selected.function,
+            .materialized = materialized[@intCast(selected.function - first_copy)],
+        };
     };
     return .{ .program = program, .tails = tails };
 }

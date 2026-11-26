@@ -550,6 +550,64 @@ test "a tail clause keeps the hints of every binding its copy retains" {
     }}, compiled.hints);
 }
 
+const JoinedResume = struct { module: source.Module, resumed: u64, five: u64, joined: u64 };
+
+fn joinedResume(raw: *source.Builder) !JoinedResume {
+    const original = try source.examples.branchingTail(raw);
+    const clause = original.handlers[0].clauses[0].function;
+    const integer = original.functions[@intCast(clause)].result;
+    const joined = try raw.variable(integer);
+    const answer = try raw.variable(integer);
+    const five = try raw.constant(u64, 5);
+    const chosen = try raw.term(.{ .conditional = .{
+        .condition = try raw.reference(raw.parameter(clause, 0)),
+        .when_true = try raw.pure(five),
+        .when_false = try raw.pure(try raw.constant(u64, 9)),
+    } });
+    const argument = try raw.reference(joined);
+    const resume_joined = try raw.term(.{ .resume_value = .{
+        .resumption = try raw.reference(raw.parameter(clause, 1)),
+        .argument = argument,
+    } });
+    const resumed = try raw.reference(answer);
+    raw.functions.items[@intCast(clause)].body = try raw.bind(
+        joined,
+        chosen,
+        try raw.bind(answer, resume_joined, try raw.pure(resumed)),
+    );
+    return .{
+        .module = raw.module(original.entry, original.failure),
+        .resumed = resumed,
+        .five = five,
+        .joined = argument,
+    };
+}
+
+test "a tail clause hints only the bindings its copy materializes" {
+    var raw = source.Builder.init(testing.allocator);
+    defer raw.deinit();
+    const built = try joinedResume(&raw);
+    var compiled = try source.lowerObserved(testing.allocator, built.module, .{
+        .hints = try source.Hints.bind(built.module, &.{
+            .{ .value = built.resumed, .kind = .context },
+            .{ .value = built.five, .kind = .context },
+            .{ .value = built.joined, .kind = .residual },
+        }),
+    });
+    defer compiled.deinit();
+    const clause = try tailClause(compiled.program);
+    const tail = compiled.program.functions[@intCast(clause.function)];
+    const branch = compiled.program.blocks[@intCast(tail.entry)].terminator.branch;
+    const chosen = compiled.program.blocks[@intCast(branch.when_true.block)];
+    const constant = chosen.instructions[0].destination;
+    const joined = chosen.terminator.jump.assignments[0].destination;
+    var expected = [_]Hint{
+        .{ .function = clause.function, .slot = constant, .kind = .context },
+        .{ .function = clause.function, .slot = joined, .kind = .residual },
+    };
+    try testing.expectEqualSlices(Hint, data.binding_time.normalize(&expected), compiled.hints);
+}
+
 fn Returned(comptime function: anytype) type {
     return @typeInfo(@typeInfo(@TypeOf(function)).@"fn".return_type.?).error_union.payload;
 }

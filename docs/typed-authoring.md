@@ -228,10 +228,12 @@ an explicit `source.lowerObserved(..., .{ .hints = ... })`, and
 
 Each place that materializes a hinted value names its function and slot; slot
 ordering and checked structural coalescing transport those bindings like
-recovery origins. Tail-clause conversion copies every binding of a converted
-clause to its tail copy, which keeps each slot except the erased resumption, so
-a hint on a clause binding survives in the emitted tail clause. A binding
-hinted both ways is residual. When coalescing merges a hinted function with an
+recovery origins. Tail-clause conversion copies a binding of a converted clause
+to its tail copy only when the copy materializes that slot, as one of its inputs
+or a write in one of its blocks, so a hint on such a binding survives in the
+emitted tail clause, while the erased resumption and the resumed answer, which
+the copy returns without binding, carry none. A binding hinted both ways is
+residual. When coalescing merges a hinted function with an
 unhinted structural twin, the merged binding is residual, so a context hint
 never covers the twin's call sites. A hint is dropped when its value is never
 materialized or its function is removed.
