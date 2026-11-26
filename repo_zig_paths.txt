@@ -38,6 +38,7 @@ src/data/activation_structure.zig
 src/data/activation_structure_tests.zig
 src/data/activation_types.zig
 src/data/admission.zig
+src/data/admission_differential_tests.zig
 src/data/affine_capture.zig
 src/data/affine_capture_tests.zig
 src/data/affine_edges.zig
@@ -201,6 +202,7 @@ src/data/slot_access.zig
 src/data/slot_packing.zig
 src/data/slot_packing_tests.zig
 src/data/state_admission.zig
+src/data/state_admission_tests.zig
 src/data/state_effects.zig
 src/data/state_image.zig
 src/data/state_image_tests.zig
@@ -215,6 +217,7 @@ src/data/traits.zig
 src/data/unfold_fusion.zig
 src/data/unfold_fusion_tests.zig
 src/data/validator_coverage_tests.zig
+src/data/value_decode_bench.zig
 src/data/value_facts.zig
 src/data/wire.zig
 src/data/zig17_tests.zig

@@ -714,7 +714,7 @@ test "static read cache does not publish failed decoding growth or allocation" {
     const a = std.testing.allocator;
     var cache: ReadCache = .{ .module = read_cache_module, .facts = read_cache_facts };
     defer cache.deinit(a);
-    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 1 });
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
     var reader: data.wire.Reader = .{ .input = &.{} };
     var left: u64 = 4;
     try std.testing.expectError(
@@ -723,12 +723,13 @@ test "static read cache does not publish failed decoding growth or allocation" {
     );
     try std.testing.expect(!failing.has_induced_failure);
     try std.testing.expectEqual(@as(usize, 0), cache.entries.count());
-    failing.fail_index = failing.alloc_index + 1;
+    failing.fail_index = failing.alloc_index;
     left = 100;
     try std.testing.expectError(
         error.OutOfMemory,
         cache.read(failing.allocator(), 0, &reader, &left),
     );
+    try std.testing.expect(failing.has_induced_failure);
     try std.testing.expectEqual(@as(usize, 0), cache.entries.count());
     try std.testing.expectEqual(@as(usize, 0), reader.position);
     failing.fail_index = std.math.maxInt(usize);

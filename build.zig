@@ -33,9 +33,10 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{.{ .name = "horos_data", .module = data }},
     });
-    benchmarks(b, optimize);
+    const value_decode_bench = benchmarks(b, optimize);
     const static_contracts = staticContracts(b, data, optimize);
     const data_step = dataChecks(b, host, static_contracts, optimize);
+    data_step.dependOn(value_decode_bench);
     const static_authoring = staticAuthoring(b, horos, data);
     const native_linker = compiler(b, target, public_data, data, optimize);
     const component_step = componentChecks(b, horos, native_linker, optimize);
@@ -295,7 +296,7 @@ fn dataChecks(
     return data_step;
 }
 
-fn benchmarks(b: *std.Build, optimize: std.lang.Optimize) void {
+fn benchmarks(b: *std.Build, optimize: std.lang.Optimize) *std.Build.Step {
     // Optional measurements use the ordinary structural compiler and admission.
     // Timing is deliberately not a correctness threshold or part of `check`.
     const data = b.createModule(.{
@@ -346,6 +347,25 @@ fn benchmarks(b: *std.Build, optimize: std.lang.Optimize) void {
         run_control_bench.captureStdOut(.{}),
         "admission-derive.jsonl",
     ).step);
+    return valueDecodeBenchmark(b, optimize);
+}
+
+fn valueDecodeBenchmark(b: *std.Build, optimize: std.lang.Optimize) *std.Build.Step {
+    const bench = b.addExecutable(.{
+        .name = "value-decode-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/data/value_decode_bench.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+        }),
+    });
+    const run = b.addRunArtifact(bench);
+    run.has_side_effects = true;
+    b.step(
+        "bench-value-decode",
+        "Measure repeated element and record value decoding (JSON)",
+    ).dependOn(&b.addInstallFile(run.captureStdOut(.{}), "value-decode.json").step);
+    return &bench.step;
 }
 
 fn staticAuthoring(
