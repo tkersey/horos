@@ -81,7 +81,7 @@ test "materialization preserves expensive shared product construction" {
 
 test "shared compilation searches product-copy remnants after projection forwarding" {
     const compiler = @import("closed_compilation.zig");
-    var result = try compiler.run(a, shared_product, .{ .contract = .semantic });
+    var result = try compiler.run(a, .unhinted(shared_product), .{ .contract = .semantic });
     defer result.deinit();
     try std.testing.expectEqual(@as(usize, 2), result.program.blocks[0].instructions.len);
     for (result.program.blocks[0].instructions) |op| try std.testing.expect(op.opcode == .product);

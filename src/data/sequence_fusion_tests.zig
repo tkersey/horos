@@ -177,8 +177,8 @@ test "sequence fusion releases each failed allocation and limits roll back throu
     defer limited.deinit();
     try std.testing.expect(stats.work_limit);
     try std.testing.expectEqual(
-        try @import("program_image.zig").identity(a, baseline.program),
-        try @import("program_image.zig").identity(a, limited.program),
+        try @import("program_image.zig").identity(a, .unhinted(baseline.program)),
+        try @import("program_image.zig").identity(a, .unhinted(limited.program)),
     );
     var invalid = map_fold;
     invalid.roots.entry = 100;
@@ -342,7 +342,7 @@ test "an effectful mapper remains in its eager production phase" {
     var baseline = try @import("coalescing.zig").run(a, program, .{});
     defer baseline.deinit();
     try std.testing.expectEqual(
-        try @import("program_image.zig").identity(a, baseline.program),
-        try @import("program_image.zig").identity(a, result.program),
+        try @import("program_image.zig").identity(a, .unhinted(baseline.program)),
+        try @import("program_image.zig").identity(a, .unhinted(result.program)),
     );
 }

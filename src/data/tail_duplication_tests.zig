@@ -9,7 +9,7 @@ test "a profile spends one tail copy on the hot proved incoming edge" {
     var counts = @as([split.blocks.len]u64, @splat(0));
     counts[2] = 100;
     const record: profiles.Record = .{
-        .image_identity = try @import("program_image.zig").identity(a, split),
+        .image_identity = try @import("program_image.zig").identity(a, .unhinted(split)),
         .block_counts = &counts,
         .total = 100,
     };
@@ -141,8 +141,8 @@ test "duplication budgets and allocation failures retain P01" {
         defer result.deinit();
         try std.testing.expect(stats.work_limit);
         try std.testing.expectEqual(
-            try @import("program_image.zig").identity(a, baseline.program),
-            try @import("program_image.zig").identity(a, result.program),
+            try @import("program_image.zig").identity(a, .unhinted(baseline.program)),
+            try @import("program_image.zig").identity(a, .unhinted(result.program)),
         );
     }
 }
@@ -289,7 +289,7 @@ test "shared compiler selects duplication rather than folding copies back togeth
     var stats: @import("closed_compilation.zig").Statistics = .{};
     var result = try @import("closed_compilation.zig").run(
         a,
-        split,
+        .unhinted(split),
         .{ .contract = .semantic, .statistics = &stats },
     );
     defer result.deinit();

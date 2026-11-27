@@ -91,18 +91,14 @@ const StateView = struct {
 
 pub fn validateStable(
     allocator: std.mem.Allocator,
-    program: stable_ir.Program,
+    subject: image.Image,
     state: ps.State,
 ) Error!void {
-    var flow = try @import("activation_ownership.zig").analyze(allocator, program);
-    defer flow.deinit();
-    if (!std.mem.eql(
-        u8,
-        &state.program_identity,
-        &try @import("program_image.zig").identity(allocator, program),
-    )) return error.InvalidState;
-    var view = flow.view();
-    return validateStableRecords(allocator, program, state, &view, null);
+    var verified = try image.identityWithFlow(allocator, subject, null);
+    defer verified.deinit();
+    if (!std.mem.eql(u8, &state.program_identity, &verified.identity)) return error.InvalidState;
+    var view = verified.facts.view();
+    return validateStableRecords(allocator, subject.program, state, &view, null);
 }
 
 /// Only the opaque immutable byte-admitted owner can supply reusable facts.

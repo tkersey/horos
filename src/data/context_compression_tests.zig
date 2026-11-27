@@ -226,8 +226,8 @@ test "context construction cleans allocation failures, bounds work and rejects i
     defer limited.deinit();
     try std.testing.expect(stats.work_limit);
     try std.testing.expectEqual(
-        try @import("program_image.zig").identity(a, baseline.program),
-        try @import("program_image.zig").identity(a, limited.program),
+        try @import("program_image.zig").identity(a, .unhinted(baseline.program)),
+        try @import("program_image.zig").identity(a, .unhinted(limited.program)),
     );
     var invalid = xor_chain;
     invalid.roots.entry = 100;

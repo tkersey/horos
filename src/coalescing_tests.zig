@@ -90,15 +90,19 @@ test "coalescing typed authoring shares independently emitted captured closure f
         try testing.expectEqual(@as(usize, 2), safe.program.functions.len);
         try testing.expectEqual(@as(usize, 1), safe.program.constructors.len);
         try testing.expectEqual(@as(usize, 1), safe.program.scopes.captures.len);
-        const before = try data.program_image.encodedLength(off.program);
-        const after = try data.program_image.encodedLength(safe.program);
+        const before = try data.program_image.encodedLength(off.image());
+        const after = try data.program_image.encodedLength(safe.image());
         try testing.expect(after <= before);
         if (count >= 16) try testing.expect(after < before);
         for ([_]data.activation.Program{ off.program, safe.program }) |program| {
-            const length = try data.program_image.encodedLength(program);
+            const length = try data.program_image.encodedLength(.unhinted(program));
             const buffer = try testing.allocator.alloc(u8, length);
             defer testing.allocator.free(buffer);
-            const encoded = try data.program_image.encode(testing.allocator, program, buffer);
+            const encoded = try data.program_image.encode(
+                testing.allocator,
+                .unhinted(program),
+                buffer,
+            );
             try testing.expectEqual(length, encoded.len);
         }
         var constructions: usize = 0;
@@ -131,8 +135,8 @@ test "canonical coalescing shares code and observations preserve its output" {
     try testing.expect(stats.round_count > stats.rounds_recorded);
     try testing.expectEqual(@as(usize, 1), stats.rounds_recorded);
     try testing.expectEqual(
-        try data.program_image.identity(testing.allocator, ordinary.program),
-        try data.program_image.identity(testing.allocator, observed.program),
+        try data.program_image.identity(testing.allocator, ordinary.image()),
+        try data.program_image.identity(testing.allocator, observed.image()),
     );
 }
 
@@ -171,8 +175,8 @@ test "coalescing retains each original closure observation through constructor c
         var plain = try source.lowerObserved(testing.allocator, module, .{});
         defer plain.deinit();
         try testing.expectEqual(
-            try data.program_image.identity(testing.allocator, plain.program),
-            try data.program_image.identity(testing.allocator, observed.program),
+            try data.program_image.identity(testing.allocator, plain.image()),
+            try data.program_image.identity(testing.allocator, observed.image()),
         );
     }
 }
@@ -194,8 +198,8 @@ test "coalescing shares depth-eight helper chains through calls and constructed 
             @as(usize, if (kind == .tree) 4 else 8),
             safe.program.constructors.len,
         );
-        try testing.expect(try data.program_image.encodedLength(safe.program) <=
-            try data.program_image.encodedLength(off.program));
+        try testing.expect(try data.program_image.encodedLength(safe.image()) <=
+            try data.program_image.encodedLength(off.image()));
     }
 }
 
@@ -278,8 +282,8 @@ test "coalescing matches renamed function-local loops and retains changed exit o
             @as(usize, if (kind == .loop) 2 else 3),
             safe.program.functions.len,
         );
-        try testing.expect(try data.program_image.encodedLength(safe.program) <=
-            try data.program_image.encodedLength(off.program));
+        try testing.expect(try data.program_image.encodedLength(safe.image()) <=
+            try data.program_image.encodedLength(off.image()));
     }
 }
 
@@ -327,7 +331,7 @@ const ConcurrentCompilation = struct {
             });
             defer compiled.deinit();
             // closures has already destroyed the source builder at this point.
-            const actual = try data.program_image.identity(allocator, compiled.program);
+            const actual = try data.program_image.identity(allocator, compiled.image());
             const expected = self.expected[@intFromBool(!limited)];
             if (!std.mem.eql(u8, &expected, &actual)) return error.ConcurrentImageMismatch;
             if (limited and stats.outcome != .work_limit) return error.MissingWorkLimit;
@@ -345,8 +349,8 @@ test "coalescing concurrent independent compilers preserve deterministic owners 
         defer original.deinit();
         var compiled = try closures(testing.allocator, count, .{});
         defer compiled.deinit();
-        job.expected[0] = try data.program_image.identity(testing.allocator, original.program);
-        job.expected[1] = try data.program_image.identity(testing.allocator, compiled.program);
+        job.expected[0] = try data.program_image.identity(testing.allocator, original.image());
+        job.expected[1] = try data.program_image.identity(testing.allocator, compiled.image());
     }
     var threads: [jobs.len]std.Thread = undefined;
     var started: usize = 0;
@@ -376,8 +380,8 @@ test "coalescing folds fresh hyper helper emissions but retains Step configurati
         defer safe.deinit();
         try testing.expect(safe.program.functions.len < off.program.functions.len);
         try testing.expect(safe.program.constructors.len < off.program.constructors.len);
-        try testing.expect(try data.program_image.encodedLength(safe.program) <
-            try data.program_image.encodedLength(off.program));
+        try testing.expect(try data.program_image.encodedLength(safe.image()) <
+            try data.program_image.encodedLength(off.image()));
         selected_functions[index] = safe.program.functions.len;
     }
     // The near case changes only the second Step's actual emitted arithmetic.
@@ -512,7 +516,7 @@ test "coalescing allocation failures cover handlers, constructors, regions and r
         defer builder.deinit();
         var baseline = try frozen.kind(testing.allocator, "", kind);
         defer baseline.deinit();
-        const before = try data.program_image.identity(testing.allocator, baseline.program);
+        const before = try data.program_image.identity(testing.allocator, baseline.image());
         try @import("allocation_testing.zig").check(
             testing.allocator,
             richAllocationCase,
@@ -520,7 +524,7 @@ test "coalescing allocation failures cover handlers, constructors, regions and r
         );
         try testing.expectEqual(
             before,
-            try data.program_image.identity(testing.allocator, baseline.program),
+            try data.program_image.identity(testing.allocator, baseline.image()),
         );
     }
 }

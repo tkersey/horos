@@ -36,8 +36,8 @@ test "product projections forward exact operands and eliminate materialization" 
     std.debug.print(
         "product scalar replacement: {d} -> {d} bytes\n",
         .{
-            try @import("program_image.zig").encodedLength(original),
-            try @import("program_image.zig").encodedLength(eliminated.program),
+            try @import("program_image.zig").encodedLength(.unhinted(original)),
+            try @import("program_image.zig").encodedLength(.unhinted(eliminated.program)),
         },
     );
 }

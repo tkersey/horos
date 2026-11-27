@@ -444,12 +444,8 @@ fn labelBytes(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
     try c.define(entry, try body.ret(try body.constant(u64, 42)));
     var compiled = try c.compile(allocator, entry, try c.schema(void));
     defer compiled.deinit();
-    const bytes = try allocator.alloc(
-        u8,
-        try @import("horos_data").program_image.encodedLength(compiled.program),
-    );
+    const bytes = try compiled.encode(allocator);
     errdefer allocator.free(bytes);
-    _ = try compiled.encode(allocator, bytes);
     return bytes;
 }
 test "A17 source labels do not change executable bytes" {
@@ -1167,12 +1163,8 @@ fn recordUpdateBytes(
     try c.define(entry, try body.ret(try body.checkedAdd(total, result, failure)));
     var compiled = try c.compile(allocator, entry, unit);
     defer compiled.deinit();
-    const bytes = try allocator.alloc(
-        u8,
-        try @import("horos_data").program_image.encodedLength(compiled.program),
-    );
+    const bytes = try compiled.encode(allocator);
     errdefer allocator.free(bytes);
-    _ = try compiled.encode(allocator, bytes);
     return bytes;
 }
 
@@ -1740,10 +1732,8 @@ fn snapshotGrowth(allocator: std.mem.Allocator) !void {
     const count = first.functions.len;
     var before = try source.lower(allocator, first);
     defer before.deinit();
-    const length = try @import("horos_data").program_image.encodedLength(before.program);
-    const expected = try allocator.alloc(u8, length);
+    const expected = try before.encode(allocator);
     defer allocator.free(expected);
-    _ = try before.encode(allocator, expected);
     for (0..128) |_| {
         const helper = try c.function("later helper", .{}, integer, &.{});
         const helper_body = try c.body(helper);
@@ -1756,9 +1746,8 @@ fn snapshotGrowth(allocator: std.mem.Allocator) !void {
     try testing.expectEqual(first.failure, second.failure);
     var after = try source.lower(allocator, first);
     defer after.deinit();
-    const actual = try allocator.alloc(u8, length);
+    const actual = try after.encode(allocator);
     defer allocator.free(actual);
-    _ = try after.encode(allocator, actual);
     try testing.expectEqualSlices(u8, expected, actual);
     var later = try source.lower(allocator, second);
     defer later.deinit();
@@ -3364,7 +3353,7 @@ test "typed and source compilation preserve supplied profile validation and use"
     defer testing.allocator.free(counts);
     @memset(counts, 0);
     const valid: data.closed_compilation.ProfilePolicy = .{ .record = .{
-        .image_identity = try data.program_image.identity(testing.allocator, original.program),
+        .image_identity = try data.program_image.identity(testing.allocator, original.image()),
         .block_counts = counts,
         .total = 0,
     } };
@@ -3807,12 +3796,8 @@ fn stateInterpretationImage(
     )));
     var compiled = try c.compile(allocator, main, try c.schema(void));
     defer compiled.deinit();
-    const bytes = try allocator.alloc(
-        u8,
-        try @import("horos_data").program_image.encodedLength(compiled.program),
-    );
+    const bytes = try compiled.encode(allocator);
     errdefer allocator.free(bytes);
-    _ = try compiled.encode(allocator, bytes);
     return bytes;
 }
 

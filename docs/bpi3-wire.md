@@ -31,11 +31,12 @@ Canonicality is deterministic structural form, not behavioral equivalence.
 
 ## Body and common records
 
-The body is exactly these nine fields:
+The body is exactly these nine executable fields, optionally followed by a
+nonempty binding-time hint table (see below):
 
 ```
 roots, [Schema], [Literal], [Effect], [Function], [Block],
-[Handler], scopes, [Constructor]
+[Handler], scopes, [Constructor] (, [Hint])?
 ```
 
 Roots is `(profile:N=1, entry:N, result:N, failure:N)`. Only profile 1 is
@@ -229,11 +230,60 @@ zero byte at the retired optional-field position, preserving every previously
 accepted BPI3/BMO1 encoding. There is no corresponding public constructor or
 handler field. Forwarding uses explicit older-capability dispatch.
 
+## Binding-time hints
+
+Hints tell a later specializer which function-local bindings it should treat as
+known when specializing (context) and which must stay residual. They have no
+executable meaning: every hint denotes the identity on its binding, so a hint
+cannot change outcomes, failures, effects or metering.
+
+```
+Hint = (function:N, slot:N, kind:N)    kind: context=0, residual=1
+```
+
+The table follows `[Constructor]` only when it has at least one hint, so an
+image without hints is exactly the encoding that preceded hints, with the same
+identity. Frame flags stay zero. Admission rejects a present empty table,
+unknown kinds, a function outside the catalog, a slot outside that function's
+layout, and bindings that are not strictly ascending by (function, slot); a
+binding therefore carries at most one kind. Truncation, overlong naturals and
+trailing bytes reject as elsewhere. A hint carries no code, so there is no hint
+body to verify and no way to encode a hint whose meaning is not the identity.
+
+Executors read only the nine executable fields. Decoding a hinted image yields
+the same `Program` records as its unhinted twin, so execution and metering are
+identical. Program identity covers the whole image, so it binds the hints: a
+hinted image and its unhinted twin have different identities, and hints cannot
+be added to or removed from an image without changing its identity.
+
+There is one program identity. `Image` pairs the executable records with their
+hint table, and `encodedLength`, `encode`, `encodeAlloc`, `identity` and
+`identityWithFlow` accept only an `Image`; a bare `Program` cannot be sized,
+encoded or identified. `Image.unhinted(program)` states that a program has no
+hints. `Decoded.image()`, `Admitted.image()`, `Compiled.image()` and
+`Linked.image()` return the image they own, so each identity function agrees
+with `Decoded.identity` and `Admitted.identity()`. State admission
+(`state_admission.validateStable`) and optimization profiles take the image
+too, so a PST3 state or a profile of a hinted program is checked against the
+same identity that admission computed.
+
+Closed compilation takes an `Image` and returns a `closed_compilation.Compiled`,
+whose hint table has no default. Structural P01 transports its hints
+through the checked correspondence; a final binding keeps a kind only when every
+binding merged into it carried that kind, and any merged binding without a hint
+joins it to residual. Its `max_image_bytes` and reported byte counts measure the
+emitted image, including the hint table. The semantic contract rejects a hinted
+input with `InvalidCorrespondence`, so its result states an empty table. A P01 or
+semantic-stage `coalescing.Owned` holds records only and names no image; a caller
+holding one writes `Image.unhinted`.
+
 ## Owners, limits and failure safety
 
-`encodedLength` sizes borrowed records without granting admission. `encode`
+`encodedLength` sizes a borrowed image without granting admission. `encode`
 performs full stable admission, sizing, capacity and recursive borrowed-storage
-overlap checks before writing any output. `identity` also performs admission.
+overlap checks before writing any output; `encodeAlloc` allocates exactly the
+encoded length and is the only sizing route of `Compiled.encode` and
+`Linked.encode`. `identity` also performs admission.
 
 `decode` copies input, checks framing, reads records, performs full stable
 admission and checks canonical bytes by re-emission. Its returned owner contains

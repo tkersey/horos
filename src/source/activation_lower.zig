@@ -62,13 +62,17 @@ pub const Construction = struct {
     /// parameter remains live at every instruction in its function.
     parameters: []const RecoveryBinding = &.{},
     recovery_evidence: ?RecoveryEvidence = null,
+    hints: []const data.binding_time.Hint,
+
+    pub fn image(self: *const Construction) data.program_image.Image {
+        return .{ .program = self.program, .hints = self.hints };
+    }
 
     pub fn encode(
         self: *const Construction,
         allocator: std.mem.Allocator,
-        output: []u8,
-    ) data.program_image.Error![]const u8 {
-        return data.program_image.encode(allocator, self.program, output);
+    ) data.program_image.Error![]u8 {
+        return data.program_image.encodeAlloc(allocator, self.image());
     }
 
     pub fn deinit(self: *Construction) void {
@@ -119,6 +123,10 @@ fn lowerInternal(
     options: source.CompileOptions,
 ) Error!Construction {
     options.resetObservations();
+    if (options.hints) |hints| if (hints.table.len != 0) {
+        if (component or !try hints.recordedAgainst(input)) return error.InvalidSource;
+        if (options.contract != .structural) return error.InvalidCorrespondence;
+    };
     if (component and options.recovery) return error.InvalidSource;
     return (lowerBody(
         allocator,
@@ -271,6 +279,7 @@ fn lowerBody(
         .cacheable = try @import("value_cache.zig").deriveWithWork(a, input, traits, work),
         .uses = traits,
         .recovery_enabled = options.recovery,
+        .hinted = try hintedValues(a, input, hintTable(options)),
     };
     const program = try lowerProgram(&compiler, options);
     if (options.diagnostic) |diagnostic| diagnostic.function = null;
@@ -304,6 +313,26 @@ fn lowerBody(
     const ordered = try optimizeDirect(&compiler, program, options);
     if (!component and !recovery_input) return try coalesce(allocator, ordered, &compiler, options);
     return try ownConstruction(allocator, ordered, &compiler, imports, component, borrows, options);
+}
+
+fn hintTable(options: source.CompileOptions) []const ast.Hint {
+    return if (options.hints) |hints| hints.table else &.{};
+}
+
+fn hintedValues(
+    a: std.mem.Allocator,
+    input: ast.Module,
+    hints: []const ast.Hint,
+) Error![]const ?data.binding_time.Kind {
+    if (hints.len == 0) return &.{};
+    const hinted = try a.alloc(?data.binding_time.Kind, input.values.len);
+    @memset(hinted, null);
+    for (hints) |hint| {
+        if (hint.value >= input.values.len) return error.InvalidSource;
+        const kind = &hinted[@intCast(hint.value)];
+        kind.* = if (kind.*) |present| present.join(hint.kind) else hint.kind;
+    }
+    return hinted;
 }
 
 fn checkPrimitiveCatalog(
@@ -395,9 +424,13 @@ fn coalesce(
             out.* = detail;
         };
     }
+    const hinted: data.program_image.Image = .{
+        .program = program,
+        .hints = data.binding_time.normalize(compiler.hint_sites.items),
+    };
     var result = data.closed_compilation.run(
         allocator,
-        program,
+        hinted,
         compilationOptions(options, &observation, &statistics, selected),
     ) catch |err| {
         diagnoseCoalescing(compiler, options, statistics, detail);
@@ -466,6 +499,8 @@ const Compiler = struct {
     parameter_bindings: std.ArrayList(RecoveryBinding) = .empty,
     final_bindings: std.ArrayList(RecoveryBinding) = .empty,
     correspondence: ?data.coalescing.Correspondence = null,
+    hinted: []const ?data.binding_time.Kind,
+    hint_sites: std.ArrayList(data.binding_time.Hint) = .empty,
     cacheable: []const bool,
     uses: data.traits.Facts,
     constants: std.ArrayList(p.Literal) = .empty,
@@ -506,18 +541,44 @@ const Compiler = struct {
             .schema = schema,
         };
     }
+    const binding_lists = .{ "recovery_bindings", "parameter_bindings", "hint_sites" };
+
     fn reorderBindings(
         context: *anyopaque,
         maps: []const ?[]const p.Id,
     ) std.mem.Allocator.Error!void {
         const self: *Compiler = @ptrCast(@alignCast(context));
-        inline for (.{ "recovery_bindings", "parameter_bindings" }) |field|
+        inline for (binding_lists) |field|
             for (@field(
                 self,
                 field,
             ).items) |*binding| if (maps[@intCast(binding.function)]) |slots| {
                 binding.slot = slots[@intCast(binding.slot)];
             };
+    }
+
+    fn selectTails(self: *Compiler, program: ir.Program) Error!ir.Program {
+        const a = self.allocator;
+        var selection = try data.tail_clauses.optimize(a, program, self.uses);
+        inline for (binding_lists) |field| {
+            const bindings = &@field(self, field);
+            for (0..bindings.items.len) |index| {
+                var binding = bindings.items[index];
+                binding.function = try selection.tail(a, binding.function, binding.slot) orelse
+                    continue;
+                try bindings.append(a, binding);
+            }
+        }
+        return selection.program;
+    }
+
+    fn noteHint(self: *Compiler, function: p.Id, value: p.Id, slot: p.Id) Error!void {
+        if (self.hinted.len == 0) return;
+        const kind = self.hinted[@intCast(value)] orelse return;
+        try self.hint_sites.append(
+            self.allocator,
+            .{ .function = function, .slot = slot, .kind = kind },
+        );
     }
 
     fn observeCapture(
@@ -1166,6 +1227,7 @@ const Block = struct {
                 continue;
             }
             const result = try self.emitValue(task.id, task.operands);
+            try compiler.noteHint(self.function.id, task.id, result);
             if (compiler.cacheable[@intCast(task.id)])
                 try self.computed.put(compiler.allocator, task.id, result);
             _ = tasks.pop();
@@ -1314,18 +1376,14 @@ fn optimizeDirect(
     const a = compiler.allocator;
     options.stage(.direct_optimization);
     const threaded = try @import("thread_jumps.zig").optimize(a, program);
-    // Tail-clause conversion adds functions and erases a resumption input. It
-    // has no source-binding transport yet. Recovery keeps the general clauses;
-    // source specialization and checked structural coalescing remain enabled.
-    const selected = if (options.recovery) threaded else try data.tail_clauses.optimize(
-        a,
-        threaded,
-        compiler.uses,
-    );
+    // Tail-clause conversion adds functions and erases a resumption input.
+    // Recovery keeps the general clauses; source specialization and checked
+    // structural coalescing remain enabled.
+    const selected = if (options.recovery) threaded else try compiler.selectTails(threaded);
     return try @import("slot_order.zig").optimizeObserved(
         a,
         selected,
-        if (options.recovery) .{
+        if (options.recovery or compiler.hinted.len != 0) .{
             .context = compiler,
             .receive = Compiler.reorderBindings,
         } else null,
@@ -1358,6 +1416,10 @@ fn ownConstruction(
         RecoveryBinding,
         compiler.parameter_bindings.items,
     );
+    const hints = try output.allocator().dupe(
+        data.binding_time.Hint,
+        data.binding_time.normalize(compiler.hint_sites.items),
+    );
     const flow = try checkTarget(
         allocator,
         compiler,
@@ -1377,6 +1439,7 @@ fn ownConstruction(
         .flow = flow,
         .recovery = recovery,
         .parameters = parameters,
+        .hints = hints,
     };
 }
 
@@ -1448,7 +1511,7 @@ fn finishCoalescing(
     program: ir.Program,
     compiler: *Compiler,
     options: source.CompileOptions,
-    result: *data.coalescing.Owned,
+    result: *data.closed_compilation.Compiled,
 ) Error!Construction {
     const recovery = try result.arena.allocator().dupe(
         RecoveryBinding,
@@ -1485,6 +1548,7 @@ fn finishCoalescing(
         .recovery = recovery,
         .parameters = parameters.items,
         .recovery_evidence = evidence,
+        .hints = result.hints,
     };
     options.stage(.complete);
     if (options.diagnostic) |diagnostic| diagnostic.* = .{ .phase = .complete };

@@ -62,6 +62,7 @@ pub const Options = struct {
     semantic_round_limit: usize = 4,
     semantic_statistics: ?*data.closed_compilation.Statistics = null,
     compilation_observer: ?data.closed_compilation.Observer = null,
+    hints: ?@import("ast.zig").Hints = null,
 
     pub fn resetObservations(self: Options) void {
         const compilation: data.closed_compilation.Options = .{

@@ -66,7 +66,7 @@ test "operational input demand retains transfers but kills overwritten incoming 
         try std.testing.expectEqual(@as(usize, @intFromBool(overwrite)), stats.parameters_removed);
         var compiled = try @import("closed_compilation.zig").run(
             a,
-            original,
+            .unhinted(original),
             .{ .contract = .semantic },
         );
         defer compiled.deinit();
@@ -125,7 +125,7 @@ test "captured operational input demand preserves retained yield transfers" {
         try std.testing.expectEqual(@as(usize, @intFromBool(overwrite)), stats.fields_removed);
         var compiled = try @import("closed_compilation.zig").run(
             a,
-            original,
+            .unhinted(original),
             .{ .contract = .semantic },
         );
         defer compiled.deinit();
@@ -226,7 +226,7 @@ test "definition removal propagates retained transfer reads across blocks" {
                 try std.testing.expectEqual(expected, stats.instructions_removed);
                 var compiled = try @import("closed_compilation.zig").run(
                     a,
-                    original,
+                    .unhinted(original),
                     .{ .contract = .semantic },
                 );
                 defer compiled.deinit();
@@ -289,7 +289,7 @@ test "definition removal propagates transfer reads through a loop backedge" {
     try std.testing.expectEqual(@as(usize, 0), stats.instructions_removed);
     var compiled = try @import("closed_compilation.zig").run(
         a,
-        original,
+        .unhinted(original),
         .{ .contract = .semantic },
     );
     defer compiled.deinit();

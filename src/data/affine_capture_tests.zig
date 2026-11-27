@@ -220,8 +220,8 @@ test "checked affine transformation owns output and rolls back deterministic lim
     defer baseline.deinit();
     try std.testing.expectEqual(.work_limit, stats.outcome);
     try std.testing.expectEqual(
-        try @import("program_image.zig").identity(a, baseline.program),
-        try @import("program_image.zig").identity(a, limited.program),
+        try @import("program_image.zig").identity(a, .unhinted(baseline.program)),
+        try @import("program_image.zig").identity(a, .unhinted(limited.program)),
     );
     try @import("allocation_testing.zig").check(a, checkedAllocationAttempt, .{});
 }
@@ -236,12 +236,12 @@ test "semantic closed compilation consumes affine state while structural preserv
         }
     };
     var trace: Trace = .{};
-    var structural = try compilation.run(a, rotating, .{});
+    var structural = try compilation.run(a, .unhinted(rotating), .{});
     defer structural.deinit();
     var stats: compilation.Statistics = .{};
     var semantic = try compilation.run(
         a,
-        rotating,
+        .unhinted(rotating),
         .{
             .contract = .semantic,
             .statistics = &stats,
@@ -254,8 +254,8 @@ test "semantic closed compilation consumes affine state while structural preserv
     try std.testing.expect(stats.changed_stages > 0);
     try std.testing.expect(!std.mem.eql(
         u8,
-        &(try @import("program_image.zig").identity(a, structural.program)),
-        &(try @import("program_image.zig").identity(a, semantic.program)),
+        &(try @import("program_image.zig").identity(a, structural.image())),
+        &(try @import("program_image.zig").identity(a, semantic.image())),
     ));
 }
 
@@ -414,8 +414,8 @@ test "rank-zero state is emitted and full-rank observation is a legal no-op" {
     var baseline = try @import("coalescing.zig").run(a, program, .{});
     defer baseline.deinit();
     try std.testing.expectEqual(
-        try @import("program_image.zig").identity(a, baseline.program),
-        try @import("program_image.zig").identity(a, retained.program),
+        try @import("program_image.zig").identity(a, .unhinted(baseline.program)),
+        try @import("program_image.zig").identity(a, .unhinted(retained.program)),
     );
 }
 
@@ -596,9 +596,9 @@ test "distinct canonical and observation bases both validate with actual emitted
 test "checked affine output survives decoded input and source buffer release" {
     const image = @import("program_image.zig");
     var result = blk: {
-        const bytes = try a.alloc(u8, try image.encodedLength(rotating));
+        const bytes = try a.alloc(u8, try image.encodedLength(.unhinted(rotating)));
         defer a.free(bytes);
-        _ = try image.encode(a, rotating, bytes);
+        _ = try image.encode(a, .unhinted(rotating), bytes);
         var decoded = try image.decode(a, bytes);
         defer decoded.deinit();
         const transformed = try @import("affine_state.zig").run(
@@ -613,12 +613,15 @@ test "checked affine output survives decoded input and source buffer release" {
         break :blk transformed;
     };
     defer result.deinit();
-    const encoded = try a.alloc(u8, try image.encodedLength(result.program));
+    const encoded = try a.alloc(u8, try image.encodedLength(.unhinted(result.program)));
     defer a.free(encoded);
-    _ = try image.encode(a, result.program, encoded);
+    _ = try image.encode(a, .unhinted(result.program), encoded);
     var decoded_result = try image.decode(a, encoded);
     defer decoded_result.deinit();
-    try std.testing.expectEqual(try image.identity(a, result.program), decoded_result.identity);
+    try std.testing.expectEqual(
+        try image.identity(a, .unhinted(result.program)),
+        decoded_result.identity,
+    );
 }
 
 pub fn directFixture(storage: std.mem.Allocator) !ir.Program {
@@ -655,7 +658,7 @@ test "direct recursive parameter state uses the checked affine pipeline without 
     try std.testing.expectEqual(@as(usize, 5), entry.inputs.len);
     var semantic = try @import("closed_compilation.zig").run(
         a,
-        program,
+        .unhinted(program),
         .{ .contract = .semantic },
     );
     defer semantic.deinit();
@@ -665,8 +668,8 @@ test "direct recursive parameter state uses the checked affine pipeline without 
     var baseline = try @import("coalescing.zig").run(a, program, .{});
     defer baseline.deinit();
     try std.testing.expectEqual(
-        try @import("program_image.zig").identity(a, baseline.program),
-        try @import("program_image.zig").identity(a, semantic.program),
+        try @import("program_image.zig").identity(a, .unhinted(baseline.program)),
+        try @import("program_image.zig").identity(a, semantic.image()),
     );
 }
 
@@ -755,8 +758,8 @@ test "direct parameter synthesis owns every partial allocation and rolls back wo
     defer baseline.deinit();
     try std.testing.expectEqual(.work_limit, stats.outcome);
     try std.testing.expectEqual(
-        try @import("program_image.zig").identity(a, baseline.program),
-        try @import("program_image.zig").identity(a, limited.program),
+        try @import("program_image.zig").identity(a, .unhinted(baseline.program)),
+        try @import("program_image.zig").identity(a, .unhinted(limited.program)),
     );
 }
 
@@ -771,7 +774,7 @@ test "shared compiler selects profitable direct parity state and retains small n
         var stats: @import("closed_compilation.zig").Statistics = .{};
         var output = try @import("closed_compilation.zig").run(
             a,
-            program,
+            .unhinted(program),
             .{ .contract = .semantic, .statistics = &stats },
         );
         defer output.deinit();
@@ -975,8 +978,8 @@ test "full product inspection of the rotating state preserves all three words" {
     defer baseline.deinit();
     try std.testing.expectEqual(.no_change, stats.outcome);
     try std.testing.expectEqual(
-        try @import("program_image.zig").identity(a, baseline.program),
-        try @import("program_image.zig").identity(a, retained.program),
+        try @import("program_image.zig").identity(a, .unhinted(baseline.program)),
+        try @import("program_image.zig").identity(a, .unhinted(retained.program)),
     );
 }
 
@@ -1058,8 +1061,8 @@ test "a valid opaque computation consumer keeps its original capture interface" 
     defer baseline.deinit();
     try std.testing.expectEqual(.no_change, stats.outcome);
     try std.testing.expectEqual(
-        try @import("program_image.zig").identity(a, baseline.program),
-        try @import("program_image.zig").identity(a, retained.program),
+        try @import("program_image.zig").identity(a, .unhinted(baseline.program)),
+        try @import("program_image.zig").identity(a, .unhinted(retained.program)),
     );
 }
 

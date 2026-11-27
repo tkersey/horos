@@ -37,7 +37,11 @@ test "bounded equality search reports exhaustion without discarding its checked 
         }},
     };
     var stats: compile.Statistics = .{};
-    var result = try compile.run(a, program, .{ .contract = .semantic, .statistics = &stats });
+    var result = try compile.run(
+        a,
+        .unhinted(program),
+        .{ .contract = .semantic, .statistics = &stats },
+    );
     defer result.deinit();
     try std.testing.expect(stats.search_exhaustions > 0);
     try std.testing.expectEqual(compile.Outcome.applied, stats.outcome);
@@ -59,7 +63,7 @@ test "shared profile policy reaches independently checked loop and tail consumer
         counts[if (index == 0) 1 else 2] = 100;
         const policy: compile.ProfilePolicy = .{
             .record = .{
-                .image_identity = try image.identity(a, program),
+                .image_identity = try image.identity(a, .unhinted(program)),
                 .block_counts = counts,
                 .total = 100,
             },
@@ -69,7 +73,7 @@ test "shared profile policy reaches independently checked loop and tail consumer
         var stats: compile.Statistics = .{};
         var result = try compile.run(
             a,
-            program,
+            .unhinted(program),
             .{ .contract = .semantic, .profile = policy, .statistics = &stats },
         );
         defer result.deinit();
@@ -85,7 +89,7 @@ test "shared profile budget is bound to original records and consumed only once"
     var counts = @as([program.blocks.len]u64, @splat(0));
     counts[4] = 100;
     const record: profiles.Record = .{
-        .image_identity = try image.identity(a, program),
+        .image_identity = try image.identity(a, .unhinted(program)),
         .block_counts = &counts,
         .total = 100,
     };
@@ -94,7 +98,7 @@ test "shared profile budget is bound to original records and consumed only once"
     const policy: compile.ProfilePolicy = .{ .record = record, .max_variants = 1 };
     var result = try compile.run(
         a,
-        program,
+        .unhinted(program),
         .{
             .contract = .semantic,
             .profile = policy,
@@ -107,34 +111,46 @@ test "shared profile budget is bound to original records and consumed only once"
     try std.testing.expectEqual(@as(usize, 1), stats.profile_variants);
     try std.testing.expect(stats.outcome != .work_limit);
     try std.testing.expect(p01_stats.outcome != .not_run);
-    var repeated = try compile.run(a, program, .{ .contract = .semantic, .profile = policy });
+    var repeated = try compile.run(
+        a,
+        .unhinted(program),
+        .{ .contract = .semantic, .profile = policy },
+    );
     defer repeated.deinit();
     try std.testing.expectEqualSlices(
         u8,
-        &try image.identity(a, result.program),
-        &try image.identity(a, repeated.program),
+        &try image.identity(a, result.image()),
+        &try image.identity(a, repeated.image()),
     );
-    var structural = try compile.run(a, program, .{ .profile = policy, .statistics = &stats });
+    var structural = try compile.run(
+        a,
+        .unhinted(program),
+        .{ .profile = policy, .statistics = &stats },
+    );
     defer structural.deinit();
     try std.testing.expect(!stats.profile_used);
     try std.testing.expectEqual(compile.Outcome.structural, stats.outcome);
     var limited = try compile.run(
         a,
-        program,
+        .unhinted(program),
         .{ .contract = .semantic, .profile = policy, .statistics = &stats, .work_limit = 0 },
     );
     defer limited.deinit();
     try std.testing.expectEqual(compile.Outcome.work_limit, stats.outcome);
     try std.testing.expectEqualSlices(
         u8,
-        &try image.identity(a, structural.program),
-        &try image.identity(a, limited.program),
+        &try image.identity(a, structural.image()),
+        &try image.identity(a, limited.image()),
     );
     var stale = policy;
     stale.record.image_identity[0] ^= 1;
     try std.testing.expectError(
         error.InvalidOptimizationProfile,
-        compile.run(a, program, .{ .contract = .semantic, .profile = stale, .work_limit = 0 }),
+        compile.run(
+            a,
+            .unhinted(program),
+            .{ .contract = .semantic, .profile = stale, .work_limit = 0 },
+        ),
     );
 }
 
@@ -143,7 +159,7 @@ test "both closed compilation contracts invoke P01 and only semantic rewrites ap
     var structural_p01: p01.Statistics = .{};
     var structural = try compile.run(
         a,
-        captured,
+        .unhinted(captured),
         .{ .statistics = &structural_stats, .coalescing = .{ .statistics = &structural_p01 } },
     );
     defer structural.deinit();
@@ -158,7 +174,7 @@ test "both closed compilation contracts invoke P01 and only semantic rewrites ap
     var semantic_p01: p01.Statistics = .{};
     var semantic = try compile.run(
         a,
-        captured,
+        .unhinted(captured),
         .{
             .contract = .semantic,
             .statistics = &stats,
@@ -177,9 +193,9 @@ test "both closed compilation contracts invoke P01 and only semantic rewrites ap
 }
 
 test "zero budget and a late round limit return the exact structural baseline" {
-    var baseline = try compile.run(a, captured, .{});
+    var baseline = try compile.run(a, .unhinted(captured), .{});
     defer baseline.deinit();
-    const identity = try image.identity(a, baseline.program);
+    const identity = try image.identity(a, baseline.image());
     for ([_]compile.Options{
         .{ .contract = .semantic, .work_limit = 0 },
         .{ .contract = .semantic, .round_limit = 1 },
@@ -187,17 +203,17 @@ test "zero budget and a late round limit return the exact structural baseline" {
         var options = selected;
         var stats: compile.Statistics = .{};
         options.statistics = &stats;
-        var result = try compile.run(a, captured, options);
+        var result = try compile.run(a, .unhinted(captured), options);
         defer result.deinit();
         try std.testing.expectEqual(compile.Outcome.work_limit, stats.outcome);
-        try std.testing.expectEqual(identity, try image.identity(a, result.program));
+        try std.testing.expectEqual(identity, try image.identity(a, result.image()));
         if (selected.round_limit == 1) try std.testing.expect(stats.changed_stages > 0);
     }
     try std.testing.expectError(
         error.Capacity,
         compile.run(
             a,
-            captured,
+            .unhinted(captured),
             .{ .contract = .semantic, .work_limit = 0, .max_image_bytes = 0 },
         ),
     );
@@ -205,16 +221,16 @@ test "zero budget and a late round limit return the exact structural baseline" {
 
 test "size objective and explicit zero growth protect the original exact image size" {
     const projection = @import("capture_projection_tests.zig").reused;
-    var baseline = try compile.run(a, projection, .{});
+    var baseline = try compile.run(a, .unhinted(projection), .{});
     defer baseline.deinit();
     for ([_]compile.Options{
         .{ .contract = .semantic, .objective = .size },
         .{ .contract = .semantic, .image_growth_bytes = 0 },
     }) |options| {
-        var result = try compile.run(a, projection, options);
+        var result = try compile.run(a, .unhinted(projection), options);
         defer result.deinit();
         try std.testing.expect(
-            try image.encodedLength(result.program) <= try image.encodedLength(baseline.program),
+            try image.encodedLength(result.image()) <= try image.encodedLength(baseline.image()),
         );
     }
 }
@@ -239,12 +255,12 @@ test "incomplete value facts and exhausted backwards proofs never escape" {
     invalid.constructors = &.{.{ .function = 99, .capture = 0, .schema = 2 }};
     try std.testing.expectError(
         error.InvalidReference,
-        compile.run(a, invalid, .{ .contract = .semantic, .work_limit = 0 }),
+        compile.run(a, .unhinted(invalid), .{ .contract = .semantic, .work_limit = 0 }),
     );
 }
 
 fn allocationAttempt(allocator: std.mem.Allocator) !void {
-    var result = try compile.run(allocator, captured, .{ .contract = .semantic });
+    var result = try compile.run(allocator, .unhinted(captured), .{ .contract = .semantic });
     defer result.deinit();
 }
 test "closed compilation releases baseline and successor owners on every allocation failure" {
@@ -260,18 +276,18 @@ test "observers do not change selected semantic bytes" {
         }
     };
     var counter: Counter = .{};
-    var plain = try compile.run(a, captured, .{ .contract = .semantic });
+    var plain = try compile.run(a, .unhinted(captured), .{ .contract = .semantic });
     defer plain.deinit();
     var observed = try compile.run(
         a,
-        captured,
+        .unhinted(captured),
         .{ .contract = .semantic, .observer = .{ .context = &counter, .enter = Counter.enter } },
     );
     defer observed.deinit();
     try std.testing.expect(counter.count > 0);
     try std.testing.expectEqual(
-        try image.identity(a, plain.program),
-        try image.identity(a, observed.program),
+        try image.identity(a, plain.image()),
+        try image.identity(a, observed.image()),
     );
 }
 
@@ -306,12 +322,16 @@ test "work accounting uses logical records rather than compressed literal wire l
     var stats: compile.Statistics = .{};
     var limited = try compile.run(
         a,
-        program,
+        .unhinted(program),
         .{ .contract = .semantic, .work_limit = 0, .statistics = &stats },
     );
     defer limited.deinit();
     try std.testing.expectEqual(compile.Outcome.work_limit, stats.outcome);
-    var result = try compile.run(a, program, .{ .contract = .semantic, .statistics = &stats });
+    var result = try compile.run(
+        a,
+        .unhinted(program),
+        .{ .contract = .semantic, .statistics = &stats },
+    );
     defer result.deinit();
     try std.testing.expectEqual(@as(usize, 1), result.program.blocks[0].instructions.len);
     try std.testing.expect(stats.selected_candidate == .shrinking);
@@ -340,7 +360,7 @@ test "inapplicable semantic passes are skipped without skipping mandatory P01" {
     var structural: p01.Statistics = .{};
     var result = try compile.run(
         a,
-        program,
+        .unhinted(program),
         .{
             .contract = .semantic,
             .statistics = &stats,
@@ -382,7 +402,11 @@ test "a proved no-op stage is not repeated on unchanged records" {
         },
     };
     var stats: compile.Statistics = .{};
-    var result = try compile.run(a, program, .{ .contract = .semantic, .statistics = &stats });
+    var result = try compile.run(
+        a,
+        .unhinted(program),
+        .{ .contract = .semantic, .statistics = &stats },
+    );
     defer result.deinit();
     try std.testing.expectEqual(compile.Outcome.no_change, stats.outcome);
     try std.testing.expectEqual(@as(usize, 1), stats.stages_run);
@@ -406,7 +430,11 @@ const shrinking_fixture: @import("activation.zig").Program = .{
     }, .terminator = .{ .return_value = 1 } }},
 };
 fn shrinkingAllocationAttempt(allocator: std.mem.Allocator) !void {
-    var result = try compile.run(allocator, shrinking_fixture, .{ .contract = .semantic });
+    var result = try compile.run(
+        allocator,
+        .unhinted(shrinking_fixture),
+        .{ .contract = .semantic },
+    );
     defer result.deinit();
 }
 test "independent shrinking candidate releases every partial owner and charges its work" {
@@ -414,17 +442,17 @@ test "independent shrinking candidate releases every partial owner and charges i
     var stats: compile.Statistics = .{};
     var limited = try compile.run(
         a,
-        shrinking_fixture,
+        .unhinted(shrinking_fixture),
         .{ .contract = .semantic, .work_limit = 1, .statistics = &stats },
     );
     defer limited.deinit();
-    var baseline = try compile.run(a, shrinking_fixture, .{});
+    var baseline = try compile.run(a, .unhinted(shrinking_fixture), .{});
     defer baseline.deinit();
     try std.testing.expectEqual(compile.Outcome.work_limit, stats.outcome);
     try std.testing.expectEqual(compile.Stage.dead_computation, stats.stopped_stage.?);
     try std.testing.expectEqual(
-        try image.identity(a, baseline.program),
-        try image.identity(a, limited.program),
+        try image.identity(a, baseline.image()),
+        try image.identity(a, limited.image()),
     );
 }
 
@@ -440,8 +468,8 @@ test "dead-computation round credit preserves whole-attempt rollback and admissi
         try std.testing.expectEqual(limit, stats.round_attempts);
         try std.testing.expectEqual(@as(usize, 0), stats.instructions_removed);
         try std.testing.expectEqual(
-            try image.identity(a, baseline.program),
-            try image.identity(a, limited.program),
+            try image.identity(a, .unhinted(baseline.program)),
+            try image.identity(a, .unhinted(limited.program)),
         );
     }
     var stats: dead.Statistics = .{};

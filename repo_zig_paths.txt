@@ -13,6 +13,7 @@ src/authoring/option_contract.zig
 src/authoring/runtime.zig
 src/authoring_cases.zig
 src/authoring_tests.zig
+src/binding_time_tests.zig
 src/cache_key_rejections.zig
 src/capture_order_case.zig
 src/coalescing_allocation_meter.zig
@@ -60,6 +61,8 @@ src/data/analysis_sets.zig
 src/data/analysis_sets_tests.zig
 src/data/application_specialization.zig
 src/data/application_specialization_tests.zig
+src/data/binding_time.zig
+src/data/binding_time_tests.zig
 src/data/blob_admission.zig
 src/data/borrow_contract.zig
 src/data/borrow_flow.zig
@@ -252,6 +255,7 @@ src/library/runtime/state.zig
 src/library/runtime/writer.zig
 src/library/scheduler.zig
 src/library/search.zig
+src/library/stage.zig
 src/library/state.zig
 src/library/writer.zig
 src/recovery_optimization_test_root.zig

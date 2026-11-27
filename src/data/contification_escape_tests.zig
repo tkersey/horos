@@ -134,8 +134,8 @@ test "returned helper value and handler-retained capture remain first class" {
         var baseline = try @import("coalescing.zig").run(a, original, .{});
         defer baseline.deinit();
         try std.testing.expectEqual(
-            try @import("program_image.zig").identity(a, baseline.program),
-            try @import("program_image.zig").identity(a, result.program),
+            try @import("program_image.zig").identity(a, .unhinted(baseline.program)),
+            try @import("program_image.zig").identity(a, .unhinted(result.program)),
         );
     }
 }

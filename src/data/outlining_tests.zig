@@ -145,8 +145,8 @@ test "outline allocation and work limits preserve the canonical baseline" {
         defer result.deinit();
         try std.testing.expect(stats.work_limit);
         try std.testing.expectEqual(
-            try @import("program_image.zig").identity(a, baseline.program),
-            try @import("program_image.zig").identity(a, result.program),
+            try @import("program_image.zig").identity(a, .unhinted(baseline.program)),
+            try @import("program_image.zig").identity(a, .unhinted(result.program)),
         );
     }
 }
@@ -155,7 +155,7 @@ test "shared pipeline retains one worker without an inline-outline cycle" {
     var stats: @import("closed_compilation.zig").Statistics = .{};
     var result = try @import("closed_compilation.zig").run(
         a,
-        repeated,
+        .unhinted(repeated),
         .{ .contract = .semantic, .statistics = &stats },
     );
     defer result.deinit();
@@ -163,13 +163,13 @@ test "shared pipeline retains one worker without an inline-outline cycle" {
     try std.testing.expectEqual(@as(usize, 2), result.program.functions.len);
     var again = try @import("closed_compilation.zig").run(
         a,
-        result.program,
+        result.image(),
         .{ .contract = .semantic },
     );
     defer again.deinit();
     try std.testing.expectEqual(
-        try @import("program_image.zig").identity(a, result.program),
-        try @import("program_image.zig").identity(a, again.program),
+        try @import("program_image.zig").identity(a, result.image()),
+        try @import("program_image.zig").identity(a, again.image()),
     );
 }
 test "outlined call cannot be redirected to an existing handler authority" {

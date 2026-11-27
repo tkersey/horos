@@ -13,6 +13,7 @@ test {
     _ = @import("authoring/checked_tests.zig");
     _ = @import("authoring/runtime.zig");
     _ = @import("authoring_tests.zig");
+    _ = @import("binding_time_tests.zig");
     _ = @import("coalescing_tests.zig");
     _ = @import("coalescing_allocation_meter.zig");
     _ = @import("root.zig");

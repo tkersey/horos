@@ -11,7 +11,8 @@ pub fn main(init: std.process.Init) !void {
     const mixed = std.mem.eql(u8, kind, "mixed");
     const irregular = std.mem.eql(u8, kind, "irregular");
     const constant = std.mem.eql(u8, kind, "constant");
-    if (!mixed and !irregular and !constant and !std.mem.eql(u8, kind, "install"))
+    const hinted = std.mem.eql(u8, kind, "hinted");
+    if (!mixed and !irregular and !constant and !hinted and !std.mem.eql(u8, kind, "install"))
         return error.InvalidKind;
     var builder = horos.source.Builder.init(init.gpa);
     defer builder.deinit();
@@ -26,15 +27,20 @@ pub fn main(init: std.process.Init) !void {
         try @import("compact_fixtures.zig").mixed(&builder, count, 0, false)
     else
         try horos.source.examples.installations(&builder, count);
-    var compiled = try horos.program.compile(init.gpa, module);
+    const hints = try init.gpa.alloc(horos.source.Hint, if (hinted) module.values.len else 0);
+    defer init.gpa.free(hints);
+    for (hints, 0..) |*hint, value| hint.* = .{
+        .value = value,
+        .kind = if (value % 2 == 0) .context else .residual,
+    };
+    var compiled = try horos.program.compileObserved(init.gpa, module, .{
+        .hints = try horos.source.Hints.bind(module, hints),
+    });
     defer compiled.deinit();
     if (constant and compiled.program.constants.len != 1) return error.DuplicatedConstant;
-    const bytes = try init.gpa.alloc(
-        u8,
-        try horos.data.program_image.encodedLength(compiled.program),
-    );
+    if (hinted and compiled.hints.len == 0) return error.MissingHints;
+    const bytes = try compiled.encode(init.gpa);
     defer init.gpa.free(bytes);
-    _ = try compiled.encode(init.gpa, bytes);
     var buffer: [4096]u8 = undefined;
     var output = std.Io.File.stdout().writer(init.io, &buffer);
     try output.interface.writeAll(bytes);

@@ -107,8 +107,8 @@ test "two predecessors share one local body with parallel argument and swap edge
     std.debug.print(
         "shared join bytes: {d} -> {d}\n",
         .{
-            try @import("program_image.zig").encodedLength(shared),
-            try @import("program_image.zig").encodedLength(result.program),
+            try @import("program_image.zig").encodedLength(.unhinted(shared)),
+            try @import("program_image.zig").encodedLength(.unhinted(result.program)),
         },
     );
 }
@@ -187,8 +187,8 @@ test "join allocation and budget exhaustion preserve the P01 baseline" {
         defer result.deinit();
         try std.testing.expect(stats.work_limit);
         try std.testing.expectEqual(
-            try @import("program_image.zig").identity(a, baseline.program),
-            try @import("program_image.zig").identity(a, result.program),
+            try @import("program_image.zig").identity(a, .unhinted(baseline.program)),
+            try @import("program_image.zig").identity(a, .unhinted(result.program)),
         );
     }
 }
@@ -197,7 +197,7 @@ test "shared pipeline selects a single relocated join body" {
     var stats: @import("closed_compilation.zig").Statistics = .{};
     var result = try @import("closed_compilation.zig").run(
         a,
-        shared,
+        .unhinted(shared),
         .{ .contract = .semantic, .statistics = &stats },
     );
     defer result.deinit();

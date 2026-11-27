@@ -374,8 +374,8 @@ pub fn construct(
     var program = original;
     program.functions = functions;
     program.blocks = blocks;
-    const before = try image.encodedLength(original);
-    const after = try image.encodedLength(program);
+    const before = try image.encodedLength(.unhinted(original));
+    const after = try image.encodedLength(.unhinted(program));
     if (after > before and
         after - before > options.max_added_bytes)
         return error.ContificationLimit;

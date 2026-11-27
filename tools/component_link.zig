@@ -66,8 +66,7 @@ pub fn main(init: std.process.Init) !void {
         },
     );
     defer linked.deinit();
-    const image = try a.alloc(u8, try data.program_image.encodedLength(linked.program));
-    _ = try linked.encode(init.gpa, image);
+    const image = try linked.encode(a);
     try output.interface.writeAll(image);
     try output.interface.flush();
 }

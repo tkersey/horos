@@ -135,7 +135,7 @@ pub fn materialize(
         .arena = arena,
         .program = projected.program,
         .flow = flow,
-        .bytes = try image.encodedLengthWithWork(projected.program, remaining),
+        .bytes = try image.encodedLengthWithWork(.unhinted(projected.program), remaining),
         .entries = try count(projected.program),
         .correspondence = correspondence,
     };

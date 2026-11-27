@@ -39,6 +39,7 @@ pub const activation_flow = @import("activation_flow.zig");
 pub const activation_types = @import("activation_types.zig");
 pub const activation_ownership = @import("activation_ownership.zig");
 pub const program_image = @import("program_image.zig");
+pub const binding_time = @import("binding_time.zig");
 pub const process_state = @import("process_state.zig");
 pub const state_image = @import("state_image.zig");
 pub const invocation = @import("invocation.zig");

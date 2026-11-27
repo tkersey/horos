@@ -138,7 +138,7 @@ test "shared compilation selects captured callable specialization" {
     var stats: @import("closed_compilation.zig").Statistics = .{};
     var result = try @import("closed_compilation.zig").run(
         a,
-        captured,
+        .unhinted(captured),
         .{ .contract = .semantic, .statistics = &stats },
     );
     defer result.deinit();

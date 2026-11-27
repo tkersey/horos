@@ -4,7 +4,7 @@ This development grammar is implemented by `process_state.zig`, `state_image.zig
 and the shared ordered graph traversal. The codec establishes framing, bounded
 record decoding, references, canonical graph order and activation record shape.
 `state_admission.validateStable` separately checks the graph against the admitted
-Program, including identity, code position, slot availability, ownership, effects,
+program image, including identity, code position, slot availability, ownership, effects,
 borrow lifetimes and cleanup custody. Kosmos now restores these checked records
 into its native stable controller. Current envelopes and Kosmos ABI 3 carry this
 same State through fresh and resident execution and the cross-host checks.

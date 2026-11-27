@@ -39,6 +39,7 @@ test {
     _ = @import("activation_flow_tests.zig");
     _ = @import("activation_borrow_tests.zig");
     _ = @import("program_image_tests.zig");
+    _ = @import("binding_time_tests.zig");
     _ = @import("component_tests.zig");
     _ = @import("relocation_tests.zig");
     _ = @import("coalescing_graph_tests.zig");

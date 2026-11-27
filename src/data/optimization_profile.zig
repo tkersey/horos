@@ -2,7 +2,6 @@
 //! Opt-in search weights. Counts never establish reachability or value facts.
 const std = @import("std");
 const builtin = @import("builtin");
-const ir = @import("activation.zig");
 const image = @import("program_image.zig");
 const wire = @import("wire.zig");
 
@@ -18,12 +17,13 @@ pub const Record = struct {
     total: u64,
 };
 
-pub fn validate(allocator: std.mem.Allocator, program: ir.Program, record: Record) Error!void {
+pub fn validate(allocator: std.mem.Allocator, subject: image.Image, record: Record) Error!void {
     if (record.version != schema_version or !std.mem.eql(
         u8,
         record.toolchain_identity,
         toolchain,
-    ) or record.block_counts.len != program.blocks.len) return error.InvalidOptimizationProfile;
+    ) or record.block_counts.len != subject.program.blocks.len)
+        return error.InvalidOptimizationProfile;
     var total: u64 = 0;
     for (record.block_counts) |count| total = std.math.add(
         u64,
@@ -33,17 +33,17 @@ pub fn validate(allocator: std.mem.Allocator, program: ir.Program, record: Recor
     if (total != record.total or !std.mem.eql(
         u8,
         &record.image_identity,
-        &try image.identity(allocator, program),
+        &try image.identity(allocator, subject),
     )) return error.InvalidOptimizationProfile;
 }
 
 pub fn orderedBlocks(
     allocator: std.mem.Allocator,
-    program: ir.Program,
+    subject: image.Image,
     record: Record,
 ) Error![]usize {
-    try validate(allocator, program, record);
-    const order = try allocator.alloc(usize, program.blocks.len);
+    try validate(allocator, subject, record);
+    const order = try allocator.alloc(usize, subject.program.blocks.len);
     for (order, 0..) |*id, index| id.* = index;
     std.mem.sort(usize, order, record.block_counts, struct {
         fn less(counts: []const u64, left: usize, right: usize) bool {
@@ -69,9 +69,9 @@ pub const Collector = struct {
     identity: [32]u8,
     counts: []u64,
     total: u64 = 0,
-    pub fn init(allocator: std.mem.Allocator, program: ir.Program) Error!Collector {
-        const identity = try image.identity(allocator, program);
-        const counts = try allocator.alloc(u64, program.blocks.len);
+    pub fn init(allocator: std.mem.Allocator, subject: image.Image) Error!Collector {
+        const identity = try image.identity(allocator, subject);
+        const counts = try allocator.alloc(u64, subject.program.blocks.len);
         @memset(counts, 0);
         return .{ .allocator = allocator, .identity = identity, .counts = counts };
     }
@@ -125,14 +125,14 @@ pub fn encode(record: Record, output: []u8) Error![]const u8 {
     try write(&writer, record);
     return output[0..writer.position];
 }
-pub fn decode(allocator: std.mem.Allocator, program: ir.Program, bytes: []const u8) Error!Owned {
+pub fn decode(allocator: std.mem.Allocator, subject: image.Image, bytes: []const u8) Error!Owned {
     var reader: wire.Reader = .{ .input = bytes };
     if (!std.mem.eql(u8, try reader.take(4), "BPF1")) return error.InvalidOptimizationProfile;
     const version = try reader.fixed(u32);
     const identity = (try reader.take(32))[0..32].*;
     if (!std.mem.eql(u8, try reader.bytes(), toolchain)) return error.InvalidOptimizationProfile;
     const count = try reader.count();
-    if (count != program.blocks.len) return error.InvalidOptimizationProfile;
+    if (count != subject.program.blocks.len) return error.InvalidOptimizationProfile;
     const total = try reader.fixed(u64);
     // Bound allocation by both the admitted input and available fixed counters.
     if (count > (bytes.len - reader.position) / 8) return error.Truncated;
@@ -146,6 +146,6 @@ pub fn decode(allocator: std.mem.Allocator, program: ir.Program, bytes: []const 
         .block_counts = counts,
         .total = total,
     };
-    try validate(allocator, program, record);
+    try validate(allocator, subject, record);
     return .{ .allocator = allocator, .record = record };
 }

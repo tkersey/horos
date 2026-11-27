@@ -101,8 +101,8 @@ test "induction reduction cleans allocation failures and preserves zero-work adm
     try std.testing.expect(stats.work_limit);
     const identity = @import("program_image.zig").identity;
     try std.testing.expectEqual(
-        try identity(a, baseline.program),
-        try identity(a, limited.program),
+        try identity(a, .unhinted(baseline.program)),
+        try identity(a, .unhinted(limited.program)),
     );
     var invalid = guarded;
     invalid.roots.entry = 99;

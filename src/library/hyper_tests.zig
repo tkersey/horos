@@ -130,11 +130,7 @@ fn lazyAggregateImage(comptime runtime_rows: bool, comptime sum: bool) ![]u8 {
     try c.define(entry, try body.ret(answer));
     var compiled = try c.compile(std.testing.allocator, entry, try c.schema(void));
     defer compiled.deinit();
-    const image = @import("horos_data").program_image;
-    const bytes = try std.testing.allocator.alloc(u8, try image.encodedLength(compiled.program));
-    errdefer std.testing.allocator.free(bytes);
-    _ = try compiled.encode(std.testing.allocator, bytes);
-    return bytes;
+    return compiled.encode(std.testing.allocator);
 }
 
 test "typed hyper lazy rows reject effectful unobserved members" {

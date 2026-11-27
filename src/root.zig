@@ -12,6 +12,7 @@ pub const library = struct {
     pub const raise = @import("library/raise.zig");
     pub const scheduler = @import("library/scheduler.zig");
     pub const search = @import("library/search.zig");
+    pub const stage = @import("library/stage.zig");
 };
 pub const program = struct {
     pub const lower = source.emit;

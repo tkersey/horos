@@ -471,8 +471,8 @@ fn surviving(ws: []const reuse.Witness, map: Correspondence, budget: *reuse.Budg
 }
 
 fn imageGuard(baseline: Program, actual: Program, limits: Limits, work: *u64) !void {
-    const before = try data.program_image.encodedLengthWithWork(baseline, work);
-    const after = try data.program_image.encodedLengthWithWork(actual, work);
+    const before = try data.program_image.encodedLengthWithWork(.unhinted(baseline), work);
+    const after = try data.program_image.encodedLengthWithWork(.unhinted(actual), work);
     if (after -| before > limits.image_growth_bytes) return error.ImageSizeLimit;
 }
 

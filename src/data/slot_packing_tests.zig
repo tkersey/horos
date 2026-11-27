@@ -162,8 +162,8 @@ test "packing allocation failure and work exhaustion retain P01" {
     defer baseline.deinit();
     try std.testing.expect(stats.work_limit);
     try std.testing.expectEqual(
-        try @import("program_image.zig").identity(a, baseline.program),
-        try @import("program_image.zig").identity(a, result.program),
+        try @import("program_image.zig").identity(a, .unhinted(baseline.program)),
+        try @import("program_image.zig").identity(a, .unhinted(result.program)),
     );
 }
 
@@ -192,7 +192,7 @@ test "shared compiler selects packing and retains its fixed point" {
     var stats: @import("closed_compilation.zig").Statistics = .{};
     var result = try @import("closed_compilation.zig").run(
         a,
-        chain,
+        .unhinted(chain),
         .{ .contract = .semantic, .statistics = &stats },
     );
     defer result.deinit();
@@ -200,13 +200,13 @@ test "shared compiler selects packing and retains its fixed point" {
     try std.testing.expectEqual(@as(usize, 2), result.program.functions[0].layout.slots.len);
     var again = try @import("closed_compilation.zig").run(
         a,
-        result.program,
+        result.image(),
         .{ .contract = .semantic },
     );
     defer again.deinit();
     try std.testing.expectEqual(
-        try @import("program_image.zig").identity(a, result.program),
-        try @import("program_image.zig").identity(a, again.program),
+        try @import("program_image.zig").identity(a, result.image()),
+        try @import("program_image.zig").identity(a, again.image()),
     );
 }
 

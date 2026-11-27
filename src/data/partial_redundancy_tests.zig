@@ -170,8 +170,8 @@ test "PRE allocation failures and work exhaustion preserve original ownership" {
     defer baseline.deinit();
     try std.testing.expect(stats.work_limit);
     try std.testing.expectEqual(
-        try @import("program_image.zig").identity(a, baseline.program),
-        try @import("program_image.zig").identity(a, limited.program),
+        try @import("program_image.zig").identity(a, .unhinted(baseline.program)),
+        try @import("program_image.zig").identity(a, .unhinted(limited.program)),
     );
 }
 
@@ -209,7 +209,7 @@ test "shared semantic compiler consumes PRE with path-sensitive cost" {
     var stats: @import("closed_compilation.zig").Statistics = .{};
     var result = try @import("closed_compilation.zig").run(
         a,
-        comptime liveDiamond(),
+        .unhinted(comptime liveDiamond()),
         .{ .contract = .semantic, .statistics = &stats },
     );
     defer result.deinit();

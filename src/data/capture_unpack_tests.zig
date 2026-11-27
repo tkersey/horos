@@ -126,7 +126,7 @@ test "checked product unpacking feeds aggregate reduction and affine synthesis" 
     var compilation: @import("closed_compilation.zig").Statistics = .{};
     var compiled = try @import("closed_compilation.zig").run(
         a,
-        product_cycle,
+        .unhinted(product_cycle),
         .{ .contract = .semantic, .statistics = &compilation },
     );
     defer compiled.deinit();
@@ -158,8 +158,8 @@ test "whole-product observation keeps the original captured representation" {
     var retained = try unpack.run(a, original, .{});
     defer retained.deinit();
     try std.testing.expectEqual(
-        try image.identity(a, baseline.program),
-        try image.identity(a, retained.program),
+        try image.identity(a, .unhinted(baseline.program)),
+        try image.identity(a, .unhinted(retained.program)),
     );
     _ = p;
 }
@@ -418,7 +418,7 @@ test "capture unpack preserves representations retained by effect continuations"
         const original = try retentionFixture(arena.allocator(), case);
         var admitted = try @import("activation_ownership.zig").analyze(a, original);
         defer admitted.deinit();
-        var baseline = try @import("closed_compilation.zig").run(a, original, .{});
+        var baseline = try @import("closed_compilation.zig").run(a, .unhinted(original), .{});
         defer baseline.deinit();
         var candidate = try unpack.construct(a, original, 0);
         defer if (candidate) |*owned| owned.deinit();
@@ -430,13 +430,13 @@ test "capture unpack preserves representations retained by effect continuations"
             defer unchanged.deinit();
             const image = @import("program_image.zig");
             try std.testing.expectEqual(
-                try image.identity(a, baseline.program),
-                try image.identity(a, unchanged.program),
+                try image.identity(a, baseline.image()),
+                try image.identity(a, .unhinted(unchanged.program)),
             );
         }
         var compiled = try @import("closed_compilation.zig").run(
             a,
-            original,
+            .unhinted(original),
             .{ .contract = .semantic },
         );
         defer compiled.deinit();

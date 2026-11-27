@@ -128,8 +128,8 @@ test "common-tail limits and allocation failure retain mandatory P01" {
     defer result.deinit();
     try std.testing.expect(stats.work_limit);
     try std.testing.expectEqual(
-        try @import("program_image.zig").identity(a, baseline.program),
-        try @import("program_image.zig").identity(a, result.program),
+        try @import("program_image.zig").identity(a, .unhinted(baseline.program)),
+        try @import("program_image.zig").identity(a, .unhinted(result.program)),
     );
 }
 
@@ -137,7 +137,7 @@ test "shared semantic compiler selects within-function tail sharing" {
     var stats: @import("closed_compilation.zig").Statistics = .{};
     var result = try @import("closed_compilation.zig").run(
         a,
-        repeated,
+        .unhinted(repeated),
         .{ .contract = .semantic, .statistics = &stats },
     );
     defer result.deinit();

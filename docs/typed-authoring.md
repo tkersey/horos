@@ -198,8 +198,59 @@ supplied source, independently checks the finite correspondence against the
 actual candidate program, and returns its verified formal bindings.
 `source.recovery.validate` additionally compares those bindings with a compiled
 result. The evidence carries no alternative lowering input. Recovery lowering
-retains general handler clauses because direct tail conversion does not yet
-provide an origin transport; ordinary lowering keeps that optimization.
+retains general handler clauses because direct tail conversion has no
+independently checked origin correspondence; ordinary lowering keeps that
+optimization.
+
+## Binding-time hints
+
+`library.stage.context(body, value)` and `library.stage.residual(body, value)`
+return `value` itself, with its type. They record that the value should be
+known when a later specializer specializes the program (context) or must stay
+residual. Their meaning is the identity: the source module and the emitted
+executable records are exactly those of the same program without the calls.
+
+```zig
+const pc = try horos.library.stage.context(body, try body.parameter("pc"));
+const acc = try horos.library.stage.residual(body, try body.parameter("acc"));
+```
+
+The hints live beside the module, never inside it, so source relations, slices
+and specialization do not rewrite them. A recorded table is a `source.Hints`
+bound to the source identity of the module it was recorded against
+(`source.relation.identity`), and compilation rejects any other module with
+`InvalidSource`; a sliced, specialized or otherwise different module cannot
+silently inherit hints whose value IDs name another module's values.
+`Context.compile*` and `source.emit` bind and pass the recorded hints;
+`Context.hints()` returns the binding made by the last `Context.module()` for
+an explicit `source.lowerObserved(..., .{ .hints = ... })`, and
+`source.Hints.bind(module, table)` binds a table written for one module.
+
+Each place that materializes a hinted value names its function and slot; slot
+ordering and checked structural coalescing transport those bindings like
+recovery origins. Tail-clause conversion selects only deep clauses whose every
+path ends in `resume_value(k, v)` and then returns the resumed answer, and emits
+a tail copy of each. The copy takes the clause's state and payload, keeps the
+blocks before each resumption, and ends each path by returning `v`, the
+resumption argument, which has the effect's result type. The resumed answer,
+which has the handler's answer type, never passes through the copy, and `k` is
+erased. A clause binding is duplicated onto the copy only when the copy
+materializes its slot, as an input or as a write in one of its blocks, so a hint
+can cover the state, the payload, values computed before the resumption and
+`v`, but never `k` or the resumed answer. A binding hinted both ways is
+residual. When coalescing merges a hinted function with an unhinted structural
+twin, the merged binding is residual, so a context hint never covers the twin's
+call sites. A hint is dropped when its value is never materialized or its
+function is removed.
+`Compiled.hints` holds the canonical table, `Compiled.image()` pairs it with
+the records, and `Compiled.encode(allocator)` returns exactly that image's
+bytes. `max_image_bytes` bounds the emitted image, hint table included.
+
+Hints need a correspondence to final bindings. Structural compilation, with or
+without recovery, provides it. The semantic contract rejects hinted modules with
+`InvalidCorrespondence`. Component compilation, including
+`authoring.interop.componentModule`, rejects them with `InvalidSource` because
+BMO1 has no hint table.
 
 ## Operations and interpretations
 

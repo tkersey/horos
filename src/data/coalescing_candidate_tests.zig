@@ -29,10 +29,13 @@ fn candidateCase(allocator: std.mem.Allocator) !void {
     );
     defer full.deinit();
     try testing.expectEqual(@as(usize, 2), full.program.functions.len);
-    try testing.expect(full.bytes < try image.encodedLength(baseline.program));
+    try testing.expect(full.bytes < try image.encodedLength(.unhinted(baseline.program)));
     const buffer = try allocator.alloc(u8, full.bytes);
     defer allocator.free(buffer);
-    try testing.expectEqual(full.bytes, (try image.encode(allocator, full.program, buffer)).len);
+    try testing.expectEqual(
+        full.bytes,
+        (try image.encode(allocator, .unhinted(full.program), buffer)).len,
+    );
     var descriptions = try candidate.build(
         allocator,
         scratch.allocator(),
@@ -43,7 +46,10 @@ fn candidateCase(allocator: std.mem.Allocator) !void {
     );
     defer descriptions.deinit();
     try testing.expectEqual(@as(usize, 3), descriptions.program.functions.len);
-    try testing.expectEqual(try image.encodedLength(baseline.program), descriptions.bytes);
+    try testing.expectEqual(
+        try image.encodedLength(.unhinted(baseline.program)),
+        descriptions.bytes,
+    );
 }
 
 test "coalescing candidate shares whole code and independently admits both profiles" {
@@ -180,8 +186,8 @@ test "discarded authority neither pins live helpers nor hides an invalid unused 
         var repeated = try pass.run(testing.allocator, result.program, .{});
         defer repeated.deinit();
         try testing.expectEqual(
-            try image.identity(testing.allocator, result.program),
-            try image.identity(testing.allocator, repeated.program),
+            try image.identity(testing.allocator, .unhinted(result.program)),
+            try image.identity(testing.allocator, .unhinted(repeated.program)),
         );
     }
 }

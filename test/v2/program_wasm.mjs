@@ -26,4 +26,24 @@ for (const kind of ["install", "mixed", "irregular"]) {
     results.push({ kind, count, bpi3: length, identity: expected.toString("hex") });
   }
 }
+for (const count of [8, 256]) {
+  const plain = execFileSync(emitter, [String(count), "install"], { maxBuffer: 1 << 20 });
+  const input = execFileSync(emitter, [String(count), "hinted"], { maxBuffer: 1 << 20 });
+  assert.ok(input.length > plain.length, `hinted-${count} table`);
+  assert.deepEqual(input.subarray(20, plain.length), plain.subarray(20), `hinted-${count} records`);
+  const { exports } = new WebAssembly.Instance(module, {});
+  new Uint8Array(exports.memory.buffer, exports.compact_input_ptr(), input.length).set(input);
+  const length = exports.hinted_program_encode(input.length);
+  assert.equal(length, input.length, `hinted-${count}`);
+  const actual = new Uint8Array(exports.memory.buffer, exports.compact_output_ptr(), length);
+  assert.deepEqual(actual, new Uint8Array(input));
+  const identity = new Uint8Array(exports.memory.buffer, exports.program_identity_ptr(), 32);
+  const expected = createHash("sha256").update("boundary.program/v3\0").update(input).digest();
+  assert.deepEqual(identity, new Uint8Array(expected));
+  const erased = exports.program_encode(input.length);
+  assert.equal(erased, plain.length, `hinted-${count} erased`);
+  const records = new Uint8Array(exports.memory.buffer, exports.compact_output_ptr(), erased);
+  assert.deepEqual(records, new Uint8Array(plain));
+  results.push({ kind: "hinted", count, bpi3: length, identity: expected.toString("hex") });
+}
 console.log(JSON.stringify({ check: "BPI3 native/wasm32 byte and identity agreement", results }));

@@ -359,6 +359,7 @@ const ContextData = struct {
     library_storage: std.StringHashMapUnmanaged(*anyopaque) = .empty,
     capture_failure: ?Error = null,
     capture_declarations: std.ArrayList(*const Schema) = .empty,
+    published_hints: ?source.Hints = null,
 };
 fn contextData(c: *const Context) *ContextData {
     return @ptrCast(@alignCast(@constCast(c)));
@@ -2098,6 +2099,7 @@ pub const Context = opaque {
                 .semantic_round_limit = compilation.round_limit,
                 .semantic_statistics = compilation.statistics,
                 .compilation_observer = compilation.observer,
+                .hints = try self.recordedHints(module_value),
                 .captures = if (contextData(self).lambda_schemas.count() != 0 or contextData(
                     self,
                 ).handlers.items.len != 0) .{
@@ -2302,7 +2304,30 @@ pub const Context = opaque {
         entry: *const Function,
         failure: *const Schema,
     ) Error!source.Module {
-        return self.publish(entry, failure, true);
+        const published = try self.publish(entry, failure, true);
+        const raw = contextData(self).raw;
+        var returned_error: anyerror = undefined;
+        errdefer self.poison(returned_error);
+        const table = try captureError(
+            &returned_error,
+            raw.allocator().dupe(source.Hint, raw.hints.items),
+        );
+        contextData(self).published_hints = try captureError(
+            &returned_error,
+            source.Hints.bind(published, table),
+        );
+        return published;
+    }
+    pub fn hints(self: *Context) ?source.Hints {
+        return contextData(self).published_hints;
+    }
+    fn recordedHints(self: *Context, module_value: source.Module) Error!?source.Hints {
+        var returned_error: anyerror = undefined;
+        errdefer self.poison(returned_error);
+        return captureError(
+            &returned_error,
+            source.Hints.bind(module_value, contextData(self).raw.hints.items),
+        );
     }
     fn publish(
         self: *Context,
@@ -3645,6 +3670,17 @@ pub const Body = opaque {
             else => return c.reject(error.InvalidCategory, "blob", "requires bytes or UTF-8 text"),
         }
     }
+    pub fn bindingTime(
+        self: *Body,
+        kind: @import("horos_data").binding_time.Kind,
+        value: *const Value,
+    ) Error!void {
+        const v = try self.useValue(value);
+        const c = bodyData(self).context;
+        var returned_error: anyerror = undefined;
+        errdefer c.poison(returned_error);
+        try captureError(&returned_error, contextData(c).raw.hint(v.id, kind));
+    }
     pub fn yieldNow(self: *Body) Error!*const Value {
         try self.ready();
         const c = bodyData(self).context;
@@ -4931,6 +4967,7 @@ pub const interop = struct {
             interface,
             .{
                 .diagnostic = &diagnostic,
+                .hints = try c.recordedHints(module),
                 .captures = .{
                     .context = c,
                     .capture = Context.observeCapture,

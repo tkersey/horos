@@ -28,8 +28,9 @@ An application implements `emit(builder)` using the checked staged builder.
 `horos.program.compile(allocator, module)` compiles an already constructed
 source module. Both use the same stable-slot compiler. The returned owner must
 be deinitialized; it owns the emitted records and derived flow facts independently
-of the source builder. `compiled.encode(allocator, destination)` emits BPI3 into
-caller-owned storage. Arbitrary native Zig function bodies are not translated.
+of the source builder. `compiled.encode(allocator)` returns the BPI3 image in
+exactly sized caller-owned storage. Arbitrary native Zig function bodies are not
+translated.
 
 `program.compileObserved` additionally accepts caller-owned diagnostics and a
 phase observer. Diagnostics identify source variables or target calls and scopes
@@ -59,6 +60,11 @@ choice, first/all results, DFS/BFS search, owned generators and FIFO cooperative
 scheduling. Typed bodies provide `protect` and `bracket`. Ownership, borrowing, nominal identities, failure
 order and cleanup remain checked. Stable slots retain earlier bindings without
 copying them into every intermediate continuation interface.
+
+`library.stage` provides the binding-time hints `context` and `residual`. They
+are identities that leave executable records unchanged and are recorded in an
+optional BPI3 hint table for a later specializer; see
+[binding-time hints](docs/typed-authoring.md#binding-time-hints).
 
 Choice, Search, State, Reader, Writer and Raise families use an `authoring.Context` and typed handles.
 Choice/Writer/Raise expose `effect()` and `capability()`; State exposes `get()`, `put()`

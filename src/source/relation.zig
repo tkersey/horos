@@ -216,15 +216,11 @@ pub fn transportFunctions(
     return result;
 }
 
-pub fn identity(module: ast.Module) Error![32]u8 {
-    return identityWithWork(module, null);
+pub fn identity(module: ast.Module) data.record.Error![32]u8 {
+    return ast.identity(module, null);
 }
-pub fn identityWithWork(module: ast.Module, work: ?*u64) Error![32]u8 {
-    var digest = std.crypto.hash.sha2.Sha256.init(.{});
-    var writer: data.wire.Writer = .{ .hasher = &digest, .remaining = work };
-    try writer.put("horos.source-relation/1\x00");
-    try data.record.write(ast.Module, module, &writer);
-    return digest.finalResult();
+pub fn identityWithWork(module: ast.Module, work: ?*u64) data.record.Error![32]u8 {
+    return ast.identity(module, work);
 }
 fn chargeModule(module: ast.Module, left: *u64) Error!void {
     return chargeRecord(ast.Module, module, left);

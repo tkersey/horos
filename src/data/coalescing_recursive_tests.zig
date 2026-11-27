@@ -76,7 +76,7 @@ test "coalescing actual recursive candidates merge role for role and propagate d
     defer again.deinit();
     const image = @import("program_image.zig");
     try testing.expectEqual(
-        try image.identity(testing.allocator, equal.program),
-        try image.identity(testing.allocator, again.program),
+        try image.identity(testing.allocator, .unhinted(equal.program)),
+        try image.identity(testing.allocator, .unhinted(again.program)),
     );
 }

@@ -380,15 +380,64 @@ const Correspondence = struct {
     }
 };
 
+const Tail = struct { function: p.Id, materialized: []const bool };
+
+pub const Selection = struct {
+    input: ir.Program,
+    program: ir.Program,
+    tails: ?[]const ?Tail = null,
+
+    pub fn tail(
+        self: *Selection,
+        a: std.mem.Allocator,
+        function: p.Id,
+        slot: p.Id,
+    ) std.mem.Allocator.Error!?p.Id {
+        const tails = self.tails orelse try self.derive(a);
+        const copy = tails[@intCast(function)] orelse return null;
+        return if (copy.materialized[@intCast(slot)]) copy.function else null;
+    }
+
+    fn derive(self: *Selection, a: std.mem.Allocator) std.mem.Allocator.Error![]const ?Tail {
+        const first_copy = self.input.functions.len;
+        const copies = self.program.functions[first_copy..];
+        const materialized = try a.alloc([]bool, copies.len);
+        for (materialized, copies) |*slots, copy| {
+            slots.* = try a.alloc(bool, copy.layout.slots.len);
+            @memset(slots.*, false);
+            for (copy.inputs) |slot| slots.*[@intCast(slot)] = true;
+        }
+        for (self.program.blocks[self.input.blocks.len..]) |block| {
+            const slots = materialized[@intCast(block.function - first_copy)];
+            for (block.instructions) |operation| slots[@intCast(operation.destination)] = true;
+            @import("slot_access.zig").markWrites(block.terminator, slots);
+        }
+        const tails = try a.alloc(?Tail, first_copy);
+        @memset(tails, null);
+        for (self.input.handlers, self.program.handlers) |before, after| for (
+            before.clauses,
+            after.clauses,
+        ) |general, selected| {
+            if (selected.function != general.function) tails[@intCast(general.function)] = .{
+                .function = selected.function,
+                .materialized = materialized[@intCast(selected.function - first_copy)],
+            };
+        };
+        self.tails = tails;
+        return tails;
+    }
+};
+
 pub fn optimize(
     a: std.mem.Allocator,
     input: ir.Program,
     uses: traits.Facts,
-) std.mem.Allocator.Error!ir.Program {
-    return transform(a, input, uses, false, null) catch |err| switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
+) std.mem.Allocator.Error!Selection {
+    const program = transform(a, input, uses, false, null) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
         error.TailClauseWorkLimit => unreachable, // No budget on the existing source path.
     };
+    return .{ .input = input, .program = program };
 }
 
 // Both callers share construction. The semantic caller must independently
@@ -1009,8 +1058,9 @@ test "a general resumption with an administrative join becomes a checked tail cl
     const structural = try optimize(scratch, original, uses);
     try std.testing.expectEqual(
         ir.Clause{ .effect = 0, .function = 3, .resumption = 4 },
-        structural.handlers[0].clauses[0],
+        structural.program.handlers[0].clauses[0],
     );
+    try checkLazySelection(scratch, original, uses);
     const candidate = try transform(scratch, original, uses, true, null);
     try std.testing.expect(candidate.handlers[0].clauses[0].strategy == .tail);
     try std.testing.expectEqual(original.functions.len + 1, candidate.functions.len);
@@ -1024,13 +1074,35 @@ test "a general resumption with an administrative join becomes a checked tail cl
     try std.testing.expect(stats.work_limit);
     const image_codec = @import("program_image.zig");
     try std.testing.expectEqual(
-        try image_codec.identity(a, limited.program),
-        try image_codec.identity(a, late_limit.program),
+        try image_codec.identity(a, .unhinted(limited.program)),
+        try image_codec.identity(a, .unhinted(late_limit.program)),
     );
     try checkChangedAnswer(a, scratch, original);
     try checkShallowClause(a, scratch, original);
     try checkEffectfulClause(a, scratch, original);
     try checkMutatedClause(a, scratch, original, candidate);
+}
+
+fn checkLazySelection(scratch: std.mem.Allocator, original: ir.Program, uses: traits.Facts) !void {
+    var direct = original;
+    const blocks = try scratch.dupe(ir.Block, original.blocks);
+    blocks[5].terminator.resume_value.next = .{
+        .block = 7,
+        .assignments = &.{.{ .destination = 2, .source = .returned }},
+    };
+    direct.blocks = blocks;
+    var transformed = std.testing.FailingAllocator.init(scratch, .{});
+    _ = try transform(transformed.allocator(), direct, uses, false, null);
+    var allocations = std.testing.FailingAllocator.init(scratch, .{});
+    const a = allocations.allocator();
+    var selection = try optimize(a, direct, uses);
+    try std.testing.expectEqual(transformed.allocated_bytes, allocations.allocated_bytes);
+    try std.testing.expectEqual(@as(?p.Id, 4), try selection.tail(a, 3, 0));
+    const derived = allocations.allocated_bytes;
+    for ([_]p.Id{ 1, 2, 3 }) |slot|
+        try std.testing.expectEqual(@as(?p.Id, null), try selection.tail(a, 3, slot));
+    try std.testing.expectEqual(@as(?p.Id, null), try selection.tail(a, 1, 0));
+    try std.testing.expectEqual(derived, allocations.allocated_bytes);
 }
 
 fn checkChangedAnswer(

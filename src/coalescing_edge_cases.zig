@@ -87,7 +87,12 @@ pub fn compileLoop(
         .blocks = blocks,
     };
     const result = try data.coalescing.run(allocator, program, options);
-    return .{ .arena = result.arena, .program = result.program, .flow = result.flow };
+    return .{
+        .arena = result.arena,
+        .program = result.program,
+        .flow = result.flow,
+        .hints = &.{},
+    };
 }
 
 fn loopBody(
@@ -210,7 +215,12 @@ fn build(
         .blocks = blocks,
     };
     const result = try data.coalescing.run(allocator, program, options);
-    return .{ .arena = result.arena, .program = result.program, .flow = result.flow };
+    return .{
+        .arena = result.arena,
+        .program = result.program,
+        .flow = result.flow,
+        .hints = &.{},
+    };
 }
 
 fn definePermutedBodies(

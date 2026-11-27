@@ -163,8 +163,8 @@ pub fn construct(
     var program = original;
     program.functions = functions;
     program.blocks = blocks;
-    const before_bytes = try image.encodedLength(original);
-    const after_bytes = try image.encodedLength(program);
+    const before_bytes = try image.encodedLength(.unhinted(original));
+    const after_bytes = try image.encodedLength(.unhinted(program));
     if (after_bytes > before_bytes and
         after_bytes - before_bytes > options.max_added_bytes)
         return error.InlineLimit;

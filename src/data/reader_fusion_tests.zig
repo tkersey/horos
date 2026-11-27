@@ -388,7 +388,7 @@ fn checkCanonicalReaderRows(scratch: std.mem.Allocator, original: ir.Program) !v
     try std.testing.expectEqual(@as(usize, 1), stats.pairs_fused);
     var compiled = try @import("closed_compilation.zig").run(
         a,
-        original,
+        .unhinted(original),
         .{ .contract = .semantic },
     );
     defer compiled.deinit();

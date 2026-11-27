@@ -24,7 +24,7 @@ pub const Statistics = struct {
 };
 fn cost(program: ir.Program, worker: u64) Error!Cost {
     var result: Cost = .{
-        .image_bytes = try @import("program_image.zig").encodedLength(program),
+        .image_bytes = try @import("program_image.zig").encodedLength(.unhinted(program)),
         .worker_instructions = 0,
         .construction_instructions = 0,
     };
